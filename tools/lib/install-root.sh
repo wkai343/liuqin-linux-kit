@@ -3,7 +3,8 @@
 # Device-side installer, intended only for the dedicated read-only RAM image.
 set -eu
 die() { printf 'liuqin-install: %s\n' "$*" >&2; exit 1; }
-usage='usage: install-root.sh BOOT_ID ROOTFS_URL SHA256 BYTES ERASE-LIUQIN-USERDATA ROOT_PARTNAME HOME_PARTNAME [ENABLE-USB-RESCUE] [KEEP-HOME] [SWITCH-STORE ubuntu URL SHA256 BYTES android URL SHA256 BYTES]'
+phase() { printf 'liuqin-gui: phase=%s\n' "$1"; }
+usage='usage: install-root.sh BOOT_ID ROOTFS_URL SHA256 BYTES ERASE-LIUQIN-USERDATA ROOT_PARTNAME HOME_PARTNAME_OR_- [ENABLE-USB-RESCUE] [KEEP-HOME] [SWITCH-STORE ubuntu URL SHA256 BYTES android URL SHA256 BYTES]'
 [ "$#" -ge 7 ] || die "$usage"
 [ "$5" = ERASE-LIUQIN-USERDATA ] || die 'explicit data-erasure acknowledgement required'
 root_name=$6
@@ -53,6 +54,14 @@ parse_options() { # the script's own arguments
 	done
 }
 parse_options "$@"
+case $root_name:$home_name in
+linux_root:linux_home) ;;
+userdata:-)
+	[ -z "$keep_home" ] && [ -z "$store" ] ||
+		die 'single root cannot keep home or install a dual-boot switch store'
+	;;
+*) die 'unsupported root/home partition combination' ;;
+esac
 [ "$(cat /proc/sys/kernel/random/boot_id)" = "$1" ] || die 'RAM boot identity changed'
 [ "$(cat /etc/liuqin-installer 2>/dev/null)" = liuqin ] || die 'not the installer RAM image'
 ln -sf /proc/self/fd/0 /dev/stdin
@@ -132,20 +141,34 @@ home_needs_skeleton() { # <mounted home> <KEEP-HOME or empty>
 	printf 'liuqin-install: home partition is empty; seeding the skeleton\n'
 }
 root=$(find_part "$root_name")
-home=$(find_part "$home_name")
-[ "$root" != "$home" ] || die 'the system and home partitions must differ'
+home=
+if [ "$home_name" != - ]; then
+	home=$(find_part "$home_name")
+	[ "$root" != "$home" ] || die 'the system and home partitions must differ'
+fi
 node=${root##*/}
 size=$(cat "/sys/class/block/$node/size")
 case $size in ''|*[!0-9]*) die 'system partition size is unavailable' ;; esac
 [ "$size" -ge 33554432 ] || die 'the system partition is smaller than 16 GiB —— 不支持该布局'
-home_size=$(cat "/sys/class/block/${home##*/}/size")
-case $home_size in ''|*[!0-9]*) die 'home partition size is unavailable' ;; esac
-[ "$home_size" -ge 16777216 ] || die 'the home partition is smaller than 8 GiB —— 不支持该布局'
+if [ -n "$home" ]; then
+	home_size=$(cat "/sys/class/block/${home##*/}/size")
+	case $home_size in ''|*[!0-9]*) die 'home partition size is unavailable' ;; esac
+	[ "$home_size" -ge 16777216 ] || die 'the home partition is smaller than 8 GiB —— 不支持该布局'
+fi
 parent_path=$(/bin/busybox readlink -f "/sys/class/block/$node/.." 2>/dev/null || true)
 [ -n "$parent_path" ] || die 'the system partition parent disk is unavailable'
 parent=/dev/${parent_path##*/}
 [ -b "$parent" ] || die 'the system partition parent disk is missing'
-for target in "$root" "$home"; do
+[ "$parent" = /dev/sda ] || die 'the root is not on the first UFS LUN'
+[ "$(cat /sys/class/block/sda/queue/logical_block_size)" = 4096 ] ||
+	die 'the root disk does not report 4096-byte logical sectors'
+targets=$root
+if [ -n "$home" ]; then
+	home_parent=$(/bin/busybox readlink -f "/sys/class/block/${home##*/}/.." 2>/dev/null || true)
+	[ "/dev/${home_parent##*/}" = "$parent" ] || die 'root and home are on different disks'
+	targets="$targets $home"
+fi
+for target in $targets; do
 	device_number=$(cat "/sys/class/block/${target##*/}/dev")
 	awk -v device="$device_number" '$3 == device {found=1} END {exit !found}' /proc/self/mountinfo &&
 		die 'a target partition is mounted (including through a device alias)'
@@ -185,7 +208,7 @@ cleanup() {
 		mounted=false
 	fi
 	if [ "$opened" = true ]; then
-		/bin/busybox blockdev --setro "$home"
+		[ -z "$home" ] || /bin/busybox blockdev --setro "$home"
 		/bin/busybox blockdev --setro "$root"
 		/bin/busybox blockdev --setro "$parent"
 		opened=false
@@ -205,7 +228,9 @@ trap 'exit 130' HUP INT TERM
 mkdir -p /mnt/install-download /run/persist /mnt/install /mnt/install-home
 mount -t tmpfs -o "size=$(( $4 + 16777216 ))" tmpfs /mnt/install-download
 download_mounted=true
+phase transfer
 /bin/busybox wget -O "$archive" "$2"
+phase verify_archive
 [ "$(stat -c %s "$archive")" = "$4" ] || die 'downloaded archive size mismatch'
 printf '%s  %s\n' "$3" "$archive" | /bin/busybox sha256sum -c -
 [ "$(cat /proc/sys/kernel/random/boot_id)" = "$1" ] || die 'RAM identity changed before formatting'
@@ -216,17 +241,22 @@ for item in wlan/wlan_mac.bin bluetooth/.bt_nv.bin audio/crus_calr.bin; do
 	[ -f "/run/persist/$item" ] || die 'factory data is incomplete'
 done
 [ -d /run/persist/sensors/registry/registry ] || die 'factory sensor registry is missing'
+phase format_root
 /bin/busybox blockdev --setrw "$parent"
 opened=true
 /bin/busybox blockdev --setrw "$root"
-/bin/busybox blockdev --setrw "$home"
-prepare_home "$home" "$keep_home"
+if [ -n "$home" ]; then
+	/bin/busybox blockdev --setrw "$home"
+	prepare_home "$home" "$keep_home"
+fi
 /usr/sbin/mkfs.ext4 -F -L LIUQIN_ROOT -m 0 "$root"
 mount -t ext4 "$root" /mnt/install
 mounted=true
 mkdir /mnt/install/native-root
+phase extract_root
 /usr/bin/tar -xzf "$archive" -C /mnt/install/native-root \
 	--numeric-owner --same-owner --same-permissions --acls --xattrs --xattrs-include='*' --warning=no-timestamp
+phase configure_device
 PERSIST_SRC=/run/persist sh /usr/lib/liuqin/provision.sh /mnt/install/native-root
 if [ "$rescue" = ENABLE-USB-RESCUE ]; then
 	touch /mnt/install/native-root/etc/liuqin-rescue-enabled
@@ -234,13 +264,15 @@ fi
 # /home is a separate partition so that a later system reinstall can keep it.
 # The label is the identity here too; nofail keeps a missing or unreadable
 # home partition from holding up the boot at the console-less first start.
-mount -t ext4 "$home" /mnt/install-home
-home_mounted=true
-if home_needs_skeleton /mnt/install-home "$keep_home" && [ -d /mnt/install/native-root/home ]; then
-	/usr/bin/tar -C /mnt/install/native-root/home -cf - . --numeric-owner --acls --xattrs \
-		--xattrs-include='*' | /usr/bin/tar -C /mnt/install-home -xf - \
-		--numeric-owner --same-owner --same-permissions --acls --xattrs --xattrs-include='*' \
-		--warning=no-timestamp
+if [ -n "$home" ]; then
+	mount -t ext4 "$home" /mnt/install-home
+	home_mounted=true
+	if home_needs_skeleton /mnt/install-home "$keep_home" && [ -d /mnt/install/native-root/home ]; then
+		/usr/bin/tar -C /mnt/install/native-root/home -cf - . --numeric-owner --acls --xattrs \
+			--xattrs-include='*' | /usr/bin/tar -C /mnt/install-home -xf - \
+			--numeric-owner --same-owner --same-permissions --acls --xattrs --xattrs-include='*' \
+			--warning=no-timestamp
+	fi
 fi
 if [ -n "$store" ]; then
 	sh "$switch_store" /mnt/install/native-root \
@@ -250,17 +282,23 @@ fi
 {
 	printf '# Written by the liuqin installer. The root filesystem is mounted by\n'
 	printf '# the boot image, which finds it by LABEL=LIUQIN_ROOT.\n'
-	printf 'LABEL=LIUQIN_HOME\t/home\text4\tdefaults,nofail,x-systemd.device-timeout=30s\t0\t2\n'
+	if [ -n "$home" ]; then
+		printf 'LABEL=LIUQIN_HOME\t/home\text4\tdefaults,nofail,x-systemd.device-timeout=30s\t0\t2\n'
+	else
+		printf '# Single root: /home is a directory on the root filesystem.\n'
+	fi
 } >/mnt/install/native-root/etc/fstab
 chmod 0644 /mnt/install/native-root/etc/fstab
 [ -n "$(/usr/sbin/getcap /mnt/install/native-root/usr/lib/snapd/snap-confine)" ] ||
 	die 'snap-confine capability was not restored'
 # Verify immutable boot-contract files after extraction and provisioning.
+phase verify_root
 tail -n +2 /etc/liuqin-native-root.contract | while read -r expected path; do
 	[ -n "$expected" ] || continue
 	actual=$(/bin/busybox sha256sum "/mnt/install/native-root$path" | /bin/busybox cut -d' ' -f1)
 	[ "$actual" = "$expected" ] || die "root contract mismatch: $path"
 done
+phase sync_root
 cleanup
 trap - EXIT HUP INT TERM
 printf 'liuqin-install: ROOT_INSTALLED\n'

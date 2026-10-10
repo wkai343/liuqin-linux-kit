@@ -1,103 +1,85 @@
-# Xiaomi Pad 6 Pro fingerprint support
+# 小米平板 6 Pro 指纹使用说明
 
-[简体中文](FINGERPRINT.zh-CN.md)
+[English](FINGERPRINT.en.md)
 
-## Current status
+## 当前状态
 
-The native Ubuntu Settings enrollment interface is implemented for the FPC1264
-sensor. It uses the normal system authorization dialog and fprintd/libfprint
-progress, cancellation and storage. Normal use does not require a terminal or a
-separate fingerprint application.
+FPC1264 已实现 Ubuntu 设置页的原生录入接口，使用系统授权对话框，以及
+fprintd/libfprint 的进度、取消和模板保存流程。正常使用不需要终端或单独的
+指纹应用。
 
-As of 2026-10-07, native Settings enrollment has completed on the known 256 GB
-test unit. Its saved template was retained through installation of the combined
-DP/fingerprint kernel `6.17.0-rc1-gfe81794b5e1b` and userspace `4d6b22f`.
-**Same-finger acceptance, other-finger rejection, native lock-screen unlock and
-fingerprint login after an ordinary boot from tablet storage have passed.**
-System authentication/session signals and the user's confirmation agree.
+截至 2026-10-07，已在已知 256 GB 开发机完成原生设置录入，并保留模板升级到
+DP＋指纹组合内核 `6.17.0-rc1-gfe81794b5e1b`、用户态 `4d6b22f`。
+**已验证已录手指通过、未录手指拒绝、原生锁屏解锁，以及从平板存储正常重启后
+直接用指纹进入桌面。** 系统认证结果、会话状态与用户确认相互对应。
 
-The v0.6.0 complete installation bundle includes these components and has passed
-full installation, initial setup and user acceptance on the test unit.
+v0.6.0 完整安装包已经整合这些组件，并完成开发机上的完整安装、首次设置与用户功能确认。
 
-## Requirements
+## 使用条件
 
-v0.6.0 automatically supports the first local account created by initial setup
-(UID 1000), without a preconfigured username. Use the exact matching kernel, FPC
-module, device tree and OEM firmware. The current scope is **one finger for that account**. Kernel/module hashes and wiring
-checks must not be bypassed.
+v0.6.0 在首次设置后自动支持第一个普通本地账号（UID 1000），无需预先写入用户名。
+范围是**该账号的一枚指纹**，必须配套准确的内核、FPC 模块、设备树及原厂固件，不能跳过
+内核、模块哈希或接线检查。
 
-A temporary RAM boot does not install a kernel for the next power-on. Fingerprint
-availability after reboot requires the matching kernel and modules to be
-persistently installed. That ordinary boot path has passed on this test unit.
-Build and installation details are in the [component reference](../device/fingerprint/oem/README.md).
+临时 RAM 启动不会安装下次开机使用的内核。普通重启后要继续使用指纹，必须
+持久安装配套内核和模块；上述开发机已验证这一正常启动路径。构建与安装细节见
+[组件说明](../device/fingerprint/oem/README.md)。
 
-## Enroll through Ubuntu Settings
+## 从 Ubuntu 设置录入
 
-1. Open **Settings → System → Users → Fingerprint Login** for the configured
-   account. Unlock Settings if the normal system dialog requests it.
-2. Choose a finger and authorize enrollment in the system password dialog.
-3. Follow the native scan, lift/reposition and progress instructions until the
-   dialog reports completion. Cancellation waits for the ongoing operation to
-   clean up before releasing the reader.
+1. 打开指定账号的**设置 → 系统 → 用户 → 指纹登录**。如果系统要求解锁设置，
+   使用其正常授权对话框。
+2. 选择手指，在系统密码对话框中授权录入。
+3. 按原生向导的采样、抬起及调整位置提示操作，直到显示完成。取消会等待正在
+   进行的操作清理后再释放传感器。
 
-After successful enrollment, verification uses the regular Ubuntu login and
-lock screen. The normal password-login stack is preserved, so password login
-remains the fallback. The presence of the Settings row or a running service does
-not demonstrate successful enrollment or unlock.
+录入成功后，验证使用 Ubuntu 正常的登录和锁屏界面。普通密码登录栈保持不变，
+指纹不可用时仍可使用密码。设置项出现、服务启动或传感器节点存在，都不等于
+录入和解锁已经成功。
 
-Another enrollment is refused while a finger is already stored for this
-account. If intentionally replacing it, use the Settings deletion control first;
-do not remove private files to force re-enrollment.
+该账号已有指纹时，再次录入会被拒绝。如果确实要更换手指，先使用设置页的删除
+功能；不要删除私有文件来强制重新录入。
 
-## Passwords and existing identities
+## 密码和旧身份
 
-The password dialog is the desktop's Polkit authorization for enrolling or
-deleting a fingerprint. The provider does **not** store the Linux password. It
-creates a separate, root-only random machine credential and Gatekeeper handle
-for the configured account; those private files stay on this tablet. A Linux
-password change therefore requires no separate fingerprint-password sync for
-this native route.
+密码对话框用于系统 Polkit 授权录入或删除指纹。原生提供程序**不保存 Linux
+密码**，而是为指定账号建立独立的、仅 root 可读的随机机器凭据和 Gatekeeper
+handle，私有文件留在本机。因此，修改 Linux 密码后，新原生路径无需单独同步
+“指纹密码”。
 
-Existing password-derived identities and templates are not automatically
-migrated, recreated or deleted. Preserve any uncertain-creation markers rather
-than attempting a credential reset. Initial credential creation writes real
-Gatekeeper/RPMB state; cancellation during that short transaction finishes its
-safe commit before stopping and does not proceed into fingerprint capture.
-A temporary kernel does not make these operations read-only.
+此前由密码派生的旧身份以及已有模板，不会被自动迁移、重建或删除。遇到不确定
+创建标记应保留现场，不能靠删除标记重试。首次建立凭据会写入真实 Gatekeeper/
+RPMB 状态；若在这段短事务中取消，会先完成安全提交再停止，不继续采集指纹。
+临时内核启动不等于这些操作都是只读。
 
-## Validation scope and remaining work
+## 验证范围与后续项目
 
-Native enrollment, template reload, same-finger acceptance, other-finger rejection,
-native lock-screen unlock and GDM login after an ordinary reboot have passed.
-Password login remains available without a separate unlock application.
+原生录入、模板重载、同指接受、异指拒绝、原生锁屏和正常重启后的 GDM 登录
+已通过。现有密码登录继续可用，不需要单独的解锁应用。
 
-Verification does not consume the old boot-local 18-hour enrollment authorization
-or ask for the Linux password through the legacy helper. The reboot test started
-at the regular login screen without any manual Keymaster negotiation or setup
-helper. Fingerprint login does not decrypt the password-encrypted GNOME login
-keyring; applications accessing its secrets may still request the keyring password.
+日常验证不使用旧流程中仅在本次启动有效的 18 小时录入授权，也不会通过旧助手
+索要 Linux 密码。本次重启后直接在正常登录界面验证，没有事先手工运行
+Keymaster 协商或设置助手。指纹登录不会解密以密码加密的 GNOME 登录密钥环；
+需要访问其中秘密的应用仍可能请求密钥环密码。
 
-Placement sensitivity, latency, suspend/resume, long-term reliability and
-multiple fingers/accounts and fingerprint secure-storage coexistence after an
-Android round trip are not established for this candidate.
+接触位置敏感、速度、休眠恢复、长期可靠性、多指/多用户，以及指纹安全存储在
+Android 往返后的共存仍未完成验证。
 
-## Appendix: recovery and legacy diagnostics
+## 附录：恢复和旧调试入口
 
-If fingerprint verification must be disabled while preserving private state and
-password login, an administrator can stop and mask the normal daemon:
+需要关闭指纹验证、同时保留私有状态和密码登录时，管理员可以停止并屏蔽标准
+指纹服务：
 
 ~~~sh
 sudo systemctl mask --now fprintd.service
 ~~~
 
-Diagnostic details are available from `fprintd.service` and
-`liuqin-fpc-stable-module.service`. Share only status/phase information, never
-passwords, random credentials, handles, tokens, templates or calibration.
+排查时查看 `fprintd.service` 和 `liuqin-fpc-stable-module.service` 的状态及
+诊断信息。只共享状态/阶段，不能公开密码、随机凭据、handle、认证令牌、模板
+或私有校准。
 
-`acceptance.py`, the old terminal launcher and `user_credentials.py` remain
-internal tools for the legacy development-helper interface. They are not the
-normal native entry; native installation removes their application-menu launchers.
-The old `--sync-password` command applies only to password-derived legacy
-identities. Do not run legacy create or random probe-UID operations as native
-preflight checks. See the [component reference](../device/fingerprint/oem/README.md)
-for that distinction and the matching-package requirements.
+`acceptance.py`、旧终端启动器和 `user_credentials.py` 仅保留给旧版开发助手
+流程内部调试，不是原生用户入口；原生安装会移除它们的应用菜单入口。
+旧 `--sync-password` 只适用于此前的密码派生身份。不要把旧版 create 或随机
+probe UID 创建当作原生功能的前置检查。两条路径的区别与内核配套要求见
+[组件说明](../device/fingerprint/oem/README.md)。

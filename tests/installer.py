@@ -111,11 +111,12 @@ with tempfile.TemporaryDirectory() as directory:
         assert calls[-1][3] == 'boot', (reported, calls)
     print('PASS: userdata layouts of 16 GiB and above are admitted')
 
-    calls = run_install([], hex(471789528 * 512), stdin_tty=True, answer='no')
+    calls = run_install([], hex(471789528 * 512), stdin_tty=False)
     assert not any(call[3:4] == ['boot'] for call in calls)
     calls = run_install([], hex(471789528 * 512), stdin_tty=True, answer='YES')
     assert calls[-1][3] == 'boot'
-    print('PASS: interactive erasure confirmation gates the RAM installer boot')
+    print('PASS: an interactive session or --yes is required before RAM boot; '
+          'erasure confirmation waits for the actual partition table')
 
     # Both boot partitions are size-checked before the dual layout boots the
     # RAM installer, because both receive the project image.

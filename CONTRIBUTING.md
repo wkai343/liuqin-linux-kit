@@ -1,19 +1,24 @@
-# Contributing
+# 参与贡献
 
-Device integration, build tools and documentation belong in this repository.
-Kernel changes belong in `linux-sm8450-liuqin`, on the `liuqin-6.17` branch.
-The project build selects an exact kernel commit through `kernel/source.json`.
+[English](CONTRIBUTING.en.md) ｜ [项目首页](README.md)
 
-Keep changes focused and explain the behavior they address. Preserve original
-authors and license notices when adapting third-party code. Build and test the
-affected components before proposing a change.
+设备集成、安装器、构建工具和文档放在本仓库。内核修改放在
+`linux-sm8450-liuqin` 的 `liuqin-6.17` 分支；本项目通过
+`kernel/source.json` 选择确切的内核提交。
 
-For device results, include the model, source revision, image version and steps
-to reproduce. Distinguish a successful build from a successful hardware test.
-Remove credentials, device addresses, serial numbers and personal data from
-logs before sharing them.
+提交应围绕明确的问题，说明最终行为、修改原因和验证结果。适配第三方代码时保留
+原作者与许可证声明。修改后构建、测试受影响的组件，再提出变更。
 
-Do not change a published release tag. A release must identify its sources and
-build inputs, and its installation and recovery instructions must match the
-tested images. Kernel and root filesystem updates must preserve user accounts
-and files unless an explicitly selected reinstall requires otherwise.
+记录真机结果时注明型号、源码版本、镜像版本和复现步骤。区分构建成功、模拟测试
+和实际硬件验收。共享日志前删除凭据、设备地址、序列号和个人信息。
+
+不要改写已发布的版本标签。发行版需标明源码与构建输入，安装和恢复说明必须与
+验证过的镜像一致。除用户明确选择重装外，内核与根文件系统更新应保留账号和文件。
+
+## 安装器开发
+
+QML、Python 后端及备份逻辑均在 `tools/liuqin_gui/`；共用的布局与设备脚本在
+`tools/lib/`。先使用 `python3 tools/install-gui.py --demo` 和 GUI 测试，
+再安排真机验收。模拟模式不访问平板，不能作为完整真机安装证明。
+
+设备备份、系统镜像、运行状态及私有校准材料不要放入源码提交。

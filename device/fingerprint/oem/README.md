@@ -1,230 +1,134 @@
-# FPC1264 OEM fingerprint support
+# FPC1264 OEM 指纹适配
 
-User guide: [English](../../../docs/FINGERPRINT.md) · [简体中文](../../../docs/FINGERPRINT.zh-CN.md).
+[English](README.en.md) ｜ [中文使用指南](../../../docs/FINGERPRINT.md)
 
-This optional liuqin component implements fingerprint enrollment through
-**Ubuntu Settings → System → Users → Fingerprint Login**, using the normal
-Polkit password dialog. The libfprint TOD driver reports capture progress and
-cancellation to that dialog; fprintd stores the resulting fingerprint and
-provides the standard GDM login and lock-screen verification interface. It does
-not add a separate everyday unlock application or modify GNOME Settings.
+本组件通过 Ubuntu 的“设置 → 系统 → 用户 → 指纹登录”与正常 Polkit 密码对话框
+录入指纹。libfprint TOD 上报采集进度和取消，fprintd 保存模板并向 GDM 登录及
+锁屏提供标准验证接口，不新增日常解锁应用，也不修改 GNOME 设置。
 
-The current candidate supports **one configured Linux account and one finger**.
-Native enrollment and login/unlock have passed on the test unit as described
-below. The default image/kernel lock is not changed by this optional component.
+当前支持首个本地账号（UID 1000）和一枚指纹。此可选组件不自行改变默认内核锁定。
 
-## Current validation boundary
+## 已知验证范围
 
-As of 2026-10-07, native Settings enrollment completed on the b87 support kernel.
-The saved template was retained through installation of userspace `4d6b22f` and
-the combined DP/fingerprint kernel `6.17.0-rc1-gfe81794b5e1b`. Same-finger acceptance,
-other-finger rejection and native lock-screen unlock passed on that combination.
-After writing the matching boot images and modules, an ordinary reboot also
-reached the desktop through `gdm-fingerprint`, without entering the login password
-or manually warming Keymaster/TEE. DP output was subsequently confirmed on the
-same persistent boot. This is one configured account/finger on the known 256 GB
-test unit, not a release or a claim covering other devices and adapters.
+上游记录截至 2026-10-07：在 b87 支持内核完成原生设置录入，模板在安装用户态
+`4d6b22f` 与 `6.17.0-rc1-gfe81794b5e1b` 组合后保留；同指通过、异指拒绝、原生
+锁屏和普通重启后的指纹登录通过，同一持久启动上随后验证 DP 输出。这是一台已知
+256GB 开发机、一名账号和一枚指纹的结果，不代表其他设备、转接器或所有掉电情形。
 
-The fprintd service uses `UMask=0077`: native enrollment must create root-owned
-mode-0600 templates accepted by the adaptive-update writer. Earlier development
-templates created as 0644 need their permissions tightened before matching;
-their contents and credentials must be preserved. Do not relax the writer's
-ownership or mode checks. Storage failures now log only a fixed phase and error
-domain/code, instead of silently turning a sensor match into authentication failure.
+fprintd 使用 `UMask=0077`，模板必须为 root 所有、0600。早期 0644 模板仅修正
+权限，保留内容和凭据；不能放宽自适应写入器的所有者及权限检查。存储失败只记录
+固定阶段和错误域/代码，避免把存储错误静默变成认证失败。
 
-## User workflow and authorization
+## 使用与授权
 
-After the matching bundle and kernel have been installed:
+安装匹配的内核和组件后，在原生设置中选择账号和手指，经 Polkit 授权并按采集
+提示完成，再用普通登录或锁屏验证。密码登录继续可用，指纹 PAM 专用入口不插入
+普通密码登录栈。
 
-1. Open **Settings → System → Users → Fingerprint Login** for the configured
-   account. If Settings requires unlocking, use its normal system dialog.
-2. Select a finger and authorize the enrollment through Polkit. Follow the
-   native scan, lift/reposition and progress messages until completion.
-3. Use the regular Ubuntu login or lock screen for verification. Password login
-   remains available; the dedicated fingerprint PAM helper is not inserted into
-   the normal password-login stack.
+每次录入和删除使用 `auth_self`，不保留授权。fprintd 核验真实 D-Bus 发送者，
+另行授权其他用户名；原生提供者还绑定账号配置。公开包在首次设置后解析 UID 1000
+账号，开发包保留显式用户名/UID 绑定。改变配置不应重建、改名或迁移已有身份。
+多账号管理不在当前范围内。
 
-The active local user must authenticate for each enroll/delete action
-(`auth_self`, without retaining that authorization). fprintd checks the real
-D-Bus sender and separately authorizes selection of another username. The native
-provider additionally restricts operations to the installed account profile.
-The public package supports only the first local account, UID 1000, resolving
-its name after initial setup. Development bundles retain explicit username/UID
-binding. Existing private credential records retain their username/UID binding;
-changing profiles does not recreate, rename or migrate an identity. Managing
-multiple accounts is outside this component's scope.
+原生录入使用 `/var/lib/liuqin-fingerprint/native-enrollment/` 下的 root 私有
+随机凭据和 Gatekeeper handle，原生 UID 为 `0x60000000 | linux_uid`。
+这不是 Linux 密码副本，密码变化不需要另行同步。录入会进行真实 Gatekeeper/RPMB
+写入；临时 RAM 内核不意味着录入没有写入。
 
-The provider uses a separate root-private random credential and Gatekeeper
-handle under `/var/lib/liuqin-fingerprint/native-enrollment/`, with native UID
-`0x60000000 | linux_uid`. This authorizes the OEM enrollment protocol; it is not a
-copy of the Linux password. New native credentials therefore need no separate
-synchronization when the Linux password changes. Enrollment uses real
-Gatekeeper/RPMB operations and writes private state; a temporary RAM kernel does
-not make enrollment a zero-write operation.
+旧 `0x40000000` / `0x50000000` 密码派生身份和 fprintd 模板不会自动迁移或覆盖。
+已有手指时拒绝再次录入。不要删除凭据或不确定状态标记来强行重试。取消初始凭据
+创建会等小事务安全结束；取消采集会等待已有 TEE 操作及监听清理。
 
-Existing password-derived identities in the `0x40000000`/`0x50000000` ranges are
-not migrated or overwritten. Existing fprintd templates are also preserved:
-another enrollment is refused while a finger is stored for the account. Do not
-delete credential files or uncertainty markers to force a retry. Canceling
-initial credential creation lets that short transaction finish safely before
-stopping; it does not continue into capture. Canceling capture waits for the
-existing TEE operation and listeners to clean up.
+## 匹配内核与运行时
 
-## Matching kernel and runtime
+必须使用候选材料中指定的确切内核、FPC 设备树、模块和 OEM 固件。
+仅有 `/dev/fpc1020` 不够。延迟加载器核验内核、模块 SHA256、TEE 节点、FPC 线路
+及 2960000–3008000 微伏供电范围，不重新绑定 GENI。
 
-Use the exact kernel release, FPC DT, module and OEM firmware identified by the
-candidate. A working `/dev/fpc1020` alone is insufficient. The late loader checks
-the kernel release, module SHA256, TEE node, FPC DT wiring and the validated
-2960000–3008000 microvolt supply range. It never rebinds GENI.
+原生部署使用 `deployment_mode: "installed"`，模块服务等待 GDM 和旋转服务，
+不依赖 SSH、网络或临时诊断通道。GDM 就绪不要求用户已经登录。
+开发模式保留诊断/网络检查。两种模式都不刷 boot 或修改分区表。
 
-Native deployment uses `deployment_mode: "installed"`. Its module service waits
-for GDM and rotation services, without depending on SSH, networking or a temporary
-diagnostic service. GDM service readiness does not require a user to have logged
-in. The default `development` mode retains diagnostic/network readiness checks.
-Neither mode installs a boot image or changes the partition table.
+`fastboot boot` 仅提供当前内核。普通重启后可用需要持久安装匹配的内核和模块，
+不能改版本字符串或跳过模块哈希。原生验证直接读取 fprintd 持久数据库，使用
+Keymaster `0x205`，不调用旧 PAM 凭据助手、旧 18 小时预备输入密钥或录入协商序列。
+完整协议边界见[英文详版](README.en.md#matching-kernel-and-runtime)。
 
-A temporary `fastboot boot` only supplies that running kernel. Availability after
-an ordinary reboot requires a persistently installed matching kernel/module
-combination. Boot/root identity checks must remain intact; changing a release
-string or bypassing module hashes is not a supported installation method.
+## 公开构建与打包
 
-Verification loads the persisted fprintd database through the OEM matcher. It
-does not call the old PAM credential helper or consume the old boot-local
-18-hour prepared-input key. Verification after an ordinary reboot has passed
-without a manual setup step. The verify path calls Keymaster `0x205` directly; unlike the
-Gatekeeper enrollment client, it does not send the `0x200`/`0x207` negotiation
-sequence. The observed reboot test does not justify adding speculative
-initialization or claiming every power-loss/recovery scenario has passed.
+发行镜像使用 `liuqin-fingerprint` Debian 包。从同一 v0.6.0 发行版取得
+`fingerprint-build-inputs.tar.gz`。该公共归档包含核验程序、对应源码/依赖和固定
+TA 哈希，不含 OEM TA 本体或用户状态，构建器锁定其 SHA256。
 
-## Build and package
-
-The release image uses the `liuqin-fingerprint` Debian package. Download
-`fingerprint-build-inputs.tar.gz` from the **same v0.6.0 release** (also included
-in its complete release bundle), then build without accessing a device or host
-services. This public archive contains the verified programs, corresponding
-source/dependency materials and fixed TA hashes, with no OEM TA bytes or user
-state; its SHA256 is pinned by the builder.
-
-~~~sh
+```sh
 python3 tools/build-liuqin-fingerprint-deb.py --bundle /path/to/fingerprint-build-inputs.tar.gz --out out/fingerprint-debs --version 0.6.0
-~~~
+```
 
-`BUILD_INPUTS.json` records the validated userspace's `4d6b22f` revision and
-original input identity. Maintainers can reproduce the public archive from the
-audited internal r4 host bundle using the fixed-metadata transformation below;
-consumers need only the downloadable public archive, not that private input.
+`BUILD_INPUTS.json` 记录用户态 `4d6b22f` 与原始输入身份。维护者可以从审计过的
+内部 r4 归档生成公开材料；普通用户只需要公共归档：
 
-~~~sh
+```sh
 python3 tools/make-fingerprint-build-inputs.py --bundle /path/to/audited-r4/fingerprint.tar.gz --output out/fingerprint-build-inputs.tar.gz
-~~~
+```
 
-This preserves the verified native binaries and exact FE module, overlays the
-current Python integration, and stages the standard fprintd service, enrollment
-Polkit rule and `UMask=0077`. It needs no existing user during rootfs assembly,
-creates no credential/template, and installs no separate enrollment app. The
-package pins the verified libfprint/TOD package ABI and matching kernel package.
-The default first local UID 1000 account uses Ubuntu Settings after first boot.
-The first-user profile and local firmware extraction still require final image
-verification; the preceding device results describe the bound development bundle.
+转换保留核验过的二进制与 FE 模块，叠加当前 Python 集成、标准 fprintd 服务、
+Polkit 规则与 `UMask=0077`。构建时不需要现成用户，不创建凭据/模板或独立录入
+应用，并锁定 libfprint/TOD ABI 和匹配内核包。首用户配置及本机提取仍需最终镜像验收。
 
-The public Debian package **does not distribute OEM trusted applications**.
-It includes [ten fixed hashes](firmware/SHA256.json) and their
-[stock provenance](firmware/NOTICE). Before late module loading, it reuses a
-verified local cache or mounts this tablet's `modem_a` FAT read-only and copies
-only those ten files. This occurs on normal boot, after the installer repairs
-the stock modem image. A missing or mismatched image fails fingerprint startup
-without a repair/retry loop, raw writes, or blocking password login. No firmware
-extraction or credential creation runs during Debian/rootfs installation.
+公开 Debian 包不分发 OEM trusted application 本体。包中只有
+[固定哈希](firmware/SHA256.json)和[原厂来源声明](firmware/NOTICE)。正常启动时
+复用本机已验证缓存，或将本机 modem_a FAT 只读挂载并只提取锁定的十个文件。
+缺失或不匹配会停止指纹启动，不重试修复、裸写分区或阻塞密码登录。
+Debian/rootfs 安装时不提取固件，也不创建凭据。
 
-### Internal source builds and bound development bundles
+## 内部源码构建与开发候选
 
-[SOURCE_LOCK.json](SOURCE_LOCK.json) records source revisions and pinned Ubuntu
-archives. [FPRINTD_SOURCE_HASHES.json](FPRINTD_SOURCE_HASHES.json) verifies the
-external fprintd source. Compile static ARM64 clients from the repository root:
+[SOURCE_LOCK.json](SOURCE_LOCK.json) 锁定源码及 Ubuntu 输入，
+[FPRINTD_SOURCE_HASHES.json](FPRINTD_SOURCE_HASHES.json) 校验外部 fprintd 源码。
+在主项目根目录构建静态 ARM64 客户端及原生组件：
 
-~~~sh
+```sh
 sh tools/build-liuqin-fingerprint-oem.sh clients
-~~~
-
-Build the native components with the target libfprint/TOD 1.95.1+tod1, Gio,
-PAM/OpenSSL, Polkit/systemd and Meson/Ninja development inputs:
-
-~~~sh
 FPRINTD_SOURCE=/path/to/fprintd-v1.94.5 sh tools/build-liuqin-fingerprint-oem.sh native
-~~~
+```
 
-`OUT_DIR` selects an isolated output (default `out/fingerprint-oem`). For a host
-cross-build, the TOD/PAM scripts accept `CC` and target pkg-config paths; the
-fprintd script also accepts `MESON_CROSS_FILE`. These commands do not connect to a
-device or create credentials. Link against the target libraries and matching
-TOD headers; compilation is not hardware acceptance.
+原生组件需目标 libfprint/TOD 1.95.1+tod1、Gio、PAM/OpenSSL、Polkit/systemd、
+Meson/Ninja 开发输入。OUT_DIR 默认 `out/fingerprint-oem`。交叉编译可设置 CC、
+目标 pkg-config 路径和 MESON_CROSS_FILE。构建不连接设备，不创建凭据，不能代替真机验收。
 
-Copy `candidate-config.example.json` outside source, replace its historical
-stable-#2 kernel/boot identifiers with the actual inputs, and set the real
-username and UID. For the native Settings interface, explicitly add:
+复制示例配置到源码树外，使用实际内核/boot 标识、用户名和 UID。
+原生设置入口必须显式配置：
 
-~~~json
-{
-  "enrollment_interface": "fprintd",
-  "deployment_mode": "installed"
-}
-~~~
+```json
+{"enrollment_interface": "fprintd", "deployment_mode": "installed"}
+```
 
-The historical example by itself selects the development helper interface.
-Use the newly built native-capable TOD, `native_enrol.py`, the enrollment Polkit
-rule, the exact matching FPC module and external `fpcliu.mdt`/segment files.
-Credential handles, random secrets, templates and calibration are never generic
-firmware or public package inputs.
+历史配置本身选择开发助手接口。使用匹配的原生 TOD、native_enrol.py、Polkit 规则、
+FPC 模块和外部 fpcliu.mdt/分段。凭据、随机秘密、模板和校准不是通用构建输入。
+完整打包命令见[英文详版](README.en.md#internal-source-builds-and-bound-development-bundles)。
 
-~~~sh
-python3 device/fingerprint/oem/tools/package_fingerprint.py --stage out/fingerprint-stage --build out/fingerprint-oem --kernel-module /path/to/matching/fpc1264_spi_diag.ko --candidate-config /path/to/public-config.json --firmware /path/to/matching-firmware --revision your-revision --output out/liuqin-fpc-oem.tar.gz
-~~~
+安装器核验运行内核，安装标准 fprintd/Polkit 集成，移除未修改的旧应用启动器和
+旧免密规则，保留密码登录及已有凭据/模板。`--replace-owned-candidate` 仅核验并
+备份已有程序，不迁移生物识别状态。更换支持内核时用 `--defer-start` 保持 fprintd
+屏蔽；启动匹配内核后再次运行安装器完成检查和激活。暴露接口不等于录入/解锁验收。
 
-The stage must be empty or match its manifest. Use a new output archive path;
-existing archives are not overwritten. Extract into a root-owned directory and
-run `install.py` as root. Native installation checks the live matching kernel,
-installs the standard fprintd/Polkit integration, removes unchanged legacy app
-launchers and their password-free authorization rule, then starts canonical
-fprintd. It preserves password login and existing credential/template files.
-`--replace-owned-candidate` verifies and backs up an existing owned program
-bundle before replacement; it does not migrate biometric state.
+## 排查与限制
 
-When staging a different support kernel, use `install.py --defer-start` to keep
-fprintd masked. After booting the matching kernel, rerun the installer without
-`--defer-start` to check it and activate fprintd. Starting fprintd exposes the interface; it is not proof that enrollment or
-unlocking works.
+acceptance.py、user_credentials.py 和旧终端/PAM 入口只保留给历史开发流程，
+不是原生设置入口。旧 `--sync-password` 只适用于旧密码派生方案，不能把旧创建、
+录入或随机 UID 试探操作当作原生预检查。
 
-## Internal diagnostics and remaining limits
+检查 `journalctl -u fprintd.service` 的有界阶段/状态及模块服务状态。
+不要收集或发布凭据输入、handle、认证 token、随机秘密、模板、原始采集或私有校准。
+若要暂时停用验证，管理员可以停止并 mask fprintd，保留状态和密码登录，不必重置凭据。
 
-`acceptance.py`, `user_credentials.py` and the terminal/PAM launcher are retained
-for the legacy development-helper workflow. They are not the normal native
-Settings entry, and native installation removes their application-menu entry.
-The legacy `--sync-password` command applies only to the old password-derived
-identity scheme. Do not invoke legacy create, enrollment or random probe-UID
-operations as native preflight checks.
+位置敏感性、延迟、重试频率、挂起恢复、长期可靠性及双系统安全存储共存尚未确定。
+已知设备窗口内未观察到 GENI 故障，不证明历史问题全部解决或反复冷启动稳定。
+离线 API 和打包测试不能证明真实匹配、硬件授权、用户可见解锁或完整镜像。
 
-For native failures, inspect the bounded status/phase diagnostics in
-`journalctl -u fprintd.service` and the module service status. Never collect or
-publish credential input, handles, authentication tokens, random secrets,
-templates, raw captures or private calibration. To disable fingerprint
-verification while preserving its state and password login, an administrator
-can mask and stop `fprintd.service`; no credential reset is needed.
+## 许可证
 
-Current-device completion, persistence, same/other-finger behavior and native
-login/unlock passed within the scope above. Placement sensitivity, latency,
-identify-status 4/12 retry frequency, suspend/resume, long-term reliability and dual-boot
-secure-storage coexistence are not established for this candidate. The current
-support DTB has booted and the FPC module loaded without observed GENI faults in
-that window; this does not resolve the contributor's historical GENI corruption
-or prove repeated cold-boot stability.
-
-Offline API and packaging tests cover protocol/ABI behavior. They cannot prove
-real matching, hardware authorization, user-visible unlock or a complete image.
-
-## Licenses
-
-Original scripts/build integration follow project MIT. File-level licenses take
-precedence: OEM C/PAM BSD-2-Clause, TOD/FpPrint LGPL-2.1-or-later, fprintd adaptation
-GPL-2.0-or-later, AOSP definitions Apache-2.0, and vendor BSD notices retained.
-OEM firmware and private credentials/HAT/templates/raw images/calibration are
-not public source inputs.
+项目原有脚本与集成遵循 MIT；文件级许可证优先：OEM C/PAM 为 BSD-2-Clause，
+TOD/FpPrint 为 LGPL-2.1-or-later，fprintd 适配为 GPL-2.0-or-later，AOSP 定义为
+Apache-2.0，并保留厂商 BSD 声明。OEM 固件和任何私有凭据、HAT、模板、原始图像及
+校准都不属于公共源码输入。

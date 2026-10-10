@@ -12,6 +12,8 @@ from pathlib import Path
 import subprocess
 import zipfile
 
+from lib.liuqin_layout import MODES
+
 
 # Files that decide what the installer writes to the tablet's storage: the
 # partition layout engine, the host driver and the two device-side scripts.
@@ -179,8 +181,8 @@ def main():
             shutil.copytree(out / 'bundle', destination,
                             ignore=shutil.ignore_patterns('rootfs.tar.gz'))
             metadata = json.loads((destination / 'bundle.json').read_text())
-            for name in ('INSTALL-TESTING.md', 'INSTALL-TESTING.zh-CN.md',
-                         'FINGERPRINT.md', 'FINGERPRINT.zh-CN.md'):
+            for name in ('INSTALL-TESTING.md', 'INSTALL-TESTING.en.md', 'INSTALL-TESTING.zh-CN.md',
+                         'FINGERPRINT.md', 'FINGERPRINT.en.md', 'FINGERPRINT.zh-CN.md'):
                 shutil.copyfile(project / 'docs' / name, destination / name)
                 metadata['files'][name] = hashlib.sha256((destination / name).read_bytes()).hexdigest()
             if args.device_tested:
@@ -215,7 +217,8 @@ def main():
                 for name in ('tools/fetch-kernelsu-assets.sh',
                              'tools/patch-android-boot-ksu.py',
                              'tools/lib/kernelsu-assets.json',
-                             'device/android/ksu-boot-ubuntu/README.md', 'LICENSE', 'NOTICE'):
+                             'device/android/ksu-boot-ubuntu/README.md',
+                             'device/android/ksu-boot-ubuntu/README.en.md', 'LICENSE', 'NOTICE'):
                     entry = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
                     entry.compress_type = zipfile.ZIP_DEFLATED
                     entry.external_attr = 0o644 << 16
@@ -227,10 +230,12 @@ def main():
                      'liuqin_layout.py': project / 'tools/lib/liuqin_layout.py',
                      'liuqin-rom-images.json': project / 'tools/lib/liuqin-rom-images.json',
                      'INSTALL-TESTING.md': project / 'docs/INSTALL-TESTING.md',
+                     'INSTALL-TESTING.en.md': project / 'docs/INSTALL-TESTING.en.md',
                      'INSTALL-TESTING.zh-CN.md': project / 'docs/INSTALL-TESTING.zh-CN.md',
                      'NOTICE': project / 'NOTICE', 'LICENSE': project / 'LICENSE',
                      ksu_modules[0].name: ksu_modules[0], 'dualboot-tools.zip': dualboot_tools,
                      'FINGERPRINT.md': project / 'docs/FINGERPRINT.md',
+                     'FINGERPRINT.en.md': project / 'docs/FINGERPRINT.en.md',
                      'FINGERPRINT.zh-CN.md': project / 'docs/FINGERPRINT.zh-CN.md',
                      'fingerprint-build-inputs.tar.gz': Path(supplied['FINGERPRINT_BUNDLE'])}
             if imported:
@@ -258,6 +263,7 @@ def main():
                         'project_commit': subprocess.check_output(['git', '-C', str(project), 'rev-parse', 'HEAD'], env=env, text=True).strip(),
                         'project_dirty': bool(subprocess.check_output(['git', '-C', str(project), 'status', '--porcelain'], env=env)),
                         'kernel_release': (kernel / 'include/config/kernel.release').read_text().strip(),
+                        'installer_layouts': list(MODES),
                         'features': {'displayport': True,
                                      'native_fingerprint': bool(supplied.get('FINGERPRINT_BUNDLE')),
                                      'kernelsu_return_module': ksu_modules[0].name},

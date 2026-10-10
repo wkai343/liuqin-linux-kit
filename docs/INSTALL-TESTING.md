@@ -1,115 +1,107 @@
-# Installation Steps
+# 安装步骤
 
-Initial installation and first boot have been tested on a 256 GB unit. The
-128 GB and 512 GB variants are admitted by the rules in the
-[installation guide](FLASHING.md) but have not been tested on real hardware.
-This remains an experimental device port. Keep the tablet attended and prepare a recovery plan.
+[English](INSTALL-TESTING.en.md)
 
-An earlier revision of the dual-boot layout has been installed on a 256 GB
-unit: the partition table was split, Ubuntu was installed into `linux_root`
-with `/home` on `linux_home`, and Ubuntu booted from slot B. The current
-revision boots both systems from slot A and switches between them by
-exchanging the boot image in `boot_a` (see
-[Switching Between the Systems](#switching-between-the-systems)). v0.6.0 passed a complete `--layout dual --keep-home --no-backup` installation, initial setup and user acceptance on the same 256 GB unit. Both boot partitions matched the expected image and the existing `/home` was retained. Earlier tests covered Android's first boot after firmware repair and the KernelSU return script under a debug Android boot; automatic KernelSU activation under an ordinary Android boot and the WebUI button remain unverified. The Linux-only layout uses the same
-layout engine but has not been installed on hardware. Treat both as attended
-experiments.
+首次安装和首次启动已在 256 GB 机型完成真机验证；128 GB 与 512 GB 变体按
+[安装指南](FLASHING.md)的规则放行但未逐一真机验证。本项目仍属于实验性设备移植，
+安装时请保持有人在场，并准备恢复条件。
 
-## Installation Layouts
+早先版本的双系统布局已在 256 GB 机型完成真机安装：分区表完成划分，Ubuntu 安装到
+`linux_root`、`/home` 位于 `linux_home`，并从 B 槽正常启动。当前版本让两个系统都从 A 槽启动，
+通过更换 `boot_a` 中的 boot 镜像在两者之间切换（见[双系统切换](#双系统切换)）。
+v0.6.0 已在同一台 256 GB 机型以 `--layout dual --keep-home --no-backup` 完成完整安装、首次设置和用户功能确认；A/B 启动镜像回读一致，原 `/home` 保留。此前已验证原厂固件修复后的 Android 首次启动及调试 Android 下 KernelSU 脚本往返；普通 Android 下的 KernelSU 自动加载与 WebUI 按钮仍未单独验收。
+本分支的单根 `linux-single` 已在一台 256GB / HW16.9.0 设备上验证 A 槽启动、正常重启与自动旋转。
+传统 `linux-only` B 槽路径仍未单独真机验收；128GB / 512GB 仅完成离线模拟检查。
+这些结果来自脚本安装与引导修复，不替代新版 GUI 的完整真机安装验收。
 
-The installer offers two layouts, both laid out by the same engine. In the
-`dual` layout both systems boot from slot A. The `linux-only` layout places
-Ubuntu in slot B and leaves slot A untouched, so that an emergency Android kept
-with `--android-size` remains bootable.
+电脑端图形向导及独立备份流程见 [QML 安装助手](INSTALLER-GUI.md)。下文命令行安装器保持原有备份参数；GUI 备份是独立操作，不在准备方案时重复备份。
 
-| Layout | Android | Ubuntu system | Ubuntu home |
+## 分区布局
+
+源码安装器提供三种布局。`dual` 布局下两个系统都从 A 槽启动；
+`linux-only` 布局把 Ubuntu 安装到 B 槽、不触碰 A 槽，使通过 `--android-size` 保留的应急 Android 仍可启动。
+
+| 布局 | Android | Ubuntu 系统 | Ubuntu 用户目录 |
 | --- | --- | --- | --- |
-| `linux-only` | none by default | `linux_root`, 32 GiB | `linux_home`, the remainder |
-| `dual` | `userdata`, 96 GiB | `linux_root`, 32 GiB | `linux_home`, the remainder |
+| `linux-only` | 默认不保留 | `linux_root`，32 GiB | `linux_home`，剩余全部 |
+| `dual` | `userdata`，96 GiB | `linux_root`，32 GiB | `linux_home`，剩余全部 |
+| `linux-single` | 不保留 | 原 `userdata` 的全部空间 | 根文件系统内的普通 `/home` 目录 |
 
-Select one with `--layout linux-only` or `--layout dual`. Sizes are given as
-`NNG` or as a percentage of the available tail of the disk:
+`linux-single` 是本分支新增功能，已有上述 256GB 设备验证，不包含在旧 v0.6.0 安装镜像内。
+需要配套重建 `installer.img` 和安装包；`bundle.json` 必须在 `installer_layouts` 中声明该模式。
+只替换主机端 `install.py` 不够。该模式不重划 userdata 的分区名或边界，将其格式化为
+`LIUQIN_ROOT`，系统仍位于卷内的 `/native-root`，并从 A 槽启动。它清空系统和用户目录，
+不接受 `--keep-home`、`--root-size` 或 `--android-size`。已有双分区布局须先恢复原厂表，不能原地转换。
+选择槽位仍由 Bootloader 更新启动相关 GPT 状态和 UFS boot LUN，不等于全机 GPT 字节完全不变。
 
-- `--android-size` sets the size of the Android data partition. The default is
-  `96G` for `dual` and `0` for `linux-only`. `0` deletes `userdata`, which
-  gives the whole tail to Ubuntu. A non-zero size must be at least 16 GiB;
-  `--layout linux-only --android-size 32G` keeps a small emergency Android.
-- `--root-size` sets the size of `linux_root`. The default is `32G` and the
-  minimum is 16 GiB.
-- `linux_home` receives everything that is left and must be at least 8 GiB.
+使用 `--layout linux-only`、`--layout dual` 或 `--layout linux-single` 选择。
+前两种模式的尺寸可写作 `NNG`，
+也可写作磁盘尾部可用区域的百分比：
 
-Every partition is aligned to 4 MiB. `userdata` is only ever shrunk in place:
-it keeps its original type GUID, unique GUID and attribute bits, and no
-existing partition is moved. A size outside the feasible range is refused
-before any device access, with the feasible range printed.
+- `--android-size` 指定 Android 数据分区大小。`dual` 默认 `96G`，`linux-only` 默认 `0`。
+  取 `0` 表示删除 `userdata`，尾部空间全部归 Ubuntu；非零值不得小于 16 GiB。
+  `--layout linux-only --android-size 32G` 可保留一个应急用的小 Android。
+- `--root-size` 指定 `linux_root` 大小，默认 `32G`，不得小于 16 GiB。
+- `linux_home` 取剩余全部空间，不得小于 8 GiB。
 
-The installer prints the complete layout plan — partition, start sector, size
-and action — and requires the same interactive confirmation as before.
+新建分区按 4 MiB 对齐；单根模式保持 userdata 的原有边界。`userdata` 只做原地缩小，保留原有的类型 GUID、唯一 GUID
+与属性位，不移动任何既有分区。百分比按本机实际尾部区域计算，超出可行范围的尺寸会在写入之前被拒绝，
+并打印可行区间。
 
-### What each layout writes
+安装器先临时启动 RAM 环境、核对设备并备份，然后读取本机实际分区表，打印完整的布局计划
+（分区、起始扇区、大小、操作）并要求输入 `YES`。确认后再次读取分区表；任何变化都会停止写入。
+128 GB 默认双系统的 `96G + 32G` 通常放不下，需显式缩小 Android，比如 `32G + 32G`；实际可行范围由本机表决定。
 
-`linux-only` writes the partition table, `linux_root`, `linux_home` and
-`boot_b`. It does not touch `super`, `metadata` or any slot A partition.
+### 三种布局各自写入什么
 
-`dual` additionally clears the first 16 MiB of `userdata` and of `metadata`, so
-that Android reformats both on first boot instead of finding stale file-based
-encryption keys, and restores the stock Android partitions of slot A from a ROM
-directory you supply. Only the images whose bytes differ from what the tablet
-already holds are written, and only to `_a` partition names. `super` is an
-Android sparse image and cannot be compared against the partition, so it is
-always written when the dual layout is selected.
+`linux-single` 只格式化 userdata、安装 Ubuntu 并写入 `boot_a`；不重新划分数据区，
+不创建独立 home，不写入 `super`、`metadata` 或 `persist`。它写入 A 槽的 boot_a，不刷写其他 A 槽固件。
 
-The ROM's `boot.img` is the exception: it is not flashed. `boot_a` receives
-the project boot image, `boot_b` receives the same image as the bootloader's
-fallback, and Android's boot image is stored on `linux_root` for the switcher
-described below. The installer never runs the stock `flash_all` script and
-never writes a `_b` partition other than `boot_b`.
+`linux-only` 写入分区表、`linux_root`、`linux_home` 与 `boot_b`，
+不触碰 `super`、`metadata` 以及任何 A 槽分区。
 
-### Dual-boot prerequisites
+`dual` 另外清零 `userdata` 与 `metadata` 的前 16 MiB，使 Android 首次开机重新格式化这两个分区，
+而不是读到过期的文件级加密密钥；并用用户提供的 ROM 目录恢复 A 槽的原厂 Android 分区。
+只有与设备当前内容不一致的镜像才会被写入，且只写入 `_a` 后缀的分区。
+`super` 是 Android 稀疏镜像，无法与分区内容逐字节比对，因此选择 `dual` 时总会写入。
 
-`--layout dual` requires `--rom-dir`, pointing at an extracted stock Xiaomi
-Fastboot ROM. The original ROM is an upstream input and is not redistributed
-here. The installer verifies `boot.img`, `vendor_boot.img`, `dtbo.img`,
-`vbmeta.img`, `vbmeta_system.img`, `super.img`, `NON-HLOS.bin`, `BTFM.bin` and
-`dspso.bin` against the checksums pinned
-in `liuqin-rom-images.json`, and refuses any other release. Those checksums
-identify the exact ROM this port was validated against; a different ROM
-requires repeating that validation.
+ROM 中的 `boot.img` 例外，不会被刷入：`boot_a` 写入本项目的 boot 镜像，`boot_b` 写入同一镜像
+作为 Bootloader 的回退副本，Android 的 boot 镜像则保存在 `linux_root` 上，供下文所述的切换工具使用。
+安装器不会执行原厂 `flash_all` 脚本，除 `boot_b` 外不写入任何 `_b` 分区。
 
-`NON-HLOS.bin` restores `modem_a`, which contains the WLAN and DSP firmware;
-`BTFM.bin` restores `bluetooth_a`, and `dspso.bin` restores `dsp_a`. A missing or damaged firmware filesystem can
-crash Android before ADB starts even when its boot and system images match.
-Matching partitions are left alone. Before replacing one of these firmware partitions,
-the installer saves its entire original contents as `modem_a.img`,
-`bluetooth_a.img` or `dsp_a.img` in the private backup directory and verifies its checksum.
-The replacement is zero-filled to the actual partition size and checked again
-before flashing, so damaged bytes beyond the original ROM file cannot survive.
-To undo a replacement, verify that directory's `SHA256SUMS`, then use
-`fastboot -s SERIAL flash modem_a /path/to/backup/modem_a.img` (or the corresponding
-`bluetooth_a` or `dsp_a` command). This restores the saved bytes, including any pre-existing
-damage; it does not alter the partition table or Android data.
+### 双系统模式的前提
 
-Observe the ROM's own anti-rollback rule: its version must be at least the
-version already fused into the tablet.
+`--layout dual` 必须提供 `--rom-dir`，指向解包后的原厂小米 Fastboot ROM 目录。
+原厂 ROM 从上游取得，不在本项目重复托管。安装器会用 `liuqin-rom-images.json` 中固定的校验值
+核对 `boot.img`、`vendor_boot.img`、`dtbo.img`、`vbmeta.img`、`vbmeta_system.img`、`super.img`、
+`NON-HLOS.bin`、`BTFM.bin` 与 `dspso.bin`，
+不匹配即拒绝。这些校验值对应本移植验证过的确切 ROM 版本；更换版本需要重新完成该验证。
 
-### Replacing the Android boot image
+`NON-HLOS.bin` 恢复包含 WLAN 与 DSP 固件的 `modem_a`，`BTFM.bin` 恢复 `bluetooth_a`，
+`dspso.bin` 恢复 `dsp_a`。
+固件文件系统缺失或损坏会使 Android 在 ADB 启动前崩溃，即使 boot 与系统镜像完全匹配。
+已匹配的分区保持不动；需要替换时，安装器先将原分区完整保存为私有备份目录中的
+`modem_a.img`、`bluetooth_a.img` 或 `dsp_a.img` 并核对校验值。
+替换镜像按实际分区大小零填充，刷入前再次核验，避免 ROM 文件末尾之后残留旧损坏内容。
+若要撤销该替换，先核验备份目录的 `SHA256SUMS`，再执行
+`fastboot -s SERIAL flash modem_a /path/to/backup/modem_a.img`（蓝牙与 DSP 分别对应 `bluetooth_a`、`dsp_a`）。
+这会恢复备份的原字节，包括原有损坏，不改变分区表或 Android 数据。
 
-`--layout dual` accepts `--android-boot IMG`, which makes `IMG` Android's boot
-image instead of the ROM's own `boot.img`: it is stored on `linux_root` and
-written to `boot_a` whenever the tablet is switched to Android. Every other
-stock image is still verified against the pinned checksums, and the override
-itself is admitted only when it is exactly as long as the stock `boot.img` and
-its header identifies it as an Android boot image (header version 3 or 4). Its
-sha256 is printed in the plan summary and again in the erasure confirmation.
-The option is rejected with any layout other than `dual`.
+同时需遵守 ROM 自身的防回滚要求：ROM 版本不得低于设备已熔断的版本。
 
-This is how a root-enabled Android is installed alongside Ubuntu.
-`tools/patch-android-boot-ksu.py` produces such an image entirely on the host:
-it unpacks the stock `boot.img`, renames `init` to `init.real` in the ramdisk,
-installs KernelSU's `ksuinit` as `init` and the matching loadable module as
-`/kernelsu.ko`, and repacks the image with the kernel, the command line and
-every other header field unchanged. The KernelSU release it draws on is pinned
-in `tools/lib/kernelsu-assets.json` and fetched by
-`tools/fetch-kernelsu-assets.sh`.
+### 替换 Android 侧 boot 镜像
+
+`--layout dual` 可附加 `--android-boot IMG`，以 `IMG` 取代 ROM 自带的 `boot.img` 作为 Android 的
+boot 镜像：它保存在 `linux_root` 上，每次切换到 Android 时写入 `boot_a`。其余原厂镜像仍按固定校验值
+逐一核对；替换镜像本身只有在长度与原厂 `boot.img` 完全一致、且头部表明其为 Android boot 镜像
+（头版本 3 或 4）时才被接受。其 sha256 会出现在布局计划与清除数据确认中。
+该参数在 `dual` 以外的布局下一律拒绝。
+
+这是在 Ubuntu 旁安装带 root 的 Android 的方式。`tools/patch-android-boot-ksu.py`
+完全在主机侧生成这样的镜像：解包原厂 `boot.img`，将 ramdisk 中的 `init` 改名为 `init.real`，
+以 KernelSU 的 `ksuinit` 作为新的 `init`，并加入匹配的内核模块 `/kernelsu.ko`，
+重新打包时保持内核、命令行以及其余头部字段不变。所依据的 KernelSU 发行版固定记录在
+`tools/lib/kernelsu-assets.json`，由 `tools/fetch-kernelsu-assets.sh` 下载并校验。
 
 ```sh
 sh tools/fetch-kernelsu-assets.sh
@@ -120,33 +112,27 @@ python3 tools/patch-android-boot-ksu.py \
   --out out/android-ksu/boot-ksu.img --report out/android-ksu/boot-ksu.report.txt
 ```
 
-The tool refuses to write anything unless an unpatched unpack-and-repack of the
-same image reproduces the stock bytes exactly, so the only difference between
-its output and the stock image is the ramdisk it was asked to change.
+该工具会先对同一镜像做一次不修改内容的解包重打包，只有结果与原厂镜像逐字节一致才继续，
+因此输出与原厂镜像的差异只存在于被要求修改的 ramdisk。
 
-Any change to the ramdisk invalidates the AVB boot signature and the vbmeta
-hash descriptor for that partition, so the resulting image boots only on an
-unlocked bootloader. Root also makes Android able to modify slot B: the
-`liuqin_boot_ubuntu` KernelSU module disables the system updater on every boot
-for that reason, because an Android over-the-air update rewrites the inactive
-slot, which holds the fallback copy of the Ubuntu boot image, and then makes
-it active.
+修改 ramdisk 会使该分区的 AVB boot 签名与 vbmeta 哈希描述符失效，
+因此生成的镜像只能在已解锁 Bootloader 的设备上启动。root 之后 Android 同样具备改写 B 槽的能力：
+`liuqin_boot_ubuntu` KernelSU 模块因此在每次开机时停用系统更新程序——
+Android 的 OTA 会改写非活动槽并将其设为活动槽，而该槽保存着 Ubuntu boot 镜像的回退副本。
 
-## Requirements
+## 准备
 
-- Xiaomi Pad 6 Pro (liuqin) with the factory partition table, 4096-byte
-  logical sectors and `userdata` as the last partition. Modified partition
-  layouts are rejected.
-- Unlocked bootloader and the device in Fastboot mode.
-- Battery at least 30 percent charged.
-- Linux host with Python 3.11 or newer, Android platform-tools and USB networking.
-- Personal files backed up outside the tablet. Installation erases all userdata.
-- A matching original Xiaomi Fastboot ROM and an Android recovery plan prepared
-  before installation. The installer does not back up personal userdata.
+- Xiaomi Pad 6 Pro（liuqin），出厂分区表、4096 字节逻辑扇区，且 `userdata` 为最后一个分区；
+  自定义分区布局会被拒绝。
+- Bootloader 已解锁，平板进入 Fastboot，电量至少 30%。
+- Linux 主机、Python 3.11 或更新版本、Android platform-tools，以及正常的 USB 网络支持。
+- 个人文件已备份到平板以外；安装会清空整个 userdata，安装器不会备份个人文件。
+- 已准备适配本机、满足防回滚要求的原厂 Fastboot ROM，并明确如何恢复 Android。
 
-Download all files from the same release. `install.py`, `liuqin_layout.py` and
-`liuqin-rom-images.json` belong together; the installer refuses to run without
-them. If the system archive is split, join it in the bundle directory:
+## 执行安装
+
+下载同一版本的全部文件，在安装包目录执行。`install.py`、`liuqin_layout.py` 与
+`liuqin-rom-images.json` 必须齐备，缺一安装器拒绝运行。若系统归档分卷提供，先合并：
 
 ```sh
 if [ ! -f rootfs.tar.gz ]; then
@@ -154,13 +140,20 @@ if [ ! -f rootfs.tar.gz ]; then
 fi
 ```
 
-Images are verified automatically before any device access. Before the
-installation starts, confirm the erasure interactively by typing `YES`
-(scripts and non-interactive shells pass `--yes` explicitly):
+安装器会在访问设备前自动校验镜像，无需重复校验。开始安装前需交互输入
+`YES` 确认清空数据（脚本或无交互环境显式加 `--yes`）：
 
 ```sh
 python3 install.py --bundle . --serial DEVICE_SERIAL \
   --backup /path/to/new-private-backup --erase-userdata --layout linux-only
+```
+
+新增单根模式仅用于配套重建、尚未验收的安装包：
+
+```sh
+python3 install.py --bundle . --serial DEVICE_SERIAL \
+  --backup /path/to/new-private-backup --erase-userdata --layout linux-single \
+  --allow-unverified
 ```
 
 ```sh
@@ -176,75 +169,58 @@ python3 install.py --bundle . --serial DEVICE_SERIAL \
   --android-size 96G --root-size 32G
 ```
 
-Use `python3 install.py --bundle . --check` for an optional local-only check;
-adding `--layout` prints the planned layout without accessing a device.
-Locally built or CI-generated bundles that have not passed device testing require
-`--allow-unverified` for an explicitly attended test.
+只检查文件、不访问设备时使用 `python3 install.py --bundle . --check`；
+加上 `--layout` 打印的是明确标注的 256 GB 参考示例，不能用于确认 128 GB 的实际布局。
+自行构建或 CI 生成的未验收包，需要在有人在场的测试中显式添加 `--allow-unverified`。
 
-The installer boots `installer.img` in RAM, waits for its USB network, backs up
-boot_a, boot_b, persist and both copies of the partition table, verifies those
-backups, then edits the partition table, installs the rootfs and provisions this
-tablet's calibration and addresses. It formats `linux_root` and `linux_home` as
-ext4 and writes an `/etc/fstab` entry mounting `LABEL=LIUQIN_HOME` at `/home`.
-In the dual layout it also places the Ubuntu and Android boot images, each
-checked against its checksum and header, in the switch store on `linux_root`.
-Only after the root installation succeeds does it write the project boot image
-— to `boot_a` and `boot_b` in the dual layout, to `boot_b` in the Linux-only
-layout — select the booting slot through Fastboot (slot A for dual, slot B for
-Linux-only) and reboot. It does not relock the bootloader and does not write
-persist.
-Keep the backup directory private. The USB rescue shell has no authentication:
-use a direct, trusted USB connection, not a shared network.
+安装器临时启动 installer.img，等待 USB 网络，备份并校验 boot_a、boot_b、persist
+以及分区表的主备两份副本；随后确认本机方案（单根模式跳过分区表修改），下载并校验系统归档，
+把 `linux_root` 与 `linux_home` 格式化为 ext4，安装系统并提取本机校准和地址，
+写入把 `LABEL=LIUQIN_HOME` 挂载到 `/home` 的 `/etc/fstab` 条目。
+单根模式则只格式化 userdata，不挂载独立 home，也不写这个 fstab 条目。
+双系统布局下还会把 Ubuntu 与 Android 的 boot 镜像逐一核对校验值和头部后，放入 `linux_root` 上的切换存储区。
+根文件系统安装成功且卸载后，才写入本项目的 boot 镜像（双系统布局写入 `boot_a` 与 `boot_b`，
+linux-only 写入 `boot_b`，linux-single 写入 `boot_a`），通过 Fastboot 选定启动槽（dual 和 linux-single 为 A 槽，linux-only 为 B 槽）并重启。
+不会写入 persist，也不会重新锁定 Bootloader。备份必须放在安装包目录以外，并保持私密。
 
-After a partition-table edit, `sgdisk` verifies the new table and the installer
-re-reads it and compares it with the plan. If anything does not match, the
-installation stops and the saved table can be written back.
+分区表写入后，`sgdisk` 会校验新表，安装器随即重新读取并与计划逐项比对；
+任何一项不符即停止安装，可用备份写回原分区表。
 
-USB networking normally obtains an address through DHCP. `--host-address` selects
-the host's USB address when automatic route selection is unsuitable. If the
-installer cannot establish its control channel it stops; do not blindly retry
-after a partial installation. Preserve the error output and backup first.
+USB 网络通常通过 DHCP 配置；必要时可用 `--host-address` 指定主机 USB 网卡地址。
+安装 RAM 环境的救援 shell 没有身份认证，只能使用可信的直连 USB，不要接入共享网络。
+失败后先保留报错与备份，确认已完成哪些步骤，不要直接反复重跑。
 
-## Reinstalling and Changing the Split
+## 重装与调整切分比例
 
-On a tablet that already carries this split layout, the installer refuses to
-resize it. Partition sizes cannot be adjusted in place, because `linux_root`
-and `linux_home` would have to move and their contents cannot be preserved
-through the move.
+对已经是本布局的平板，安装器拒绝调整分区尺寸。尺寸无法原地修改，
+因为 `linux_root` 与 `linux_home` 必须移动，移动过程中的数据无法保留。
 
-To reinstall the system on an existing split and keep `/home`, pass
-`--keep-home`. It keeps the existing sizes, leaves `linux_home` untouched and
-reinstalls `linux_root` only, so it may not be combined with `--android-size`
-or `--root-size`. Before anything is formatted, the installer checks that
-`linux_home` holds the existing `LIUQIN_HOME` filesystem (its label, then
-`e2fsck -p`) and stops if it does not; the filesystem is then kept as it is,
-and only an empty one receives the default `/home` contents.
+若只重装系统并保留 `/home`，使用 `--keep-home`：沿用现有尺寸，
+不触碰 `linux_home`，只重装 `linux_root`；该选项不可与 `--android-size`
+或 `--root-size` 同时使用。格式化任何分区之前，安装器先核对 `linux_home` 上现有的
+`LIUQIN_HOME` 文件系统（先查卷标，再运行 `e2fsck -p`），不符即停止；通过后原样保留，
+仅当其为空时才写入默认的 `/home` 内容。
 
-To change the split, restore the stock partition table and install again:
+要更改切分比例，先恢复出厂分区表，再重新安装：
 
 ```sh
 python3 install.py --bundle . --serial DEVICE_SERIAL \
   --restore-partition-table /path/to/private-backup
 ```
 
-The restore refuses a backup taken from another tablet, and refuses a saved
-table whose checksums do not match the manifest recorded beside it. A restored
-stock table leaves the tablet without a usable system; complete it with a full
-installation or with the original ROM's clean-flash procedure.
+恢复操作拒绝来自其他平板的备份，也拒绝校验值与随附清单不符的备份。
+恢复出厂分区表后平板上没有可用系统，需继续执行完整安装，
+或执行原厂 ROM 的完整清刷流程。
 
-## Switching Between the Systems
+## 双系统切换
 
-In the dual layout both systems boot from slot A. Switching writes the other
-system's boot image into `boot_a`, reads it back, and restarts the tablet. The
-switch never changes the active slot: this bootloader changes slots only
-through its own `fastboot --set-active`, which also swaps the type GUIDs of
-every `_a`/`_b` partition pair and the UFS boot LUN, and a slot change made in
-any other way leaves every image failing to load. Only the boot image rotates.
-Android's `vendor_boot_a`, `dtbo_a`, `vbmeta_a`, `super`, `metadata` and
-`userdata` stay as installed; the Ubuntu boot image is self-contained and
-carries its own kernel, device tree and initramfs.
+双系统布局下两个系统都从 A 槽启动。切换时把另一系统的 boot 镜像写入 `boot_a`，回读核对后重启平板，
+不改变活动槽。本机 Bootloader 只通过其自身的 `fastboot --set-active` 切换槽位，该操作同时交换每一对
+`_a`/`_b` 分区的类型 GUID 以及 UFS 启动 LUN；以其他方式切换槽位会使所有镜像都无法加载。
+切换只涉及 boot 镜像：Android 的 `vendor_boot_a`、`dtbo_a`、`vbmeta_a`、`super`、`metadata` 与
+`userdata` 保持安装时的状态；Ubuntu 的 boot 镜像自带内核、设备树与 initramfs。
 
-The image that is not installed is kept on the Ubuntu root filesystem:
+未安装在 `boot_a` 中的镜像保存在 Ubuntu 根文件系统上：
 
 ```
 /var/lib/liuqin/switch/
@@ -253,73 +229,54 @@ The image that is not installed is kept on the Ubuntu root filesystem:
   state.json switch.log
 ```
 
-The installer fills both sets. The directory is not part of the file list the
-boot image verifies before starting Ubuntu, so changing it never prevents
-Ubuntu from booting. `boot_b` holds a copy of the Ubuntu boot image that the
-bootloader falls back to on its own when `boot_a` does not load; the switcher
-never writes it.
+两组镜像均由安装器写入。该目录不在 boot 镜像启动 Ubuntu 前核对的文件清单之内，
+修改它不会妨碍 Ubuntu 启动。`boot_b` 保存 Ubuntu boot 镜像的一份副本，
+供 `boot_a` 无法加载时 Bootloader 自动回退使用；切换工具从不写入 `boot_b`。
 
-**From Ubuntu**, open **Reboot to Android** from the application list, which
-asks for an administrator password, or run:
+**在 Ubuntu 中**，从应用列表打开"重启到 Android"（需要输入管理员密码），或执行：
 
 ```sh
-sudo liuqin-switch status          # what boot_a holds and what the store holds
-sudo liuqin-switch verify          # re-check both images; non-zero if anything is off
-sudo liuqin-switch to-android      # write the Android image into boot_a and reboot
+sudo liuqin-switch status          # boot_a 与存储区当前内容
+sudo liuqin-switch verify          # 重新核对两组镜像；有任何异常即返回非零
+sudo liuqin-switch to-android      # 将 Android 镜像写入 boot_a 并重启
 ```
 
-**From Android**, use the **Reboot to Ubuntu** button in the WebUI of the
-`liuqin_boot_ubuntu` KernelSU module, or run
-`su -c 'sh /data/adb/modules/liuqin_boot_ubuntu/system/bin/boot-ubuntu'`.
-Android mounts the Ubuntu root read-only for the duration of the switch; its
-kernel cannot mount that file system read-write.
+**在 Android 中**，使用 KernelSU 模块 `liuqin_boot_ubuntu` 的 WebUI 中的"Reboot to Ubuntu"按钮，
+或执行 `su -c 'sh /data/adb/modules/liuqin_boot_ubuntu/system/bin/boot-ubuntu'`。
+切换期间 Android 以只读方式挂载 Ubuntu 根分区；Android 内核无法以读写方式挂载该文件系统。
 
-`--no-reboot` stops before the restart, and `--dry-run` reports what would be
-written without writing anything.
+`--no-reboot` 在重启前停止，`--dry-run` 只报告将要写入的内容，不写入任何数据。
 
-The switcher enforces these rules, in this order:
+切换工具依次执行以下规则：
 
-- A stored image that is missing, does not match its `SHA256SUMS`, is larger
-  than `boot_a` or is not of the kind its directory names is refused before
-  anything is written.
-- No switch starts without a verified way back. Switching to Android requires
-  a usable Ubuntu image in the store. Switching to Ubuntu requires the Android
-  image currently in `boot_a` to be the one in the store; from Ubuntu the
-  switcher archives it first, and from Android, where the store is read-only,
-  it refuses instead.
-- An image that identifies as the project's own is never archived as Android.
-- `boot_a` is written as a whole partition — the image followed by zeros —
-  synced, read back and compared. If the read-back differs, or the write fails,
-  the previous system's image is written back and the switcher exits with an
-  error without restarting the tablet.
-- The kernel read-only flag of `boot_a` and of its disk, which the storage
-  guard sets on every boot, is cleared only for the write and restored on every
-  exit path. Interrupt, hangup and terminate signals are ignored while `boot_a`
-  is being written.
+- 存储区中的镜像缺失、与 `SHA256SUMS` 不符、大于 `boot_a`，或类型与所在目录不符时，
+  在任何写入之前拒绝。
+- 没有经过核对的返回途径就不切换。切换到 Android 前，存储区中必须有可用的 Ubuntu 镜像；
+  切换到 Ubuntu 前，`boot_a` 中当前的 Android 镜像必须与存储区中的副本一致——在 Ubuntu 中
+  会先将其归档，在存储区只读的 Android 中则直接拒绝。
+- 识别为本项目镜像的内容绝不会被当作 Android 镜像归档。
+- `boot_a` 按整个分区写入（镜像加零填充），同步后回读比对。回读不一致或写入失败时，
+  写回切换前系统的镜像，并以错误状态退出，不重启平板。
+- 存储保护每次开机都会为 `boot_a` 及其所在磁盘设置内核只读标志；切换工具只在写入期间清除该标志，
+  并在所有退出路径上恢复。写入 `boot_a` 期间忽略中断、挂断与终止信号。
 
-The two kinds of image are told apart by their boot-image header. Header
-version 2 with a 4096-byte page, a 1660-byte header and an embedded device tree
-is the project's Ubuntu image. Header version 3 or 4, with a header of 1580 or
-1584 bytes respectively, is an Android image. Anything else is refused.
+两类镜像按 boot 镜像头部区分：头版本 2、页大小 4096 字节、头部 1660 字节且内嵌设备树的是本项目的
+Ubuntu 镜像；头版本 3 或 4（头部分别为 1580 或 1584 字节）的是 Android 镜像；其他一律拒绝。
 
-**When Android's boot image changes.** Replacing Android's boot image on the
-tablet itself — for example with the KernelSU manager's direct-install action —
-makes it differ from the stored copy, and the switch to Ubuntu is then refused
-from Android. Prepare such images on the host instead, and import them from
-Ubuntu before switching:
+**Android 的 boot 镜像发生变化时。** 在平板上直接替换 Android 的 boot 镜像（例如使用 KernelSU
+管理器的直接安装功能）会使其与存储区中的副本不一致，此后从 Android 切换到 Ubuntu 会被拒绝。
+请在主机上制作此类镜像，并在切换前从 Ubuntu 导入：
 
 ```sh
 sudo liuqin-switch import-android /path/to/boot-ksu.img
 ```
 
-If the switch is already blocked, copy `boot_a` off the tablet from Android,
-restore Ubuntu's boot image from a host (see the Fastboot commands below), and
-import the copy from Ubuntu.
+若切换已被拒绝，可在 Android 中把 `boot_a` 复制出平板，在主机上按下文的 Fastboot 命令
+恢复 Ubuntu 的 boot 镜像，再从 Ubuntu 导入该副本。
 
-**When the tablet starts from slot B.** If `boot_a` does not load, the
-bootloader switches to slot B by itself and starts Ubuntu from the fallback
-copy. The switcher detects this and refuses to write, because writing `boot_a`
-cannot change what boots next. Repair it from a host in Fastboot mode:
+**平板从 B 槽启动时。** `boot_a` 无法加载时，Bootloader 会自行切换到 B 槽，从回退副本启动 Ubuntu。
+切换工具会识别这种情况并拒绝写入，因为写入 `boot_a` 无法改变下次启动的内容。
+请在 Fastboot 模式下从主机修复：
 
 ```sh
 cp /path/to/boot.img boot-padded.img
@@ -328,27 +285,20 @@ fastboot flash boot_a boot-padded.img
 fastboot --set-active=a
 ```
 
-Fastboot writes only the bytes it is sent, and `liuqin-switch` identifies the
-content of `boot_a` by the whole partition, so the image is flashed zero-filled
-to the 192 MiB partition size, as the installer does. The bare image boots as
-well, but leaves the previous tail of the partition behind it, and
-`liuqin-switch verify` then reports an Ubuntu image that is not the one in the
-store until `liuqin-switch to-ubuntu` rewrites the partition.
+Fastboot 只写入发送的字节，而 `liuqin-switch` 按整个分区识别 `boot_a` 的内容，因此与安装器一样，
+镜像需零填充到 192 MiB 分区大小后再刷写。直接刷写原始镜像同样可以启动，但分区尾部会保留原有内容，
+此时 `liuqin-switch verify` 会报告“不是存储区中的 Ubuntu 镜像”，直到 `liuqin-switch to-ubuntu`
+重写整个分区。
 
-An interruption during a write that the switcher cannot catch, such as a power
-loss, has the same outcome and the same repair.
+切换工具无法拦截的写入中断（例如断电）会导致相同的结果，修复方法相同。
 
-**Validation status.** The switcher's decision and verification logic is
-covered by host-side tests that run it against ordinary files. Neither
-direction of the switch, the read-only mount on Android, nor the cold boot of
-either system from slot A after a switch has been performed on the tablet.
-Ubuntu has booted from slot B on the earlier revision; booting it from slot A,
-where the bootloader pairs it with slot A's stock `dtbo_a` and `vbmeta_a`, has
-not been tested.
+**验证状态。** 切换工具的判定与校验逻辑已由主机侧测试覆盖，这些测试以普通文件代替分区运行。
+两个方向的切换、Android 侧的只读挂载，以及切换后任一系统从 A 槽冷启动，均尚未在平板上执行。
+早先版本中 Ubuntu 曾从 B 槽启动；从 A 槽启动时 Bootloader 会搭配 A 槽的原厂 `dtbo_a` 与
+`vbmeta_a`，这一组合尚未测试。
 
-**Upgrading an earlier dual installation.** Installations made by the earlier
-revision boot Ubuntu from slot B and have no switch store. Reinstall the system
-with the current release, keeping `/home`, to move to the new arrangement:
+**升级早先的双系统安装。** 早先版本的安装从 B 槽启动 Ubuntu，且没有切换存储区。
+使用当前版本重装系统并保留 `/home`，即可迁移到新方案：
 
 ```sh
 python3 install.py --bundle . --serial DEVICE_SERIAL \
@@ -357,79 +307,65 @@ python3 install.py --bundle . --serial DEVICE_SERIAL \
   --keep-home
 ```
 
-`--android-boot` is optional; without it the ROM's `boot.img` is stored.
+`--android-boot` 可省略；省略时保存 ROM 自带的 `boot.img`。
 
-## Android in the Dual Layout
+## 双系统下的 Android
 
-The first Android boot after a dual installation reformats `userdata` and
-`metadata` and takes several minutes.
+双系统安装后的首次 Android 开机会重新格式化 `userdata` 与 `metadata`，需要数分钟。
 
-Root through KernelSU is deliberately not performed by the installer. Produce
-the patched image on the host as described above and either pass it to the
-installer with `--android-boot` or import it from Ubuntu with
-`liuqin-switch import-android`. Do not flash it to `boot_a` directly.
+安装器不会代为取得 KernelSU root。请按上文在主机上生成打过补丁的镜像，安装时通过
+`--android-boot` 传入，或之后在 Ubuntu 中用 `liuqin-switch import-android` 导入。
+不要直接把它刷入 `boot_a`。
 
-**Never use "install to inactive slot" in the KernelSU manager.** The inactive
-slot is slot B, which holds the fallback copy of the Ubuntu boot image.
+**切勿使用 KernelSU 管理器的"安装到未使用的槽位"。** 未使用的槽位是 B 槽，
+其中保存着 Ubuntu boot 镜像的回退副本。
 
-**Freeze system updates.** A MIUI or HyperOS over-the-air update writes to the
-inactive slot, slot B, and then makes it active. Android cannot start from
-slot B, and the update destroys the fallback copy of the Ubuntu boot image.
+**必须冻结系统更新。** MIUI / HyperOS 的 OTA 会写入未使用的槽位（B 槽）并将其设为活动槽。
+Android 无法从 B 槽启动，该更新还会破坏 Ubuntu boot 镜像的回退副本。
 
-**Never run the stock `flash_all` script again.** It writes most images with the
-`_ab` suffix, that is, into both slots at once, and it ends with
-`fastboot set_active a`. Running it after a dual installation overwrites the
-Ubuntu boot chain and returns the tablet to Android only. The same applies to
-`flash_all_lock.sh` and `flash_all_except_storage.sh`.
+**切勿再次执行原厂 `flash_all` 脚本。** 该脚本绝大多数镜像使用 `_ab` 后缀，
+即一次写入两个槽位，并在结尾执行 `fastboot set_active a`。
+双系统建成后运行它会覆盖 Ubuntu 的启动链，使平板退回到只有 Android 的状态。
+`flash_all_lock.sh` 与 `flash_all_except_storage.sh` 同理。
 
-## Desktop Diagnostics
+## 桌面诊断
 
-For an attended installation test, add `--enable-rescue` to the installation
-command to make the rescue shell available from the first boot. This is an
-explicit opt-in to unauthenticated root access, not the default installation.
+有人在场的安装测试可在安装命令后添加 `--enable-rescue`，让救援通道从首次启动即可使用。
+该选项会开放免认证 root 访问，仅适用于可信连接；默认安装不启用。
 
-On the tablet, enable the rescue shell with:
+也可以在平板上手动开启：
 
 ```sh
 sudo liuqin-rescue on
 ```
 
-Check it with `liuqin-rescue status`. This grants unauthenticated root access
-at `192.168.7.2:2323` and remains enabled across boots. Use only a trusted
-connection; do not expose or forward this port to other networks. After
-diagnostics, run `sudo liuqin-rescue off` on the tablet to disable it and
-close existing rescue connections. Release images leave it disabled by default.
+使用 `liuqin-rescue status` 查看状态。开启后，`192.168.7.2:2323` 提供救援访问，重启后仍然有效。
+不要将此端口转发或暴露到其他网络。诊断结束后，在平板上执行 `sudo liuqin-rescue off` 关闭通道；
+现有救援连接也会断开。
 
-## Known Issues
+## 已知问题
 
-On some units, starting the sensor processor (SLPI) resets the tablet. On such
-a unit, create the empty marker file `/etc/liuqin-slpi-disabled` (for example
-with `sudo touch /etc/liuqin-slpi-disabled`) and reboot: `liuqin-slpi.service`
-is then skipped and SLPI is not started. Automatic screen rotation is
-unavailable while the marker exists; delete it and reboot to start SLPI again.
-Never edit `/etc/systemd/system/liuqin-slpi.service` itself: the boot image
-verifies that file and refuses to start a root on which it has been modified.
+部分平板在启动传感器处理器（SLPI）时会复位。遇到这种情况，可创建空标记文件
+`/etc/liuqin-slpi-disabled`（例如执行 `sudo touch /etc/liuqin-slpi-disabled`）后重启：
+`liuqin-slpi.service` 将被跳过，SLPI 不再启动。标记存在期间自动旋转不可用；删除该文件并重启即可恢复启动 SLPI。
+切勿直接修改 `/etc/systemd/system/liuqin-slpi.service`：boot 镜像会校验该文件，文件被改动后将拒绝启动该根分区。
 
-## Recovery
+## 恢复 Android
 
-Returning to Android alone erases the Ubuntu installation and requires a
-compatible original Fastboot ROM, including its userdata initialization.
-Restoring a boot partition alone is not a complete Android recovery, and it does
-not restore the partition table: use `--restore-partition-table` first if the
-tablet was installed with a split layout.
+仅恢复 Android 会清除 Ubuntu，需要使用匹配的原厂 Fastboot ROM 完成系统恢复和 userdata 初始化。
+仅还原 boot 分区不等于恢复 Android，也不会恢复分区表；
+若平板使用过分区布局安装，应先执行 `--restore-partition-table`。
 
-Use the original ROM's full clean-flash procedure, not its keep-data or relock
-variant. Preserve the anti-rollback checks. Never restore another tablet's
-persist or calibration. Keep the bootloader unlocked while non-stock images
-remain. The original ROM is an upstream input, not duplicated in this repository.
+使用原厂完整清刷流程，不用保留数据或重新上锁的变体；保留原厂防回滚检查。
+不得恢复其他平板的 persist 或校准。在仍有非原厂镜像时保持 Bootloader 解锁。
+原厂 ROM 从上游取得，不在本项目重复托管。
 
-Android recovery still requires independent device testing. Successful Ubuntu
-installation does not establish that Android recovery has been validated.
+Android 恢复路线仍待独立真机验证，不应将 Ubuntu 安装通过等同于恢复已验证。
 
-## Explicitly skipping backups during reinstallation
+## 明确跳过备份的重装
 
-On an existing supported split layout, `--no-backup` can replace `--backup PATH` in a `--keep-home` reinstall command. It explicitly skips boot, persist and GPT backups; it cannot be used for initial partitioning or restoring a partition table. Backups remain the default.
+已有受支持的 split 布局时，可在 `--keep-home` 重装命令中用 `--no-backup` 替代 `--backup 路径`，明确跳过启动分区、persist 与 GPT 备份。该选项不允许首次分区或恢复分区表。默认安装仍执行备份。
 
-`--keep-home` retains only the separate `/home` filesystem. The Ubuntu system partition is recreated, removing its accounts and fingerprint templates/credentials; create the account and enroll the finger again after installation.
+`--keep-home` 只保留独立 `/home`，仍会重建 Ubuntu 系统分区，旧账号配置与系统中的指纹模板/凭据会清除；首次设置时需重新创建账号并录入指纹。
 
-The complete bundle also includes `liuqin_boot_ubuntu-v0.3.zip`, `dualboot-tools.zip` and the public fingerprint build input. Normal fingerprint use needs no separate application. Extract `dualboot-tools.zip` to use the documented pinned KernelSU download and Android boot patching commands.
+本版完整包同时附带 `liuqin_boot_ubuntu-v0.3.zip`、`dualboot-tools.zip` 和公开指纹构建输入；正常使用指纹无需再安装单独应用。解压 `dualboot-tools.zip` 后可按本文命令获取、校验 KernelSU 上游组件并生成 Android boot。

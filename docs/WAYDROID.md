@@ -1,37 +1,33 @@
-# Waydroid Support
+# Waydroid 支持
 
-[中文](WAYDROID.zh-CN.md) | [Project overview](../README.md)
+[English](WAYDROID.en.md) ｜ [项目首页](../README.md)
 
-The device kernel in this project already carries what Waydroid needs.
-Waydroid runs an Android userspace container on the host Linux kernel, so it
-requires Binder IPC, binderfs and a handful of generic kernel features:
+本项目的设备内核已包含运行 Waydroid 所需的配置。Waydroid 用宿主 Linux
+内核承载一个 Android 用户空间容器，因此需要 Binder IPC、binderfs 以及
+若干通用内核特性：
 
-| Requirement | Kernel status | Source |
+| 需求 | 本内核状态 | 来源 |
 |---|---|---|
-| Binder IPC / binderfs | ✅ Built in | `device/configs/liuqin-waydroid.config` |
-| IPv4 and IPv6 policy routing (FIB rules) | ✅ Built in | `device/configs/liuqin-waydroid.config` |
-| PSI (`/proc/pressure`) | ✅ Built in | `device/configs/liuqin-desktop.config` |
-| memfd, network namespaces, cgroup freezer | ✅ Built in | Base configuration |
-| veth | ✅ Module | Installed with the kernel modules |
+| Binder IPC / binderfs | ✅ 内建 | `device/configs/liuqin-waydroid.config` |
+| IPv4 与 IPv6 策略路由（FIB rules） | ✅ 内建 | `device/configs/liuqin-waydroid.config` |
+| PSI（`/proc/pressure`） | ✅ 内建 | `device/configs/liuqin-desktop.config` |
+| memfd、network namespace、cgroup freezer | ✅ 内建 | 基线配置 |
+| veth | ✅ 模块 | 已随内核模块安装 |
 
-`device/configs/liuqin-waydroid.config` adds the Binder and routing symbols;
-the result is locked by `kernel/source.json` (`config_fragments` and
-`config_sha256`). After changing the fragment, regenerate and update
-`config_sha256` with the same toolchain.
+`device/configs/liuqin-waydroid.config` 新增 Binder 与路由相关项；其内容由
+`kernel/source.json` 锁定（`config_fragments` 与 `config_sha256`）。改动该
+片段后必须用同一工具链重新生成并更新 `config_sha256`。
 
-Android's `netd` installs the container's default route and DNS through policy
-routing (`ip rule`), so the kernel must provide the advanced router and
-multiple routing tables for **both** IPv4 and IPv6. If either rule set is
-missing, `netd` aborts `RouteController` initialisation and the container comes
-up with only its on-link `/24` route and no internet. These options change the
-layout of `struct net`, so the kernel modules must be rebuilt together with the
-image (`make Image modules`) and reinstalled; flashing a new `Image` alone
-leaves the old modules with stale structure offsets.
+Android 的 `netd` 依靠策略路由（`ip rule`）为容器安装默认路由与 DNS，因此
+内核必须同时提供 IPv4 与 IPv6 的高级路由和多路由表。任一缺失时 `netd` 的
+`RouteController` 初始化会失败，容器只剩同网段 `/24` 路由、无法上网。这些
+选项会改变 `struct net` 的内存布局，所以必须**连同模块一起重编**
+（`make Image modules`）并重新安装；只刷新的 `Image` 会让旧模块用到过期的
+结构偏移量。
 
-## Installation
+## 安装
 
-Waydroid downloads its Android image over the network (about 1 GB), so bring
-the tablet online first:
+Waydroid 的 Android 镜像需要联网下载（约 1 GB），请先在平板接入网络：
 
 ```sh
 sudo apt update
@@ -40,17 +36,12 @@ sudo waydroid init
 sudo systemctl enable --now waydroid-container
 ```
 
-Then start Waydroid from the application list, or run
-`waydroid session start` inside a graphical session.
+随后从应用列表启动 Waydroid，或在图形会话中运行 `waydroid session start`。
 
-## Known Limitations
+## 已知限制
 
-- The default image ships **without Google services**; adding them is subject
-  to their terms.
-- Features that depend on vendor HALs -- camera, microphone, sensors and
-  cellular telephony -- are unavailable, matching the Ubuntu limitations on
-  this device.
-- Graphics use hardware acceleration through Mesa/Freedreno; compatibility
-  with games and 3D applications is not established.
-- This is experimental and has not been separately validated on hardware for a
-  release bundle.
+- 默认镜像**不含 Google 服务**；自行添加需遵守相应条款。
+- 相机、麦克风、传感器、蜂窝电话等依赖厂商 HAL 的功能不可用，与本机
+  Ubuntu 的限制一致。
+- 图形经由 Mesa/Freedreno 硬件加速；部分游戏和 3D 应用的兼容性未知。
+- 该功能尚未随发布包做独立真机验证，属于实验性支持。

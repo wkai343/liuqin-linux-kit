@@ -27,8 +27,11 @@ jobs:
       - name: Installer offline checks
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y gdisk
+          sudo apt-get install --no-install-recommends -y gdisk busybox-static
           python3 tests/installer.py
+          python3 tests/storage-layouts.py
+          python3 tests/gui-engine.py
+          python3 tests/gui-worker.py
           python3 tests/installer-layout.py
           sudo python3 tests/rootfs-archive.py
       - name: Persistent-root fail-closed policy
@@ -51,6 +54,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y busybox-static e2fsprogs
           sh tests/install-root.sh
+          python3 tests/install-root-single.py
       - name: Sensor startup policy
         run: |
           sudo apt-get update

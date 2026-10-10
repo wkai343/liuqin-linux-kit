@@ -1,10 +1,10 @@
 # 安装指南
 
-[English](FLASHING.md) ｜ [项目首页](../README.zh-CN.md)
+[English](FLASHING.en.md) ｜ [项目首页](../README.md)
 
 ## 安装包
 
-请下载同一版本的全部安装文件，按照[安装步骤](INSTALL-TESTING.zh-CN.md)执行。
+请下载同一版本的全部安装文件，按照[安装步骤](INSTALL-TESTING.md)执行。
 系统归档可能分为多个文件，指南提供合并命令；不要混用版本。
 
 ## 适用设备
@@ -14,7 +14,7 @@ Xiaomi Pad 6 Pro，代号 `liuqin`，芯片 SM8475。其他小米平板型号不
 128 GB 与 512 GB 容量变体按下方规则放行，但未逐一真机验证；自定义分区布局不支持。
 不得修改常量或跳过检查来强行安装。
 
-程序要求 Bootloader 已解锁且 A 槽活动，并在设备侧核对以下 Linux sysfs 数值
+程序要求 Bootloader 已解锁并进入 Fastboot，安装完成后由 Bootloader 选择计划槽位。设备侧核对以下 Linux sysfs 数值
 （容量单位为 512 字节扇区，不是文件系统块大小）：
 
 | 项目 | 允许值 |
@@ -22,6 +22,12 @@ Xiaomi Pad 6 Pro，代号 `liuqin`，芯片 SM8475。其他小米平板型号不
 | userdata 分区名（PARTNAME） | `userdata`，且唯一、位于第一颗 UFS（sda） |
 | sda 逻辑块大小 | 4096 |
 | userdata 扇区数 | ≥ 33554432（16 GiB） |
+| 原厂分区表 | 35 个分区；分区名和编号唯一，范围不重叠 |
+
+源码安装器按本机实际分区表生成并确认方案，百分比尺寸也使用本机容量。
+新增 `linux-single` 保留 userdata 的原有分区边界，使用整个 userdata 作为根文件系统，`/home` 是其中的目录。
+该模式须配套重建安装镜像，旧 v0.6.0 安装包不支持。本分支已在一台 256GB / HW16.9.0 设备上验证单根 A 槽启动、正常重启和自动旋转；128GB / 512GB 尚未逐一真机验收。
+切槽会更新启动相关 GPT 状态，不应理解为全机 GPT 字节完全不变。新版 [QML 安装器](INSTALLER-GUI.md) 的完整真机安装仍待验收。
 
 分区编号与起始偏移随容量变体不同，不属于身份检查；安装器与启动链均按
 PARTNAME 解析目标分区。型号、槽位或会话身份无法确认时，安装器必须停止，
@@ -31,6 +37,7 @@ PARTNAME 解析目标分区。型号、槽位或会话身份无法确认时，�
 
 单系统布局把 Android userdata 分区的空间交给 Ubuntu；双系统布局缩小该分区，
 在 Ubuntu 旁保留 Android。两种首次安装都会清除数据，解锁 Bootloader 也会清除用户数据。
+单根模式保留 userdata 的分区边界但格式化其内容；重装也会清空同一文件系统中的用户目录，不能使用 `--keep-home`。
 
 安装前需要：
 
@@ -54,7 +61,7 @@ Bootloader 解锁。
 Ubuntu 提供"重启到 Android"入口，Android 通过 KernelSU 模块提供"Reboot to Ubuntu"按钮。
 
 两个方向的切换均尚未经真机验证。命令、安全规则与修复方法见
-[双系统切换](INSTALL-TESTING.zh-CN.md#双系统切换)。
+[双系统切换](INSTALL-TESTING.md#双系统切换)。
 
 ## 发布内容
 

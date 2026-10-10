@@ -34,6 +34,9 @@ import uuid
 DUAL_UBUNTU_SLOT = 'a'
 DUAL_FALLBACK_SLOT = 'b'
 LINUX_ONLY_UBUNTU_SLOT = 'b'
+# Single root does not keep a usable Android system. Use the slot-A chain
+# verified by the current device port instead of inheriting the legacy B path.
+LINUX_SINGLE_UBUNTU_SLOT = 'a'
 # The stock (or --android-boot) boot image is not flashed in the dual layout:
 # it is stored for liuqin-switch and served to the RAM installer under this name.
 ANDROID_BOOT_IMAGE = 'boot.img'
@@ -154,11 +157,13 @@ def frame_command(text, start, end):
     return line
 
 
-def command(address, text, timeout=60):
+def command(address, text, timeout=60, on_output=None, cancel_check=None):
     """Use exact line markers, not command echo, to delimit one shell result."""
     token = 'LIUQIN_' + uuid.uuid4().hex
     start, end = token + '_START', token + '_END'
     line = frame_command(text, start, end)
+    if cancel_check:
+        cancel_check()
     with socket.create_connection((address, 2323), timeout=10) as connection:
         connection.settimeout(1)
         # BusyBox telnetd announces WILL ECHO / WILL SGA / DO NAWS.
@@ -167,7 +172,10 @@ def command(address, text, timeout=60):
         buffer = bytearray()
         deadline = time.monotonic() + timeout
         pattern = re.compile(rb'(?:^|\n)' + end.encode() + rb' ([0-9]+)\r?\n')
+        delivered = None
         while time.monotonic() < deadline:
+            if cancel_check:
+                cancel_check()
             try:
                 chunk = connection.recv(65536)
             except socket.timeout:
@@ -177,6 +185,19 @@ def command(address, text, timeout=60):
             buffer.extend(chunk)
             # Backup output can be large; the terminator is always at the tail.
             match = pattern.search(buffer, max(0, len(buffer) - 512))
+            if on_output:
+                if delivered is None:
+                    first = re.search(rb'(?:^|\n)' + start.encode() + rb'\r?\n', buffer)
+                    if first:
+                        delivered = first.end()
+                if delivered is not None:
+                    # Hold the incomplete last line so marker fragments never
+                    # reach the observer. Observers must not alter framing.
+                    end_offset = (match.start() + (buffer[match.start():match.start() + 1] == b'\n')
+                                  if match else buffer.rfind(b'\n') + 1)
+                    if end_offset > delivered:
+                        on_output(bytes(buffer[delivered:end_offset]))
+                        delivered = end_offset
             if match:
                 first = re.search(rb'(?:^|\n)' + start.encode() + rb'\r?\n', buffer)
                 if not first or int(match[1]) != 0:
@@ -198,7 +219,8 @@ def parse_arguments(argv=None):
     parser.add_argument('--erase-userdata', action='store_true')
     parser.add_argument('--layout', choices=list(layout.MODES),
                         help='linux-only: Ubuntu is the only system. '
-                             'dual: keep a stock Android alongside it; both boot from slot A')
+                             'dual: keep a stock Android alongside it; both boot from slot A. '
+                             'linux-single: use all userdata for / and /home without changing GPT')
     parser.add_argument('--android-size', help='Android userdata size as NNG or NN%% '
                                                '(0 deletes the partition; default 96G dual, 0 linux-only)')
     parser.add_argument('--root-size', help='linux_root size as NNG or NN%% (default 32G); '
@@ -222,10 +244,9 @@ def parse_arguments(argv=None):
 
 
 def reference_plan(parser, args):
-    """The plan as it applies to an untouched factory table, for the prompt.
+    """An explicitly labelled 256 GB example for the local-only --check path.
 
-    The device's own table is read and re-planned before anything is written;
-    this preview exists so that the confirmation names real numbers.
+    Installation confirmation uses the actual tablet table, never this example.
     """
     disk = layout.reference_stock_disk()
     region = disk.usable_end - disk.by_name(layout.USERDATA_NAME).start
@@ -244,6 +265,10 @@ def validate_arguments(parser, args, preview=False):
     if args.keep_home and (args.android_size or args.root_size):
         parser.error('--keep-home keeps the existing sizes; do not also request new ones'
                      ' —— 现有分区尺寸不可调整，请勿同时指定尺寸参数')
+    if args.layout == 'linux-single':
+        if args.keep_home or args.android_size is not None or args.root_size is not None:
+            parser.error('linux-single uses all userdata; --keep-home and size options do not apply'
+                         ' —— 单根模式使用整个 userdata，不能保留独立 home 或指定分区尺寸')
     if args.restore_partition_table is not None:
         for name, value in (('--layout', args.layout), ('--rom-dir', args.rom_dir),
                             ('--android-boot', args.android_boot),
@@ -263,12 +288,60 @@ def validate_arguments(parser, args, preview=False):
     if preview:
         return
     if not args.layout:
-        parser.error('--layout linux-only|dual is required')
+        parser.error('--layout linux-only|dual|linux-single is required')
     if args.layout == 'dual' and not args.rom_dir:
         parser.error('--layout dual needs --rom-dir pointing at an extracted stock Fastboot ROM'
                      ' —— 双系统模式必须提供原厂 ROM 目录，本项目不分发原厂镜像')
     if args.layout != 'dual' and args.rom_dir:
         parser.error('--rom-dir only applies to --layout dual')
+
+
+def plan_for_disk(args, disk):
+    """Validate and plan from the selected tablet's own partition report."""
+    state = layout.classify(disk)
+    if state == 'unknown':
+        raise layout.LayoutError('partition table is neither factory nor a supported split layout; '
+                                 'restore the saved factory table before changing it')
+    if state == 'split':
+        if not args.keep_home:
+            raise layout.LayoutError('the tablet already has a split layout; --keep-home is required '
+                                     'for a reinstall; restore the factory table to change the layout')
+        if args.layout == 'dual' and disk.by_name(layout.USERDATA_NAME) is None:
+            raise layout.LayoutError('dual reinstall requires an existing Android userdata partition')
+        return layout.reinstall_plan(disk, args.layout)
+    if args.keep_home:
+        raise layout.LayoutError('the factory table has no separate linux_home to keep')
+    layout.check_stock_device(disk, new_partitions=0 if args.layout == 'linux-single' else 2)
+    region = disk.usable_end - disk.by_name(layout.USERDATA_NAME).start
+    sizes = layout.resolve_sizes(args.layout, args.android_size, args.root_size, region)
+    return layout.plan_layout(disk, args.layout, *sizes)
+
+
+def confirm_installation(parser, args, plan, rom_images):
+    """One destructive confirmation, after reading and backing up the real disk."""
+    print('Actual tablet layout (' + args.layout + '):', flush=True)
+    print(plan.table(), flush=True)
+    slots = boot_slots(args.layout)
+    print('Boot image writes: ' + ', '.join('boot_' + slot for slot in slots)
+          + '; active slot after installation: ' + slots[0].upper(), flush=True)
+    if args.layout == 'linux-single':
+        print('The partition table is unchanged. All userdata, including /home, will be erased.', flush=True)
+    elif args.keep_home:
+        print('The existing partition sizes and /home are kept; the Ubuntu system is reformatted.', flush=True)
+    else:
+        print('The partition table will be changed and the data partitions above erased.', flush=True)
+    if args.layout == 'dual':
+        print('Slot A stock Android partitions are verified/restored from the supplied ROM. '
+              'Android boot.img is stored on Ubuntu for switching, not flashed now.', flush=True)
+        if args.android_boot is not None:
+            print('Android boot image override: ' + str(args.android_boot.resolve()), flush=True)
+            print('  sha256 ' + rom_images['boot.img']['sha256'], flush=True)
+    if not args.yes:
+        if not sys.stdin.isatty():
+            parser.error('data erasure needs an interactive confirmation; pass --yes to confirm it')
+        print(f'即将按上表安装并清空平板 {args.serial} 的对应数据。', flush=True)
+        if input('Type YES to continue / 输入 YES 继续: ') != 'YES':
+            parser.error('data erasure was not confirmed —— 未确认，已取消')
 
 
 def boot_image_kind(header):
@@ -365,6 +438,10 @@ def main(argv=None):
     manifest = json.loads((bundle / 'bundle.json').read_text())
     if manifest['device'] != 'liuqin':
         parser.error('wrong device bundle')
+    if args.layout == 'linux-single' and 'linux-single' not in manifest.get('installer_layouts', []):
+        parser.error('this bundle does not include a linux-single installer runtime; rebuild the '
+                     'matching installer.img and bundle, not only install.py'
+                     ' —— 旧安装包不支持单根模式，必须使用配套重建的 installer.img')
     for name in ('boot.img', 'installer.img', 'rootfs.tar.gz'):
         if sha(bundle / name) != manifest['files'][name]:
             parser.error('bundle checksum mismatch: ' + name + ' —— 包文件损坏或不完整，请重新下载')
@@ -372,7 +449,7 @@ def main(argv=None):
         validate_arguments(parser, args, preview=True)
         print('Local bundle checksums verified; no device access')
         if args.layout:
-            print('Planned layout for an untouched factory partition table:')
+            print('256 GB reference example only; the actual tablet plan is confirmed during installation:')
             print(reference_plan(parser, args).table())
         return
     validate_arguments(parser, args)
@@ -389,7 +466,6 @@ def main(argv=None):
             args.backup = args.backup.resolve()
             if args.backup == bundle or bundle in args.backup.parents:
                 parser.error('private backups must be outside the served bundle directory')
-        planned = None if args.keep_home else reference_plan(parser, args)
         rom_table, rom_images = ({}, {})
         if args.layout == 'dual':
             rom_table, rom_images = verify_rom(parser, args.rom_dir, args.android_boot)
@@ -452,30 +528,10 @@ def main(argv=None):
                          ' (max-download-size ' + (match[1] if match else 'unknown') + ')'
                          ' —— Bootloader 单次下载上限小于 boot 分区')
         print('Layout: ' + args.layout)
-        if args.keep_home:
-            print('Reinstalling on the existing split layout: the partition sizes are kept as'
-                  ' they are and linux_home is left untouched.')
-        else:
-            print(planned.table())
-        if not args.yes:
-            if not sys.stdin.isatty():
-                parser.error('data erasure needs an interactive confirmation; pass --yes to skip it'
-                             ' —— 非交互环境请显式加 --yes 确认清空 userdata')
-            print(f'About to REPARTITION tablet {args.serial} and erase every partition shown above.')
-            print(f'即将修改平板 {args.serial} 的分区表并清空上表所列分区的全部数据。')
-            if args.layout == 'dual':
-                print('Both systems boot from slot A. Ubuntu\'s boot image is written to boot_a,'
-                      ' with a fallback copy in boot_b; Android keeps its own userdata, and its'
-                      ' boot image is stored on the Ubuntu root for liuqin-switch.')
-                print('两个系统都从 A 槽启动：Ubuntu 的 boot 镜像写入 boot_a，boot_b 保存一份回退副本；'
-                      'Android 保留独立的 userdata，其 boot 镜像存放在 Ubuntu 根分区，由 liuqin-switch 切换。')
-                if args.android_boot is not None:
-                    print('Android will boot the supplied image instead of the stock boot.img:')
-                    print('  ' + str(args.android_boot.resolve()))
-                    print('  sha256 ' + rom_images['boot.img']['sha256'])
-                    print('Android 侧将启动上述替换镜像，而非原厂 boot.img。')
-            if input('Type YES to continue / 输入 YES 继续: ') != 'YES':
-                parser.error('data erasure was not confirmed —— 未确认，已取消')
+        print('The RAM installer will read the actual layout before data-erasure confirmation.')
+        if not args.yes and not sys.stdin.isatty():
+            parser.error('data erasure needs an interactive confirmation; pass --yes to confirm it'
+                         ' —— 非交互环境请显式加 --yes 确认清空 userdata')
     server = None
     scratch = None
     try:
@@ -547,29 +603,13 @@ def main(argv=None):
         disk = layout.parse_print(device_layout('report', ANCHOR))
         state = layout.classify(disk)
         print('Partition table state: ' + state)
-        if state == 'unknown':
-            raise RuntimeError(
-                'this partition table is neither the factory layout nor one this installer created;'
-                ' refusing to change it —— 分区表无法识别，拒绝修改。'
-                ' 可用 --restore-partition-table 恢复出厂分区表')
-        if state == 'stock' and args.keep_home:
-            raise RuntimeError(
-                'the tablet still carries the factory partition table, so there is no linux_home'
-                ' to keep; install without --keep-home —— 设备仍是出厂分区表，没有可保留的 linux_home')
-        if state == 'split':
-            if not args.keep_home:
-                raise RuntimeError(
-                    'the tablet already carries a split layout; pass --keep-home to reinstall the'
-                    ' system and keep linux_home. Changing the split requires restoring the stock'
-                    ' partition table and installing again —— 已有分区布局不支持原地调整尺寸')
-            print('Reinstalling on the existing split layout; linux_home is left untouched.')
-        else:
-            layout.check_stock_device(disk)
-            region = disk.usable_end - disk.by_name(layout.USERDATA_NAME).start
-            android, root = layout.resolve_sizes(args.layout, args.android_size, args.root_size, region)
-            plan = layout.plan_layout(disk, args.layout, android, root)
-            print(plan.table(), flush=True)
-            confirm_plan(planned, plan)
+        plan = plan_for_disk(args, disk)
+        confirm_installation(parser, args, plan, rom_images)
+        # Re-read after the user has reviewed the plan. No size is compared to
+        # a 256 GB reference; every boundary must still equal the confirmed one.
+        current_disk = layout.parse_print(device_layout('report', ANCHOR))
+        confirm_plan(plan, plan_for_disk(args, current_disk))
+        if state == 'stock' and args.layout != 'linux-single':
             apply_layout(device_layout, disk, plan, saved, args.layout)
         flashes = []
         if args.layout == 'dual':
@@ -595,7 +635,7 @@ def main(argv=None):
                 (args.backup / 'SHA256SUMS').write_text(''.join(f'{h}  {n}\n' for n, h in backups.items()))
         base = f'http://{args.host_address}:{server.server_port}'
         install = install_root_command(boot_id, base, bundle, manifest, args, rom_images)
-        print('Installing Ubuntu into ' + layout.ROOT_NAME + '.', flush=True)
+        print('Installing Ubuntu into ' + layout.root_partition_name(args.layout) + '.', flush=True)
         result = remote(shlex.join(install), 3600)
         if b'liuqin-install: ROOT_INSTALLED' not in result:
             raise RuntimeError('Device did not confirm root installation')
@@ -623,6 +663,8 @@ def boot_slots(mode):
     booting slot first."""
     if mode == 'dual':
         return (DUAL_UBUNTU_SLOT, DUAL_FALLBACK_SLOT)
+    if mode == 'linux-single':
+        return (LINUX_SINGLE_UBUNTU_SLOT,)
     return (LINUX_ONLY_UBUNTU_SLOT,)
 
 
@@ -680,7 +722,8 @@ def install_root_command(boot_id, base_url, bundle, manifest, args, rom_images):
     """
     install = ['sh', '/usr/lib/liuqin/install-root.sh', boot_id, base_url + '/rootfs.tar.gz',
                manifest['files']['rootfs.tar.gz'], str((bundle / 'rootfs.tar.gz').stat().st_size),
-               'ERASE-LIUQIN-USERDATA', layout.ROOT_NAME, layout.HOME_NAME]
+               'ERASE-LIUQIN-USERDATA', layout.root_partition_name(args.layout),
+               layout.home_partition_name(args.layout) or '-']
     if args.enable_rescue:
         install.append('ENABLE-USB-RESCUE')
     if args.keep_home:
@@ -716,18 +759,18 @@ def bundle_handler(bundle, extra):
 def confirm_plan(expected, actual):
     """What was confirmed and what will be written must be the same decision.
 
-    Only the sizes the operator chose are compared.  linux_home is the
-    remainder by definition, so its size legitimately follows the capacity of
-    the tablet in front of us rather than the preview's reference geometry.
+    Both plans use the tablet's actual geometry. Re-reading after confirmation
+    must not change any partition, boundary, action, or disk size.
     """
-    if [item.name for item in expected.entries] != [item.name for item in actual.entries]:
-        raise RuntimeError('the computed layout has a different shape from the confirmed one')
-    for one, two in zip(expected.entries, actual.entries):
-        if one.action != two.action or (one.name != layout.HOME_NAME and one.size != two.size):
-            raise RuntimeError(
-                'the tablet\'s partition table does not produce the layout that was confirmed '
-                f'({one.name}: {one.action} {one.size} confirmed, {two.action} {two.size} '
-                'computed); nothing was written')
+    def signature(plan):
+        disk = plan.disk
+        return (plan.mode, plan.keep_home, disk.sector_size, disk.total_sectors,
+                disk.first_usable, disk.last_usable, disk.entry_count,
+                tuple((p.number, p.first_sector, p.last_sector, p.name) for p in disk.partitions),
+                tuple((e.number, e.name, e.start, e.end, e.action) for e in plan.entries))
+    if signature(expected) != signature(actual):
+        raise RuntimeError('the tablet partition table or plan changed after confirmation; '
+                           'nothing was written —— 确认后分区表或安装方案发生变化，未写入')
 
 
 def backup_partition_table(device_layout, directory, serial):

@@ -1,28 +1,41 @@
 # 安装步骤
 
-[English](INSTALL-TESTING.md)
+[English](INSTALL-TESTING.en.md)
 
 首次安装和首次启动已在 256 GB 机型完成真机验证；128 GB 与 512 GB 变体按
-[安装指南](FLASHING.zh-CN.md)的规则放行但未逐一真机验证。本项目仍属于实验性设备移植，
+[安装指南](FLASHING.md)的规则放行但未逐一真机验证。本项目仍属于实验性设备移植，
 安装时请保持有人在场，并准备恢复条件。
 
 早先版本的双系统布局已在 256 GB 机型完成真机安装：分区表完成划分，Ubuntu 安装到
 `linux_root`、`/home` 位于 `linux_home`，并从 B 槽正常启动。当前版本让两个系统都从 A 槽启动，
 通过更换 `boot_a` 中的 boot 镜像在两者之间切换（见[双系统切换](#双系统切换)）。
 v0.6.0 已在同一台 256 GB 机型以 `--layout dual --keep-home --no-backup` 完成完整安装、首次设置和用户功能确认；A/B 启动镜像回读一致，原 `/home` 保留。此前已验证原厂固件修复后的 Android 首次启动及调试 Android 下 KernelSU 脚本往返；普通 Android 下的 KernelSU 自动加载与 WebUI 按钮仍未单独验收。
-单系统布局与双系统共用同一布局引擎，但尚未在真机上安装。两者均应按有人在场的实验流程对待。
+本分支的单根 `linux-single` 已在一台 256GB / HW16.9.0 设备上验证 A 槽启动、正常重启与自动旋转。
+传统 `linux-only` B 槽路径仍未单独真机验收；128GB / 512GB 仅完成离线模拟检查。
+这些结果来自脚本安装与引导修复，不替代新版 GUI 的完整真机安装验收。
+
+电脑端图形向导及独立备份流程见 [QML 安装助手](INSTALLER-GUI.md)。下文命令行安装器保持原有备份参数；GUI 备份是独立操作，不在准备方案时重复备份。
 
 ## 分区布局
 
-安装器提供两种布局，由同一套布局引擎生成。`dual` 布局下两个系统都从 A 槽启动；
+源码安装器提供三种布局。`dual` 布局下两个系统都从 A 槽启动；
 `linux-only` 布局把 Ubuntu 安装到 B 槽、不触碰 A 槽，使通过 `--android-size` 保留的应急 Android 仍可启动。
 
 | 布局 | Android | Ubuntu 系统 | Ubuntu 用户目录 |
 | --- | --- | --- | --- |
 | `linux-only` | 默认不保留 | `linux_root`，32 GiB | `linux_home`，剩余全部 |
 | `dual` | `userdata`，96 GiB | `linux_root`，32 GiB | `linux_home`，剩余全部 |
+| `linux-single` | 不保留 | 原 `userdata` 的全部空间 | 根文件系统内的普通 `/home` 目录 |
 
-使用 `--layout linux-only` 或 `--layout dual` 选择。尺寸可写作 `NNG`，
+`linux-single` 是本分支新增功能，已有上述 256GB 设备验证，不包含在旧 v0.6.0 安装镜像内。
+需要配套重建 `installer.img` 和安装包；`bundle.json` 必须在 `installer_layouts` 中声明该模式。
+只替换主机端 `install.py` 不够。该模式不重划 userdata 的分区名或边界，将其格式化为
+`LIUQIN_ROOT`，系统仍位于卷内的 `/native-root`，并从 A 槽启动。它清空系统和用户目录，
+不接受 `--keep-home`、`--root-size` 或 `--android-size`。已有双分区布局须先恢复原厂表，不能原地转换。
+选择槽位仍由 Bootloader 更新启动相关 GPT 状态和 UFS boot LUN，不等于全机 GPT 字节完全不变。
+
+使用 `--layout linux-only`、`--layout dual` 或 `--layout linux-single` 选择。
+前两种模式的尺寸可写作 `NNG`，
 也可写作磁盘尾部可用区域的百分比：
 
 - `--android-size` 指定 Android 数据分区大小。`dual` 默认 `96G`，`linux-only` 默认 `0`。
@@ -31,13 +44,18 @@ v0.6.0 已在同一台 256 GB 机型以 `--layout dual --keep-home --no-backup` 
 - `--root-size` 指定 `linux_root` 大小，默认 `32G`，不得小于 16 GiB。
 - `linux_home` 取剩余全部空间，不得小于 8 GiB。
 
-所有分区按 4 MiB 对齐。`userdata` 只做原地缩小，保留原有的类型 GUID、唯一 GUID
-与属性位，不移动任何既有分区。超出可行范围的尺寸会在访问设备之前被拒绝，
+新建分区按 4 MiB 对齐；单根模式保持 userdata 的原有边界。`userdata` 只做原地缩小，保留原有的类型 GUID、唯一 GUID
+与属性位，不移动任何既有分区。百分比按本机实际尾部区域计算，超出可行范围的尺寸会在写入之前被拒绝，
 并打印可行区间。
 
-安装器会打印完整的布局计划（分区、起始扇区、大小、操作），并沿用原有的交互确认。
+安装器先临时启动 RAM 环境、核对设备并备份，然后读取本机实际分区表，打印完整的布局计划
+（分区、起始扇区、大小、操作）并要求输入 `YES`。确认后再次读取分区表；任何变化都会停止写入。
+128 GB 默认双系统的 `96G + 32G` 通常放不下，需显式缩小 Android，比如 `32G + 32G`；实际可行范围由本机表决定。
 
-### 两种布局各自写入什么
+### 三种布局各自写入什么
+
+`linux-single` 只格式化 userdata、安装 Ubuntu 并写入 `boot_a`；不重新划分数据区，
+不创建独立 home，不写入 `super`、`metadata` 或 `persist`。它写入 A 槽的 boot_a，不刷写其他 A 槽固件。
 
 `linux-only` 写入分区表、`linux_root`、`linux_home` 与 `boot_b`，
 不触碰 `super`、`metadata` 以及任何 A 槽分区。
@@ -130,6 +148,14 @@ python3 install.py --bundle . --serial DEVICE_SERIAL \
   --backup /path/to/new-private-backup --erase-userdata --layout linux-only
 ```
 
+新增单根模式仅用于配套重建、尚未验收的安装包：
+
+```sh
+python3 install.py --bundle . --serial DEVICE_SERIAL \
+  --backup /path/to/new-private-backup --erase-userdata --layout linux-single \
+  --allow-unverified
+```
+
 ```sh
 python3 install.py --bundle . --serial DEVICE_SERIAL \
   --backup /path/to/new-private-backup --erase-userdata --layout dual \
@@ -144,16 +170,17 @@ python3 install.py --bundle . --serial DEVICE_SERIAL \
 ```
 
 只检查文件、不访问设备时使用 `python3 install.py --bundle . --check`；
-加上 `--layout` 可在不访问设备的情况下打印布局计划。
+加上 `--layout` 打印的是明确标注的 256 GB 参考示例，不能用于确认 128 GB 的实际布局。
 自行构建或 CI 生成的未验收包，需要在有人在场的测试中显式添加 `--allow-unverified`。
 
 安装器临时启动 installer.img，等待 USB 网络，备份并校验 boot_a、boot_b、persist
-以及分区表的主备两份副本；随后修改分区表，下载并校验系统归档，
+以及分区表的主备两份副本；随后确认本机方案（单根模式跳过分区表修改），下载并校验系统归档，
 把 `linux_root` 与 `linux_home` 格式化为 ext4，安装系统并提取本机校准和地址，
 写入把 `LABEL=LIUQIN_HOME` 挂载到 `/home` 的 `/etc/fstab` 条目。
+单根模式则只格式化 userdata，不挂载独立 home，也不写这个 fstab 条目。
 双系统布局下还会把 Ubuntu 与 Android 的 boot 镜像逐一核对校验值和头部后，放入 `linux_root` 上的切换存储区。
 根文件系统安装成功且卸载后，才写入本项目的 boot 镜像（双系统布局写入 `boot_a` 与 `boot_b`，
-单系统布局写入 `boot_b`），通过 Fastboot 选定启动槽（双系统为 A 槽，单系统为 B 槽）并重启。
+linux-only 写入 `boot_b`，linux-single 写入 `boot_a`），通过 Fastboot 选定启动槽（dual 和 linux-single 为 A 槽，linux-only 为 B 槽）并重启。
 不会写入 persist，也不会重新锁定 Bootloader。备份必须放在安装包目录以外，并保持私密。
 
 分区表写入后，`sgdisk` 会校验新表，安装器随即重新读取并与计划逐项比对；

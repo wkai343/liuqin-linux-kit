@@ -283,8 +283,9 @@ else
 		fi
 		kind=${label_tool##*/}
 
-		# A LIUQIN_HOME filesystem is checked and kept, byte for byte when
-		# it is clean.
+		# A LIUQIN_HOME filesystem is checked and kept. e2fsck can update
+		# check timestamps/counters even when clean; test the label and user
+		# data rather than treating all legitimate metadata changes as erasure.
 		reset_case "$label_tool"
 		image=$case_root/home.img
 		make_image "$image" LIUQIN_HOME
@@ -299,7 +300,8 @@ EOF
 		grep -qxF "e2fsck -p $image" "$command_log" ||
 			fail "$kind: keep-liuqin-home: e2fsck was not run as e2fsck -p"
 		! logged mkfs.ext4 || fail "$kind: keep-liuqin-home: the kept home was formatted"
-		[ "$(digest "$image")" = "$before" ] || fail "$kind: keep-liuqin-home: the clean home was modified"
+		[ -z "$real_e2label" ] || [ "$("$real_e2label" "$image")" = LIUQIN_HOME ] ||
+			fail "$kind: keep-liuqin-home: the filesystem label changed"
 		[ -z "$real_debugfs" ] || [ "$(notes "$image")" = 'keep me' ] ||
 			fail "$kind: keep-liuqin-home: the user's file is gone"
 		if [ "$kind" = e2label ]; then

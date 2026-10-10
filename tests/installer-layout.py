@@ -44,10 +44,10 @@ def sgdisk(*arguments):
     return result.stdout
 
 
-def build_stock_image(path):
+def build_stock_image(path, total_bytes=None):
     """Write the factory table, restated in 512-byte sectors, onto a sparse file."""
     with path.open('wb') as stream:
-        stream.truncate(layout.STOCK_TOTAL_SECTORS * layout.DEVICE_SECTOR_SIZE)
+        stream.truncate(total_bytes or layout.STOCK_TOTAL_SECTORS * layout.DEVICE_SECTOR_SIZE)
     sgdisk('--clear', '--set-alignment=1', '--resize-table=' + str(layout.STOCK_ENTRIES), path)
     arguments = ['--set-alignment=1']
     for number, first, last, name in layout.STOCK_TABLE:
@@ -287,6 +287,50 @@ with tempfile.TemporaryDirectory(prefix='liuqin-layout-test-') as directory:
                           capture_output=True, text=True)
     check('--keep-home and an explicit size together are refused',
           both.returncode != 0, both.stderr)
+
+    # Exercise the real GPT editor on capacity variants, not only arithmetic.
+    # These are sparse synthetic images, never /dev nodes or device dumps.
+    for capacity in (128, 512):
+        variant = work / f'sda-{capacity}.img'
+        size = layout.STOCK_TOTAL_SECTORS * layout.DEVICE_SECTOR_SIZE * capacity // 256
+        disk = build_stock_image(variant, size)
+        original = sgdisk('-p', variant)
+        single = plan_for(disk, 'linux-single')
+        layout.verify_applied(disk, single)
+        check(f'{capacity} GB single root preserves the entire userdata and the GPT',
+              len(single.entries) == 1 and single.entry('userdata').action == 'format'
+              and single.entry('userdata').size == disk.by_name('userdata').size
+              and sgdisk('-p', variant) == original)
+        prefix = [(p.number, p.first_sector, p.last_sector, p.name)
+                  for p in disk.partitions if p.name != 'userdata']
+        planned = plan_for(disk, 'linux-only')
+        after = apply(variant, planned, info(variant, 35))
+        layout.verify_applied(after, planned)
+        check(f'{capacity} GB split Linux preserves every prefix partition',
+              [(p.number, p.first_sector, p.last_sector, p.name)
+               for p in after.partitions if p.name not in ('linux_root', 'linux_home')] == prefix)
+        disk = build_stock_image(variant, size)
+        planned = plan_for(disk, 'dual', '32G', '50%')
+        userdata_info = info(variant, 35)
+        after = apply(variant, planned, userdata_info)
+        layout.verify_applied(after, planned)
+        layout.verify_preserved(userdata_info, info(variant, 35))
+        check(f'{capacity} GB percentage dual plan survives actual GPT application',
+              after.by_name('linux_home').end == after.usable_end)
+
+    # Preferred numbers can already belong to a stock entry on a variant.
+    disk = build_stock_image(image)
+    sgdisk('--delete=1', '--set-alignment=1',
+           '--new=36:48:63', '--change-name=36:switch', image)
+    disk = read(image)
+    planned = plan_for(disk, 'linux-only')
+    after = apply(image, planned, info(image, 35))
+    layout.verify_applied(after, planned)
+    check('occupied entry 36 remains intact while new Linux entries use 37/38',
+          after.by_name('switch').number == 36
+          and after.by_name('switch').first_sector == 48
+          and after.by_name('linux_root').number == 37
+          and after.by_name('linux_home').number == 38)
 
 if failures:
     sys.exit('layout test failures:\n' + '\n'.join('  ' + item for item in failures))

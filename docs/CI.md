@@ -1,52 +1,44 @@
-# Builds and Automation
+# 构建与持续集成
 
-## Kernel Changes
+[English](CI.en.md) ｜ [项目首页](../README.md)
 
-The kernel repository's `Liuqin kernel` workflow builds pushes and pull requests
-to `liuqin-6.17`. It checks out the integration repository's `main` and uses its
-shared `.github/actions/kernel` action. No cross-repository write token is needed.
-Both repositories must exist under the same GitHub owner before enabling this flow.
+## 内核变更
 
-The integration repository's `Kernel build` workflow uses `kernel/source.json`.
-Accept a kernel update by changing that commit: the configuration and packaging
-remain in the integration repository. Kernel development artifacts record their
-tested SHA separately and cannot enter image assembly as product inputs. The one
-exception is a development build of the very commit that `kernel/source.json`
-pins now, with the pinned configuration hash and byte-identical fragments: it was
-built from the same inputs as a product build, and image assembly accepts it
-and says so.
+内核仓库的 `Liuqin kernel` 工作流构建推送到 `liuqin-6.17` 的提交和 PR。
+它检出集成仓库的 `main`，复用 `.github/actions/kernel`，不需要跨仓库写入令牌。
+启用前需确保两个仓库位于同一个 GitHub 所有者名下。
 
-Kernel jobs use GitHub-hosted Ubuntu runners and ccache. They upload the Image,
-DTB, configuration, symbols, matching module package inputs and checksums as
-Actions artifacts. Compilation is not a device test or an automatic release.
+集成仓库的 `Kernel build` 使用 `kernel/source.json`。更新其中的确切提交来
+接受内核变更，配置与打包仍由集成仓库管理。开发构建的测试 SHA 单独记录，
+不能直接作为正式镜像输入。唯一例外是开发构建恰好使用当前锁定的提交、配置哈希
+和逐字节相同的配置片段；装配器会核验并记录这种情况。
 
-## System Images
+内核任务使用 GitHub 托管的 Ubuntu runner 和 ccache，上传 Image、设备树、配置、
+符号、匹配的模块输入与校验值作为 Actions 产物。编译不等于真机验收或自动发布。
 
-`tools/build-liuqin-image.py` is the local and CI assembly entry point. It consumes
-a completed product kernel build plus prepared inputs; it does not rebuild every
-third-party dependency. `--stage` resumes an interrupted assembly without repeating
-successful stages. Do not modify sources or inputs while an assembly is running.
+## 系统镜像
 
-The `System image` workflow is manually dispatched on `main` and uploads the
-matching boot image, installer RAM image, rootfs, installer and checksums.
-It requires a dedicated Linux x86-64 runner labeled `liuqin-images`, sufficient
-disk space for kernel outputs and two desktop trees, and the host dependencies
-listed in BUILD. Python also needs pyelftools; image assembly needs root, GNU tar,
-ACL/xattr support, squashfs-tools, cpio, ARM64 binfmt and the cross compiler.
-The runner must allow noninteractive execution of the trusted assembly command
-with sudo. Do not run external pull requests on this privileged runner.
-After configuring the runner, set repository variable `LIUQIN_IMAGE_CI=enabled`
-to also assemble images automatically when relevant code changes reach `main`.
+`tools/build-liuqin-image.py` 是本地与 CI 的装配入口。它消费已经完成的正式内核
+构建和准备好的输入，不重复构建全部第三方依赖。`--stage` 可从中间阶段继续；
+装配时不要改动源码或输入。
 
-Set `LIUQIN_IMAGE_INPUTS` to a runner-local JSON file (default
-`/opt/liuqin/inputs.json`). It contains the prepared-input variables listed by
-`tools/build-liuqin-image.py`: Ubuntu root and manifest, firmware pool and prepared
-tree, audio topology, WLAN set, stock DTB/DTBO inputs, sensor archive, Settings
-binary and its build manifest, BusyBox and mkbootimg. Hash values remain pinned;
-the local paths and raw input file are not uploaded with artifacts. Upstream
-downloads and prebuilt components may be cached outside the checkout.
+`System image` 在 `main` 上手动触发，上传匹配的 boot、RAM 安装器、rootfs、
+安装工具和校验值。它需要标记为 `liuqin-images` 的专用 Linux x86-64 runner，
+足够容纳内核输出与两份桌面树的空间，以及[构建指南](BUILD.md)中的主机依赖。
+Python 另需 pyelftools；镜像装配需 root、GNU tar、ACL/xattr、squashfs-tools、
+cpio、ARM64 binfmt 和交叉工具链。
 
-Example on a prepared host:
+runner 必须允许用 sudo 非交互运行受信任的装配命令。不要在此特权 runner 上
+构建外部 PR。配置完成后，可设置仓库变量 `LIUQIN_IMAGE_CI=enabled`，
+使相关修改进入 `main` 时自动装配。
+
+设置 `LIUQIN_IMAGE_INPUTS` 指向 runner 本地的 JSON，默认
+`/opt/liuqin/inputs.json`。其内容为装配器列出的输入变量：Ubuntu 根树和清单、
+固件池与准备目录、音频拓扑、WLAN 组合、原厂 DTB/DTBO、传感器归档、设置程序及
+构建清单、BusyBox、mkbootimg。哈希保持锁定；本地路径与原始输入 JSON 不上传。
+上游下载及预编译材料可以缓存在检出目录之外。
+
+准备好主机后：
 
 ```sh
 python3 tools/build-liuqin-kernel.py
@@ -55,30 +47,29 @@ sudo python3 tools/build-liuqin-image.py \
 python3 tools/install-liuqin.py --bundle out/image/bundle --check
 ```
 
-The workflow does not create a public Release or mark a bundle device-tested.
-Full-image CI requires a configured dedicated runner. Test installation on the
-final candidate before marking a bundle device-tested; report Android recovery
-separately and do not claim it is validated by a successful Ubuntu installation.
+工作流不会自动创建公开 Release，也不会把安装包标成已经真机验收。
+候选包必须经过实际安装后才能使用 `--device-tested`。Android 恢复需单独验收，
+Ubuntu 启动成功不能证明恢复 Android 成功。
 
-## Public Delivery
+## 安装器检查
 
-Installation versions belong in tagged Releases of the integration repository,
-not another repository, the source Git tree or Git LFS. Actions artifacts are
-temporary build results, not supported installation releases.
+集成检查包含命令行安装器、实际容量布局、设备端安装脚本和存储保护策略，
+并运行 `tests/gui-engine.py` 与 `tests/gui-worker.py`。GUI 渲染需要 PySide6，
+本地运行 `python3 tests/gui-qml.py` 使用 offscreen/software 模式走完整个演示向导。
+上述测试均不应连接或刷写真实平板。
 
-GitHub [limits each Release asset to under 2 GiB](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases).
-The release export stage splits the desktop archive into parts below that limit
-without rebuilding the images. Upload every file in `out/image/release-assets/`.
-Users join the parts as described in the bundled installation instructions;
-the installer verifies the joined archive before installation. See
-[Release assets](BUILD.md#release-assets) for the export command.
+## 发布与材料
 
-Required board firmware is included in the assembled system and boot images.
-A matching firmware package may also be attached for builders, without another
-firmware repository. Small, stable, generic firmware binaries may also be tracked
-under `device/firmware/` with their provenance, hashes and applicable notices;
-this is an allowed layout, not a claim that all firmware is already imported.
-Keep one authoritative copy and avoid repeatedly committing large binary sets.
-Upstream Ubuntu images, unmodified upstream components and
-full stock ROMs are not mirrored here. Per-device calibration and addresses are
-always obtained from the user's own tablet and are never Release assets.
+安装版本放在集成仓库的带标签 Release 中，不放入源码树或 Git LFS。
+Actions 产物是临时构建结果，不是正式支持的安装发行版。
+
+GitHub 的单个 Release 资源大小限制见其
+[官方说明](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases)。
+导出阶段会把桌面归档拆成小于 2GiB 的分卷，不重建镜像。上传
+`out/image/release-assets/` 中的全部文件。用户按附带说明合并分卷，安装器随后
+核验完整归档。导出命令见[构建指南](BUILD.md#release-文件)。
+
+板级通用固件包含在匹配的系统与启动镜像中。小型、稳定的通用文件可在
+`device/firmware/` 中保留唯一来源及许可证信息，避免重复提交大体积材料。
+上游 Ubuntu 镜像、未改动的上游组件和完整原厂 ROM 不在本仓库镜像分发。
+每台设备的校准与地址来自用户自己的平板，不属于公开发行材料。

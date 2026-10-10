@@ -3,6 +3,17 @@
 /tools/local
 /sources
 /logs
+/gui-state
+/backups
+/bundle
+/runs
+.venv/
+.pytest_cache/
+# Device images and private partition dumps are never source inputs.
+*.img
+rootfs.tar.gz*
+sda-head.bin
+sda-tail.bin
 
 # Python and editor state.
 __pycache__/
