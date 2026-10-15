@@ -6,7 +6,9 @@ import contextlib
 import copy
 import io
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -46,6 +48,25 @@ class BuildTests(unittest.TestCase):
     def tearDown(self):
         self.project.stop()
         self.temporary.cleanup()
+
+    @unittest.skipUnless(os.name == 'posix', 'Devbox builds use a Linux shell')
+    def test_named_scripts_forward_custom_arguments_without_shell_expansion(self):
+        bin = self.root / 'bin'
+        bin.mkdir()
+        capture = self.root / 'arguments.json'
+        python = bin / 'python3'
+        python.write_text('#!' + sys.executable + '\nimport json,os,sys\n'
+                          'open(os.environ["TEST_ARGUMENTS"],"w").write(json.dumps(sys.argv[1:]))\n')
+        python.chmod(0o755)
+        scripts = json.loads((project / 'devbox.json').read_text())['shell']['scripts']
+        arguments = ['--config', '配置 目录;$(false).json', '--configure-only']
+        env = dict(os.environ, PATH=str(bin) + os.pathsep + os.environ['PATH'],
+                   TEST_ARGUMENTS=str(capture))
+        for name, body in scripts.items():
+            with self.subTest(script=name):
+                subprocess.run(['sh', '-c', body, name, *arguments], env=env, check=True)
+                received = json.loads(capture.read_text())
+                self.assertEqual(received[-len(arguments):], arguments)
 
     def test_kernel_uses_custom_config_and_configure_only_never_builds_images(self):
         with patch.object(builder, 'run') as run:

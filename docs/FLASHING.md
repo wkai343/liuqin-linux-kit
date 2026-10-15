@@ -7,7 +7,7 @@
 仅支持已解锁 Bootloader 的 Xiaomi Pad 6 Pro（liuqin，SM8475）。
 使用接口相容的 `installer.img`、`boot.img`、`rootfs.tar.gz`，电脑端安装器单独提供。
 256GB 单根已实测，128GB / 512GB 仅通过容量规划离线检查。
-新版 GUI 从头安装、Btrfs、Windows USB 安装和 Android 恢复仍待各自验收。
+本机 256GB 已通过 Linux GUI 单根 Btrfs 安装、桌面启动与正常重启，Windows GUI 安装也已验证成功；Android 恢复仍待验收。
 
 安装器读取真实 GPT，要求 userdata 唯一、位于第一颗 UFS（sda）、至少 16 GiB，
 逻辑块为 4096 字节，并符合原厂 35 分区布局。编号、边界不套用其他容量的数值；

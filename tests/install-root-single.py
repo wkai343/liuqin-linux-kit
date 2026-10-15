@@ -33,7 +33,7 @@ def executable(path, content):
     path.chmod(0o755)
 
 
-def execute(single, *, provision_failure=False, options=(), snap=True, independent=True, contract_failure=None, missing_contract=False, updatable=True, filesystem='ext4', root_support=True, installer_support=True):
+def execute(single, *, provision_failure=False, options=(), snap=True, independent=True, contract_failure=None, missing_contract=False, updatable=True, filesystem='ext4', root_support=True, installer_support=True, archive_dot=False):
     independent = independent or updatable
     with tempfile.TemporaryDirectory(prefix='liuqin-single-root-test-') as temporary:
         root = Path(temporary)
@@ -98,7 +98,7 @@ def execute(single, *, provision_failure=False, options=(), snap=True, independe
             install_fixture(tree, '6.18.0-liuqin1', versioned)
         with tarfile.open(archive, 'w:gz') as tar:
             for path in tree.iterdir():
-                tar.add(path, arcname=path.name)
+                tar.add(path, arcname=('./' if archive_dot else '') + path.name)
         archive_hash = hashlib.sha256(archive.read_bytes()).hexdigest()
         root_options = []
         if independent:
@@ -144,6 +144,8 @@ mkdir -p "$last"
         executable(bin / 'btrfs', '#!/bin/sh\nprintf "btrfs %s\\n" "$*" >>"$TEST_LOG"\n'
                    '[ "$1:$2" = subvolume:create ] && mkdir "$3"\n')
         executable(bin / 'getcap', '#!/bin/sh\nprintf "getcap %s\\n" "$*" >>"$TEST_LOG"\nprintf "fixture cap_setuid=ep\\n"\n')
+        executable(bin / 'tar', '#!/bin/sh\nprintf "tar %s\\n" "$*" >>"$TEST_LOG"\n'
+                   'exec "$TEST_TAR" "$@"\n')
         # The host fixtures model files created by the root RAM session.
         executable(bin / 'stat', '#!/bin/sh\nif [ "$2" = "%u %g" ]; then printf "0 0\\n"; '
                    'else exec ' + shutil.which('stat') + ' "$@"; fi\n')
@@ -156,7 +158,7 @@ printf 'provision %s\n' "$*" >>"$TEST_LOG"
             '/bin/busybox': str(bin / 'bb'), '/usr/sbin/mkfs.ext4': str(bin / 'mkfs'),
             '/usr/sbin/mkfs.btrfs': str(bin / 'mkfs'), '/usr/bin/btrfs': str(bin / 'btrfs'),
             '/proc/filesystems': str(root / 'filesystems'),
-            '/usr/bin/tar': host_tar,
+            '/usr/bin/tar': str(bin / 'tar'),
             '/usr/sbin/getcap': str(bin / 'getcap'),
             '/proc/sys/kernel/random/boot_id': str(root / 'boot_id'),
             '/proc/self/mountinfo': str(root / 'mountinfo'), '/proc/meminfo': str(root / 'meminfo'),
@@ -176,6 +178,7 @@ printf 'provision %s\n' "$*" >>"$TEST_LOG"
         env = dict(os.environ, PATH=str(bin) + ':' + search_path,
                    TEST_LOG=str(log), TEST_ROOT=str(root), TEST_BUSYBOX=busybox,
                    TEST_ARCHIVE=str(archive), TEST_MKFS=shutil.which('mkfs.btrfs',path=search_path) if filesystem=='btrfs' else mkfs,
+                   TEST_TAR=host_tar,
                    TEST_PROVISION_FAIL='1' if provision_failure else '0')
         result = subprocess.run([busybox, 'sh', str(script_path),
                                  (root / 'boot_id').read_text().strip(), 'fixture-url',
@@ -207,6 +210,11 @@ printf 'provision %s\n' "$*" >>"$TEST_LOG"
             assert (root / 'mnt/install-home/default-user/note').read_text() == 'home skeleton\n'
             formatted = root / 'dev/sda36'
         if filesystem=='btrfs':
+            assert '-K' in formats[0].split(), 'whole-device TRIM must not block installation'
+            metadata_reads = [c for c in commands if c.startswith('tar -xOf ')]
+            assert metadata_reads and all('--occurrence=1' in c.split() for c in metadata_reads), commands
+            first_write = next(i for i,c in enumerate(commands) if c.startswith('bb blockdev --setrw '))
+            assert all(i < first_write for i,c in enumerate(commands) if c.startswith('tar -xOf ')), commands
             with formatted.open('rb') as stream:
                 stream.seek(65600);assert stream.read(8)==b'_BHRfS_M'
                 stream.seek(65672);assert stream.read(8)==b'\x01'+b'\0'*7
@@ -225,6 +233,8 @@ execute(True)
 print('PASS: single root formats only userdata, retains home inside root and omits home fstab')
 execute(True,filesystem='btrfs')
 print('PASS: real Btrfs formatting on a disposable image, compression, root subvolume and cleanup')
+execute(True,filesystem='btrfs',archive_dot=True)
+print('PASS: Btrfs metadata reads stop early for both published ./ paths and custom archive paths')
 execute(True,filesystem='btrfs',root_support=False)
 execute(True,filesystem='btrfs',installer_support=False)
 print('PASS: missing target-root or installer Btrfs support is rejected before formatting')

@@ -827,7 +827,6 @@ class Engine:
         self.receipt['backup_compatibility'] = compatibility
         self.receipt['confirmation'] = dict(consent, plan_id=self.plan_id)
         self.save_receipt()
-        self.phase('transfer')
         self.transport.install_root(self.padded)
         self.receipt['root_installed'] = True
         self.save_receipt()

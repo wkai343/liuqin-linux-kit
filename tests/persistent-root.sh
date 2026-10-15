@@ -65,6 +65,11 @@ count=0
 [ ! -r "$TEST_MOUNT_COUNT" ] || count=$(cat "$TEST_MOUNT_COUNT")
 count=$((count + 1)); printf '%s\n' "$count" >"$TEST_MOUNT_COUNT"
 printf 'mount%d %s\n' "$count" "$*" >>"$TEST_COMMAND_LOG"
+# The current Btrfs kernel parser only accepts rescue=nologreplay. The old
+# standalone flag must fail here just as it does on a real filesystem.
+for argument in "$@"; do
+    case ,$argument, in *,nologreplay,*) exit 1 ;; esac
+done
 if [ "$count" = "${TEST_MUTATE_AFTER_MOUNT_NUMBER:-0}" ]; then
 	case ${TEST_MUTATE_AFTER_MOUNT:-none} in
 	add) : >"$TEST_DEV/sdc"; printf '1\n' >"$TEST_STATE/sdc" ;;
@@ -533,7 +538,7 @@ native_expect_success() {
     fs=${TEST_ROOT_FS:-ext4}
     ro_opts=ro,noload; rw_opts=rw,noatime
     if [ "$fs" = btrfs ]; then
-        ro_opts=ro,nologreplay,subvolid=5
+        ro_opts=ro,rescue=nologreplay,subvolid=5
         rw_opts=rw,noatime,subvolid=5,compress=zstd:3
     fi
 	if ! run_init; then cat "$init_log" >&2; fail "$name: valid native root was rejected"; fi
@@ -866,7 +871,7 @@ btrfs_fixture() {
 }
 btrfs_fixture
 native_expect_success btrfs-single-root
-grep -q 'mount1 -t btrfs -o ro,nologreplay,subvolid=5' "$command_log" || fail 'Btrfs RO probe can replay logs'
+grep -q 'mount1 -t btrfs -o ro,rescue=nologreplay,subvolid=5' "$command_log" || fail 'Btrfs RO probe can replay logs or use an unsupported option'
 grep -q 'mount2 -t btrfs -o rw,noatime,subvolid=5,compress=zstd:3' "$command_log" || fail 'Btrfs compression is not preserved'
 btrfs_fixture
 printf '\002' | dd of="$dev/sda35" bs=1 seek=65672 conv=notrunc 2>/dev/null

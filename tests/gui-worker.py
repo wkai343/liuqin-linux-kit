@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: MIT
 """Persistent worker protocol tests using only the hardware-free demo."""
 import json
+import os
 from pathlib import Path
 import queue
+import signal
 import threading
 import subprocess
 import sys
@@ -113,6 +115,30 @@ class WorkerTests(unittest.TestCase):
         receipt = next(e['receipt'] for e in events if e['type'] == 'installation_written')
         self.assertTrue(receipt['boot_readback_verified'])
         self.assertFalse(receipt['first_boot_verified'])
+
+    @unittest.skipUnless(os.name == 'posix', 'direct SIGINT delivery requires POSIX')
+    def test_sigint_during_idle_and_boot_readback_keeps_worker_alive(self):
+        self.process.send_signal(signal.SIGINT)
+        self.assertTrue(any(e['type'] == 'devices' for e in self.job('devices')))
+        payload = self.prepare()
+        self.send('install', **payload)
+        events = []
+        interrupted = False
+        while True:
+            event = self.read()
+            events.append(event)
+            if event.get('phase') == 'verify_boot' and not interrupted:
+                self.process.send_signal(signal.SIGINT)
+                interrupted = True
+            if event['type'] == 'activity' and event['busy'] is False:
+                break
+        self.assertTrue(interrupted)
+        self.assertIsNone(self.process.poll())
+        self.assertFalse(any(e['type'] == 'error' for e in events))
+        receipt = next(e['receipt'] for e in events if e['type'] == 'installation_written')
+        self.assertTrue(receipt['boot_readback_verified'])
+        self.assertTrue(receipt['active_slot_set'])
+        self.assertTrue(any(e['type'] == 'devices' for e in self.job('devices')))
 
 
 if __name__ == '__main__':

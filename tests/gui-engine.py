@@ -94,6 +94,8 @@ class EngineTests(unittest.TestCase):
 
     def test_completion_requires_actual_first_boot_report(self):
         self.engine.install(self.consent())
+        self.assertEqual(sum(e['type'] == 'phase' and e.get('phase') == 'transfer'
+                             for e in self.events), 1)
         self.assertEqual(self.engine.state, 'awaiting_first_boot')
         self.assertTrue(self.engine.receipt['boot_readback_verified'])
         self.assertFalse(self.engine.receipt['first_boot_verified'])

@@ -1,7 +1,7 @@
 # 安装助手
 
 电脑端 QML 安装向导，支持 Linux、Windows 10/11 x64 与 Xiaomi Pad 6 Pro（liuqin）。
-当前提供 userdata 单根 ext4/Btrfs 安装和 A 槽引导；Windows USB 真机全流程仍待验收。
+当前提供 userdata 单根 ext4/Btrfs 安装和 A 槽引导。
 镜像构建使用 Linux/Devbox，安装器不需要构建环境。
 
 ## 启动
@@ -13,7 +13,6 @@ uv run --project installer installer/install-gui.py
 ```
 
 uv 自动准备独立的 Python 3.12 和锁定的 Qt 依赖，首次运行需要下载，之后复用缓存。
-不要用 Devbox/Nix 的 Python 创建 GUI 环境，以免出现 `libstdc++.so.6` 加载错误。
 Linux 主机仍需正常图形会话及 Qt 系统运行库，GUI 以普通用户运行。
 
 在界面选择镜像目录，或添加 `--bundle /path/to/images`。
@@ -45,7 +44,7 @@ Btrfs 使用同名子卷、Zstd 三级压缩和元数据 DUP，`/home` 位于其
 更换格式需取消已有方案后重新检查，确认页会显示最终选择。
 
 首次使用 Btrfs 须重新构建三个文件：`devbox run build`。
-旧镜像的驱动为模块，不能挂载 Btrfs 根系统；新路径已完成离线检查，平板桌面启动仍待验收。
+旧镜像的驱动为模块，不能挂载 Btrfs 根系统。修复后的安装与启动路径已在本机 256GB 上验证桌面启动和正常重启。
 
 ## 备份复用
 
@@ -80,9 +79,6 @@ persist 全分区哈希包含文件系统元数据，差异不一定表示校准
 6. 继续核对方案并确认安装。GUI 本身保持普通用户权限。
 
 Fastboot 驱动与 RAM 的 USB 网卡是两种设备。
-Windows 安装需要新版 RNDIS `installer.img`；旧 NCM 安装镜像会在访问设备前被拒绝。
-在构建主机运行 `devbox run build-installer` 即可更新安装通道，目标 boot/rootfs 无需因此重建。
-新增 Btrfs 能力则按前文重建三个文件。
 
 专用网卡使用 USB ID `1d6b:1041`、主机 MAC `02:00:00:00:07:01` 和 Microsoft OS 描述符，
 适配 Windows 10/11 自带 RNDIS 驱动；已安装桌面的 USB 配置仍为 NCM。
@@ -107,7 +103,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\windows-network.
 
 安装器不提供多分区、双系统、Android 自动恢复或内核构建。
 文件服务仅绑定平板网络地址，并使用会话令牌与允许列表；安装后不新增持久管理员通道。
-脚本安装和本机硬件修复已有记录，新版 GUI 完整安装仍待独立验收。
+本机 256GB 已完成 Linux 主机上的 GUI 单根 Btrfs 安装与重启验证，Windows 主机 GUI 安装也已确认成功；范围见 [硬件说明](HARDWARE.md)，其他容量仍待实测。
 
 开发演示、测试、源码位置和 JSON 协议见 [安装器开发说明](../installer/README.md)。
 独立安装器源码包由 `python3 installer/package.py` 生成；镜像另行提供，构建见 [构建指南](BUILD.md)。

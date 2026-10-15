@@ -22,7 +22,7 @@ python3 installer/install-liuqin.py --bundle /path/to/images --serial DEVICE_SER
 ```
 
 将 `DEVICE_SERIAL` 和路径替换为实际值。Btrfs 使用 `--filesystem btrfs`，三个文件都须支持。
-当前构建包尚未完成完整新安装验收，测试时需显式 `--allow-unverified`，写入前仍交互确认清空数据。
+未标注验收状态的包需显式 `--allow-unverified`，写入前仍交互确认清空数据。
 CLI 创建新备份，`--backup` 必须是镜像目录以外的新目录；已有备份复用使用 GUI。
 
 安装临时启动 RAM 环境，读取真实分区表、备份启动分区和 persist/GPT，
@@ -39,7 +39,8 @@ CLI 创建新备份，`--backup` 必须是镜像目录以外的新目录；已�
 3. 正常重启，确认仍能登录；按需验证相机、指纹和其他外设。
 4. 记录设备容量、源码提交、三个文件的校验值、测试结果与未通过项。
 
-本机 256GB 已安装系统的结果见 [硬件说明](HARDWARE.md)，不替代新版 GUI、新镜像从头安装或其他容量验收。
+本机 256GB 已通过 Linux GUI 单根 Btrfs 安装、桌面启动与正常重启，详见 [硬件说明](HARDWARE.md)。
+Windows GUI 安装也已验证成功，其他容量及后续镜像版本仍需分别验收。
 
 失败时保留备份、安装记录和错误文字，先核对已完成阶段，再决定恢复或重试，避免重复格式化。
 公开日志前移除个人信息；设备备份、校准和指纹私态不上传。

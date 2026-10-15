@@ -4,6 +4,7 @@
 import argparse
 import os
 from pathlib import Path
+import signal
 import sys
 import tempfile
 import time
@@ -19,6 +20,7 @@ from PySide6.QtTest import QTest
 project = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(project / 'installer'))
 from liuqin_gui.controller import Controller
+from liuqin_gui.app import install_interrupt_handler
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--screenshots', type=Path)
@@ -39,6 +41,7 @@ def wait(condition, seconds=15):
 
 with tempfile.TemporaryDirectory() as directory:
     controller = Controller(True, None, Path(directory))
+    restore_interrupt = install_interrupt_handler(app, controller)
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty('backend', controller)
     engine.load(QUrl.fromLocalFile(str(project / 'installer/liuqin_gui/qml/Main.qml')))
@@ -99,6 +102,11 @@ with tempfile.TemporaryDirectory() as directory:
     QMetaObject.invokeMethod(button, 'clicked', Qt.ConnectionType.DirectConnection)
     wait(lambda: controller.data['state'] == 'installing')
     assert not controller.closeWindow(), 'window closed during installation'
+    controller.update(error='')
+    signal.raise_signal(signal.SIGINT)
+    QTest.qWait(150)
+    assert controller.process.state() == QProcess.ProcessState.Running, 'Ctrl+C stopped the worker'
+    assert '当前操作仍在进行' in controller.data['error'], 'Ctrl+C bypassed the guarded close path'
     wait(lambda: controller.data['state'] == 'awaiting_first_boot' and not controller.data['busy'])
     assert controller.data['receipt']['boot_readback_verified']
     assert not controller.data['receipt']['first_boot_verified']
@@ -107,7 +115,8 @@ with tempfile.TemporaryDirectory() as directory:
     controller.verifyFirstBoot()
     wait(lambda: controller.data['state'] == 'verified' and not controller.data['busy'])
     assert controller.data['receipt']['simulation']
-    assert controller.closeWindow()
+    signal.raise_signal(signal.SIGINT)
     wait(lambda: controller.process.state() == QProcess.ProcessState.NotRunning)
+    restore_interrupt()
     window.close()
 print('PASS: QML wizard, bound confirmation, demo installation and first-boot verification')

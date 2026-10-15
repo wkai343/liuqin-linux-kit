@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
 from pathlib import Path
+import signal
 import sys
 
 from PySide6.QtCore import QProcess, QStandardPaths, QTimer, QUrl
@@ -9,6 +10,34 @@ from PySide6.QtQuickControls2 import QQuickStyle
 
 from .controller import Controller
 from liuqin_identity import PROJECT_NAME
+
+
+def install_interrupt_handler(app, controller):
+    """Defer terminal Ctrl+C to the window's normal, write-aware close path."""
+    requested = False
+
+    def request_interrupt(*_args):
+        nonlocal requested
+        requested = True
+
+    previous = signal.signal(signal.SIGINT, request_interrupt)
+    timer = QTimer(app)
+
+    def check_interrupt():
+        nonlocal requested
+        if requested:
+            requested = False
+            if controller.closeWindow():
+                app.quit()
+
+    timer.timeout.connect(check_interrupt)
+    timer.start(100)
+
+    def restore():
+        timer.stop()
+        signal.signal(signal.SIGINT, previous)
+
+    return restore
 
 
 def main(args):
@@ -42,9 +71,13 @@ def main(args):
             if controller.process.state() == QProcess.ProcessState.NotRunning:
                 app.quit()
         QTimer.singleShot(1200, screenshot)
-    result = app.exec()
-    # A normally closed window is already idle and has sent shutdown.
-    if controller.process.state() != QProcess.ProcessState.NotRunning:
-        controller.process.finished.connect(lambda *_: None)
-        controller.process.waitForFinished(3000)
+    restore_interrupt = install_interrupt_handler(app, controller)
+    try:
+        result = app.exec()
+        # A normally closed window is already idle and has sent shutdown.
+        if controller.process.state() != QProcess.ProcessState.NotRunning:
+            controller.process.finished.connect(lambda *_: None)
+            controller.process.waitForFinished(3000)
+    finally:
+        restore_interrupt()
     raise SystemExit(result)

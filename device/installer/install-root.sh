@@ -277,16 +277,20 @@ for item in wlan/wlan_mac.bin bluetooth/.bt_nv.bin audio/crus_calr.bin; do
 	[ -f "/run/persist/$item" ] || die 'factory data is incomplete'
 done
 [ -d /run/persist/sensors/registry/registry ] || die 'factory sensor registry is missing'
-phase format_root
 # Check the target userspace before opening the device write window.
+# Published archives use ./ paths. Stop at the requested entry instead of
+# decompressing the whole desktop archive for each tiny metadata file.
+archive_metadata() {
+    /usr/bin/tar -xOf "$archive" --occurrence=1 "./$1" 2>/dev/null ||
+        /usr/bin/tar -xOf "$archive" --occurrence=1 "$1" 2>/dev/null
+}
 if [ "$filesystem" = btrfs ]; then
-    support=$(/usr/bin/tar -xOf "$archive" etc/liuqin-filesystems 2>/dev/null || \
-              /usr/bin/tar -xOf "$archive" ./etc/liuqin-filesystems 2>/dev/null || true)
+    support=$(archive_metadata etc/liuqin-filesystems) || die 'target root lacks filesystem capabilities'
     [ "$support" = "$(printf 'ext4\nbtrfs')" ] || die 'target root does not support Btrfs'
-    template=$(/usr/bin/tar -xOf "$archive" etc/liuqin-root-filesystem 2>/dev/null || \
-               /usr/bin/tar -xOf "$archive" ./etc/liuqin-root-filesystem 2>/dev/null || true)
+    template=$(archive_metadata etc/liuqin-root-filesystem) || die 'target root lacks a filesystem configuration template'
     case $template in ext4|btrfs) ;; *) die 'target root lacks a filesystem configuration template' ;; esac
 fi
+phase format_root
 /bin/busybox blockdev --setrw "$parent"
 opened=true
 /bin/busybox blockdev --setrw "$root"
@@ -300,7 +304,8 @@ ext4)
     mount -t ext4 "$root" /mnt/install
     ;;
 btrfs)
-    /usr/sbin/mkfs.btrfs -f -L LIUQIN_ROOT -d single -m dup -s 4096 "$root"
+    # Avoid a synchronous whole-userdata TRIM on the tablet's UFS.
+    /usr/sbin/mkfs.btrfs -f -K -L LIUQIN_ROOT -d single -m dup -s 4096 "$root"
     mount -t btrfs -o subvolid=5,noatime,compress=zstd:3 "$root" /mnt/install
     ;;
 esac

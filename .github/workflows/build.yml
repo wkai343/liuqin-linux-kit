@@ -29,8 +29,8 @@ jobs:
           PY
       - name: 构建默认目标内核与模块
         run: |
-          devbox run kernel --config "$RUNNER_TEMP/liuqin-build.json"
-          devbox run modules --config "$RUNNER_TEMP/liuqin-build.json"
+          devbox run kernel -- --config "$RUNNER_TEMP/liuqin-build.json"
+          devbox run modules -- --config "$RUNNER_TEMP/liuqin-build.json"
       - name: 上传内核构建结果
         uses: actions/upload-artifact@v4
         with:

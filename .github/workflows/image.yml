@@ -23,7 +23,7 @@ jobs:
       - name: 获取并校验原厂 ROM
         working-directory: project
         run: |
-          devbox run fetch-rom --out "$RUNNER_TEMP/liuqin-rom/images" \
+          devbox run fetch-rom -- --out "$RUNNER_TEMP/liuqin-rom/images" \
             --cache "$RUNNER_TEMP/liuqin-rom/downloads"
       - name: 创建本次镜像构建配置
         working-directory: project
@@ -50,8 +50,8 @@ jobs:
       - name: 构建三个安装文件
         working-directory: project
         run: |
-          devbox run plan --config "$RUNNER_TEMP/liuqin-image-build.json"
-          devbox run build --config "$RUNNER_TEMP/liuqin-image-build.json"
+          devbox run plan -- --config "$RUNNER_TEMP/liuqin-image-build.json"
+          devbox run build -- --config "$RUNNER_TEMP/liuqin-image-build.json"
       - uses: actions/upload-artifact@v4
         with:
           name: liuqin-system-${{ github.sha }}

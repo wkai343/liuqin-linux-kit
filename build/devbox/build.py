@@ -303,10 +303,10 @@ def main():
                 raise RuntimeError('已有配置必须是 JSON 对象，未修改：' + str(args.config))
             print('配置已存在，已保留全部设置：' + str(args.config))
             if existing.get('rootfs_config'):
-                option = '' if args.config.resolve() == (PROJECT / 'build.json').resolve() else ' --config ' + shlex.quote(str(args.config))
+                option = '' if args.config.resolve() == (PROJECT / 'build.json').resolve() else ' -- --config ' + shlex.quote(str(args.config))
                 print('无需重复初始化。接下来检查配置并运行 devbox run plan' + option + '；确认材料齐全后运行 devbox run build' + option + '。')
             else:
-                print('此文件尚未使用当前官方系统配置。如需新配置，运行 devbox run init-build --config build.new.json，后续命令带同一 --config。')
+                print('此文件尚未使用当前官方系统配置。如需新配置，运行 devbox run init-build -- --config build.new.json，后续命令带同一 --config。')
             return
         with args.config.open('xb') as target:
             target.write(EXAMPLE.read_bytes())

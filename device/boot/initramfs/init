@@ -278,7 +278,7 @@ storage_identity_ok() {
             "$BB" od -An -tx1 | "$BB" tr -d ' \n')
         [ "$storage_btrfs_devices" = 0100000000000000 ] || return 1
         storage_fstype=btrfs
-        storage_ro_options=ro,nologreplay,subvolid=5
+        storage_ro_options=ro,rescue=nologreplay,subvolid=5
         storage_rw_options=rw,noatime,subvolid=5,compress=zstd:3
     fi
 	if [ "$storage_resolved_partname" = linux_root ]; then
@@ -647,14 +647,14 @@ storage_prepare_persistent_root() {
 
 	if [ -z "$storage_root_subdir" ]; then
 		if ! "$BB" mount -t "$storage_fstype" -o "$storage_rw_options" "$storage_target" "$storage_newroot"; then
-			log "persistent root failed its read-write ext4 mount"
+			log "persistent root failed its read-write $storage_fstype mount"
 			storage_abort
 			return 1
 		fi
 		storage_root_mounted=true
 	else
 		if ! "$BB" mount -t "$storage_fstype" -o "$storage_rw_options" "$storage_target" "$storage_probe_root"; then
-			log "persistent volume failed its read-write ext4 mount"
+			log "persistent volume failed its read-write $storage_fstype mount"
 			storage_abort
 			return 1
 		fi

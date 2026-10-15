@@ -21,7 +21,7 @@
 
 一台 256GB / HW16.9.0 设备已验证 Fedora 桌面、中文、Wi-Fi、HiFi 音频、自动旋转、
 磁吸键盘平板模式、U 盘、电池显示、Adreno 监测、指纹锁屏及后摄；前摄未启用。
-新版 GUI 从头安装、Btrfs 和 Windows USB 安装仍待验收，详见 [硬件说明](docs/HARDWARE.md)。
+本机 256GB 已通过 Linux GUI 单根 Btrfs 安装、桌面启动与正常重启，Windows GUI 安装也已验证成功；其他容量仍待实测，见 [硬件说明](docs/HARDWARE.md)。
 
 ## 构建
 

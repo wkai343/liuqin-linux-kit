@@ -6,7 +6,7 @@
     "plasma-welcome", "plasma-milou", "plasma-systemsettings", "kinfocenter", "accountsservice",
     "bash-color-prompt", "bash-completion",
 
-    "procps-ng", "psmisc", "util-linux", "ncurses", "iputils", "bind-utils",
+    "procps-ng", "psmisc", "util-linux", "ncurses", "hostname", "iputils", "bind-utils",
     "curl", "wget", "rsync", "nano", "less", "fastfetch",
     "zip", "unzip", "xz", "bzip2",
     "libatomic",

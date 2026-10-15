@@ -26,7 +26,8 @@ Devbox 提供交叉编译器、QEMU、镜像和打包工具，三个文件共用
 - `rootfs_config` 指向的 JSON：发行版、软件、overlay 和首次初始化方式。
 
 已有 `build.json` 时，`init-build` 保留原设置并正常退出。
-需要另一份配置可运行 `devbox run init-build --config build.new.json`，后续命令带相同的 `--config`。
+需要另一份配置可运行 `devbox run init-build -- --config build.new.json`，后续例如 `devbox run plan -- --config build.new.json`。
+脚本参数放在 `--` 之后，与 Devbox 自身的选项分开。
 
 `build.json` 示例：
 
@@ -71,7 +72,7 @@ devbox run fetch-rom
 已有完整包可复用，或直接在配置中填写已解压的同版 `images` 路径：
 
 ```sh
-devbox run fetch-rom --archive /path/to/liuqin_images_OS2.0.6.0.VMYCNXM_20250318.0000.00_15.0_cn_c29f6de5df.tgz
+devbox run fetch-rom -- --archive /path/to/liuqin_images_OS2.0.6.0.VMYCNXM_20250318.0000.00_15.0_cn_c29f6de5df.tgz
 ```
 
 下载来源和完整包校验值在 `build/data/stock-rom-source.json`，单份镜像校验值在
@@ -119,14 +120,14 @@ rootfs.tar.gz
 
 | 命令 | 输出或范围 |
 | --- | --- |
-| `devbox run kernel --configure-only` | 生成最终 `.config` 预览，不编译 |
+| `devbox run kernel -- --configure-only` | 生成最终 `.config` 预览，不编译 |
 | `devbox run kernel` | 目标内核 Image 与 DTB |
 | `devbox run modules` | 同版内核模块 |
 | `devbox run boot` | 目标引导镜像，不装配桌面 |
 | `devbox run kernel-packages` | 按配方生成版本化 RPM/DEB 内核升级包 |
 | `devbox run rootfs` | 装配用户态、设备包与目标内核，生成根归档 |
 | `devbox run build-installer` | 独立安装内核与 RAM 安装镜像 |
-| `devbox run build --refresh` | 重新装配 APT/DNF 软件阶段，保留旧缓存 |
+| `devbox run build -- --refresh` | 重新装配 APT/DNF 软件阶段，保留旧缓存 |
 
 各命令自动补齐依赖，结束时打印实际产物路径。
 首次准备完整安装目录使用 `devbox run build`。
@@ -168,11 +169,11 @@ GUI 根据三个文件的实际能力开放选项，自定义配置关闭 Btrfs 
 
 Btrfs 使用单设备、元数据 DUP、Zstd 三级压缩，系统在 `native-root` 子卷中，`/home` 位于其中。
 不增加 GPT 分区、独立 home 子卷或自动快照策略。
-启动检查使用 `ro,nologreplay,subvolid=5`，避免只读挂载仍重放日志；
+启动检查使用 `ro,rescue=nologreplay,subvolid=5`，避免只读挂载仍重放日志；
 见 [Btrfs 挂载说明](https://btrfs.readthedocs.io/en/latest/Administration.html#btrfs-specific-mount-options)。
 
 首次启用须重新构建三个文件。旧镜像的 Btrfs 驱动为模块；
-新路径已完成离线检查，平板上的 Btrfs 桌面启动尚未验收。
+修复后的路径已在本机 256GB 上通过 GUI 安装、桌面启动及正常重启。
 
 ## 5. 自定义根文件系统
 
@@ -199,7 +200,7 @@ overlay 只允许普通文件、目录及不离开目标根的相对链接，不
 | 电池与电源管理 | `upower`、`powerdevil` |
 | 移动存储 | `udisks2`、`dosfstools`、`exfatprogs`、`ntfs-3g` |
 | 终端与手册 | `procps-ng`（含 `free`）、`ncurses`（含 `clear`）、`man-db`、`man-pages`、`mandoc` |
-| 浏览器 | `firefox`、`firefox-langpacks`；中文包使用本地资源，初次激活可能需重开浏览器 |
+| 浏览器 | `firefox`、`firefox-langpacks`；中文包使用本地资源 |
 | Flatpak | `flatpak`、`plasma-discover-flatpak`；注册系统级 Flathub，不预装应用或放宽全局权限 |
 
 默认还包含 KDE 常用应用、分区工具、KDE Connect、Elisa、Haruna、MPV 和相机组件。
@@ -293,8 +294,8 @@ uv run --project installer installer/install-gui.py --bundle out/releases/fedora
 已有系统的日常软件更新使用 DNF/APT，内核更新使用 [配套升级包](KERNEL-UPDATES.md)。
 
 离线验证覆盖来源校验、ARM64 装配、缓存、软件包、SELinux 归档、三文件接口及存储保护。
-设备功能以 [硬件说明](HARDWARE.md) 为准；新版 GUI 全流程、Btrfs、Windows USB 安装、
-其他容量及系统内自动写 boot 仍需单独验收。
+本机 256GB 已通过 Linux GUI 单根 Btrfs 安装、桌面启动及正常重启。
+Windows GUI 安装也已验证成功，范围见 [硬件说明](HARDWARE.md)；其他容量及系统内自动写 boot 仍需单独验收。
 
 基础系统来源：[Fedora Container Base](https://fedoraproject.org/en/misc/#container)、
 [Ubuntu Base](https://cdimage.ubuntu.com/ubuntu-base/releases/26.04/release/)。

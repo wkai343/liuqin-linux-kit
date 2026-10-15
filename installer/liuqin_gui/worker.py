@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import signal
 import sys
 import threading
 
@@ -11,6 +12,9 @@ from .host import configure_stdio
 
 
 def main(args):
+    # The UI owns cancellation and closing. Terminal Ctrl+C must not unwind
+    # this reader while the operation thread or its child process writes boot.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     configure_stdio()
     os.umask(0o077)
     output = sys.stdout
