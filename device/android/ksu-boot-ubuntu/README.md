@@ -1,6 +1,6 @@
 # KernelSU 模块：从 Android 返回 Ubuntu
 
-[English](README.en.md) ｜ [安装步骤](../../../docs/INSTALL-TESTING.md)
+[安装步骤](../../../docs/INSTALL-TESTING.md)
 
 `liuqin_boot_ubuntu` 是双系统切换的 Android 一侧。Ubuntu 一侧使用同一个
 `/usr/local/sbin/liuqin-switch`，由 `liuqin-device-support` 包提供，并带有
@@ -71,14 +71,24 @@ pm disable-user --user 0 com.android.updater
 ## 构建与验证
 
 ```sh
-sh tools/build-ksu-module.sh
+sh build/scripts/build-ksu-module.sh
 ```
 
 输出为 `out/ksu-module/liuqin_boot_ubuntu-v0.3.zip`，由 KernelSU 管理器安装。
 拒绝 Recovery sideload，以免解压到错误位置。
 
-模块自身的早期验证边界和待测清单见 [英文详版](README.en.md)。包括 SELinux
-命名空间下的只读挂载、块设备访问、WebUI 回调、KernelSU 版本、槽位属性及系统更新
-包名等。最新整机结果以[安装步骤](../../../docs/INSTALL-TESTING.md)为准：脚本在
-调试 Android 下的返回验证，不等于普通 Android 的自动加载或 WebUI 已全部验收。
-`tests/switch-selftest.sh` 使用普通文件，只能验证决策和校验逻辑。
+最新整机结果以[安装步骤](../../../docs/INSTALL-TESTING.md)为准。调试 Android 下的脚本返回验证，
+不能推导普通 Android 的自动加载或 WebUI 已完成验收。`tests/switch-selftest.sh` 使用普通文件，
+仅验证决策和校验逻辑。下列项目保留为原模块的专项核实清单：
+
+- Android SELinux 与挂载命名空间下的 `ro,noload` 挂载，以及 KernelSU su 域中的块设备访问。
+- 写入 boot_a、刷新页缓存后的回读，以及从 A 槽冷启动的实际行为。
+- WebUI 使用 `ksu.exec(command, optionsJson, callbackName)`，回调为
+  `window[callbackName](errno, stdout, stderr)`；管理器版本的桥接接口和重启前回调时序需核实。
+  桥接接口差异应在 `webroot/index.html` 的 `exec()` 中处理，终端入口可用于诊断。
+- 原厂 GKI 为 `5.10.209-android12-9`、KMI 为 `android12-5.10`。补丁工具是
+  `build/scripts/patch-android-boot-ksu.py`，资源由 `build/data/kernelsu-assets.json` 锁定。
+  必须核实相应镜像能够启动，以及管理器是否报告 root。
+- `ro.boot.slot_suffix` 应反映实际槽位，切换器据此拒绝从 B 槽执行切换。
+- 更新程序包名按 ROM 核实；包不存在时，service.sh 的日志会记录
+  `is not installed for user 0`。

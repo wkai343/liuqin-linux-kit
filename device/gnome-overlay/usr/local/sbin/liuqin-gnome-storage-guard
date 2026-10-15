@@ -30,6 +30,7 @@ path_is_block() {
 [ "$($BB sha256sum "$marker" | $BB cut -d' ' -f1)" = "$marker_sha" ] || fail 'root marker content invalid'
 
 root_source=
+root_fstype=
 roots=0
 homes=0
 home_candidate=
@@ -44,9 +45,10 @@ while IFS=' ' read -r source target fstype options _; do
 		# varies with the capacity variant, so here the rw pair is derived from
 		# the actual root mount on the first UFS LUN.
 		case $source in "$dev_root"/sda[0-9]*) ;; *) fail 'unexpected root source' ;; esac
-		[ "$fstype" = ext4 ] || fail 'unexpected root filesystem'
+        case $fstype in ext4|btrfs) ;; *) fail 'unexpected root filesystem' ;; esac
 		case ,$options, in *,rw,*) ;; *) fail 'root is not read-write' ;; esac
 		root_source=$source
+        root_fstype=$fstype
 		;;
 	/home)
 		homes=$((homes + 1))
@@ -57,6 +59,14 @@ while IFS=' ' read -r source target fstype options _; do
 	esac
 done <"$mounts"
 [ "$roots" = 1 ] || fail 'root mount is missing or duplicated'
+fs_marker=${marker%/*}/liuqin-root-filesystem
+if [ -e "$fs_marker" ] || [ -L "$fs_marker" ]; then
+    [ -f "$fs_marker" ] && [ ! -L "$fs_marker" ] || fail 'filesystem marker is not a regular file'
+    [ "$($BB stat -c '%a %u %g' "$fs_marker")" = '644 0 0' ] || fail 'filesystem marker metadata invalid'
+    [ "$($BB cat "$fs_marker")" = "$root_fstype" ] || fail 'root filesystem differs from its installed format'
+elif [ "$root_fstype" != ext4 ]; then
+    fail 'Btrfs root lacks its installation marker'
+fi
 
 # The split layout mounts LABEL=LIUQIN_HOME at /home from fstab.  The unit is
 # ordered after home.mount, so that mount is final here, and a home node that

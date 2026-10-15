@@ -1,0 +1,8 @@
+{
+  "version": "6.7.5",
+  "package_release": "102.liuqin",
+  "archive": "ksystemstats-6.7.5.tar.xz",
+  "url": "https://download.kde.org/stable/plasma/6.7.5/ksystemstats-6.7.5.tar.xz",
+  "sha256": "27cfb9a189244b897ae23f3a8681e7c4b45cc67ec27faff8961783edce16f1fc",
+  "checksum_source": "https://kde.org/info/plasma-6.7.5/"
+}

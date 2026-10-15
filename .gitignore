@@ -1,6 +1,6 @@
 # Local build inputs, outputs and logs (including symlinks to shared caches).
 /out
-/tools/local
+/inputs
 /sources
 /logs
 /gui-state
@@ -8,6 +8,9 @@
 /bundle
 /runs
 .venv/
+.devbox/
+/build.json
+/build.*.json
 .pytest_cache/
 # Device images and private partition dumps are never source inputs.
 *.img

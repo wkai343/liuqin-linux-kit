@@ -27,7 +27,10 @@ CLEANUP = "oem_runtime_cleanup firmware_path_restored=1 sensor_power_off=1 liste
 FORWARD = ("READY ", "enrol_progress_status=", "capture_rejected=", "oem_runtime_cleanup ",
            "native_credential_provider=FAILED", "native_credential_provider=BUSY",
            "pipeline_incomplete=", "end_enrol_not_submitted=", "enrol_authorization=",
-           "oem_runtime_timed_out=", "oem_runtime_cancelled=")
+           "oem_runtime_timed_out=", "oem_runtime_cancelled=",
+           "finger_irq_failed=", "finger_lost_wait_exhausted=",
+           "capture_wait_time=", "capture_wait_time_timeout=",
+           "finger_state_timeout=", "finger_state_invalid=")
 
 
 def private_directory(path):
@@ -173,6 +176,9 @@ def enrol(username, output, runtime):
     secret = bytearray()
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Prepare the protected input before creating any durable identity intent.
+        secret_fd = os.memfd_create("liuqin-native-enrol-input", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+        os.fchmod(secret_fd, 0o600)
         record_path = account / "credential.json"
         handle = account / "gatekeeper.handle"
         requested = account / "create.requested"
@@ -200,8 +206,6 @@ def enrol(username, output, runtime):
             private_read(handle, 1024)
         if len(secret) != 32:
             raise ValueError("invalid machine credential")
-        secret_fd = os.memfd_create("liuqin-native-enrol-input", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
-        os.fchmod(secret_fd, 0o600)
         if os.write(secret_fd, secret) != 32:
             raise OSError("incomplete credential input")
         secret[:] = bytes(len(secret))

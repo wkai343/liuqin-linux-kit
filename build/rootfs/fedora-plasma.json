@@ -1,0 +1,34 @@
+{
+  "distribution": "fedora",
+  "desktop": "plasma",
+  "packages": [
+    "google-noto-sans-cjk-fonts", "glibc-langpack-zh", "qt6-qttranslations",
+    "plasma-welcome", "plasma-milou", "plasma-systemsettings", "kinfocenter", "accountsservice",
+    "bash-color-prompt", "bash-completion",
+
+    "procps-ng", "psmisc", "util-linux", "ncurses", "iputils", "bind-utils",
+    "curl", "wget", "rsync", "nano", "less", "fastfetch",
+    "zip", "unzip", "xz", "bzip2",
+    "libatomic",
+    "openssh-clients", "openssh-server",
+    "man-db", "man-pages", "mandoc",
+    "udisks2", "dosfstools", "exfatprogs", "ntfs-3g", "usbutils",
+    "libcamera-tools", "libcamera-ipa", "v4l-utils",
+    "kamoso", "qrca", "libcamera-gstreamer",
+    "gstreamer1-plugins-good", "gstreamer1-plugins-good-qt6", "gstreamer1-plugins-bad-free",
+    "kde-partitionmanager", "parted", "gdisk", "e2fsprogs", "ntfsprogs",
+
+    "konsole", "dolphin", "kate", "kate-plugins", "kwrite", "ark", "gwenview", "okular",
+    "kcalc", "spectacle", "plasma-systemmonitor", "khelpcenter",
+    "kio-extras", "plasma-discover", "plasma-discover-packagekit",
+    "flatpak", "plasma-discover-flatpak",
+    "fcitx5", "fcitx5-chinese-addons", "fcitx5-configtool", "fcitx5-gtk", "fcitx5-qt",
+    "xdg-user-dirs", "kde-connect",
+
+    "firefox", "firefox-langpacks",
+    "elisa-player", "haruna", "mpv"
+  ],
+  "remove": ["ibus", "ibus-libpinyin", "maliit-keyboard"],
+  "overlay": "build/rootfs/plasma-overlay",
+  "first_boot_setup": true
+}

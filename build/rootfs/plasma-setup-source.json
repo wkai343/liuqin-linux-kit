@@ -1,0 +1,8 @@
+{
+  "version": "6.6.6",
+  "package_revision": 2,
+  "archive": "plasma-setup-6.6.6.tar.xz",
+  "url": "https://download.kde.org/stable/plasma/6.6.6/plasma-setup-6.6.6.tar.xz",
+  "sha256": "3d3ef6825e4d8fd2ea6481e887953e82e7ad5434e21d76acc7694030cdd2b90e",
+  "checksum_source": "https://kde.org/info/plasma-6.6.6/"
+}

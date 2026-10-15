@@ -1,6 +1,5 @@
 [Unit]
 Description=Re-announce iio-sensor-proxy to the session's gnome-shell
-Documentation=file:///usr/share/doc/liuqin/SENSORS_AUTOROTATE_INTEGRATION.zh-CN.md
 # gnome-shell claims the accelerometer only at the moment the SensorProxy
 # D-Bus name appears.  The boot-time proxy predates the user shell (the
 # system-level liuqin-sensor-proxy-refresh.service covers the greeter

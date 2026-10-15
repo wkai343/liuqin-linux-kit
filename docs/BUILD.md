@@ -1,182 +1,303 @@
 # 构建指南
 
-[English](BUILD.en.md) ｜ [项目首页](../README.md)
+[项目首页](../README.md) ｜ [安装助手](INSTALLER-GUI.md) ｜ [内核更新](KERNEL-UPDATES.md)
 
-## 内核
+从官方 ARM64 基础系统装配 KDE Plasma，生成 `installer.img`、`boot.img`、`rootfs.tar.gz`。
+默认使用 Fedora 44，保留 Ubuntu 26.04 配方。内核、桌面和安装环境分别配置与缓存；
+设备适配沿用原项目并加入本项目补丁。构建成功与硬件验收分别记录，见 [硬件说明](HARDWARE.md)。
 
-使用 Linux 主机，将项目和内核源码放在同级目录：
+## 1. 准备环境与配置
+
+在 Linux 主机安装 Devbox/Nix，以普通用户进入项目根目录执行：
+
+```sh
+devbox install
+devbox run doctor
+devbox run init-build
+```
+
+Devbox 提供交叉编译器、QEMU、镜像和打包工具，三个文件共用这套环境。
+完整构建还需要网络、宿主 sudo 和支持 binfmt 的 Linux 内核，构建器按阶段提权。
+命令和配置中的相对路径均从项目根目录解析，也可填写绝对路径。
+
+主要维护两份配置：
+
+- `build.json`：本机内核与板级输入，不提交 Git；模板为 `build/devbox/build.example.json`。
+- `rootfs_config` 指向的 JSON：发行版、软件、overlay 和首次初始化方式。
+
+已有 `build.json` 时，`init-build` 保留原设置并正常退出。
+需要另一份配置可运行 `devbox run init-build --config build.new.json`，后续命令带相同的 `--config`。
+
+`build.json` 示例：
+
+```json
+{
+  "kernel_source": "sources/linux-sm8450-liuqin",
+  "kernel_fragments": ["build/kernel/configs/custom-zram.config"],
+  "kernel_localversion": "-liuqin-fedora",
+  "rootfs_config": "build/rootfs/fedora-plasma.json",
+  "usb_manufacturer": "Xiaomi",
+  "usb_product": "Pad 6 Pro",
+  "rom_images": "inputs/roms/liuqin/OS2.0.6.0.VMYCNXM/images",
+  "package_version": "0.1.0"
+}
+```
+
+| 配置项 | 用途 |
+| --- | --- |
+| `kernel_source` | 目标内核 Git 源码目录；不存在时获取 `build/kernel/source.json` 中的固定提交 |
+| `kernel_fragments` | 叠加的内核配置片段，示例启用 zram |
+| `kernel_localversion` | 自定义内核版本后缀；修改源码或配置时更换，避免同名内核对应不同模块 |
+| `rootfs_config` | Fedora 或 Ubuntu 的 rootfs 配方路径 |
+| `usb_manufacturer`、`usb_product` | USB 显示名称，默认为 `Xiaomi`、`Pad 6 Pro` |
+| `rom_images` | 指定版本原厂 ROM 的 `images` 目录 |
+| `package_version` | 内核升级包版本，每次发布提高 |
+| `kernel_reclaim_mte` | 可选，默认 `false`；回收 512 MiB MTE 预留，见下文 |
+
+已有内核源码必须是干净的 Git 提交，修改后先提交再构建。
+切换到 Ubuntu 时，将 `rootfs_config` 改为 `build/rootfs/ubuntu-plasma.json`；其他发行版需要另行适配。
+
+## 2. 准备原厂资料
+
+```sh
+devbox run fetch-rom
+```
+
+脚本从[指定的 cpidMi 页面](https://www.cpidmi.com/xiaomi-pad-6-pro-liuqin-os2-0-6-0-vmycnxm-15675)
+对应镜像源下载 **OS2.0.6.0.VMYCNXM Fastboot ROM**，校验完整包后只提取
+`vendor_boot.img`、`dtbo.img`、`super.img`、`NON-HLOS.bin`。
+默认输出为 `inputs/roms/liuqin/OS2.0.6.0.VMYCNXM/images`。
+
+已有完整包可复用，或直接在配置中填写已解压的同版 `images` 路径：
+
+```sh
+devbox run fetch-rom --archive /path/to/liuqin_images_OS2.0.6.0.VMYCNXM_20250318.0000.00_15.0_cn_c29f6de5df.tgz
+```
+
+下载来源和完整包校验值在 `build/data/stock-rom-source.json`，单份镜像校验值在
+`shared/liuqin-rom-images.json`。Recovery ZIP、其他 ROM 版本不能替代。
+损坏缓存会保留并停止，不覆盖用户文件；完整下载包保存在 `inputs/downloads/stock-rom/`。
+
+原厂资料用于设备树、传感器配置、音频保护程序及通用调音等硬件适配；
+操作系统本身来自官方 Fedora 或 Ubuntu。构建不连接平板，也不运行 ROM 内的刷机脚本。
+每台平板的设备地址和校准数据在安装时从本机导入，不放进通用镜像。
+
+## 3. 构建与输出
+
+```sh
+devbox run plan
+devbox run build
+```
+
+`plan` 只显示配置和缺失材料。`build` 自动补齐依赖；也可先运行 `devbox run prepare`，
+仅准备 ROM 输入、官方基础系统、BusyBox、mkbootimg 和内核源码。
+
+成品位于 `out/releases/<发行版>-plasma-<内容标识>/`，只包含：
 
 ```text
-workspace/
-  xiaomipad-6pro-mainline/
-  linux-sm8450-liuqin/
+installer.img
+boot.img
+rootfs.tar.gz
 ```
 
-内核 checkout 必须对应 `kernel/source.json` 中的提交。内核仓库基于
-`sm8450-mainline/linux`，设备分支为 `liuqin-6.17`。
-构建脚本会在编译前核对源码提交和最终配置。
+报告放在 `out/reports/`，包版本清单随构建缓存保存。
+成品状态为 `BUILT_NOT_DEVICE_TESTED`，实际安装后的验收另行记录。
 
-Ubuntu 24.04 主机依赖：
+### 三个文件的输入
+
+| 文件 | 构建输入 | 何时需要更新 |
+| --- | --- | --- |
+| `installer.img` | 独立安装内核、最小 ARM64 runtime、RAM 安装脚本及板级资料 | 安装能力、安装内核或通道改变时 |
+| `boot.img` | 目标内核、设备树、固件、启动脚本与模块身份 | 目标内核、设备树或启动配置改变时 |
+| `rootfs.tar.gz` | 官方基础系统、桌面/软件配方、设备包、目标内核包及同版模块 | 用户态改变，或为新安装打包另一版内核时 |
+
+安装环境独立于目标内核和桌面。boot 与 rootfs 中的内核模块仍须配套；
+更换目标内核只需重打包最终 rootfs，已完成的桌面装配可以复用。
+已安装系统使用内核升级包，见 [内核更新](KERNEL-UPDATES.md)。
+
+### 分别构建
+
+| 命令 | 输出或范围 |
+| --- | --- |
+| `devbox run kernel --configure-only` | 生成最终 `.config` 预览，不编译 |
+| `devbox run kernel` | 目标内核 Image 与 DTB |
+| `devbox run modules` | 同版内核模块 |
+| `devbox run boot` | 目标引导镜像，不装配桌面 |
+| `devbox run kernel-packages` | 按配方生成版本化 RPM/DEB 内核升级包 |
+| `devbox run rootfs` | 装配用户态、设备包与目标内核，生成根归档 |
+| `devbox run build-installer` | 独立安装内核与 RAM 安装镜像 |
+| `devbox run build --refresh` | 重新装配 APT/DNF 软件阶段，保留旧缓存 |
+
+各命令自动补齐依赖，结束时打印实际产物路径。
+首次准备完整安装目录使用 `devbox run build`。
+
+## 4. 自定义内核
+
+通过 `kernel_fragments` 添加配置片段，例如复制 `build/kernel/configs/custom-zram.config` 后修改。
+项目板级配置先应用，自定义片段最后应用；用 `kernel --configure-only` 检查最终结果。
+zram 内核选项只提供能力，容量与算法由 rootfs 的服务配置决定。
+
+修改内核代码后提交 Git，并更新 `kernel_localversion`。默认固定基础提交会在构建缓存中自动应用
+`build/kernel/source.json` 记录的 NanoSic 平板模式、FPC IRQ 等补丁，不改写源码目录。
+改用其他提交时，需自行核对并合入 `build/kernel/patches/` 中适用的补丁。
+Fedora 目标还叠加 `build/kernel/configs/fedora.config`，启用 SELinux。
+
+### 可选：回收 MTE 预留
+
+加入 `"kernel_reclaim_mte": true`，目标 boot 的 DTB 会移除 512 MiB MTE 预留节点。
+该选项不改变 Image、模块或独立 installer；节点地址、大小、属性不符或被引用时构建停止。
+仅改变此项时可以保留内核 release，但仍须提高 `package_version` 并安装同批升级包。
+
+一台 8GB / 256GB、HW16.9.0 设备已通过内存读写、启动、重启及桌面主要功能检查，
+可管理内存从约 6.3 GiB 增至约 6.8 GiB。其余 116 MiB 由固件排除，保留原节点；
+MPSS 回收试验失败。此结果不覆盖其他批次，因此该选项默认关闭。
+
+### USB 显示名称
+
+`usb_manufacturer`、`usb_product` 同时用于系统引导与安装镜像。
+每项为非空文本，可含中文，不含控制字符，最多 126 个 UTF-8 字节。
+修改后运行 `devbox run boot`；安装环境也要改名时再运行 `devbox run build-installer`。
+安装新引导后生效，仅重装 rootfs 或修改系统主机名不会改变 USB 产品名。
+
+### 根文件系统格式
+
+在安装器中选择 ext4 或 Btrfs，同一份 rootfs 归档可用于两者。
+Btrfs 必须在目标内核和安装内核中内置（`CONFIG_BTRFS_FS=y`，不能为模块），
+安装 runtime 还需提供 ARM64 Btrfs 工具；两个发行版均安装 `btrfs-progs`。
+GUI 根据三个文件的实际能力开放选项，自定义配置关闭 Btrfs 时仅开放 ext4。
+
+Btrfs 使用单设备、元数据 DUP、Zstd 三级压缩，系统在 `native-root` 子卷中，`/home` 位于其中。
+不增加 GPT 分区、独立 home 子卷或自动快照策略。
+启动检查使用 `ro,nologreplay,subvolid=5`，避免只读挂载仍重放日志；
+见 [Btrfs 挂载说明](https://btrfs.readthedocs.io/en/latest/Administration.html#btrfs-specific-mount-options)。
+
+首次启用须重新构建三个文件。旧镜像的 Btrfs 驱动为模块；
+新路径已完成离线检查，平板上的 Btrfs 桌面启动尚未验收。
+
+## 5. 自定义根文件系统
+
+编辑 `rootfs_config` 指向的配方，完整软件清单见
+[Fedora 配方](../build/rootfs/fedora-plasma.json)或 [Ubuntu 配方](../build/rootfs/ubuntu-plasma.json)。
+
+| 字段 | 用途 |
+| --- | --- |
+| `distribution`、`desktop` | 发行版及桌面，例如 `fedora`、`plasma` |
+| `packages` | 额外安装的软件包 |
+| `remove` | 裁剪软件；启动必需组件不可移除 |
+| `overlay` | 合并到根目录的配置目录，例如 `build/rootfs/plasma-overlay` |
+| `first_boot_setup` | `true` 为首次开机创建账号；`false` 为构建时预置账号 |
+
+overlay 只允许普通文件、目录及不离开目标根的相对链接，不可写入运行时挂载目录。
+可以扩展现有 overlay，或复制后改为自己的路径。
+软件安装关闭弱依赖，裁剪时须保留所需运行组件；常见依赖包括：
+
+| 功能 | Fedora 组件 |
+| --- | --- |
+| 登录与网络 | `systemd-pam`、`dbus-daemon`、`iproute`、Wi-Fi 后端及监管数据库 |
+| 中文界面 | `glibc-langpack-zh`、Noto CJK 字体、`qt6-qttranslations`；保留软件自身翻译 |
+| Kate 与 KRunner | `kate`、`kwrite`（含共用翻译）、`plasma-milou`（搜索 QML 组件） |
+| 电池与电源管理 | `upower`、`powerdevil` |
+| 移动存储 | `udisks2`、`dosfstools`、`exfatprogs`、`ntfs-3g` |
+| 终端与手册 | `procps-ng`（含 `free`）、`ncurses`（含 `clear`）、`man-db`、`man-pages`、`mandoc` |
+| 浏览器 | `firefox`、`firefox-langpacks`；中文包使用本地资源，初次激活可能需重开浏览器 |
+| Flatpak | `flatpak`、`plasma-discover-flatpak`；注册系统级 Flathub，不预装应用或放宽全局权限 |
+
+默认还包含 KDE 常用应用、分区工具、KDE Connect、Elisa、Haruna、MPV 和相机组件。
+媒体使用 Fedora 官方仓库组件，具体编码和硬件解码能力需分别确认。
+SSH 服务端预装但停用；需要时运行 `sudo systemctl enable --now sshd`，主机密钥在平板上生成。
+Bash 模板来自 `/etc/skel`，提示符和别名由系统配置提供，构建时检查模板非空。
+
+### 输入法与屏幕键盘
+
+Fedora 保留 Plasma 屏幕键盘和 Fcitx5，移除 IBus 主程序、拼音引擎及重复的 Maliit 键盘。
+Qt Virtual Keyboard 是 Plasma 键盘的依赖。`ibus-libs` 可因其他软件依赖保留；
+不安装会重新引入 IBus 拼音的 `langpacks-zh_CN` 元包。
+
+Wayland 下，触屏使用 Plasma 键盘及其拼音引擎；需要 Fcitx5 时，在
+“系统设置 → 键盘 → 虚拟键盘”切换到 Fcitx 5。它是输入框架启动器，不提供屏幕按键；
+两者不能同时占用 KWin 原生输入法接口。
+
+环境配置放在 Plasma 会话和 shell 配置目录：
+
+| 会话 | 输入法变量 |
+| --- | --- |
+| 共用 | `XMODIFIERS=@im=fcitx`，清除全局 `QT_IM_MODULES` |
+| Wayland | 不全局设置 `GTK_IM_MODULE`、`QT_IM_MODULE`、`SDL_IM_MODULE`，保留 KWin 文本输入通道 |
+| X11 | 上述三项设为 `fcitx`，自动启动 Fcitx5 |
+
+全局 `QT_IM_MODULES` 会覆盖 Plasma 键盘自身模块，可能导致键盘显示却无法输入或收起。
+旧 Qt/XWayland 应用可单独以 `QT_IM_MODULE=fcitx 程序名` 启动，兼容性按应用判断。
+参考 [Fcitx 的 Plasma Wayland 接入说明](https://fcitx-im.org/wiki/Using_Fcitx_5_on_Wayland#KDE_Plasma)。
+
+### 首次设置
+
+`first_boot_setup: true` 时不预置普通用户或密码，也不生成 `out/login/` 凭据。
+首次开机进入 Plasma Setup，设置语言、网络、时区、设备名和账号，完成后进入登录界面。
+Fedora 使用官方 Plasma Setup / Plasma Login，管理员加入 `wheel` 组；
+Ubuntu 使用项目打包的 Plasma Setup、SDDM 和 `sudo` 组。
+Fedora 使用 Plasma 屏幕键盘，Ubuntu 使用 Maliit。
+
+初始化完成标记为 `/etc/plasma-setup-done`；不要在已有系统上删除它重做初始化。
+首次登录后的欢迎中心使用官方包与默认欢迎文案，项目只扩展“设置你的平板”导航页。
+可随时关闭，日后从菜单重新打开；显示记录保存在用户的 `~/.config/plasma-welcomerc`。
+Fedora 登录管理器默认接键盘横屏、平板模式自动旋转，其保存的显示设置优先于镜像默认值；
+这项配置不改写普通用户的桌面显示设置。
+
+需要预置账号时设 `first_boot_setup: false`，填写 `user`，可选 `hostname`、`password_file`。
+密码文件须为权限 0600 的单行文件；未提供时生成随机密码，保存到权限为 0600 的
+`out/login/<发行版>-plasma-<内容标识>.txt`。旧配方仅包含 `user` 时仍按预置账号处理。
+
+### 项目编译的设备组件
+
+除内核与项目设备包外，主要自编译组件如下：
+
+| 组件 | 构建方式与说明 |
+| --- | --- |
+| 传感器 | 固定上游源码与补丁，在目标发行版 ARM64 根中编译，使用该发行版运行库 |
+| Adreno 监测 | 按 `fedora-stats-source.json` 构建带平台适配的 KSystemStats RPM；官方更高版本可能替换它 |
+| 指纹 | 按 `device/fingerprint/oem/SOURCE_LOCK.json` 构建专用 RPM，私有库不替换系统 libfprint；见[指纹说明](FINGERPRINT.md) |
+| Ubuntu 初始化向导 | 按 `plasma-setup-source.json` 编译，保留完成状态与失败账号回退补丁；Fedora 直接用官方包 |
+
+默认 Fedora 使用官方 KWin、欢迎中心及其余桌面软件。`device/kwin/` 为研究与回归材料，不参与镜像构建。
+设备包提供稳定的传感器服务、HiFi 音频配置和本机校准导入；固件来源与许可见 [CREDITS](../CREDITS.md)。
+
+## 6. 缓存与排障
+
+完成阶段保存在 `out/build/from-source/`，按源码、配置、输入及构建器内容区分并校验后复用。
+失败目录为 `.attempt-*`，缺少完成记录的目录不会作为缓存；修复后重新运行原命令即可。
+首次 x86 主机上的 ARM64 软件安装与 SELinux 标记需经 QEMU，耗时较长。
+重试时保留 `out/`，避免使用 `--refresh`；只有主动更新仓库软件时才用该选项。
+
+根归档优先通过写时复制准备，使用 `pigz` 最多 8 线程压缩，无 `pigz` 时回退到 gzip。
+阶段与耗时会输出到终端。基础归档固定 SHA256，APT/DNF 实际包版本另有记录，尚未锁定整套仓库快照。
+构建在私有挂载/PID 命名空间中运行，隔离宿主 Nix 工具与库，并阻止目标软件自动启动服务。
+
+Fedora SELinux 标签由 ARM64 目标策略校验后写入归档，保留所有权、ACL、文件能力和扩展属性。
+不在宿主文件系统上写入目标标签，因此无需关闭宿主 SELinux 或加载平板策略。
+
+| 现象 | 处理 |
+| --- | --- |
+| `init-build` 提示配置已存在 | 保留即可，继续 `plan` 和 `build` |
+| 输入或源码校验失败 | 核对固定来源与本地修改；保留缓存定位问题，不跳过校验 |
+| mkbootimg 缓存被改动 | 工具校验固定 AOSP 源码树；自动忽略并清理已验证模块的字节码，未知源码仍会拒绝 |
+| DNF 提示找不到包 | 核对 Fedora 包名，例如 `plasma-milou`、`elisa-player`、`kde-partitionmanager` |
+| 构建环境中 UPower 无法连接服务 | 离线装配用 `--help` 检查程序；`upower --version` 需要运行中的服务 |
+
+## 7. 安装与验证
 
 ```sh
-sudo apt-get update
-sudo apt-get install build-essential bc bison flex libssl-dev libelf-dev \
-  gcc-aarch64-linux-gnu libc6-dev-arm64-cross binutils-aarch64-linux-gnu python3 git ccache kmod rsync
+uv run --project installer installer/install-gui.py --bundle out/releases/fedora-plasma-实际内容标识
 ```
 
-在项目目录执行：
+安装会清空 userdata；备份、确认和恢复准备见 [安装助手](INSTALLER-GUI.md)及[安装指南](FLASHING.md)。
+已有系统的日常软件更新使用 DNF/APT，内核更新使用 [配套升级包](KERNEL-UPDATES.md)。
 
-```sh
-python3 tools/build-liuqin-kernel.py --configure-only
-python3 tools/build-liuqin-kernel.py --jobs 12
-```
+离线验证覆盖来源校验、ARM64 装配、缓存、软件包、SELinux 归档、三文件接口及存储保护。
+设备功能以 [硬件说明](HARDWARE.md) 为准；新版 GUI 全流程、Btrfs、Windows USB 安装、
+其他容量及系统内自动写 boot 仍需单独验收。
 
-第二条命令编译 Image、设备树和模块，输出到 `out/kernel`，不会访问平板。
-
-| out/kernel 下的路径 | 内容 |
-|---|---|
-| arch/arm64/boot/Image | ARM64 内核 |
-| arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dtb | 设备树 |
-| modules/lib/modules/ | 安装后的内核模块 |
-| .config | 最终内核配置 |
-| vmlinux、System.map | 调试与符号信息 |
-| build-info.json、SHA256SUMS | 源码/工具链身份与核心产物校验值 |
-
-用 `--source 路径` 指定其他内核目录，用 `--out 路径` 指定其他输出目录。
-重复构建复用兼容的输出和 ccache；构建输入改变时需使用新输出目录。
-默认编译器为 `aarch64-linux-gnu-gcc`，可通过 `CROSS_COMPILE` 指定工具链前缀。
-
-内核编译成功不代表真机功能验收通过，也不等于生成了完整安装镜像。
-逐字节比较还需要固定完整工具链与全部构建输入。
-
-## 用户态与镜像
-
-### 输入来源
-
-| 内容 | 获取与维护方式 |
-|---|---|
-| 原版 Ubuntu 桌面基础系统 | 脚本从 Canonical 下载固定 ISO、校验后提取；本仓库不镜像原版 ISO |
-| 未修改的 Ubuntu 软件包、BusyBox | 从 Ubuntu 软件源下载，复用本地缓存；不另建软件包镜像站 |
-| 上游工具与用户态源码 | 使用固定上游版本；本仓库保留调用代码、必要补丁和版本引用 |
-| 设备内核与项目适配 | 本项目两仓维护源码；安装版本提供匹配的预编译组件 |
-| 板级固件组合 | 安装所需组件由版本物料统一管理，不要求用户拼接实验产物；不重复托管整个原厂 ROM |
-| 本机校准、设备地址 | 安装时读取用户自己的平板，不能包含在通用包中 |
-| 已适配的 Ubuntu 系统 | 项目安装版本的成品，不等同未修改的上游 rootfs |
-
-构建者从上游下载基础输入后执行本项目装配；普通安装用户使用匹配的成品包，
-不需要自己编译内核、设置程序或逐项查找依赖。安装包见 [GitHub Releases](https://github.com/yzddmr6/xiaomipad-6pro-mainline/releases)，
-请遵守对应版本的验证范围与限制。
-
-### Ubuntu 基础系统
-
-需要 curl、util-linux（flock）、7z 和 squashfs-tools。按顺序执行：
-
-```sh
-sh tools/build-liuqin-ubuntu-desktop-rootfs.sh download
-sh tools/build-liuqin-ubuntu-desktop-rootfs.sh casper
-sudo sh tools/build-liuqin-ubuntu-desktop-rootfs.sh extract
-```
-
-下载复用已校验缓存，传输中断可续传；`UBUNTU_DESKTOP_URL` 可指定提供同一文件的镜像，
-不会接受不同版本。输入位置可用 `UBUNTU_DESKTOP_INPUT` 指定，后续步骤须使用相同值。
-提取只准备桌面基础系统；还需装入项目设备组件，不能直接作为平板启动镜像。
-
-### 设备组件
-
-第三方组件不要求全部从源码重建：可以使用固定版本的上游二进制，或在允许分发的前提下
-使用项目提供的预备组件。保留来源、版本、校验值及必要许可/对应源码材料；本项目的修改提供源码。
-目前尚未发布预备固件包，不能将本地缓存视为已有公共下载。
-
-Wi-Fi 固件组合可通过 `tools/build-liuqin-wlan.py` 准备，输入为原厂 QCA6490 目录
-（amss20.bin、m3.bin、regdb.bin、bd_m81gf.elf）及固定版本的上游 board-2.bin.zst。
-输出可直接传给固件准备器的 `HSP2_TUPLE_DIR`。`--bdencoder` 指向 Qualcomm
-qca-swiss-army-knife 提交 `6df4dae3e2f5e4c2903f3cafd40996fc1b3639ce` 下的
-`tools/scripts/ath11k/ath11k-bdencoder`，需要 Python 3 和 zstd。
-通过 `--vendor`、`--base-board` 和 `--out` 指定输入和新输出目录。
-原厂输入的获取说明与分发边界仍待完善；本工具不下载或分发固件。
-
-设备适配源码包括系统服务、音频配置、电源键支持、传感器补丁和 GNOME 设置程序补丁。
-传感器源码版本记录在 `device/sensors/sources.manifest`。
-
-GNOME 设置程序的源码与补丁由 `device/gnome-control-center/source.json` 固定。
-主机需提供 Python 3.12、curl、patch、dpkg-dev 和 AArch64 binfmt 解释器，并准备好
-Ubuntu ARM64 根文件系统。先准备源码：
-
-```sh
-python3 tools/build-liuqin-settings.py --prepare-only
-```
-
-再执行 `sudo python3 tools/build-liuqin-settings.py --jobs 8`。构建使用独立挂载命名空间，
-不修改输入根文件系统。设备包构建器从 `out/gnome-control-center/` 读取程序与源码身份，
-不再依赖历史预编译的设置程序。
-
-### 输入准备与产物缓存
-
-`python3 tools/prepare-image-inputs.py run` 一次备齐 `build-liuqin-image.py`
-需要的全部输入并写出 `out/image-inputs.local.json`。音频拓扑、固件树等便宜的
-输入每次新鲜重建；传感器栈与 GNOME 设置程序这两个 QEMU 慢构建按来源指纹缓存
-在 `tools/local/artifacts-cache/`：输入未变时经 sha256 复验后直接复用，
-输入一变就自动重建。`check` 子命令只报告复用/重建，不动手。需要重建时
-会经 sudo 调用对应官方构建器（先 `sudo -v`）。
-
-扬声器拓扑使用
-[linux-msm/audioreach-topology](https://github.com/linux-msm/audioreach-topology)
-的 `2af1f1ebb8d4fd03b5f53891467ddde2e208a8a0` 提交。准备好对应源码后执行：
-
-```sh
-AUDIOREACH_TOPOLOGY_DIR="$PWD/../audioreach-topology" \
-  OUTPUT="$PWD/out/audio-topology/Xiaomi-Pad-6-Pro-tplg.bin" \
-  sh tools/build-liuqin-audio-topology.sh
-```
-
-native boot 构建器直接使用指定内核的 Image、DTB，以及已装配根文件系统的文件清单、
-音频拓扑和固件输入，不需要旧 boot 镜像或 recovery 根文件系统。
-
-| 输入 | 环境变量 |
-|---|---|
-| 内核源码与构建输出 | KERNEL_SOURCE、KERNEL_OUT |
-| 根文件系统的 native-root.hashes | NATIVE_ROOT_HASHES |
-| 编译后的扬声器拓扑 | AUDIO_TOPOLOGY |
-| 已准备的设备固件目录 | FIRMWARE_POOL |
-| HSP2 WLAN 固件组合 | WLAN_HSP2_TUPLE |
-| 原厂 DTBO 条目及基础 DTB | STOCK_OVERLAY_DIR、STOCK_BASE_DIR |
-
-提供这些输入后，执行 `sh tools/build-liuqin-native-boot.sh`，输出为
-`out/native-boot/boot-liuqin-native.img`。同目录的 `native-boot.identity`
-记录输入与输出校验值，不包含本地路径。离线装配结果需经过真机验证后才能分发。
-
-完整镜像从干净 checkout 构建的流程仍在准备，需补齐版本化固件输入、用户态构建依赖
-后，才能提供受支持的一体化入口。不要用旧 boot 镜像或其他构建的内核代替。
-
-## 根文件系统归档
-
-装配及 manifest 阶段完成后，在相同 `OUT_DIR` 下执行
-`sudo -E sh tools/build-liuqin-native-root.sh pack`，生成 `rootfs.tar.gz` 及校验文件。
-归档期间输入树不可修改，不要对已经启动、创建账户或注入本机数据的根目录打公共包。
-这一步不重编组件，也不操作平板；不会覆盖已有归档。
-
-归档保留数字UID/GID、权限、符号/硬链接、ACL与扩展属性，包括 `security.capability`。
-本地解包使用 `sudo sh tools/lib/rootfs-archive.sh extract 新目录 rootfs.tar.gz`；
-仅解包可信且校验通过的项目归档，需要 GNU tar，不可换成 BusyBox tar。
-安装环境也必须具备同样的解包能力；本地归档通过不代表首次安装/恢复已经验证。
-
-## 持续集成
-
-工作流使用与本地相同的 Python 入口编译固定版本内核，产物为内核构建文件，
-不是可安装的 Ubuntu 发行包。内核仓库的提交构建与主项目的锁定版本构建共用同一入口。
-整包装配使用 `tools/build-liuqin-image.py`，支持单阶段续跑；GitHub 整包任务需要配置专用构建机，
-默认手动触发，可在配置完成后启用 main 更新自动装配。详见[CI 配置](CI.md)。
-真机测试按[安装步骤](INSTALL-TESTING.md)进行。CI 编译成功不代表新安装包已通过真机验证。
-
-## Release 文件
-
-完成真机安装测试后，直接导出现有安装包，不重建镜像：
-
-```sh
-sudo python3 tools/build-liuqin-image.py --inputs inputs.local.json \
-  --kernel-out out/kernel --out out/image --stage release-assets --device-tested
-```
-
-将 `out/image/release-assets/` 内的文件上传至主项目的 GitHub Release。
-根文件系统自动分卷以满足单文件大小限制，合并方式见安装步骤。
-未完成真机测试的包不得使用 `--device-tested`。
+基础系统来源：[Fedora Container Base](https://fedoraproject.org/en/misc/#container)、
+[Ubuntu Base](https://cdimage.ubuntu.com/ubuntu-base/releases/26.04/release/)。
+来源锁分别在 `build/rootfs/fedora-source.json`、`ubuntu-source.json`；
+初始化组件见 [KDE Plasma Setup](https://invent.kde.org/plasma/plasma-setup)，
+欢迎页扩展使用 [Plasma Welcome QML 接口](https://invent.kde.org/plasma/plasma-welcome/-/blob/Plasma/6.6/README.md)。

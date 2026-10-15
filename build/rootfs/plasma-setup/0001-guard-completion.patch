@@ -1,0 +1,189 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Preserve setup on failed account creation/completion; roll back failed new accounts.
+--- a/src/initialstartutil.cpp
++++ b/src/initialstartutil.cpp
+@@ -29,23 +29,32 @@
+ 
+ void InitialStartUtil::finish()
+ {
+-    doUserCreationSteps();
+-    createCompletionFlag();
++    m_errorMessage.clear();
++    Q_EMIT errorMessageChanged();
++    if (!doUserCreationSteps()) {
++        m_errorMessage = i18n("无法创建账号，请检查账号信息后重试。");
++        Q_EMIT errorMessageChanged();
++        return;
++    }
++    if (!createCompletionFlag()) {
++        m_errorMessage = i18n("无法保存初始化状态，请重试。重启后仍会进入初始化向导。");
++        Q_EMIT errorMessageChanged();
++        return;
++    }
+     logOut();
+ }
+ 
+-void InitialStartUtil::doUserCreationSteps()
++bool InitialStartUtil::doUserCreationSteps()
+ {
+-    if (m_accountController->hasExistingUsers()) {
++    if (m_newUserCreated || m_accountController->hasExistingUsers()) {
+         qCInfo(PlasmaSetup) << "Skipping user creation steps since existing users were detected.";
+-        return;
++        return true;
+     }
+ 
+     const bool userCreated = m_accountController->createUser();
+     if (!userCreated) {
+         qCWarning(PlasmaSetup) << "Failed to create user:" << m_accountController->username();
+-        // TODO: Handle the error appropriately, e.g., show a message to the user
+-        return;
++        return false;
+     }
+ 
+     // Temporarily disabling the automatic session transition because using SDDM's
+@@ -59,6 +68,8 @@
+     DisplayUtil displayUtil;
+     displayUtil.setGlobalThemeForNewUser(m_window, m_accountController->username());
+     displayUtil.setScalingForNewUser(m_window, m_accountController->username());
++    m_newUserCreated = true;
++    return true;
+ }
+ 
+ void InitialStartUtil::disablePlasmaSetupAutologin()
+@@ -110,7 +121,7 @@
+     }
+ }
+ 
+-void InitialStartUtil::createCompletionFlag()
++bool InitialStartUtil::createCompletionFlag()
+ {
+     qCInfo(PlasmaSetup) << "Creating plasma-setup completion flag file.";
+ 
+@@ -121,8 +132,10 @@
+ 
+     if (!job->exec()) {
+         qCWarning(PlasmaSetup) << "Failed to create completion flag file:" << job->errorString();
++        return false;
+     } else {
+         qCInfo(PlasmaSetup) << "Completion flag file created successfully.";
++        return true;
+     }
+ }
+ 
+--- a/src/initialstartutil.h
++++ b/src/initialstartutil.h
+@@ -20,11 +20,13 @@
+     QML_ELEMENT
+     QML_SINGLETON
+     Q_PROPERTY(QString distroName READ distroName CONSTANT);
++    Q_PROPERTY(QString errorMessage READ errorMessage NOTIFY errorMessageChanged)
+ 
+ public:
+     InitialStartUtil(QObject *parent = nullptr);
+ 
+     QString distroName() const;
++    QString errorMessage() const { return m_errorMessage; }
+ 
+     /**
+      * Completes the initial setup process.
+@@ -51,14 +53,19 @@
+      */
+     static bool runningAsPlasmaSetupUser();
+ 
++Q_SIGNALS:
++    void errorMessageChanged();
++
+ private:
++    QString m_errorMessage;
++    bool m_newUserCreated = false;
+     /**
+      * Performs the finishing steps specific to the creation of the new user.
+      *
+      * Does not handle the system-wide completion steps such as network configuration, keyboard layout, etc.
+      * This separation is needed for when Plasma Setup is run in a context where no user creation is needed.
+      */
+-    void doUserCreationSteps();
++    bool doUserCreationSteps();
+ 
+     /**
+      * Logs out of the plasma-setup user.
+@@ -78,7 +85,7 @@
+     /**
+      * Creates the completion flag file (usually /etc/plasma-setup-done) to indicate that initial setup is complete.
+      */
+-    void createCompletionFlag();
++    bool createCompletionFlag();
+ 
+     /**
+      * Creates an autostart hook for the new user to cleanup the initial setup configuration.
+--- a/src/qml/Wizard.qml
++++ b/src/qml/Wizard.qml
+@@ -272,6 +272,14 @@
+                     }
+                 }
+ 
++                Kirigami.InlineMessage {
++                    Layout.fillWidth: true
++                    Layout.margins: Kirigami.Units.gridUnit
++                    type: Kirigami.MessageType.Error
++                    text: InitialStartUtil.errorMessage
++                    visible: text.length > 0
++                }
++
+                 // bottom footer
+                 RowLayout {
+                     id: stepFooter
+@@ -321,6 +329,7 @@
+                             root.currentModule.nextEnabled = false;
+                             // Finalize and exit the wizard.
+                             root.finishFinalPage();
++                            root.currentModule.nextEnabled = true;
+                         }
+                     }
+                 }
+--- a/src/auth/authhelper.cpp
++++ b/src/auth/authhelper.cpp
+@@ -13,6 +13,7 @@
+ 
+ #include <QDir>
+ #include <QProcess>
++#include <QScopeGuard>
+ #include <QRegularExpression>
+ #include <QStandardPaths>
+ #include <QtDBus/QDBusInterface>
+@@ -190,6 +191,11 @@
+         return makeErrorReply(QStringLiteral("Password cannot be empty."));
+     }
+ 
++    if (password.contains('\n') || password.contains('\r') || password.contains('\0')) {
++        std::fill(password.begin(), password.end(), '\0');
++        return makeErrorReply(QStringLiteral("Password contains unsupported line separators."));
++    }
++
+     // Build useradd command arguments
+     QStringList useraddArguments;
+ 
+@@ -233,6 +239,14 @@
+         const QString stdoutOutput = QString::fromLocal8Bit(useraddProcess.readAllStandardOutput()).trimmed();
+         return makeErrorReply(QStringLiteral("useradd failed with exit code %1: %2 %3").arg(useraddProcess.exitCode()).arg(stderrOutput).arg(stdoutOutput));
+     }
++
++    // Roll back only the account this invocation successfully created.
++    // Existing accounts never pass the successful useradd branch above.
++    auto rollbackUser = qScopeGuard([&]() {
++        QProcess cleanup;
++        cleanup.start(findExecutable(QStringLiteral("userdel")), {QStringLiteral("-r"), username});
++        cleanup.waitForFinished();
++    });
+ 
+     const ActionReply extraGroupReply = addUserToExtraGroups(username, args.value(QStringLiteral("extraGroups")));
+     if (extraGroupReply.type() != ActionReply::SuccessType) {
+@@ -305,6 +319,7 @@
+             {QStringLiteral("uid"), userInfo.uid},
+             {QStringLiteral("gid"), userInfo.gid},
+         });
++        rollbackUser.dismiss();
+         return reply;
+     } catch (const std::runtime_error &e) {
+         return makeErrorReply(QStringLiteral("User created but failed to retrieve user info: ") + QString::fromStdString(e.what()));

@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import socket
+import sys
 import subprocess
 import tempfile
 import threading
@@ -16,9 +17,21 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 project = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location('installer', project / 'tools/install-liuqin.py')
+spec = importlib.util.spec_from_file_location('installer', project / 'installer/install-liuqin.py')
 installer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(installer)
+
+sys.path.insert(0,str(project/'installer'))
+from liuqin_gui.demo import DemoEngine
+
+def make_bundle(root):
+    demo = DemoEngine(lambda event: None, root/'demo-state')
+    files = {}
+    for name in ('boot.img','installer.img','rootfs.tar.gz'):
+        data=(demo.demo_bundle/name).read_bytes();(root/name).write_bytes(data)
+        files[name]=hashlib.sha256(data).hexdigest()
+    demo.close()
+    return files
 
 
 def boot_header(kind, fields=None):
@@ -43,23 +56,21 @@ def boot_header(kind, fields=None):
 
 with tempfile.TemporaryDirectory() as directory:
     root = Path(directory)
-    files = {}
-    for name in ('boot.img', 'installer.img', 'rootfs.tar.gz'):
-        (root / name).write_bytes(name.encode())
-        files[name] = hashlib.sha256(name.encode()).hexdigest()
+    files = make_bundle(root)
+    demo_boot = (root/'boot.img').read_bytes()
     (root / 'bundle.json').write_text(json.dumps({'device': 'liuqin', 'files': files}))
-    args = ['python3', str(project / 'tools/install-liuqin.py'), '--bundle', str(root), '--check']
+    args = ['python3', str(project / 'installer/install-liuqin.py'), '--bundle', str(root), '--check']
     subprocess.run(args, check=True)
     subprocess.run(args + ['--enable-rescue'], check=True)
     (root / 'boot.img').write_bytes(b'corrupted')
     assert subprocess.run(args, capture_output=True).returncode != 0
-    (root / 'boot.img').write_bytes(b'boot.img')
+    (root / 'boot.img').write_bytes(demo_boot)
     (root / 'bundle.json').write_text(json.dumps({'device': 'liuqin', 'files': files,
                                                'status': 'OFFLINE_ASSEMBLED'}))
     class StopFlow(Exception):
         """Not an OSError/RuntimeError, so the RAM-channel retry loop lets it through."""
 
-    pinned_boot_bytes = json.loads((project / 'tools/lib/liuqin-rom-images.json').read_text()
+    pinned_boot_bytes = json.loads((project / 'shared/liuqin-rom-images.json').read_text()
                                    )['images']['boot.img']['bytes']
 
     def run_install(argv_extra, reported, stdin_tty=False, answer=None, boot_size=hex(pinned_boot_bytes),
@@ -68,7 +79,8 @@ with tempfile.TemporaryDirectory() as directory:
 
         def fastboot(command, **kwargs):
             calls.append(command)
-            assert command[:3] == ['fastboot', '-s', 'TEST_SERIAL']
+            assert Path(command[0]).name in ('fastboot','fastboot.exe')
+            assert command[1:3] == ['-s', 'TEST_SERIAL']
             if command[3] == 'boot':
                 return SimpleNamespace(stdout='booting\n')
             name = command[-1]
@@ -80,7 +92,7 @@ with tempfile.TemporaryDirectory() as directory:
         stdin = SimpleNamespace(isatty=lambda: stdin_tty)
         with patch.object(installer.sys, 'argv', ['install.py', '--bundle', str(root),
                           '--serial', 'TEST_SERIAL', '--backup', str(root.parent / 'unused-backup'),
-                          '--erase-userdata', '--allow-unverified', '--layout', 'linux-only',
+                          '--erase-userdata', '--allow-unverified', '--layout', 'linux-single',
                           *argv_extra]), \
              patch.object(installer.subprocess, 'run', side_effect=fastboot), \
              patch.object(installer.sys, 'stdin', stdin), \
@@ -121,8 +133,8 @@ with tempfile.TemporaryDirectory() as directory:
     # Both boot partitions are size-checked before the dual layout boots the
     # RAM installer, because both receive the project image.
     calls = run_install(['--yes'], hex(16 * 1024**3))
-    assert ['partition-size:boot_b'] == [c[-1] for c in calls if c[-1].startswith('partition-size:boot')], calls
-    print('PASS: the Linux-only layout checks boot_b only')
+    assert ['partition-size:boot_a'] == [c[-1] for c in calls if c[-1].startswith('partition-size:boot')], calls
+    print('PASS: the single-root layout checks boot_a only')
 
     # The project image is flashed zero-filled to the whole partition, so a
     # boot partition of another size, or a bootloader that cannot take the
@@ -159,18 +171,18 @@ with patch.object(installer.socket, 'create_connection', side_effect=lambda *a, 
     assert installer.command('unused', 'printf value') == b'value'
 thread.join()
 listener.close()
-assert subprocess.run(['sh', str(project / 'tools/lib/install-root.sh')], capture_output=True).returncode != 0
-invalid = subprocess.run(['sh', str(project / 'tools/lib/install-root.sh'),
+assert subprocess.run(['sh', str(project / 'device/installer/install-root.sh')], capture_output=True).returncode != 0
+invalid = subprocess.run(['sh', str(project / 'device/installer/install-root.sh'),
                           'unused', 'unused', 'unused', 'unused', 'ERASE-LIUQIN-USERDATA',
                           'linux_root', 'linux_home', 'INVALID'], capture_output=True)
 assert invalid.returncode != 0 and b'unsupported option: INVALID' in invalid.stderr and \
     b'usage: install-root.sh' in invalid.stderr, invalid.stderr
-unauthorized = subprocess.run(['sh', str(project / 'tools/lib/install-root.sh'),
+unauthorized = subprocess.run(['sh', str(project / 'device/installer/install-root.sh'),
                                'unused', 'unused', 'unused', 'unused', 'NO',
                                'linux_root', 'linux_home'], capture_output=True)
 assert unauthorized.returncode != 0 and b'data-erasure acknowledgement' in unauthorized.stderr
 for arguments in ([], ['id', 'report'], ['id', 'nonsense', 'x']):
-    refused = subprocess.run(['sh', str(project / 'tools/lib/install-layout.sh'), *arguments],
+    refused = subprocess.run(['sh', str(project / 'device/installer/install-layout.sh'), *arguments],
                              capture_output=True)
     assert refused.returncode != 0, arguments
 print('PASS: checksum rejection, local-only check, CRLF command framing and missing-authorization refusal')
@@ -178,34 +190,30 @@ print('PASS: checksum rejection, local-only check, CRLF command framing and miss
 # Argument combinations that must never reach a device.
 with tempfile.TemporaryDirectory() as directory:
     root = Path(directory)
-    files = {}
-    for name in ('boot.img', 'installer.img', 'rootfs.tar.gz'):
-        (root / name).write_bytes(name.encode())
-        files[name] = hashlib.sha256(name.encode()).hexdigest()
+    files = make_bundle(root)
+    demo_boot = (root/'boot.img').read_bytes()
     (root / 'bundle.json').write_text(json.dumps({'device': 'liuqin', 'files': files,
                                                   'status': 'OFFLINE_ASSEMBLED'}))
-    base = ['python3', str(project / 'tools/install-liuqin.py'), '--bundle', str(root),
+    base = ['python3', str(project / 'installer/install-liuqin.py'), '--bundle', str(root),
             '--serial', 'TEST_SERIAL', '--backup', str(root.parent / 'unused-backup'),
             '--erase-userdata', '--allow-unverified', '--yes']
     for extra, fragment in (
             ([], b'--layout'),
             (['--layout', 'dual'], b'--rom-dir'),
             (['--layout', 'linux-only', '--rom-dir', str(root)], b'--rom-dir only applies'),
-            (['--layout', 'linux-only', '--restore-partition-table', str(root)], b'separate action')):
+            (['--layout', 'linux-single', '--restore-partition-table', str(root)], b'separate action')):
         refused = subprocess.run(base + extra, capture_output=True)
         assert refused.returncode != 0 and fragment in refused.stderr, (extra, refused.stderr)
 print('PASS: layout, ROM and restore argument combinations are checked before any device access')
 
 # The Android boot override replaces a checksum-pinned stock image, so its own
 # admission rules are checked offline, before any device is contacted.
-pinned = json.loads((project / 'tools/lib/liuqin-rom-images.json').read_text())
+pinned = json.loads((project / 'shared/liuqin-rom-images.json').read_text())
 stock_boot_bytes = pinned['images']['boot.img']['bytes']
 with tempfile.TemporaryDirectory() as directory:
     root = Path(directory)
-    files = {}
-    for name in ('boot.img', 'installer.img', 'rootfs.tar.gz'):
-        (root / name).write_bytes(name.encode())
-        files[name] = hashlib.sha256(name.encode()).hexdigest()
+    files = make_bundle(root)
+    demo_boot = (root/'boot.img').read_bytes()
     (root / 'bundle.json').write_text(json.dumps({'device': 'liuqin', 'files': files,
                                                   'status': 'OFFLINE_ASSEMBLED'}))
     good = root / 'android-boot-good.img'
@@ -219,7 +227,7 @@ with tempfile.TemporaryDirectory() as directory:
     ours.write_bytes(boot_header('ubuntu') + bytes(stock_boot_bytes - 4096))
     bare = root / 'android-boot-bare.img'
     bare.write_bytes(b'ANDROID!' + bytes(stock_boot_bytes - 8))
-    check = ['python3', str(project / 'tools/install-liuqin.py'), '--bundle', str(root), '--check']
+    check = ['python3', str(project / 'installer/install-liuqin.py'), '--bundle', str(root), '--check']
     for extra, fragment in (
             (['--layout', 'dual', '--android-boot', str(short)], b'exactly'),
             (['--layout', 'dual', '--android-boot', str(wrong_magic)], b'Android boot magic'),
@@ -232,7 +240,7 @@ with tempfile.TemporaryDirectory() as directory:
         assert refused.returncode != 0 and fragment in refused.stderr, (extra, refused.stderr)
     accepted = subprocess.run(check + ['--layout', 'dual', '--android-boot', str(good)],
                               capture_output=True)
-    assert accepted.returncode == 0, accepted.stderr
+    assert accepted.returncode != 0 and b'linux-single' in accepted.stderr, accepted.stderr
     restore = subprocess.run(check + ['--restore-partition-table', str(root),
                                       '--android-boot', str(good)], capture_output=True)
     assert restore.returncode != 0 and b'separate action' in restore.stderr, restore.stderr
@@ -323,7 +331,7 @@ assert sent[2] == 'printf %s bGl1cWlu >>' + staged, sent
 assert sent[3] == 'printf "\\n" >>' + staged, sent
 assert installer.LAYOUT_WORK == '/run/liuqin-layout'
 # The device script must read the halves back from that same directory.
-layout_script = (project / 'tools/lib/install-layout.sh').read_text()
+layout_script = (project / 'device/installer/install-layout.sh').read_text()
 assert 'LIUQIN_LAYOUT_WORK:-' + installer.LAYOUT_WORK in layout_script
 print('PASS: the staged partition-table halves land in the scratch directory the RAM image has')
 
@@ -420,7 +428,7 @@ with tempfile.TemporaryDirectory() as directory:
 print('PASS: dual writes the project image to boot_a and boot_b and selects slot A; '
       'linux-only keeps slot B; every boot write is the image zero-filled to the whole partition')
 
-installer_source = (project / 'tools/install-liuqin.py').read_text()
+installer_source = (project / 'installer/install-liuqin.py').read_text()
 assert "'--set-active=b'" not in installer_source and '--set-active=b' not in installer_source
 assert 'stock_images_to_flash(device_layout, {' in installer_source
 assert 'if name != ANDROID_BOOT_IMAGE})' in installer_source
@@ -439,7 +447,7 @@ with tempfile.TemporaryDirectory() as directory:
                          'android', 'http://192.168.7.1:8000/android-boot.img', 'b' * 64, '12288'], arguments
     # install-root.sh accepts exactly this shape, validates it before touching
     # anything, and refuses a malformed one.
-    base = ['sh', str(project / 'tools/lib/install-root.sh'), 'not-this-boot', 'u', 's', '1',
+    base = ['sh', str(project / 'device/installer/install-root.sh'), 'not-this-boot', 'u', 's', '1',
             'ERASE-LIUQIN-USERDATA', 'linux_root', 'linux_home']
     # Reaching the boot-identity check means every option was accepted: it is
     # the first test after the option scan, and nothing has been touched yet.
@@ -504,12 +512,19 @@ with tempfile.TemporaryDirectory() as directory:
                 assert built[:len(fixed)] == fixed, built
                 assert options == expected, (layout_mode, enable_rescue, keep_home, built)
                 assert ('KEEP-HOME' in built) == keep_home, built
-                result = subprocess.run(['sh', str(project / 'tools/lib/install-root.sh'), *built[2:]],
+                result = subprocess.run(['sh', str(project / 'device/installer/install-root.sh'), *built[2:]],
                                         capture_output=True)
                 assert result.returncode != 0 and accepted in result.stderr, (built, result.stderr)
-    # main() hands exactly this command to the tablet.
-    assert 'install = install_root_command(boot_id, base, bundle, manifest, args, rom_images)' in \
-        (project / 'tools/install-liuqin.py').read_text()
+with tempfile.TemporaryDirectory() as directory:
+    bundle = Path(directory)
+    (bundle / 'rootfs.tar.gz').write_bytes(b'fixture')
+    parser, args = installer.parse_arguments(['--bundle', str(bundle), '--layout', 'linux-single'])
+    contract = ('/run/target-root.contract', 'a' * 64)
+    built = installer.install_root_command('not-this-boot', 'http://fixture', bundle,
+        {'files': {'rootfs.tar.gz': 'b' * 64}}, args, {}, target_contract=contract)
+    assert built[-3:] == ['ROOT-CONTRACT', *contract]
+    refused = subprocess.run(['sh', str(project / 'device/installer/install-root.sh'), *built[2:]], capture_output=True)
+    assert refused.returncode != 0 and b'RAM boot identity changed' in refused.stderr, refused.stderr
 print('PASS: the host sends KEEP-HOME only with --keep-home, after ENABLE-USB-RESCUE and before '
       'SWITCH-STORE, and install-root.sh accepts every shape the host builds')
 
@@ -641,7 +656,7 @@ def shell_function(path, name):
     return '\n'.join(lines[start:end + 1])
 
 
-store_script = project / 'tools/lib/install-switch-store.sh'
+store_script = project / 'device/installer/install-switch-store.sh'
 for name in ('u32_at', 'classify'):
     assert shell_function(switch_script, name) == shell_function(store_script, name), name
 classifier = shell_function(switch_script, 'u32_at') + '\n' + shell_function(switch_script, 'classify') + \

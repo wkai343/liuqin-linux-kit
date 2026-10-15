@@ -3,14 +3,14 @@
 #
 # tests/installer-layout.py covers the host's layout arithmetic and
 # tests/installer.py covers the argument refusals, but neither one ever runs a
-# function of tools/lib/install-layout.sh.  This suite does: it rewrites the
+# function of device/installer/install-layout.sh.  This suite does: it rewrites the
 # script's absolute device paths onto a synthetic sysfs/dev fixture, stubs
 # busybox and sgdisk, and runs the real function bodies and the real verbs
 # under BusyBox ash -- the shell and the `set -e` semantics of the RAM image.
 set -eu
 
 project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-layout_source=${LIUQIN_LAYOUT_SCRIPT:-$project_root/tools/lib/install-layout.sh}
+layout_source=${LIUQIN_LAYOUT_SCRIPT:-$project_root/device/installer/install-layout.sh}
 [ -f "$layout_source" ] ||
 	{ printf '%s\n' "test-liuqin-layout: no such script: $layout_source" >&2; exit 1; }
 
@@ -41,8 +41,8 @@ fail() { printf 'test-liuqin-layout: %s\n' "$*" >&2; exit 1; }
 # Whole-line comments are stripped first: they may name the directory to
 # explain why it must not be used, and only code that runs on the tablet is
 # under test here.
-for device_script in tools/lib/install-layout.sh tools/lib/install-root.sh \
-	tools/lib/install-switch-store.sh tools/provision-liuqin-from-persist.sh initramfs/init; do
+for device_script in device/installer/install-layout.sh device/installer/install-root.sh \
+	device/installer/install-switch-store.sh device/installer/provision-liuqin-from-persist.sh device/boot/initramfs/init; do
 	[ -f "$project_root/$device_script" ] ||
 		fail "no such device-side script: $device_script"
 	! sed 's/^[[:space:]]*#.*$//' "$project_root/$device_script" |

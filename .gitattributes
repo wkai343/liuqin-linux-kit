@@ -1,2 +1,5 @@
 # Unified diffs use leading context spaces, including otherwise empty lines.
 *.patch -whitespace
+# Native Windows entry points retain CRLF after checkout.
+installer/*.cmd text eol=crlf whitespace=cr-at-eol
+installer/*.ps1 text eol=crlf whitespace=cr-at-eol

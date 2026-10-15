@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=小米平板初始显示设置
+Exec=/usr/libexec/liuqin-plasma-panel-defaults
+TryExec=/usr/libexec/liuqin-plasma-panel-defaults
+OnlyShowIn=KDE;
+NoDisplay=true

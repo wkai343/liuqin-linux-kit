@@ -1,8 +1,6 @@
-name: Kernel build
-# Runs on every push/PR so the job can be a required status check; the build
-# itself is skipped unless kernel-affecting paths changed (a skipped job still
-# satisfies branch protection).
-on: [push, pull_request, workflow_dispatch]
+name: 内核构建
+on:
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
@@ -15,29 +13,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          path: project
           persist-credentials: false
-          fetch-depth: 0
-      - id: affected
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            base="${{ github.event.pull_request.base.sha }}"
-          else
-            base="${{ github.event.before }}"
-          fi
-          # A rewritten branch may leave the previous commit outside this checkout.
-          # In that case build instead of treating a failed diff as no changes.
-          if [ -z "$base" ] || ! git -C project cat-file -e "$base^{commit}" 2>/dev/null; then
-            echo 'needed=true' >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if git -C project diff --name-only "$base" "${{ github.sha }}" |
-             grep -qE '^(kernel/source\.json|device/configs/|tools/build-liuqin-kernel|\.github/actions/kernel/|\.github/workflows/build\.yml)'; then
-            echo 'needed=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'needed=false' >> "$GITHUB_OUTPUT"
-          fi
-      - uses: ./project/.github/actions/kernel
-        if: steps.affected.outputs.needed == 'true'
+      - name: 安装 Devbox 构建环境
+        uses: jetify-com/devbox-install-action@734088efddca47cf44ff8a09289c6d0e51b73218 # v0.12.0
         with:
-          kernel-repository: ${{ github.repository_owner }}/linux-sm8450-liuqin
+          devbox-version: 0.18.4
+      - name: 创建 CI 构建配置
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          data = json.loads(Path('build/devbox/build.example.json').read_text())
+          data['jobs'] = 2
+          (Path(os.environ['RUNNER_TEMP']) / 'liuqin-build.json').write_text(json.dumps(data) + '\n')
+          PY
+      - name: 构建默认目标内核与模块
+        run: |
+          devbox run kernel --config "$RUNNER_TEMP/liuqin-build.json"
+          devbox run modules --config "$RUNNER_TEMP/liuqin-build.json"
+      - name: 上传内核构建结果
+        uses: actions/upload-artifact@v4
+        with:
+          name: liuqin-kernel-${{ github.sha }}
+          if-no-files-found: error
+          include-hidden-files: true
+          path: |
+            out/build/from-source/kernel-*/kernel/arch/arm64/boot/Image
+            out/build/from-source/kernel-*/kernel/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dtb
+            out/build/from-source/kernel-*/kernel/.config
+            out/build/from-source/kernel-*/kernel/build-info.json
+            out/build/from-source/kernel-*/kernel/SHA256SUMS
+            out/build/from-source/kernel-*/kernel/vmlinux
+            out/build/from-source/kernel-*/kernel/System.map
+            out/build/from-source/modules-*/modules/
+          retention-days: 14

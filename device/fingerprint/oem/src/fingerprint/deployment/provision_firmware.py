@@ -79,5 +79,40 @@ def provision(directory):
     print("fpc_firmware=READY source=local_modem_read_only")
 
 
+def provision_from_directory(source, directory):
+    """Use already extracted, SHA-pinned ROM files without touching modem_a."""
+    if os.geteuid() != 0:
+        raise RuntimeError("root required")
+    source, directory = Path(source), Path(directory)
+    info = directory.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or (info.st_uid, info.st_gid) != (0, 0) or info.st_mode & 0o022):
+        raise ValueError("untrusted FPC firmware cache")
+    hashes = checked_hashes(directory)
+    with tempfile.TemporaryDirectory(prefix=".provision-rom-", dir=directory) as temporary:
+        stage = Path(temporary)
+        for name in NAMES:
+            if not matches(source / name, hashes[name]):
+                raise RuntimeError("stock FPC firmware hash mismatch: " + name)
+            target = stage / name
+            target.write_bytes((source / name).read_bytes())
+            target.chmod(0o600)
+            if not matches(target, hashes[name]):
+                raise RuntimeError("copied FPC firmware hash mismatch: " + name)
+        for name in NAMES:
+            if (directory / name).is_symlink():
+                raise ValueError("refuse symlink in FPC firmware cache")
+        for name in NAMES:
+            os.replace(stage / name, directory / name)
+    print("fpc_firmware=READY source=verified_rom_files partition_writes=0")
+
+
 if __name__ == "__main__":
-    provision(Path(__file__).resolve().parent / "firmware")
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--from-directory", type=Path)
+    args = parser.parse_args()
+    directory = Path(__file__).resolve().parent / "firmware"
+    if args.from_directory:
+        provision_from_directory(args.from_directory, directory)
+    else:
+        provision(directory)

@@ -1,5 +1,6 @@
-name: Integration checks
-on: [push, pull_request, workflow_dispatch]
+name: 集成检查
+on:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -10,52 +11,91 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Python and shell syntax
+      - name: Python 与 Shell 语法
         run: |
           python3 - <<'PY'
           import ast
           import subprocess
           from pathlib import Path
-          for path in Path('tools').rglob('*.py'):
+          for path in [p for base in ('build','installer','shared','device/boot') for p in Path(base).rglob('*.py')]:
               ast.parse(path.read_text(), filename=str(path))
           for path in sorted(Path('device/gnome-overlay/usr/local/libexec').iterdir()):
               if path.is_file() and path.read_bytes().startswith(b'#!/usr/bin/env python3'):
                   ast.parse(path.read_text(), filename=str(path))
-          for path in Path('tools').rglob('*.sh'):
+          for path in [p for base in ('build','device/installer','device/boot') for p in Path(base).rglob('*.sh')]:
               subprocess.run(['sh', '-n', str(path)], check=True)
+          subprocess.run(['sh', '-n', 'device/boot/initramfs/init'], check=True)
           PY
-      - name: Installer offline checks
+      - name: 构建与安装器离线检查
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y gdisk busybox-static
+          sudo apt-get install --no-install-recommends -y python3-pyelftools gdisk busybox-static device-tree-compiler rpm rsync pigz acl libcap2-bin btrfs-progs
           python3 tests/installer.py
           python3 tests/storage-layouts.py
           python3 tests/gui-engine.py
+          python3 tests/gui-artifacts.py
+          python3 tests/filesystems.py
+          python3 tests/windows-installer.py
+          python3 tests/usb-installer-network.py
+          python3 tests/custom-kernel.py
+          python3 tests/kernel-updates.py
+          python3 tests/devbox-build.py
+          python3 tests/source-build.py
+          python3 tests/stock-rom.py
+          python3 tests/fedora-build.py
+          python3 tests/selinux-packaging.py
+          python3 tests/fedora-fingerprint.py
+          python3 tests/fingerprint-irq.py
+          sudo python3 tests/fingerprint-enrol-preflight.py
+          sudo python3 tests/fingerprint-release.py
+          python3 tests/shell-defaults.py
+          python3 tests/memory-reclaim.py
+          python3 tests/mkbootimg-fetch.py
+          python3 tests/initramfs-inputs.py
+          python3 tests/sensor-build-environment.py
+          python3 tests/project-structure.py
+          python3 tests/project-identity.py
+          python3 tests/docs-links.py
           python3 tests/gui-worker.py
           python3 tests/installer-layout.py
           sudo python3 tests/rootfs-archive.py
-      - name: Persistent-root fail-closed policy
+      - name: 根文件系统存储保护
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y busybox-static
           sh tests/persistent-root.sh
-      - name: GNOME storage guard policy
+      - name: Adreno 传感器读取
+        run: |
+          sudo apt-get install --no-install-recommends -y g++ pkg-config qt6-base-dev
+          python3 tests/adreno-stats.py
+      - name: KWin 平板模式回归
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          from pathlib import Path
+          sys.path.insert(0, 'build/lib')
+          from source_build import download
+          record = json.loads(Path('device/kwin/source.json').read_text())
+          download(record['url'], Path('inputs/kwin') / record['archive'], record['sha256'])
+          PY
+          python3 tests/kwin-tablet-mode.py
+      - name: 设备存储保护
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y busybox-static
           sh tests/storage-guard.sh
-      - name: Device-side layout script
+      - name: 设备端分区布局
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y busybox-static
           sh tests/install-layout.sh
-      - name: Device-side home preservation
+      - name: 设备端 home 保留
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y busybox-static e2fsprogs
           sh tests/install-root.sh
           python3 tests/install-root-single.py
-      - name: Sensor startup policy
+      - name: 传感器启动策略
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y bubblewrap

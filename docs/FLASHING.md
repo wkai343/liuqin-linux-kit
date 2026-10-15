@@ -1,70 +1,38 @@
-# 安装指南
+# 安装要求与恢复
 
-[English](FLASHING.en.md) ｜ [项目首页](../README.md)
+[项目首页](../README.md) ｜ [安装助手](INSTALLER-GUI.md) ｜ [CLI 与验收](INSTALL-TESTING.md)
 
-## 安装包
+## 设备与安装文件
 
-请下载同一版本的全部安装文件，按照[安装步骤](INSTALL-TESTING.md)执行。
-系统归档可能分为多个文件，指南提供合并命令；不要混用版本。
+仅支持已解锁 Bootloader 的 Xiaomi Pad 6 Pro（liuqin，SM8475）。
+使用接口相容的 `installer.img`、`boot.img`、`rootfs.tar.gz`，电脑端安装器单独提供。
+256GB 单根已实测，128GB / 512GB 仅通过容量规划离线检查。
+新版 GUI 从头安装、Btrfs、Windows USB 安装和 Android 恢复仍待各自验收。
 
-## 适用设备
+安装器读取真实 GPT，要求 userdata 唯一、位于第一颗 UFS（sda）、至少 16 GiB，
+逻辑块为 4096 字节，并符合原厂 35 分区布局。编号、边界不套用其他容量的数值；
+身份或布局不能确认时停止。其他型号、任意多分区和修改过的原厂布局不在当前支持范围。
 
-Xiaomi Pad 6 Pro，代号 `liuqin`，芯片 SM8475。其他小米平板型号不兼容。
-首次安装和首启验证在 **256 GB 机型**上完成；Android 恢复仍未独立验证。
-128 GB 与 512 GB 容量变体按下方规则放行，但未逐一真机验证；自定义分区布局不支持。
-不得修改常量或跳过检查来强行安装。
+## 单根布局
 
-程序要求 Bootloader 已解锁并进入 Fastboot，安装完成后由 Bootloader 选择计划槽位。设备侧核对以下 Linux sysfs 数值
-（容量单位为 512 字节扇区，不是文件系统块大小）：
+`linux-single` 使用整个 userdata，格式可选 ext4 或 Btrfs，系统位于 `native-root`，
+`/home` 位于其中，从 A 槽启动。Btrfs 的 `native-root` 为子卷；不创建独立 home 或额外 GPT 分区。
+userdata 边界保留，Bootloader 切槽仍可能改变 GPT 的启动属性。
 
-| 项目 | 允许值 |
-|---|---|
-| userdata 分区名（PARTNAME） | `userdata`，且唯一、位于第一颗 UFS（sda） |
-| sda 逻辑块大小 | 4096 |
-| userdata 扇区数 | ≥ 33554432（16 GiB） |
-| 原厂分区表 | 35 个分区；分区名和编号唯一，范围不重叠 |
-
-源码安装器按本机实际分区表生成并确认方案，百分比尺寸也使用本机容量。
-新增 `linux-single` 保留 userdata 的原有分区边界，使用整个 userdata 作为根文件系统，`/home` 是其中的目录。
-该模式须配套重建安装镜像，旧 v0.6.0 安装包不支持。本分支已在一台 256GB / HW16.9.0 设备上验证单根 A 槽启动、正常重启和自动旋转；128GB / 512GB 尚未逐一真机验收。
-切槽会更新启动相关 GPT 状态，不应理解为全机 GPT 字节完全不变。新版 [QML 安装器](INSTALLER-GUI.md) 的完整真机安装仍待验收。
-
-分区编号与起始偏移随容量变体不同，不属于身份检查；安装器与启动链均按
-PARTNAME 解析目标分区。型号、槽位或会话身份无法确认时，安装器必须停止，
-不允许猜测后继续写入。这些检查用于减少误操作风险，并不构成不会损坏设备的保证。
+**首次安装与重装均会格式化 userdata。** 安装前把个人文件备份到平板以外，
+另存本机原 boot、persist 和 GPT。设备备份不含 userdata 文件，也不是完整 Android 恢复包；
+不能使用其他平板的校准或设备地址。备份复用见 [安装助手](INSTALLER-GUI.md#备份复用)。
+日常软件和内核升级无需重装 rootfs，见 [内核更新](KERNEL-UPDATES.md)。
 
 ## 数据与恢复
 
-单系统布局把 Android userdata 分区的空间交给 Ubuntu；双系统布局缩小该分区，
-在 Ubuntu 旁保留 Android。两种首次安装都会清除数据，解锁 Bootloader 也会清除用户数据。
-单根模式保留 userdata 的分区边界但格式化其内容；重装也会清空同一文件系统中的用户目录，不能使用 `--keep-home`。
+恢复 Android 需要适配本机、满足防回滚要求的原厂 Fastboot ROM，并重新准备 Android userdata。
+仅刷回 boot 不能撤销 Linux 安装或恢复个人文件。若旧系统曾拆分 userdata，
+先按 CLI 分区表恢复流程还原原厂边界；当前单根布局保留边界。
 
-安装前需要：
+保留原厂防回滚检查，不恢复其他平板的 persist；存在非原厂镜像时保持 Bootloader 解锁。
+恢复原厂固件会覆盖 Linux 启动链，相关清刷会清除数据。此恢复路线尚未单独真机验收，
+不提供任意版本 ROM 混刷或自动恢复保证。
 
-1. 将个人文件备份到平板以外的位置。
-2. 准备与设备匹配的原厂固件，并保留对应恢复说明。
-3. 在覆盖任何 boot 分区前，备份原 boot 分区与出厂 `persist` 分区。
-   RAM 临时启动与持久刷写是不同操作；刷写后再备份不能保留原镜像。
-
-安装器必须从这台平板读取出厂校准与设备地址，不可使用其他平板的 `persist`
-镜像或校准数据。
-
-恢复 Android 需要还原适配的原厂固件，并为 Android 重新准备 userdata。
-仅替换 boot 镜像不能撤销 Ubuntu 安装。设备上仍有非原厂启动镜像时，应保持
-Bootloader 解锁。
-
-## 双系统
-
-双系统布局下两个系统都从 A 槽启动。切换时把另一系统的 boot 镜像写入 `boot_a`，
-回读核对后重启平板；未使用的镜像保存在 Ubuntu 根文件系统上。切换不会改变活动槽；
-`boot_b` 保存 Ubuntu boot 镜像的一份副本，`boot_a` 无法加载时由 Bootloader 自动使用。
-Ubuntu 提供"重启到 Android"入口，Android 通过 KernelSU 模块提供"Reboot to Ubuntu"按钮。
-
-两个方向的切换均尚未经真机验证。命令、安全规则与修复方法见
-[双系统切换](INSTALL-TESTING.md#双系统切换)。
-
-## 发布内容
-
-受支持的版本将提供匹配的 boot 镜像与根文件系统、安装工具、校验文件、源码版本、
-支持的存储布局和恢复要求。安装器会在访问设备前校验镜像。
-单独编译出的内核文件不是完整安装镜像。
+上游双系统与 KernelSU 组件作为适配参考保留，见 [组件说明](../device/android/ksu-boot-ubuntu/README.md)。
+当前安装入口仅接受 `linux-single`；双系统参考代码不代表 Fedora 支持双系统或 A/B 自动回滚。

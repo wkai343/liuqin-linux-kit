@@ -1,7 +1,7 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT
 #
-# Host-side execution tests for tools/lib/install-switch-store.sh, the
+# Host-side execution tests for device/installer/install-switch-store.sh, the
 # installer step that fills liuqin-switch's store on the new Ubuntu root.
 #
 # The script runs under BusyBox sh with only BusyBox applets on PATH -- the
@@ -13,7 +13,7 @@
 set -eu
 
 project_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-script_source=$project_root/tools/lib/install-switch-store.sh
+script_source=$project_root/device/installer/install-switch-store.sh
 switch=$project_root/device/gnome-overlay/usr/local/sbin/liuqin-switch
 
 busybox=$(command -v busybox || true)

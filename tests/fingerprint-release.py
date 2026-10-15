@@ -21,7 +21,7 @@ def load(name, path):
 
 
 firmware = load("firmware", ROOT / "device/fingerprint/oem/src/fingerprint/deployment/provision_firmware.py")
-package = load("release_package", ROOT / "tools/build-liuqin-fingerprint-deb.py")
+package = load("release_package", ROOT / "build/scripts/build-liuqin-fingerprint-deb.py")
 
 
 class ReleaseTests(unittest.TestCase):
@@ -99,6 +99,25 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 firmware.provision(self.cache)
             command.assert_not_called()
+
+    def test_verified_rom_directory_never_mounts_or_changes_partitions(self):
+        source=self.base/'rom';source.mkdir()
+        for name,data in self.data.items():(source/name).write_bytes(data)
+        with patch.object(firmware.subprocess,'run',side_effect=AssertionError('no device access')):
+            firmware.provision_from_directory(source,self.cache)
+        for name,data in self.data.items():
+            self.assertEqual((self.cache/name).read_bytes(),data)
+            self.assertEqual((self.cache/name).stat().st_mode&0o777,0o600)
+
+    def test_corrupt_rom_directory_keeps_existing_cache(self):
+        source=self.base/'rom';source.mkdir()
+        for name,data in self.data.items():(source/name).write_bytes(data)
+        (source/firmware.NAMES[-1]).write_bytes(b'bad input')
+        prior=self.cache/firmware.NAMES[0];prior.write_bytes(b'prior cache')
+        with self.assertRaisesRegex(RuntimeError,'hash mismatch'):
+            firmware.provision_from_directory(source,self.cache)
+        self.assertEqual(prior.read_bytes(),b'prior cache')
+        self.assertEqual({p.name for p in self.cache.iterdir()},{'SHA256.json',prior.name})
 
     def test_root_staging_has_no_account_services_or_credentials(self):
         payload = self.base / "payload"

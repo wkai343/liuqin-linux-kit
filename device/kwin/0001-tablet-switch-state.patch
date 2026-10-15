@@ -1,0 +1,170 @@
+--- a/src/core/inputdevice.h
++++ b/src/core/inputdevice.h
+@@ -37,6 +37,12 @@
+     Released,
+     Pressed,
+     Repeated,
++};
++
++enum class SwitchType {
++    Lid,
++    TabletMode,
++    Unknown,
+ };
+ 
+ enum class SwitchState {
+@@ -156,7 +162,7 @@
+     void holdGestureBegin(int fingerCount, std::chrono::microseconds time, InputDevice *device);
+     void holdGestureEnd(std::chrono::microseconds time, InputDevice *device);
+     void holdGestureCancelled(std::chrono::microseconds time, InputDevice *device);
+-    void switchToggle(SwitchState state, std::chrono::microseconds time, InputDevice *device);
++    void switchToggle(SwitchType type, SwitchState state, std::chrono::microseconds time, InputDevice *device);
+     void tabletToolAxisEvent(const QPointF &pos, qreal pressure, qreal xTilt, qreal yTilt, qreal rotation, qreal distance, bool tipDown, qreal sliderPosition, InputDeviceTabletTool *tool, std::chrono::microseconds time, InputDevice *device);
+     void tabletToolAxisEventRelative(const QPointF &delta,
+                                      qreal pressure, qreal xTilt, qreal yTilt, qreal rotation, qreal distance, bool tipDown, qreal sliderPosition, InputDeviceTabletTool *tool, std::chrono::microseconds time, InputDevice *device);
+--- a/src/input_event.h
++++ b/src/input_event.h
+@@ -157,6 +157,7 @@
+ 
+ struct SwitchEvent
+ {
++    SwitchType type;
+     InputDevice *device;
+     SwitchState state;
+     std::chrono::microseconds timestamp;
+--- a/src/backends/libinput/events.h
++++ b/src/backends/libinput/events.h
+@@ -181,6 +181,7 @@
+     SwitchEvent(libinput_event *event, libinput_event_type type);
+     ~SwitchEvent() override;
+ 
++    SwitchType switchType() const;
+     SwitchState state() const;
+ 
+     std::chrono::microseconds time() const;
+--- a/src/backends/libinput/events.cpp
++++ b/src/backends/libinput/events.cpp
+@@ -318,6 +318,18 @@
+ 
+ SwitchEvent::~SwitchEvent() = default;
+ 
++SwitchType SwitchEvent::switchType() const
++{
++    switch (libinput_event_switch_get_switch(m_switchEvent)) {
++    case LIBINPUT_SWITCH_LID:
++        return SwitchType::Lid;
++    case LIBINPUT_SWITCH_TABLET_MODE:
++        return SwitchType::TabletMode;
++    default:
++        return SwitchType::Unknown;
++    }
++}
++
+ SwitchState SwitchEvent::state() const
+ {
+     switch (libinput_event_switch_get_switch_state(m_switchEvent)) {
+--- a/src/backends/libinput/connection.cpp
++++ b/src/backends/libinput/connection.cpp
+@@ -489,7 +489,7 @@
+         }
+         case LIBINPUT_EVENT_SWITCH_TOGGLE: {
+             SwitchEvent *se = static_cast<SwitchEvent *>(event.get());
+-            Q_EMIT se->device()->switchToggle(se->state(), se->time(), se->device());
++            Q_EMIT se->device()->switchToggle(se->switchType(), se->state(), se->time(), se->device());
+             break;
+         }
+         case LIBINPUT_EVENT_TABLET_TOOL_AXIS: {
+--- a/src/input.cpp
++++ b/src/input.cpp
+@@ -3278,8 +3278,9 @@
+     connect(device, &InputDevice::touchCanceled, m_touch, &TouchInputRedirection::cancel);
+     connect(device, &InputDevice::touchFrame, m_touch, &TouchInputRedirection::frame);
+ 
+-    connect(device, &InputDevice::switchToggle, this, [this](SwitchState state, std::chrono::microseconds time, InputDevice *device) {
++    connect(device, &InputDevice::switchToggle, this, [this](SwitchType type, SwitchState state, std::chrono::microseconds time, InputDevice *device) {
+         SwitchEvent event{
++            .type = type,
+             .device = device,
+             .state = state,
+             .timestamp = time,
+--- a/src/tabletmodemanager.cpp
++++ b/src/tabletmodemanager.cpp
+@@ -45,7 +45,7 @@
+ 
+     void switchEvent(SwitchEvent *event) override
+     {
+-        if (!event->device->isTabletModeSwitch()) {
++        if (event->type != SwitchType::TabletMode) {
+             return;
+         }
+ 
+@@ -87,6 +87,11 @@
+ 
+     void check()
+     {
++        // deleteLater() leaves this fallback alive during input enumeration.
++        // Once a real switch exists, no pointer hotplug may overwrite it.
++        if (input()->hasTabletModeSwitch()) {
++            return;
++        }
+         const auto devices = input()->devices();
+         const bool hasTouch = std::any_of(devices.constBegin(), devices.constEnd(), [](InputDevice *device) {
+             return device->isTouch() && blocksTabletMode(device);
+--- a/src/lidswitchtracker.cpp
++++ b/src/lidswitchtracker.cpp
+@@ -25,7 +25,7 @@
+ 
+ void LidSwitchTracker::switchEvent(KWin::SwitchEvent *event)
+ {
+-    if (event->device->isLidSwitch()) {
++    if (event->type == SwitchType::Lid) {
+         const bool state = event->state == SwitchState::On;
+         if (state != m_isLidClosed) {
+             m_isLidClosed = state;
+--- a/src/dpmsinputeventfilter.cpp
++++ b/src/dpmsinputeventfilter.cpp
+@@ -197,7 +197,7 @@
+ 
+ bool DpmsInputEventFilter::switchEvent(SwitchEvent *event)
+ {
+-    if (event->device->isLidSwitch() && event->state == SwitchState::Off) {
++    if (event->type == SwitchType::Lid && event->state == SwitchState::Off) {
+         notify();
+     }
+     return false;
+--- a/autotests/integration/outputchanges_test.cpp
++++ b/autotests/integration/outputchanges_test.cpp
+@@ -1228,15 +1228,15 @@
+     input()->addInputDevice(lidSwitch.get());
+ 
+     auto timestamp = 1ms;
+-    Q_EMIT lidSwitch->switchToggle(SwitchState::Off, timestamp++, lidSwitch.get());
++    Q_EMIT lidSwitch->switchToggle(SwitchType::Lid, SwitchState::Off, timestamp++, lidSwitch.get());
+     QVERIFY(internal->isEnabled());
+     QVERIFY(external->isEnabled());
+ 
+-    Q_EMIT lidSwitch->switchToggle(SwitchState::On, timestamp++, lidSwitch.get());
++    Q_EMIT lidSwitch->switchToggle(SwitchType::Lid, SwitchState::On, timestamp++, lidSwitch.get());
+     QVERIFY(!internal->isEnabled());
+     QVERIFY(external->isEnabled());
+ 
+-    Q_EMIT lidSwitch->switchToggle(SwitchState::Off, timestamp++, lidSwitch.get());
++    Q_EMIT lidSwitch->switchToggle(SwitchType::Lid, SwitchState::Off, timestamp++, lidSwitch.get());
+     QVERIFY(internal->isEnabled());
+     QVERIFY(external->isEnabled());
+ 
+@@ -2334,12 +2334,12 @@
+     input()->addInputDevice(&lidSwitch);
+ 
+     auto timestamp = 1ms;
+-    Q_EMIT lidSwitch.switchToggle(SwitchState::On, timestamp++, &lidSwitch);
++    Q_EMIT lidSwitch.switchToggle(SwitchType::Lid, SwitchState::On, timestamp++, &lidSwitch);
+     QVERIFY(!internal->isEnabled());
+     QVERIFY(external->isEnabled());
+     QCOMPARE(external->deviceOffset(), QPoint());
+ 
+-    Q_EMIT lidSwitch.switchToggle(SwitchState::Off, timestamp++, &lidSwitch);
++    Q_EMIT lidSwitch.switchToggle(SwitchType::Lid, SwitchState::Off, timestamp++, &lidSwitch);
+     QVERIFY(internal->isEnabled());
+     QVERIFY(external->isEnabled());
+     QCOMPARE(external->deviceOffset(), deviceOffset);

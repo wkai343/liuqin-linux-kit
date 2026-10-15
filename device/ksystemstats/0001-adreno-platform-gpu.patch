@@ -1,0 +1,69 @@
+--- a/plugins/gpu/LinuxBackend.cpp
++++ b/plugins/gpu/LinuxBackend.cpp
+@@ -12,6 +12,7 @@
+ 
+ #include <processcore/gpu_utils.h>
+ 
++#include "LinuxAdrenoGpu.h"
+ #include "LinuxAmdGpu.h"
+ #include "LinuxIntelGpu.h"
+ #include "LinuxNvidiaGpu.h"
+@@ -78,6 +79,19 @@
+     }
+ 
+     udev_enumerate_unref(enumerate);
++
++    QStringList occupiedIds;
++    for (const auto *gpu : std::as_const(m_devices)) {
++        occupiedIds.append(gpu->id());
++    }
++    for (const auto &device : AdrenoSysfs::discover()) {
++        const auto id = AdrenoSysfs::availableGpuId(occupiedIds);
++        occupiedIds.append(id);
++        auto gpu = new LinuxAdrenoGpu(id, device);
++        gpu->initialize();
++        m_devices.append(gpu);
++        Q_EMIT deviceAdded(gpu);
++    }
+ }
+ 
+ void LinuxBackend::stop()
+--- a/plugins/gpu/CMakeLists.txt
++++ b/plugins/gpu/CMakeLists.txt
+@@ -9,7 +9,7 @@
+ endif()
+ 
+ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+-    target_sources(ksystemstats_plugin_gpu PRIVATE LinuxAmdGpu.cpp LinuxIntelGpu.cpp LinuxNvidiaGpu.cpp LinuxBackend.cpp NvidiaGpu.cpp NvidiaSmiProcess.cpp)
++    target_sources(ksystemstats_plugin_gpu PRIVATE LinuxAdrenoGpu.cpp LinuxAmdGpu.cpp LinuxIntelGpu.cpp LinuxNvidiaGpu.cpp LinuxBackend.cpp NvidiaGpu.cpp NvidiaSmiProcess.cpp)
+ 
+     add_executable(ksystemstats_intel_helper IntelHelper.cpp)
+     configure_file(IntelHelperLocation.h.cmake IntelHelperLocation.h)
+--- a/plugins/gpu/AllGpus.cpp
++++ b/plugins/gpu/AllGpus.cpp
+@@ -9,6 +9,7 @@
+ #include <KLocalizedString>
+ 
+ #include <systemstats/AggregateSensor.h>
++#include <systemstats/SensorContainer.h>
+ 
+ AllGpus::AllGpus(KSysGuard::SensorContainer *parent)
+     : SensorObject(QStringLiteral("all"), i18nc("@title", "All GPUs"), parent)
+@@ -23,6 +24,17 @@
+     m_usageSensor->setUnit(KSysGuard::UnitPercent);
+     m_usageSensor->setMax(100);
+ 
++    // Shared-memory GPUs may expose utilization without dedicated VRAM.
++    // Do not invent a zero-byte VRAM sensor when no device supplies one.
++    bool hasVram = false;
++    for (const auto *gpu : parent->objects()) {
++        hasVram |= gpu != this && gpu->sensor(QStringLiteral("totalVram"))
++                              && gpu->sensor(QStringLiteral("usedVram"));
++    }
++    if (!hasVram) {
++        return;
++    }
++
+     m_totalVramSensor = new KSysGuard::AggregateSensor(this, QStringLiteral("totalVram"), i18nc("@title", "All GPUs Total Memory"));
+     m_totalVramSensor->setShortName(i18nc("@title Short for 'All GPUs Total Memory'", "Total"));
+     m_totalVramSensor->setMatchSensors(QRegularExpression{QStringLiteral("^(?!all).*$")}, QStringLiteral("totalVram"));

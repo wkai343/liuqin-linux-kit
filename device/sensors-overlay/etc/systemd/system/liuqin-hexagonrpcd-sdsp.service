@@ -1,6 +1,5 @@
 [Unit]
 Description=liuqin SLPI FastRPC reverse tunnel
-Documentation=file:///usr/share/doc/liuqin/SENSORS_AUTOROTATE_INTEGRATION.zh-CN.md
 ConditionPathExists=/dev/fastrpc-sdsp
 Requires=liuqin-slpi.service
 After=systemd-udevd.service systemd-tmpfiles-setup.service liuqin-slpi.service

@@ -17,7 +17,7 @@ from PySide6.QtQuickControls2 import QQuickStyle
 from PySide6.QtTest import QTest
 
 project = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(project / 'tools'))
+sys.path.insert(0, str(project / 'installer'))
 from liuqin_gui.controller import Controller
 
 parser = argparse.ArgumentParser()
@@ -41,7 +41,7 @@ with tempfile.TemporaryDirectory() as directory:
     controller = Controller(True, None, Path(directory))
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty('backend', controller)
-    engine.load(QUrl.fromLocalFile(str(project / 'tools/liuqin_gui/qml/Main.qml')))
+    engine.load(QUrl.fromLocalFile(str(project / 'installer/liuqin_gui/qml/Main.qml')))
     assert engine.rootObjects(), 'QML did not load'
     window = engine.rootObjects()[0]
 
@@ -68,11 +68,16 @@ with tempfile.TemporaryDirectory() as directory:
     controller.createBackup(False)
     wait(lambda: controller.data['backupInfo'].get('source') == 'reused' and not controller.data['busy'])
     assert controller.data['selectedBackupPath'] == original_backup
+    controller.setFilesystem('btrfs')
+    assert controller.data['filesystem']=='btrfs'
     controller.prepare()
     wait(lambda: controller.data['state'] == 'prepared' and not controller.data['busy'])
     assert not controller.data['receipt'].get('root_installed', False)
     assert controller.data['plan']['backup_reused']
     assert controller.data['plan']['backup_dir'] == original_backup
+    assert controller.data['plan']['filesystem']=='btrfs'
+    controller.setFilesystem('ext4')
+    assert controller.data['filesystem']=='btrfs', 'prepared plan must freeze filesystem selection'
     capture('QML安装助手-方案.png')
     original_plan = dict(controller.data['plan'])
     controller.update(plan=dict(original_plan, warnings=['当前设备状态与原始恢复备份不完全相同。原始备份仍有效并保留；本次使用已检查的当前设备校准数据。']))

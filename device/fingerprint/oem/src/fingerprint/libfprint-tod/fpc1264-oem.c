@@ -188,7 +188,9 @@ enrol_status_line (FpDevice *device, const gchar *line)
   const gchar *failures[] = {
     "native_enrol_runtime=FAILED ", "native_enrol=FAILED ",
     "pipeline_incomplete=", "end_enrol_not_submitted=",
-    "enrol_authorization=TA_rejected", NULL
+    "enrol_authorization=TA_rejected", "finger_irq_failed=",
+    "finger_lost_wait_exhausted=", "capture_wait_time_timeout=", "finger_state_timeout=",
+    "finger_state_invalid=", NULL
   };
 
   /* The provider guarantees these status/phase fields contain no credential,
@@ -207,6 +209,8 @@ enrol_status_line (FpDevice *device, const gchar *line)
     self->enrol_succeeded = self->enrol_cleaned;
   else if (g_str_equal (line, "native_enrol=REFUSED existing_template=1"))
     self->enrol_existing = TRUE;
+  else if (g_str_equal (line, "capture_wait_time=1"))
+    g_message ("OEM enroll phase=waiting-for-finger");
   else if (!self->cancelled &&
            sscanf (line, "enrol_progress_status=%d remaining=%u%c", &status, &remaining, &extra) == 2) {
     g_message ("OEM enroll sample status=%d remaining=%u", status, remaining);

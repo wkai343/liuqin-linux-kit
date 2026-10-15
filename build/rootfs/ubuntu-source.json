@@ -1,0 +1,11 @@
+{
+  "distribution": "ubuntu",
+  "suite": "resolute",
+  "architecture": "arm64",
+  "release": "26.04.1",
+  "archive": "ubuntu-base-26.04.1-base-arm64.tar.gz",
+  "url": "https://cdimage.ubuntu.com/ubuntu-base/releases/26.04/release/ubuntu-base-26.04.1-base-arm64.tar.gz",
+  "sha256": "5a1906794ced63a71a8119c3f211ef5f0bbe0a243001b4bbd41fdf80c5b219fd",
+  "checksum_source": "https://cdimage.ubuntu.com/ubuntu-base/releases/26.04/release/SHA256SUMS",
+  "apt_uri": "http://ports.ubuntu.com/ubuntu-ports"
+}

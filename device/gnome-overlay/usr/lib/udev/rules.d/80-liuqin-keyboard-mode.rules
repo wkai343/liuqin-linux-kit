@@ -1,0 +1,8 @@
+# NanoSic exposes HID pointer devices even with the folio disconnected.
+# Ignore those phantom pointers for KWin's startup touch-mode fallback.
+# The real tablet switch still comes from the MCU connection report.
+ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", DRIVERS=="hid-nanosic*", TAG-="kwin-ignore-tablet-mode"
+ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", DRIVERS=="hid-nanosic*", ATTRS{keyboard_connected}=="0|-1", ENV{ID_INPUT_MOUSE}=="1", TAG+="kwin-ignore-tablet-mode"
+ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", DRIVERS=="hid-nanosic*", ATTRS{keyboard_connected}=="0|-1", ENV{ID_INPUT_TOUCHPAD}=="1", TAG+="kwin-ignore-tablet-mode"
+# Refresh the database for subsequent compositor/login sessions.
+ACTION=="change", SUBSYSTEM=="i2c", DRIVER=="hid-nanosic*", RUN+="/usr/bin/udevadm trigger --action=change --subsystem-match=input --parent-match=/sys%p"

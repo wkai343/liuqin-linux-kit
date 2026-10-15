@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.20)
+project(liuqin-plasma-panel LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 23)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui)
+find_package(KF6Screen REQUIRED)
+add_executable(liuqin-plasma-panel-defaults panel-defaults.cpp)
+target_link_libraries(liuqin-plasma-panel-defaults PRIVATE Qt6::Core Qt6::Gui KF6::Screen)
+install(TARGETS liuqin-plasma-panel-defaults RUNTIME DESTINATION libexec)

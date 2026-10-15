@@ -1,0 +1,4 @@
+# 首次登录由 Plasma 自带的欢迎中心启动程序处理。
+# 保留每个用户自己的 LastSeenVersion；系统升级后不重复弹出向导。
+[General]
+ShowUpdatePage=false

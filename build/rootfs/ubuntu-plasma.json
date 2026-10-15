@@ -1,0 +1,8 @@
+{
+  "distribution": "ubuntu",
+  "desktop": "plasma",
+  "packages": ["fonts-noto-cjk", "language-pack-zh-hans", "plasma-welcome", "systemsettings", "accountsservice"],
+  "remove": ["snapd"],
+  "overlay": "build/rootfs/plasma-overlay",
+  "first_boot_setup": true
+}

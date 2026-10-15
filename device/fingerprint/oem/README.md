@@ -1,6 +1,10 @@
 # FPC1264 OEM 指纹适配
 
-[English](README.en.md) ｜ [中文使用指南](../../../docs/FINGERPRINT.md)
+[中文使用指南](../../../docs/FINGERPRINT.md)
+
+本分支的 Fedora 集成使用独立 RPM、SELinux 策略和 `level-v1` GPIO 中断接口。
+KDE 设置录入及普通重启后的锁屏已完成验证，构建入口见上述中文指南。
+下面的 Ubuntu/GNOME 记录保留作为上游实现和验证背景。
 
 本组件通过 Ubuntu 的“设置 → 系统 → 用户 → 指纹登录”与正常 Polkit 密码对话框
 录入指纹。libfprint TOD 上报采集进度和取消，fprintd 保存模板并向 GDM 登录及
@@ -52,7 +56,7 @@ fprintd 使用 `UMask=0077`，模板必须为 root 所有、0600。早期 0644 �
 `fastboot boot` 仅提供当前内核。普通重启后可用需要持久安装匹配的内核和模块，
 不能改版本字符串或跳过模块哈希。原生验证直接读取 fprintd 持久数据库，使用
 Keymaster `0x205`，不调用旧 PAM 凭据助手、旧 18 小时预备输入密钥或录入协商序列。
-完整协议边界见[英文详版](README.en.md#matching-kernel-and-runtime)。
+验证路径不会发送录入客户端使用的 `0x200`/`0x207` 协商序列。已有普通重启验证不能作为添加推测性初始化的依据，也不代表所有断电和恢复场景均已验收。
 
 ## 公开构建与打包
 
@@ -61,14 +65,14 @@ Keymaster `0x205`，不调用旧 PAM 凭据助手、旧 18 小时预备输入密
 TA 哈希，不含 OEM TA 本体或用户状态，构建器锁定其 SHA256。
 
 ```sh
-python3 tools/build-liuqin-fingerprint-deb.py --bundle /path/to/fingerprint-build-inputs.tar.gz --out out/fingerprint-debs --version 0.6.0
+python3 build/scripts/build-liuqin-fingerprint-deb.py --bundle /path/to/fingerprint-build-inputs.tar.gz --out out/fingerprint-debs --version 0.6.0
 ```
 
 `BUILD_INPUTS.json` 记录用户态 `4d6b22f` 与原始输入身份。维护者可以从审计过的
 内部 r4 归档生成公开材料；普通用户只需要公共归档：
 
 ```sh
-python3 tools/make-fingerprint-build-inputs.py --bundle /path/to/audited-r4/fingerprint.tar.gz --output out/fingerprint-build-inputs.tar.gz
+python3 build/scripts/make-fingerprint-build-inputs.py --bundle /path/to/audited-r4/fingerprint.tar.gz --output out/fingerprint-build-inputs.tar.gz
 ```
 
 转换保留核验过的二进制与 FE 模块，叠加当前 Python 集成、标准 fprintd 服务、
@@ -88,8 +92,8 @@ Debian/rootfs 安装时不提取固件，也不创建凭据。
 在主项目根目录构建静态 ARM64 客户端及原生组件：
 
 ```sh
-sh tools/build-liuqin-fingerprint-oem.sh clients
-FPRINTD_SOURCE=/path/to/fprintd-v1.94.5 sh tools/build-liuqin-fingerprint-oem.sh native
+sh build/scripts/build-liuqin-fingerprint-oem.sh clients
+FPRINTD_SOURCE=/path/to/fprintd-v1.94.5 sh build/scripts/build-liuqin-fingerprint-oem.sh native
 ```
 
 原生组件需目标 libfprint/TOD 1.95.1+tod1、Gio、PAM/OpenSSL、Polkit/systemd、
@@ -105,7 +109,19 @@ Meson/Ninja 开发输入。OUT_DIR 默认 `out/fingerprint-oem`。交叉编译�
 
 历史配置本身选择开发助手接口。使用匹配的原生 TOD、native_enrol.py、Polkit 规则、
 FPC 模块和外部 fpcliu.mdt/分段。凭据、随机秘密、模板和校准不是通用构建输入。
-完整打包命令见[英文详版](README.en.md#internal-source-builds-and-bound-development-bundles)。
+打包命令：
+
+```sh
+python3 device/fingerprint/oem/tools/package_fingerprint.py \
+  --stage out/fingerprint-stage --build out/fingerprint-oem \
+  --kernel-module /path/to/matching/fpc1264_spi_diag.ko \
+  --candidate-config /path/to/public-config.json \
+  --firmware /path/to/matching-firmware --revision your-revision \
+  --output out/liuqin-fpc-oem.tar.gz
+```
+
+暂存目录必须为空或与其清单一致；使用新的输出归档路径，已有文件不会被覆盖。
+解压到 root 所有的目录，再以 root 运行其中的 `install.py`。
 
 安装器核验运行内核，安装标准 fprintd/Polkit 集成，移除未修改的旧应用启动器和
 旧免密规则，保留密码登录及已有凭据/模板。`--replace-owned-candidate` 仅核验并
@@ -132,3 +148,5 @@ acceptance.py、user_credentials.py 和旧终端/PAM 入口只保留给历史开
 TOD/FpPrint 为 LGPL-2.1-or-later，fprintd 适配为 GPL-2.0-or-later，AOSP 定义为
 Apache-2.0，并保留厂商 BSD 声明。OEM 固件和任何私有凭据、HAT、模板、原始图像及
 校准都不属于公共源码输入。
+
+原始英文许可说明保留在 [NOTICE](NOTICE)，不作为使用文档维护。

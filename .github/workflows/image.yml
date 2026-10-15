@@ -1,14 +1,6 @@
-name: System image
+name: 系统镜像构建
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - 'device/**'
-      - 'initramfs/**'
-      - 'kernel/source.json'
-      - 'tools/**'
-      - '.github/workflows/image.yml'
 permissions:
   contents: read
 concurrency:
@@ -16,8 +8,8 @@ concurrency:
   cancel-in-progress: false
 jobs:
   image:
-    # This privileged job only runs trusted main code, never external PRs.
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || vars.LIUQIN_IMAGE_CI == 'enabled')
+    # 高权限装配只执行可信 main，不运行外部 PR。
+    if: github.ref == 'refs/heads/main'
     runs-on: [self-hosted, linux, X64, liuqin-images]
     timeout-minutes: 360
     steps:
@@ -25,35 +17,48 @@ jobs:
         with:
           path: project
           persist-credentials: false
-      - name: Kernel revision
-        id: kernel
+      - name: 准备 Devbox 构建环境
+        working-directory: project
+        run: devbox install
+      - name: 获取并校验原厂 ROM
+        working-directory: project
+        run: |
+          devbox run fetch-rom --out "$RUNNER_TEMP/liuqin-rom/images" \
+            --cache "$RUNNER_TEMP/liuqin-rom/downloads"
+      - name: 创建本次镜像构建配置
+        working-directory: project
+        env:
+          BASE_CONFIG: ${{ vars.LIUQIN_BUILD_CONFIG }}
         run: |
           python3 - <<'PY'
           import json, os
-          sha = json.load(open('project/kernel/source.json'))['commit']
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
-              stream.write('sha=' + sha + '\n')
+          from pathlib import Path
+          configured = os.environ['BASE_CONFIG']
+          source = Path(configured) if configured else Path('build/devbox/build.example.json')
+          if configured and not source.is_absolute():
+              raise SystemExit('LIUQIN_BUILD_CONFIG must be an absolute runner path')
+          data = json.loads(source.read_text())
+          if not isinstance(data, dict) or not data.get('rootfs_config'):
+              raise SystemExit('Use the official-system configuration from docs/BUILD.md')
+          temporary = Path(os.environ['RUNNER_TEMP'])
+          data['rom_images'] = str(temporary / 'liuqin-rom/images')
+          output = temporary / 'liuqin-image-build.json'
+          output.write_text(json.dumps(data) + '\n')
+          output.chmod(0o600)
           PY
-      - uses: actions/checkout@v4
-        with:
-          repository: ${{ github.repository_owner }}/linux-sm8450-liuqin
-          ref: ${{ steps.kernel.outputs.sha }}
-          path: linux-sm8450-liuqin
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Build matching kernel
-        run: python3 project/tools/build-liuqin-kernel.py --jobs 8
-      - name: Assemble image
-        env:
-          INPUT_FILE: ${{ vars.LIUQIN_IMAGE_INPUTS || '/opt/liuqin/inputs.json' }}
+          sudo -n true
+      - name: 构建三个安装文件
+        working-directory: project
         run: |
-          sudo -n python3 project/tools/build-liuqin-image.py \
-            --inputs "$INPUT_FILE" --kernel-out "$GITHUB_WORKSPACE/project/out/kernel"
-          python3 project/tools/install-liuqin.py --bundle project/out/image/bundle --check
+          devbox run plan --config "$RUNNER_TEMP/liuqin-image-build.json"
+          devbox run build --config "$RUNNER_TEMP/liuqin-image-build.json"
       - uses: actions/upload-artifact@v4
         with:
           name: liuqin-system-${{ github.sha }}
           if-no-files-found: error
           compression-level: 0
-          path: project/out/image/bundle/
+          path: |
+            project/out/releases/*-plasma-*/installer.img
+            project/out/releases/*-plasma-*/boot.img
+            project/out/releases/*-plasma-*/rootfs.tar.gz
           retention-days: 7

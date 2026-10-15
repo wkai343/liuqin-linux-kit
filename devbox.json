@@ -1,0 +1,39 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/main/.schema/devbox.schema.json",
+  "packages": [
+    "path:./build/devbox/nix#build-tools"
+  ],
+  "env": {
+    "LC_ALL": "C",
+    "CROSS_COMPILE": "aarch64-unknown-linux-musl-",
+    "PYTHONNOUSERSITE": "1",
+    "PYTHONDONTWRITEBYTECODE": "1"
+  },
+  "shell": {
+    "init_hook": [
+      ". build/devbox/env.sh"
+    ],
+    "scripts": {
+      "doctor": "python3 build/devbox/build.py doctor",
+      "init-build": "python3 build/devbox/build.py init",
+      "show-config": "python3 build/devbox/build.py show-config",
+      "plan": "python3 build/devbox/build.py plan",
+      "prepare": "python3 build/devbox/build.py prepare",
+      "check-inputs": "python3 build/devbox/build.py check-inputs",
+      "kernel": "python3 build/devbox/build.py kernel",
+      "installer-kernel": "python3 build/devbox/build.py installer-kernel",
+      "installer": "python3 build/devbox/build.py installer",
+      "build-installer": "python3 build/devbox/build.py build-installer",
+      "modules": "python3 build/devbox/build.py modules",
+      "kernel-debs": "python3 build/devbox/build.py kernel-debs",
+      "kernel-packages": "python3 build/devbox/build.py kernel-packages",
+      "boot": "python3 build/devbox/build.py boot",
+      "rootfs": "python3 build/devbox/build.py rootfs",
+      "runtime": "python3 build/devbox/build.py runtime",
+      "images": "python3 build/devbox/build.py images",
+      "build": "python3 build/devbox/build.py all",
+      "test": "python3 build/devbox/build.py test",
+      "fetch-rom": "python3 build/scripts/fetch-stock-rom.py"
+    }
+  }
+}

@@ -32,7 +32,7 @@ with tempfile.TemporaryDirectory(prefix='liuqin-runtime-test-') as temporary:
     (root / 'factory/audio/crus_calr.bin').write_bytes(bytes(range(16)))
     for index in range(101):
         (root / f'factory/sensors/registry/registry/item{index}').write_text('fixture\n')
-    shutil.copyfile(project / 'tools/provision-liuqin-from-persist.sh', root / 'provision.sh')
+    shutil.copyfile(project / 'device/installer/provision-liuqin-from-persist.sh', root / 'provision.sh')
     subprocess.run(['mount', '-t', 'proc', 'proc', str(root / 'proc')], check=True)
     try:
         subprocess.run(['chroot', str(root), '/bin/sh', '/provision.sh', '/target'],

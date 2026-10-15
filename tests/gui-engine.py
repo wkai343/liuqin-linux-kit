@@ -9,9 +9,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'installer'))
 from liuqin_gui.demo import DemoEngine, DemoTransport, demo_report
 from liuqin_gui.engine import Cancelled, Engine, InstallerError, Transport, cli
 from liuqin_gui import backups
@@ -115,11 +116,53 @@ class EngineTests(unittest.TestCase):
         transport.boot_ram = lambda: None
         transport.remote = lambda *a, **kw: b'0' * 64 + b'  /dev/boot_a\n'
         with self.assertRaisesRegex(InstallerError, '回读校验失败'):
-            transport.flash_verify_reboot(self.engine.padded, self.engine.padded_digest, 8192)
+            transport.flash_verify_reboot(self.engine.padded, self.engine.padded_digest, self.engine.device['boot_bytes'])
         self.assertEqual(calls, [('flash', 'boot_a', str(self.engine.padded))])
         self.assertTrue(self.engine.receipt['boot_written'])
         self.assertFalse(self.engine.receipt['boot_readback_verified'])
         self.assertFalse(self.engine.receipt['active_slot_set'])
+
+    def test_ram_handshake_uses_installer_kernel_not_target_kernel(self):
+        transport = Transport(self.engine, 'DEMO-LIUQIN')
+        responses = {'cat /etc/liuqin-installer-interface': b'liuqin-installer-v2\n',
+                     'uname -r': b'6.17-installer-demo\n'}
+        transport.remote = lambda command: responses[command]
+        transport.verify_ram_interface()
+        responses['uname -r'] = b'6.17-demo\n'
+        with self.assertRaisesRegex(InstallerError, 'RAM 内核'):
+            transport.verify_ram_interface()
+        responses['cat /etc/liuqin-installer-interface'] = b'unknown\n'
+        with self.assertRaisesRegex(InstallerError, '接口'):
+            transport.verify_ram_interface()
+
+    def test_host_stages_target_boot_contract_before_dispatching_install(self):
+        transport = Transport(self.engine, 'DEMO-LIUQIN')
+        transport.boot_id = self.engine.transport.boot_id
+        calls = []
+        transport.remote = lambda text, *args, **kwargs: calls.append(text) or b'liuqin-install: ROOT_INSTALLED'
+        route = unittest.mock.MagicMock()
+        route.__enter__.return_value.getsockname.return_value = ('192.168.7.1', 0)
+        server = SimpleNamespace(server_port=8000, serve_forever=lambda: None,
+                                 shutdown=lambda: None, server_close=lambda: None)
+        with patch.object(socket, 'socket', return_value=route), patch.object(cli.http.server, 'ThreadingHTTPServer', return_value=server):
+            transport.install_root(self.engine.padded)
+        self.assertTrue(any('wget' in command and '/target-root.contract' in command for command in calls))
+        dispatch = calls[-1]
+        self.assertIn('ROOT-CONTRACT', dispatch)
+        self.assertIn(self.engine.manifest['root_contract_sha256'], dispatch)
+        self.assertTrue(self.engine.receipt['write_dispatched'])
+
+    def test_changed_target_contract_stops_before_any_install_network_access(self):
+        from liuqin_gui.artifacts import boot_interface
+        from liuqin_gui.demo import demo_image
+        boot = boot_interface(self.engine.padded)
+        self.engine.padded.write_bytes(demo_image({'etc/liuqin-root-profile': boot['profile'],
+            'etc/liuqin-native-root.contract': boot['contract'] + b'changed\n',
+            'etc/liuqin-storage-mode': b'persistent\n'}))
+        transport = Transport(self.engine, 'DEMO-LIUQIN')
+        with self.assertRaisesRegex(InstallerError, '设备接口发生变化'):
+            transport.install_root(self.engine.padded)
+        self.assertFalse(self.engine.receipt['write_dispatched'])
 
     def test_writing_refuses_cancel(self):
         self.engine.committing = True
@@ -173,7 +216,7 @@ class EngineTests(unittest.TestCase):
         engine = Engine(self.events.append, self.root / 'separate',
                         transport_factory=lambda *_: self.fail('hardware accessed'))
         (self.engine.demo_bundle / 'rootfs.tar.gz').write_bytes(b'changed')
-        with self.assertRaisesRegex(InstallerError, '文件校验失败'):
+        with self.assertRaisesRegex(InstallerError, '归档损坏'):
             engine.prepare(dict(serial='DEMO', bundle=str(self.engine.demo_bundle),
                                 backup_dir=self.backup_path))
 

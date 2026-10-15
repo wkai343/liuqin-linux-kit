@@ -1,0 +1,122 @@
+--- a/drivers/misc/fpc1264_spi_diag.c
++++ b/drivers/misc/fpc1264_spi_diag.c
+@@ -13,6 +13,8 @@
+ #include <linux/init.h>
+ #include <linux/spi/spi.h>
+ #include <linux/gpio/consumer.h>
++#include <linux/gpio/driver.h>
++#include <linux/irq.h>
+ #include <linux/interrupt.h>
+ #include <linux/delay.h>
+ #include <linux/regulator/consumer.h>
+@@ -44,6 +46,7 @@
+ struct fpc1020_data {
+ 	struct spi_device	*spi;
+ 	struct gpio_desc	*reset_gpio;
++	struct gpio_desc	*irq_gpio;
+ 	struct regulator	*vdd_supply;
+ 	int			irq;
+ 	u16			hw_id;
+@@ -53,7 +56,6 @@
+ 	struct mutex		power_lock; /* Serializes power state and open count. */
+ 	unsigned int		users;
+ 	wait_queue_head_t	irq_wait;
+-	bool			irq_fired;
+ 	bool			powered;
+ };
+ 
+@@ -171,7 +173,6 @@
+ 	struct fpc1020_data *data = dev_id;
+ 
+ 	atomic_inc(&data->irq_count);
+-	data->irq_fired = true;
+ 	wake_up_interruptible(&data->irq_wait);
+ 
+ 	dev_dbg(&data->spi->dev, "Finger touch interrupt triggered! (count=%d)\n",
+@@ -224,6 +225,22 @@
+ }
+ static DEVICE_ATTR_RO(irq_count);
+ 
++static ssize_t irq_level_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	struct fpc1020_data *data = dev_get_drvdata(dev);
++	int level = gpiod_get_raw_value_cansleep(data->irq_gpio);
++
++	return level < 0 ? level : sysfs_emit(buf, "%d\n", level);
++}
++static DEVICE_ATTR_RO(irq_level);
++
++static ssize_t irq_interface_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	return sysfs_emit(buf, "level-v1\n");
++}
++static DEVICE_ATTR_RO(irq_interface);
++
++
+ static ssize_t power_state_show(struct device *dev, struct device_attribute *attr, char *buf)
+ {
+ 	struct fpc1020_data *data = dev_get_drvdata(dev);
+@@ -236,6 +253,8 @@
+ 	&dev_attr_hw_id.attr,
+ 	&dev_attr_reset.attr,
+ 	&dev_attr_irq_count.attr,
++	&dev_attr_irq_level.attr,
++	&dev_attr_irq_interface.attr,
+ 	&dev_attr_power_state.attr,
+ 	NULL,
+ };
+@@ -331,17 +350,20 @@
+ 	return (ret == 0) ? count : ret;
+ }
+ 
++/* The OEM HAL reads the physical IRQ level before waiting. A remembered
++ * edge can instead be a short SPI-command readiness pulse that has already
++ * ended. Do not consume readiness in poll(); the TA acknowledges the sensor.
++ */
+ static __poll_t fpc1020_poll(struct file *file, struct poll_table_struct *wait)
+ {
+ 	struct fpc1020_data *data = file->private_data;
+-	__poll_t mask = 0;
++	int level;
+ 
+ 	poll_wait(file, &data->irq_wait, wait);
+-	if (data->irq_fired) {
+-		mask |= EPOLLIN | EPOLLRDNORM;
+-		data->irq_fired = false;
+-	}
+-	return mask;
++	level = gpiod_get_raw_value_cansleep(data->irq_gpio);
++	if (level < 0)
++		return EPOLLERR;
++	return level ? EPOLLIN | EPOLLRDNORM : 0;
+ }
+ 
+ static int fpc1020_message(struct fpc1020_data *data,
+@@ -532,6 +554,27 @@
+ 	if (ret < 0) {
+ 		dev_err(dev, "Failed to setup SPI device: %d\n", ret);
+ 		return ret;
++	}
++
++	/* This board routes FPC IRQ through TLMM. Reuse the descriptor for the
++	 * IRQ's own hardware offset; do not request, remux or write the GPIO.
++	 * The gpiochip remains the IRQ provider throughout this device's life.
++	 */
++	if (spi->irq > 0) {
++		struct irq_data *irq_data = irq_get_irq_data(spi->irq);
++		struct irq_chip *irq_chip = irq_data ? irq_data_get_irq_chip(irq_data) : NULL;
++		struct gpio_chip *gc;
++
++		if (!irq_chip || !irq_chip->name || strcmp(irq_chip->name, "msmgpio"))
++			return dev_err_probe(dev, -ENXIO, "FPC IRQ is not a TLMM GPIO\n");
++		gc = irq_data_get_irq_chip_data(irq_data);
++		if (!gc || irq_data->hwirq >= gc->ngpio)
++			return dev_err_probe(dev, -ENXIO, "Invalid FPC GPIO IRQ\n");
++		data->irq_gpio = gpio_device_get_desc(gc->gpiodev, irq_data->hwirq);
++		if (IS_ERR(data->irq_gpio))
++			return dev_err_probe(dev, PTR_ERR(data->irq_gpio), "FPC IRQ GPIO unavailable\n");
++	} else {
++		return dev_err_probe(dev, -ENXIO, "FPC requires a GPIO IRQ\n");
+ 	}
+ 
+ 	/* 4. Interrupt configuration */

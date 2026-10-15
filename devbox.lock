@@ -1,0 +1,13 @@
+{
+  "lockfile_version": "1",
+  "packages": {
+    "github:NixOS/nixpkgs/nixpkgs-unstable": {
+      "last_modified": "2026-09-14T07:18:56Z",
+      "resolved": "github:NixOS/nixpkgs/c7def046b9a883d46974757852106483d741586f?lastModified=1789370336"
+    },
+    "path:./build/devbox/nix#build-tools": {
+      "last_modified": "1970-01-01T00:00:00Z",
+      "resolved": "path:./build/devbox/nix#build-tools"
+    }
+  }
+}

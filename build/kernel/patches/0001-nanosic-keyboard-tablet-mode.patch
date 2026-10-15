@@ -1,0 +1,320 @@
+--- a/drivers/hid/hid-nanosic.c
++++ b/drivers/hid/hid-nanosic.c
+@@ -23,8 +23,8 @@
+  * Deliberately absent, all of it present in the vendor driver:
+  *
+  *  - The hall GPIOs. tlmm 10 and 23 are already described as gpio-keys
+- *    SW_LID / SW_TABLET_MODE in sm8475-xiaomi-liuqin.dts, which is both the
+- *    better semantics and an exclusive claim - a second consumer would fail
++ *    cover-switch inputs in the device tree; the connector state is instead
++ *    reported by the keyboard MCU. A second GPIO consumer would fail
+  *    with -EBUSY and take the whole probe down with it. The vendor driver only
+  *    ever forwarded those levels to a Xiaomi userspace daemon. Do not "restore"
+  *    them here.
+@@ -44,6 +44,7 @@
+ #include <linux/hid.h>
+ #include <linux/i2c.h>
+ #include <linux/interrupt.h>
++#include <linux/input.h>
+ #include <linux/mod_devicetable.h>
+ #include <linux/module.h>
+ #include <linux/mutex.h>
+@@ -109,6 +110,11 @@
+ #define NANOSIC_I2C_RETRY_US		25000
+ #define NANOSIC_RESET_ASSERT_MS		100
+ #define NANOSIC_RESET_READY_MS		500
++
++/* Xiaomi NanoSic v2 A1: read keyboard connection/power state; sum 0xda. */
++static const u8 nanosic_status_command[NANOSIC_VERSION_COMMAND_LEN] = {
++	0x4c, 0x32, 0x00, 0x4e, 0x31, 0x80, 0x38, 0xa1, 0x01, 0x01, 0xda,
++};
+ 
+ static const u8 nanosic_keyboard_rdesc[] = {
+ 	0x05, 0x01,		/* Usage Page (Generic Desktop)		*/
+@@ -448,6 +454,7 @@
+ 	NANOSIC_I2C_DATA_READ,
+ 	NANOSIC_I2C_VERSION_WRITE,
+ 	NANOSIC_I2C_VERSION_READ,
++	NANOSIC_I2C_STATUS_WRITE,
+ };
+ 
+ struct nanosic {
+@@ -480,6 +487,14 @@
+ 
+ 	u8 reg;
+ 	u8 rxbuf[NANOSIC_FRAME_LEN];
++	struct input_dev *tablet_mode_input;
++	struct delayed_work status_work;
++	unsigned int status_attempts;
++	bool connection_known;
++	bool keyboard_connected;
++	u8 keyboard_status;
++	u64 connection_reports;
++	u64 status_query_report;
+ };
+ 
+ static const struct nanosic_packet *nanosic_packet_by_id(u8 id)
+@@ -548,6 +563,8 @@
+ 		return "version-write";
+ 	case NANOSIC_I2C_VERSION_READ:
+ 		return "version-read";
++	case NANOSIC_I2C_STATUS_WRITE:
++		return "status-write";
+ 	default:
+ 		return "none";
+ 	}
+@@ -687,6 +704,33 @@
+ 	return -ENOMSG;
+ }
+ 
++/* The MCU reports real connector state independently of the cover magnets.
++ * NanoSic v2 source 0x38 -> host 0x80, A2 payload byte 4: bit 0 Connected.
++ * Validate the complete report boundary before reading this byte.
++ */
++static bool nanosic_parse_connection_status(struct nanosic *nano, const u8 *p,
++					   size_t len)
++{
++	bool changed;
++
++	if (len < 10 || (p[0] != 0x22 && p[0] != 0x23 &&
++			 p[0] != 0x24 && p[0] != 0x26) ||
++	    p[2] != 0x38 || p[3] != 0x80 || p[4] != 0xa2)
++		return false;
++
++	changed = !nano->connection_known || nano->keyboard_connected != !!(p[9] & BIT(0));
++	nano->keyboard_status = p[9];
++	nano->keyboard_connected = !!(p[9] & BIT(0));
++	nano->connection_known = true;
++	nano->connection_reports++;
++	input_report_switch(nano->tablet_mode_input, SW_TABLET_MODE,
++			    !nano->keyboard_connected);
++	input_sync(nano->tablet_mode_input);
++	if (changed)
++		kobject_uevent(&nano->client->dev.kobj, KOBJ_CHANGE);
++	return true;
++}
++
+ static void nanosic_parse_frame(struct nanosic *nano, u8 *frame, size_t len)
+ {
+ 	struct device *dev = &nano->client->dev;
+@@ -728,6 +772,8 @@
+ 		 * nothing to resynchronise on. Either way the frame ends here.
+ 		 */
+ 		if (!pkt) {
++			if (nanosic_parse_connection_status(nano, p, left))
++				return;
+ 			dev_dbg(dev, "unhandled report 0x%02x\n", p[0]);
+ 			return;
+ 		}
+@@ -738,6 +784,8 @@
+ 			return;
+ 		}
+ 		nano->valid_report_count++;
++		if (pkt->dest < 0)
++			nanosic_parse_connection_status(nano, p, pkt->wire_len);
+ 
+ 		if (pkt->dest >= 0) {
+ 			ret = hid_input_report(nano->hid[pkt->dest],
+@@ -827,9 +875,69 @@
+ 	return ret;
+ }
+ 
++/* Only bounded startup/resume queries. Normal connection changes arrive
++ * through the existing data IRQ; no periodic polling keeps the MCU awake.
++ */
++static void nanosic_status_work(struct work_struct *work)
++{
++	struct nanosic *nano = container_of(to_delayed_work(work),
++					  struct nanosic, status_work);
++	bool was_awake;
++	int ret;
++	struct i2c_msg msg = {
++		.addr = nano->client->addr,
++		.len = sizeof(nanosic_status_command),
++		.buf = (u8 *)nanosic_status_command,
++	};
++
++	guard(mutex)(&nano->lock);
++	if (nano->suspended || (nano->status_attempts &&
++			      nano->connection_reports != nano->status_query_report))
++		return;
++	if (!nano->status_attempts)
++		nano->status_query_report = nano->connection_reports;
++	was_awake = nano->awake;
++	nanosic_wake(nano);
++	if (!was_awake)
++		usleep_range(NANOSIC_I2C_RETRY_US, NANOSIC_I2C_RETRY_US + 500);
++	nano->status_attempts++;
++	ret = nanosic_i2c_transfer(nano, &msg, 1, NANOSIC_I2C_STATUS_WRITE);
++	if (!ret) {
++		usleep_range(10000, 10500);
++		ret = nanosic_read_frame(nano, NANOSIC_I2C_DATA_READ);
++		if (!ret)
++			nanosic_parse_frame(nano, nano->rxbuf, sizeof(nano->rxbuf));
++	}
++	if (nano->connection_reports == nano->status_query_report && nano->status_attempts < 3)
++		mod_delayed_work(system_wq, &nano->status_work, msecs_to_jiffies(200));
++}
++
++static ssize_t keyboard_connected_show(struct device *dev,
++				       struct device_attribute *attr, char *buf)
++{
++	struct nanosic *nano = dev_get_drvdata(dev);
++
++	guard(mutex)(&nano->lock);
++	return sysfs_emit(buf, "%d\n", nano->connection_known ? nano->keyboard_connected : -1);
++}
++static DEVICE_ATTR_RO(keyboard_connected);
++
++static ssize_t keyboard_status_show(struct device *dev,
++				    struct device_attribute *attr, char *buf)
++{
++	struct nanosic *nano = dev_get_drvdata(dev);
++
++	guard(mutex)(&nano->lock);
++	return sysfs_emit(buf, "known=%d connected=%d flags=%u reports=%llu\n",
++			  nano->connection_known, nano->keyboard_connected,
++			  nano->keyboard_status, (unsigned long long)nano->connection_reports);
++}
++static DEVICE_ATTR_RO(keyboard_status);
++
+ static irqreturn_t nanosic_data_irq(int irq, void *data)
+ {
+ 	struct nanosic *nano = data;
++	u64 reports, errors;
+ 
+ 	guard(mutex)(&nano->lock);
+ 	nano->irq_count++;
+@@ -897,6 +1005,8 @@
+ static struct attribute *nanosic_attrs[] = {
+ 	&dev_attr_firmware_version.attr,
+ 	&dev_attr_bridge_health.attr,
++	&dev_attr_keyboard_connected.attr,
++	&dev_attr_keyboard_status.attr,
+ 	NULL
+ };
+ 
+@@ -1037,6 +1147,7 @@
+ {
+ 	struct nanosic *nano = data;
+ 
++	cancel_delayed_work_sync(&nano->status_work);
+ 	cancel_delayed_work_sync(&nano->idle_work);
+ 	gpiod_set_value_cansleep(nano->wake_gpio, 0);
+ 	gpiod_set_value_cansleep(nano->reset_gpio, 1);
+@@ -1122,6 +1233,7 @@
+ 		return ret;
+ 
+ 	INIT_DELAYED_WORK(&nano->idle_work, nanosic_idle_work);
++	INIT_DELAYED_WORK(&nano->status_work, nanosic_status_work);
+ 
+ 	/*
+ 	 * Only these two lines and the rail. The hall GPIOs stay with
+@@ -1156,6 +1268,22 @@
+ 
+ 	/* The HID devices must exist before an interrupt can feed them. */
+ 	ret = nanosic_register_hid(nano);
++	if (ret)
++		return ret;
++
++	nano->tablet_mode_input = devm_input_allocate_device(dev);
++	if (!nano->tablet_mode_input)
++		return -ENOMEM;
++	nano->tablet_mode_input->name = "Xiaomi Keyboard Tablet Mode";
++	nano->tablet_mode_input->id.bustype = BUS_I2C;
++	nano->tablet_mode_input->phys = devm_kasprintf(dev, GFP_KERNEL,
++						    "%s/tablet-mode", dev_name(dev));
++	if (!nano->tablet_mode_input->phys)
++		return -ENOMEM;
++	input_set_capability(nano->tablet_mode_input, EV_SW, SW_TABLET_MODE);
++	/* A tablet with no confirmed keyboard starts in touch mode. */
++	input_report_switch(nano->tablet_mode_input, SW_TABLET_MODE, 1);
++	ret = input_register_device(nano->tablet_mode_input);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -1178,13 +1306,19 @@
+ 		return ret;
+ 
+ 	/* Attribute reads are the only path which issues a version request. */
+-	return sysfs_create_group(&dev->kobj, &nanosic_attr_group);
++	ret = sysfs_create_group(&dev->kobj, &nanosic_attr_group);
++	if (!ret)
++		mod_delayed_work(system_wq, &nano->status_work, msecs_to_jiffies(200));
++	return ret;
+ }
+ 
+ static void nanosic_remove(struct i2c_client *client)
+ {
+ 	/* Stop new callbacks while all devm-managed driver state is still live. */
++	struct nanosic *nano = i2c_get_clientdata(client);
+ 	sysfs_remove_group(&client->dev.kobj, &nanosic_attr_group);
++	/* Stop work before devm unregisters the switch input device. */
++	cancel_delayed_work_sync(&nano->status_work);
+ }
+ 
+ static int nanosic_suspend(struct device *dev)
+@@ -1203,6 +1337,7 @@
+ 		nano->awake = false;
+ 	}
+ 	cancel_delayed_work_sync(&nano->idle_work);
++	cancel_delayed_work_sync(&nano->status_work);
+ 
+ 	if (!device_may_wakeup(dev))
+ 		return 0;
+@@ -1217,6 +1352,8 @@
+ restore_runtime:
+ 	scoped_guard(mutex, &nano->lock) {
+ 		WRITE_ONCE(nano->suspended, false);
++		nano->status_attempts = 0;
++		mod_delayed_work(system_wq, &nano->status_work, msecs_to_jiffies(200));
+ 		nanosic_wake(nano);
+ 		if (nano->data_pending) {
+ 			nano->data_pending = false;
+@@ -1241,6 +1378,8 @@
+ 
+ 	scoped_guard(mutex, &nano->lock) {
+ 		WRITE_ONCE(nano->suspended, false);
++		nano->status_attempts = 0;
++		mod_delayed_work(system_wq, &nano->status_work, msecs_to_jiffies(200));
+ 		nanosic_wake(nano);
+ 		if (nano->data_pending) {
+ 			nano->data_pending = false;
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+@@ -187,8 +187,8 @@
+ 		/*
+ 		 * Two hall switches, plain TLMM GPIOs (vendor hall_key/hall_key1,
+ 		 * abl-final-fdt.dts gpio_keys): gpio10 closes with the folio lid,
+-		 * gpio23 signals tablet-mode.  SW_LID lets logind blank on close;
+-		 * SW_TABLET_MODE drives GNOME's on-screen-keyboard decision.  The
++		 * gpio23 is the second cover magnet.  SW_LID lets logind blank on close;
++		 * Connector presence is reported by the NanoSic MCU.  The
+ 		 * nanosic keyboard MCU reads the same magnets separately; these
+ 		 * switches do not depend on it.
+ 		 */
+@@ -201,21 +201,9 @@
+ 			wakeup-source;
+ 		};
+ 
+-		event-hall-tablet-mode {
+-			label = "Hall Tablet Mode";
+-			linux,input-type = <EV_SW>;
+-			linux,code = <SW_TABLET_MODE>;
+-			/*
+-			 * GNOME semantics: SW_TABLET_MODE=1 means "no keyboard attached".
+-			 * This hall pin is pulled up when no magnet (keyboard/folio) is
+-			 * near, so active-high maps detached -> tablet mode and attached
+-			 * -> laptop mode -- the latter additionally gates GNOME's
+-			 * on-screen keyboard.
+-			 */
+-			gpios = <&tlmm 23 GPIO_ACTIVE_HIGH>;
+-			debounce-interval = <150>;
+-			wakeup-source;
+-		};
++		/* GPIO23 is a cover magnet, not pogo-pin keyboard presence.
++		 * The NanoSic MCU reports SW_TABLET_MODE on its own input device.
++		 */
+ 
+ 		key-volume-up {
+ 			label = "Volume Up";

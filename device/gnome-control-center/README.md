@@ -1,18 +1,21 @@
 # GNOME 设置适配
 
+这是保留的上游 Ubuntu/GNOME 可选组件，当前 Fedora 和 Ubuntu Plasma 构建不调用它，
+也不是默认安装步骤。保留源码补丁、来源和许可证供 GNOME 适配维护。
+
 本组件基于 Ubuntu 的 `gnome-control-center 1:50.0-0ubuntu6`，保留发行版补丁和各设置面板，
 增加平板电源键策略的原生设置入口。
 
 源码归档和项目补丁的校验值记录在 [source.json](source.json)。从主项目根目录准备源码：
 
 ```sh
-python3 tools/build-liuqin-settings.py --prepare-only
+python3 build/scripts/build-liuqin-settings.py --prepare-only
 ```
 
 在配置好 AArch64 binfmt 的 Linux 主机上，使用已准备的 Ubuntu ARM64 根文件系统构建：
 
 ```sh
-sudo python3 tools/build-liuqin-settings.py --jobs 8
+sudo python3 build/scripts/build-liuqin-settings.py --jobs 8
 ```
 
 构建使用隔离的挂载命名空间和 overlay，不修改输入根文件系统。默认输出目录是

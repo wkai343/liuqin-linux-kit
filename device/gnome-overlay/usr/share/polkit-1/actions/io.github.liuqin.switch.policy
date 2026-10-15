@@ -10,7 +10,7 @@
   liuqin-switch invocation falls back to pkexec's generic action.
 -->
 <policyconfig>
-  <vendor>xiaomipad-6pro-mainline</vendor>
+  <vendor>Liuqin Linux Kit</vendor>
   <action id="io.github.liuqin.switch.to-android">
     <description>Reboot into Android</description>
     <description xml:lang="zh_CN">重启到 Android</description>

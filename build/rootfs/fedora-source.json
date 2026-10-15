@@ -1,0 +1,11 @@
+{
+  "distribution": "fedora",
+  "release": "44",
+  "architecture": "aarch64",
+  "format": "oci",
+  "archive": "Fedora-Container-Base-Generic-44-1.7.aarch64.oci.tar.xz",
+  "url": "https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Container/aarch64/images/Fedora-Container-Base-Generic-44-1.7.aarch64.oci.tar.xz",
+  "sha256": "eca19542a48a8e39b84e869713a1fa2408cbcc578de26c25ae72e3334ef968c1",
+  "checksum_source": "https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Container/aarch64/images/Fedora-Container-44-1.7-aarch64-CHECKSUM",
+  "signing_key": "36F612DCF27F7D1A48A835E4DBFCF71C6D9F90A6"
+}

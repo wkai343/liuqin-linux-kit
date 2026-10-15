@@ -272,4 +272,15 @@ rm "$marker"
 run_guard
 expect_fail marker-missing 'root marker missing'
 
+reset_fixture
+sed -i 's| / ext4 | / btrfs |' "$mounts"
+printf 'btrfs\n' >"${marker%/*}/liuqin-root-filesystem"
+run_guard
+expect_pass btrfs-single-root '6 nodes; root pair rw, all siblings ro'
+reset_fixture
+sed -i 's| / ext4 | / btrfs |' "$mounts"
+rm -f "${marker%/*}/liuqin-root-filesystem"
+run_guard
+expect_fail btrfs-marker-missing 'Btrfs root lacks its installation marker'
+
 printf '%s\n' 'liuqin GNOME storage guard execution tests: PASS'

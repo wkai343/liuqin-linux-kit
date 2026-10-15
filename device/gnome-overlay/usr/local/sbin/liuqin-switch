@@ -112,7 +112,7 @@ die() {
 
 is_android() { [ -z "$DEV_DIR" ] && [ -f /system/build.prop ]; }
 
-# Same parser as initramfs/init: both spellings are accepted, they must agree,
+# Same parser as device/boot/initramfs/init: both spellings are accepted, they must agree,
 # and the value must be _a or _b.  tests/slot-tool.py runs both copies.
 slot_from_cmdline() {
 	slot_suffix=

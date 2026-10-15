@@ -16,6 +16,7 @@
 #include <sys/mman.h>
 #include <sys/random.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #define QSEE_IMPL_ID 5u
@@ -677,76 +678,71 @@ static int wait_sensor_irq(int power_fd, const char *phase, int timeout_ms)
 	return -1;
 }
 
-static int clear_pending_irq(int power_fd, const char *phase)
-{
-	struct pollfd event = { .fd = power_fd, .events = POLLIN };
-	int result = poll(&event, 1, 0);
-
-	if (result < 0) {
-		perror("clear_pending_irq");
-		return -1;
-	}
-	if (result && !(event.revents & POLLIN)) {
-		fprintf(stderr, "pending_irq_error=%s revents=0x%x\n",
-			phase, event.revents);
-		return -1;
-	}
-	if (result)
-		printf("stale_irq_drained=%s\n", phase);
-	return 0;
-}
-
-/* HAL capture_image(mode=1) calls wait_finger_down with qualifier=0:
- * 10/3, IRQ, then capture. Qualification stays inside the capture command;
- * an extra 10/11 here would consume the IRQ before capture can inspect it.
+/* OEM wait_finger_down without qualification: 10/3 -> physical IRQ ->
+ * capture 10/4. The level-v1 kernel interface mirrors the HAL's GPIO read.
  */
-static int wait_finger_down(int fd, uint32_t session, int power_fd)
+static int wait_finger_down(int fd, uint32_t session, int power_fd, int timeout_ms,
+                            int report_ready)
 {
-	if (clear_pending_irq(power_fd, "before_down"))
-		return -1;
-	if (query(fd, session, SENSOR_WAIT_FINGER_DOWN))
-		return -1;
-	if (clear_pending_irq(power_fd, "after_down_setup"))
-		return -1;
-	printf("READY finger_irq_armed=down press finger now\n");
-	return wait_sensor_irq(power_fd, "down", 120000);
+ if(query(fd,session,SENSOR_WAIT_FINGER_DOWN))return -1;
+ if(report_ready)printf("READY finger_irq_armed=down press finger now\n");
+ return wait_sensor_irq(power_fd,"down",timeout_ms);
 }
 
-/* HAL fpc_tee_wait_finger_lost: 10/2, IRQ, 10/11, 10/1. */
-static int wait_finger_lost(int fd, uint32_t session, int power_fd)
+/* HAL capture_image(mode=1) retries 10/3 -> IRQ -> 10/4 when capture returns
+ * WAIT_TIME (1). That is not a rejected biometric sample and must not consume
+ * an enrollment attempt or enter the lift phase. Keep one bounded deadline
+ * across these retries; do not busy-spin on sensor readiness interrupts.
+ */
+static int capture_with_wait(int fd, uint32_t session, int power_fd)
 {
-	int status = query(fd, session, SENSOR_CHECK_FINGER_LOST);
+	struct timespec now;
+	int64_t deadline, remaining_ms;
+	int waiting_reported = 0;
+	int ready_reported = 0;
 
-	if (status < 0)
+	if (clock_gettime(CLOCK_MONOTONIC, &now))
 		return -1;
-	if (status)
-		return 0;
-	if (clear_pending_irq(power_fd, "before_up"))
-		return -1;
-	for (unsigned int attempt = 0; attempt < 600; attempt++) {
-		status = query(fd, session, SENSOR_WAIT_FINGER_LOST);
-		if (status < 0)
+	deadline = (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000 + 120000;
+	for (;;) {
+		if (operation_cancelled || clock_gettime(CLOCK_MONOTONIC, &now))
 			return -1;
-		if (status)
-			return status;
-		if (wait_sensor_irq(power_fd, "up", 30000))
+		remaining_ms = deadline - ((int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000);
+		if (remaining_ms <= 0) {
+			fprintf(stderr, "capture_wait_time_timeout=1\n");
 			return -1;
-		status = query(fd, session, SENSOR_CHECK_FINGER_STATE);
-		if (status < 0)
-			return -1;
-		if (!status) {
-			usleep(50000);
-			continue;
 		}
-		status = query(fd, session, SENSOR_CHECK_FINGER_LOST);
-		if (status < 0)
+		if (wait_finger_down(fd, session, power_fd, (int)remaining_ms, !ready_reported))
 			return -1;
-		if (status)
-			return 0;
+		ready_reported = 1;
+		int status = query(fd, session, CAPTURE_ENROL);
+		if (status != 1)
+			return status;
+		if (!waiting_reported) {
+			printf("capture_wait_time=1\n");
+			waiting_reported = 1;
+		}
 		usleep(50000);
 	}
-	fprintf(stderr, "finger_lost_wait_exhausted=600\n");
-	return -1;
+}
+
+/* OEM regular lift wait: 10/2 -> physical IRQ -> 10/11 -> 10/1. */
+static int wait_finger_lost(int fd,uint32_t session,int power_fd)
+{
+ for(unsigned int attempt=0;attempt<600&&!operation_cancelled;attempt++) {
+  int status=query(fd,session,SENSOR_WAIT_FINGER_LOST);
+  if(status<0)return -1;
+  if(status)return status;
+  if(wait_sensor_irq(power_fd,"up",30000))return -1;
+  status=query(fd,session,SENSOR_CHECK_FINGER_STATE);
+  if(status<0)return -1;
+  if(status) {
+   status=query(fd,session,SENSOR_CHECK_FINGER_LOST);
+   if(status<0)return -1;
+   if(status)return 0;
+  }
+ }
+ return -1;
 }
 
 /* OEM HAL store_template_db_host: 4/6 size, 4/14 begin, 4/16 read,
@@ -1020,10 +1016,9 @@ static int match_existing(int fd, uint32_t session, int power_fd,
 		fprintf(stderr, "match_unavailable=single_template_database_required touch_not_collected=1\n");
 		return 1;
 	}
-	if (set_auth_challenge(fd, session, &challenge) ||
-	    wait_finger_down(fd, session, power_fd))
+	if (set_auth_challenge(fd, session, &challenge))
 		return 1;
-	status = query(fd, session, CAPTURE_ENROL);
+	status = capture_with_wait(fd, session, power_fd);
 	if (status) {
 		fprintf(stderr, "match_incomplete=capture_rejected app_status=%d\n", status);
 		return 1;
@@ -1309,13 +1304,11 @@ int main(int argc, char **argv)
 			if (operation_cancelled)
 				goto out;
 			printf("READY enrol attempt=%u: press same finger and hold\n", attempt);
-			if (wait_finger_down(client_fd, client_session, power_fd)) {
+			status = capture_with_wait(client_fd, client_session, power_fd);
+			if (status < 0) {
 				fprintf(stderr, "pipeline_incomplete=finger_down_wait\n");
 				goto out;
 			}
-			status = query(client_fd, client_session, CAPTURE_ENROL);
-			if (status < 0)
-				goto out;
 			if (!status) {
 				status = query_output(client_fd, client_session, BIO_ENROL, &remaining);
 				if (status < 0)
@@ -1375,7 +1368,7 @@ int main(int argc, char **argv)
 				goto out;
 			}
 		}
-		if (capture_wait && wait_finger_down(client_fd, client_session, power_fd))
+		if (capture_wait && wait_finger_down(client_fd, client_session, power_fd, 120000, 1))
 			goto out;
 		result = query(client_fd, client_session,
 			       capture_wait ? CAPTURE_ENROL : CAPTURE_ONCE) ? 1 : 0;

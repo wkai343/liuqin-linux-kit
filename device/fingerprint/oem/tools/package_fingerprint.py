@@ -31,7 +31,7 @@ def main():
     for name, digest in existing.items():
         if hashlib.sha256((stage/name).read_bytes()).hexdigest() != digest:
             raise RuntimeError("Previous staging drift: " + name)
-    updates = {"README.md": root / "README.md"}
+    updates = {"README.md": root / "README.md", "NOTICE": root / "NOTICE"}
     firmware_sources = {}
     if options.firmware is not None:
         firmware_sources = {p.name: p for p in sorted(options.firmware.iterdir())

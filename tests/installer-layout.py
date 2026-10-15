@@ -26,7 +26,10 @@ import sys
 import tempfile
 
 project = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location('liuqin_layout', project / 'tools/lib/liuqin_layout.py')
+sys.path.insert(0, str(project / 'installer'))
+from liuqin_gui.demo import DemoEngine
+
+spec = importlib.util.spec_from_file_location('liuqin_layout', project / 'shared/liuqin_layout.py')
 layout = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(layout)
 
@@ -268,21 +271,20 @@ with tempfile.TemporaryDirectory(prefix='liuqin-layout-test-') as directory:
 
     # --- the command line ----------------------------------------------------
     bundle = work / 'bundle'
-    bundle.mkdir()
-    files = {}
-    for name in ('boot.img', 'installer.img', 'rootfs.tar.gz'):
-        (bundle / name).write_bytes(name.encode())
-        files[name] = hashlib.sha256(name.encode()).hexdigest()
-    (bundle / 'bundle.json').write_text(json.dumps({'device': 'liuqin', 'files': files}))
-    base = [sys.executable, str(project / 'tools/install-liuqin.py'), '--bundle', str(bundle), '--check']
-    preview = subprocess.run(base + ['--layout', 'dual'], capture_output=True, text=True)
-    check('--check --layout dual prints the plan without touching a device',
-          preview.returncode == 0 and 'linux_root' in preview.stdout and 'userdata' in preview.stdout,
+    demo = DemoEngine(lambda event: None, work / 'demo-state')
+    try:
+        shutil.copytree(demo.demo_bundle, bundle)
+    finally:
+        demo.close()
+    base = [sys.executable, str(project / 'installer/install-liuqin.py'), '--bundle', str(bundle), '--check']
+    preview = subprocess.run(base + ['--layout', 'linux-single'], capture_output=True, text=True)
+    check('--check --layout linux-single prints the plan without touching a device',
+          preview.returncode == 0 and 'userdata' in preview.stdout and 'linux_root' not in preview.stdout,
           preview.stdout + preview.stderr)
     print(preview.stdout.strip())
-    bad = subprocess.run(base + ['--layout', 'dual', '--android-size', '4G'], capture_output=True, text=True)
-    check('--check rejects an out-of-range size and prints the feasible range',
-          bad.returncode != 0 and 'must be between' in bad.stderr, bad.stderr)
+    bad = subprocess.run(base + ['--layout', 'dual'], capture_output=True, text=True)
+    check('--check refuses unsupported split installation modes',
+          bad.returncode != 0 and '仅支持 linux-single' in bad.stderr, bad.stderr)
     both = subprocess.run(base + ['--layout', 'dual', '--keep-home', '--root-size', '32G'],
                           capture_output=True, text=True)
     check('--keep-home and an explicit size together are refused',

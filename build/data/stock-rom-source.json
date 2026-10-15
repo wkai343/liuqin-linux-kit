@@ -1,0 +1,20 @@
+{
+  "page": "https://www.cpidmi.com/xiaomi-pad-6-pro-liuqin-os2-0-6-0-vmycnxm-15675",
+  "rom": "OS2.0.6.0.VMYCNXM",
+  "archive": "liuqin_images_OS2.0.6.0.VMYCNXM_20250318.0000.00_15.0_cn_c29f6de5df.tgz",
+  "bytes": 7087928263,
+  "md5": "c29f6de5df1445e71b1f6b8851df5e0d",
+  "sha256": "af7bd8c434ed6811e3e2fe17db165472e69c94001cea679c8b20e931de4f51cc",
+  "archive_root": "liuqin_images_OS2.0.6.0.VMYCNXM_15.0",
+  "mirrors": [
+    "https://www.cpidmi.com/download/15675-xiaomi-pad-6-pro-liuqin-os2-0-6-0-vmycnxm/dl/0",
+    "https://www.cpidmi.com/download/15675-xiaomi-pad-6-pro-liuqin-os2-0-6-0-vmycnxm/dl/3",
+    "https://www.cpidmi.com/download/15675-xiaomi-pad-6-pro-liuqin-os2-0-6-0-vmycnxm/dl/4"
+  ],
+  "required_images": [
+    "vendor_boot.img",
+    "dtbo.img",
+    "super.img",
+    "NON-HLOS.bin"
+  ]
+}

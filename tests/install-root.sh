@@ -1,5 +1,5 @@
 #!/bin/sh
-# Host-side execution tests for the /home handling of tools/lib/install-root.sh.
+# Host-side execution tests for the /home handling of device/installer/install-root.sh.
 #
 # tests/installer.py covers the option scan's refusals; this suite runs the
 # home functions themselves -- the label check, e2fsck, the format path and
@@ -13,7 +13,7 @@
 set -eu
 
 project_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-root_source=${LIUQIN_ROOT_SCRIPT:-$project_root/tools/lib/install-root.sh}
+root_source=${LIUQIN_ROOT_SCRIPT:-$project_root/device/installer/install-root.sh}
 [ -f "$root_source" ] ||
 	{ printf '%s\n' "test-liuqin-root: no such script: $root_source" >&2; exit 1; }
 

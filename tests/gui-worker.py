@@ -3,7 +3,8 @@
 """Persistent worker protocol tests using only the hardware-free demo."""
 import json
 from pathlib import Path
-import select
+import queue
+import threading
 import subprocess
 import sys
 import tempfile
@@ -17,11 +18,17 @@ class WorkerTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.root = Path(self.directory.name)
-        self.process = subprocess.Popen([sys.executable, '-u', str(project / 'tools/install-gui.py'),
+        self.process = subprocess.Popen([sys.executable, '-u', str(project / 'installer/install-gui.py'),
                                          '--worker', '--demo', '--state-dir', str(self.root / 'state')],
                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE, bufsize=0)
-        self.buffer = bytearray()
+        self.lines = queue.Queue()
+        def read_lines():
+            while line := self.process.stdout.readline():
+                self.lines.put(line)
+            self.lines.put(None)
+        self.reader = threading.Thread(target=read_lines, daemon=True)
+        self.reader.start()
         self.assertEqual(self.read()['type'], 'ready')
 
     def tearDown(self):
@@ -29,6 +36,7 @@ class WorkerTests(unittest.TestCase):
             self.process.stdin.close()
             self.process.wait(timeout=10)
         self.assertEqual(self.process.returncode, 0, self.process.stderr.read().decode())
+        self.reader.join(timeout=2)
         self.process.stdout.close()
         self.process.stderr.close()
         self.directory.cleanup()
@@ -37,16 +45,12 @@ class WorkerTests(unittest.TestCase):
         self.process.stdin.write((json.dumps(dict(action=action, **values)) + '\n').encode())
 
     def read(self):
-        deadline = time.monotonic() + 10
-        while b'\n' not in self.buffer:
-            if not select.select([self.process.stdout], [], [], max(0, deadline - time.monotonic()))[0]:
-                raise AssertionError('worker event timed out')
-            chunk = self.process.stdout.read(65536)
-            if not chunk:
-                raise AssertionError('worker exited without expected event')
-            self.buffer.extend(chunk)
-        line, _, rest = self.buffer.partition(b'\n')
-        self.buffer[:] = rest
+        try:
+            line = self.lines.get(timeout=10)
+        except queue.Empty:
+            raise AssertionError('worker event timed out') from None
+        if line is None:
+            raise AssertionError('worker exited without expected event')
         event = json.loads(line)
         self.assertEqual(event['schema_version'], 2)
         return event

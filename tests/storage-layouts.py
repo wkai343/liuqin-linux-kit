@@ -2,22 +2,34 @@
 # SPDX-License-Identifier: MIT
 """Capacity and confirmation regressions; all tablet operations are mocked."""
 import copy
-import hashlib
 import importlib.util
 import io
-import json
 from contextlib import redirect_stdout
 from pathlib import Path
 import shlex
+import shutil
+import sys
 import tempfile
 from types import SimpleNamespace
 from unittest.mock import patch
 
 project = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location('installer', project / 'tools/install-liuqin.py')
+spec = importlib.util.spec_from_file_location('installer', project / 'installer/install-liuqin.py')
 installer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(installer)
 L = installer.layout
+sys.path.insert(0, str(project / 'installer'))
+from liuqin_gui.demo import DemoEngine
+
+
+def make_bundle(root):
+    demo = DemoEngine(lambda event: None, root / 'demo-state')
+    bundle = root / 'bundle'
+    try:
+        shutil.copytree(demo.demo_bundle, bundle)
+    finally:
+        demo.close()
+    return bundle
 
 
 def stock(capacity, offset=0, userdata_number=35):
@@ -115,28 +127,27 @@ class Server:
     def server_close(self): pass
 
 
-def run_host(mode, *, answer='YES', change_after_confirmation=False, options=(), advertised=True):
+def run_host(mode, *, capacity=128, answer='YES', change_after_confirmation=False,
+             options=(), metadata=True, corrupt_boot=False):
     """Run main() past the real planning boundary with a synthetic RAM endpoint."""
     operations = []
     boot_id = '11111111-1111-4111-8111-111111111111'
-    disk = stock(128)
+    disk = stock(capacity)
     reports = 0
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
-        bundle = root / 'bundle'
-        bundle.mkdir()
-        hashes = {}
-        for name in ('boot.img', 'installer.img', 'rootfs.tar.gz'):
-            content = name.encode()
-            (bundle / name).write_bytes(content)
-            hashes[name] = hashlib.sha256(content).hexdigest()
-        metadata = {'device': 'liuqin', 'status': 'OFFLINE_ASSEMBLED',
-                    'kernel_release': 'test-kernel', 'files': hashes}
-        if advertised:
-            metadata['installer_layouts'] = list(L.MODES)
-        (bundle / 'bundle.json').write_text(json.dumps(metadata))
+        bundle = make_bundle(root)
+        interface = installer.load_artifacts().inspect_package(bundle)
+        hashes = {name: installer.sha(bundle / name)
+                  for name in ('boot.img', 'installer.img', 'rootfs.tar.gz')}
+        if not metadata:
+            (bundle / 'bundle.json').unlink(missing_ok=True)
+        if corrupt_boot:
+            (bundle / 'boot.img').write_bytes(b'not a boot image')
 
         def fastboot(argv, **unused):
+            if argv[1:] == ['devices']:
+                return SimpleNamespace(stdout='TEST_SERIAL\tfastboot\n')
             operations.append(('fastboot', argv[3:]))
             values = {'product': 'liuqin', 'unlocked': 'yes',
                       'partition-size:userdata': hex(disk.by_name('userdata').size),
@@ -156,7 +167,11 @@ def run_host(mode, *, answer='YES', change_after_confirmation=False, options=(),
             if statement == 'cat /proc/cmdline':
                 return b'androidboot.serialno=TEST_SERIAL'
             if statement == 'uname -r':
-                return b'test-kernel'
+                return interface['installer_kernel_release'].encode()
+            if statement == 'cat /etc/liuqin-installer-interface':
+                return interface['installer_interface'].encode()
+            if statement.startswith('/bin/busybox base64 -d '):
+                return b''
             if 'install-layout.sh' in statement:
                 assert ' report persist' in statement, statement
                 reports += 1
@@ -187,12 +202,14 @@ def run_host(mode, *, answer='YES', change_after_confirmation=False, options=(),
                 '--host-address', '192.168.7.1', *options]
         output = io.StringIO()
         error = None
-        with patch.object(installer.subprocess, 'run', side_effect=fastboot), \
+        with patch.object(installer.host, 'fastboot_path', return_value='fastboot-offline'), \
+             patch.object(installer.subprocess, 'run', side_effect=fastboot), \
              patch.object(installer.subprocess, 'check_output', return_value='TEST_SERIAL\tfastboot\n'), \
              patch.object(installer, 'command', side_effect=command), \
              patch.object(installer, 'backup_partition', side_effect=backup), \
              patch.object(installer, 'backup_partition_table', return_value=root / 'backup/gpt'), \
              patch.object(installer, 'pad_boot_image', side_effect=padded), \
+             patch.object(installer, 'stage_blob', side_effect=lambda *a: operations.append(('stage-contract',))), \
              patch.object(installer.http.server, 'ThreadingHTTPServer', Server), \
              patch.object(installer, 'reference_plan', side_effect=AssertionError('reference used for real install')), \
              patch.object(installer, 'apply_layout', side_effect=lambda *a: operations.append(('apply-layout',))), \
@@ -201,38 +218,46 @@ def run_host(mode, *, answer='YES', change_after_confirmation=False, options=(),
              patch('builtins.input', side_effect=input_answer), redirect_stdout(output):
             try:
                 installer.main(argv)
-            except (SystemExit, RuntimeError, L.LayoutError) as caught:
+            except (SystemExit, RuntimeError, ValueError) as caught:
                 error = caught
         return operations, output.getvalue(), error
 
 
-for mode, options in [('linux-only', ()), ('linux-only', ('--root-size', '75%')),
-                      ('linux-single', ())]:
-    operations, output, error = run_host(mode, options=options)
-    assert error is None, error
-    assert operations[-1] == ('finish', mode), operations
-    assert installer.boot_slots(mode) == (('a',) if mode == 'linux-single' else ('b',))
-    assert operations.index(('backup',)) < operations.index(('confirm',))
-    command = next(op[1] for op in operations if op[0] == 'install-root')
-    assert command[7:9] == (['userdata', '-'] if mode == 'linux-single' else ['linux_root', 'linux_home'])
-    assert any(op[0] == 'apply-layout' for op in operations) == (mode != 'linux-single')
-    assert 'Actual tablet layout' in output and '256 GB reference' not in output
-    print('PASS: actual 128 GB main() flow, confirmation and install command: ' + mode + str(options))
+for capacity in (128, 256, 512):
+    for filesystem in ('ext4', 'btrfs'):
+        operations, output, error = run_host('linux-single', capacity=capacity,
+                                             options=('--filesystem', filesystem))
+        assert error is None, error
+        assert operations[-1] == ('finish', 'linux-single'), operations
+        assert installer.boot_slots('linux-single') == ('a',)
+        assert operations.index(('backup',)) < operations.index(('confirm',))
+        command = next(op[1] for op in operations if op[0] == 'install-root')
+        assert command[7:9] == ['userdata', '-']
+        assert 'ROOT-CONTRACT' in command
+        assert ('FILESYSTEM' in command) == (filesystem == 'btrfs')
+        if filesystem == 'btrfs':
+            assert command[command.index('FILESYSTEM') + 1] == 'btrfs'
+        assert not any(op[0] == 'apply-layout' for op in operations)
+        assert 'Actual tablet layout' in output and '256 GB reference' not in output
+        print(f'PASS: actual {capacity} GB single-root CLI flow: {filesystem}')
 
-for settings in ({'answer': 'no'}, {'change_after_confirmation': True}, {'advertised': False}):
+operations, output, error = run_host('linux-single', metadata=False)
+assert error is None and operations[-1] == ('finish', 'linux-single'), error
+print('PASS: optional bundle.json is not required for installation')
+
+for mode in ('linux-only', 'dual'):
+    operations, output, error = run_host(mode)
+    assert error is not None and not operations
+print('PASS: unsupported split installation modes are refused before device access')
+
+for settings in ({'answer': 'no'}, {'change_after_confirmation': True}, {'corrupt_boot': True}):
     operations, output, error = run_host('linux-single', **settings)
     assert error is not None
     assert not any(op[0] in ('apply-layout', 'install-root', 'finish') for op in operations), operations
-print('PASS: cancellation, a changed GPT and a legacy bundle never reach destructive commands')
+print('PASS: cancellation, a changed GPT and a malformed image never reach destructive commands')
 
 with tempfile.TemporaryDirectory() as temporary:
-    bundle = Path(temporary)
-    files = {}
-    for name in ('boot.img', 'installer.img', 'rootfs.tar.gz'):
-        (bundle / name).write_bytes(name.encode())
-        files[name] = hashlib.sha256(name.encode()).hexdigest()
-    (bundle / 'bundle.json').write_text(json.dumps({'device': 'liuqin', 'files': files,
-                                                   'installer_layouts': list(L.MODES)}))
+    bundle = make_bundle(Path(temporary))
     for option in ('--keep-home', '--root-size', '--android-size'):
         argv = ['--bundle', str(bundle), '--check', '--layout', 'linux-single', option]
         if option != '--keep-home':

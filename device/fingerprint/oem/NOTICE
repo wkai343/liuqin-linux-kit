@@ -1,0 +1,8 @@
+Original notice retained from README.en.md
+==========================================
+
+Original scripts/build integration follow project MIT. File-level licenses take
+precedence: OEM C/PAM BSD-2-Clause, TOD/FpPrint LGPL-2.1-or-later, fprintd adaptation
+GPL-2.0-or-later, AOSP definitions Apache-2.0, and vendor BSD notices retained.
+OEM firmware and private credentials/HAT/templates/raw images/calibration are
+not public source inputs.
