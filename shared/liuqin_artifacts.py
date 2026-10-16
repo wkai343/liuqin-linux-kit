@@ -33,6 +33,36 @@ def bounded_gzip(data, maximum):
     return result
 
 
+def bounded_initramfs(data, maximum):
+    if data.startswith(b'\x1f\x8b'):
+        return bounded_gzip(data, maximum)
+    if not data.startswith(b'\x28\xb5\x2f\xfd'):
+        raise ArtifactError('启动环境需要 gzip 或 Zstd 压缩格式。')
+    try:
+        import zstandard
+    except ImportError as error:
+        raise ArtifactError('读取 Zstd 启动镜像需要 zstandard，请更新安装器或引导工具的依赖。') from error
+    try:
+        parameters = zstandard.get_frame_parameters(data)
+    except zstandard.ZstdError as error:
+        raise ArtifactError('Zstd 启动环境头损坏。') from error
+    # Known frame sizes take precedence over max_output_size in the decoder.
+    # Check the content and window bounds before allocating decoder output.
+    if (parameters.content_size not in (zstandard.CONTENTSIZE_UNKNOWN, zstandard.CONTENTSIZE_ERROR)
+            and parameters.content_size > maximum):
+        raise ArtifactError('镜像解压后过大。')
+    if parameters.window_size > maximum:
+        raise ArtifactError('Zstd 启动环境的解压窗口过大。')
+    try:
+        result = zstandard.ZstdDecompressor().decompress(
+            data, max_output_size=maximum, allow_extra_data=False)
+    except zstandard.ZstdError as error:
+        raise ArtifactError('Zstd 启动环境不完整、损坏或解压后过大。') from error
+    if len(result) > maximum:
+        raise ArtifactError('镜像解压后过大。')
+    return result
+
+
 def cpio_files(data):
     position, files = 0, {}
     while position + 110 <= len(data):
@@ -78,7 +108,7 @@ def boot_interface(path, installer=False):
         raise ArtifactError(path.name + ' 的内核、安装环境或设备树不完整。')
     if b'xiaomi,liuqin\0' not in data[dtb_start:dtb_start + integer(1648)]:
         raise ArtifactError(path.name + ' 的设备树不支持小米平板 6 Pro。')
-    files = cpio_files(bounded_gzip(data[ramdisk_start:ramdisk_start + ramdisk_size], 256 * 1024 * 1024))
+    files = cpio_files(bounded_initramfs(data[ramdisk_start:ramdisk_start + ramdisk_size], 256 * 1024 * 1024))
     def regular(name):
         mode, content = files.get(name, (0, b''))
         if mode & 0o170000 != 0o100000:

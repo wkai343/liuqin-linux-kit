@@ -132,6 +132,26 @@ rootfs.tar.gz
 各命令自动补齐依赖，结束时打印实际产物路径。
 首次准备完整安装目录使用 `devbox run build`。
 
+正常系统引导不显示屏幕调试日志，参数在 `device/native-bootargs.txt`；
+临时安装环境保留屏幕日志，参数独立位于 `device/installer-bootargs.txt`。
+日志仍可在系统内读取。
+正常系统额外应用 `build/kernel/configs/native-display.config`：背光驱动内置，
+显示时钟驱动作为模块加载，配合板级背光补丁保持先熄灯、后接管显示。
+正式版本已通过真机启动与正常重启验证：无灰闪，亮度调节和睡眠唤醒正常。
+正常引导还设置 `deferred_probe_timeout=60`，让驱动能等到根系统装配完毕并加载模块；
+依赖就绪便继续，不会强制等待 60 秒。
+
+Fedora 配方包含 `plymouth` 时，构建会从官方 Fedora 基础系统生成并缓存独立的
+Plymouth Spinner 运行包，再将它和匹配的显示模块放入 `boot.img`。
+首次生成运行包需要与根系统装配相同的 root/ARM64 执行环境；内核更新可复用该运行包。
+桌面根归档不参与运行库收集，`installer.img` 保持独立。
+运行库中内容和权限相同的 ELF 文件在 CPIO 中共享数据，全部路径保持可用，配置文件仍独立。
+正常引导在目标内核启用 `CONFIG_RD_ZSTD=y` 时使用 Zstd 压缩，否则使用 gzip；
+独立安装环境继续使用 gzip。安装器与引导更新工具均可读取这两种格式。
+Fedora 标志、转圈及登录界面切换已通过真机与正常重启验证。
+早期显示设备就绪后即继续，检查间隔为 50 毫秒，等待上限为 5 秒。
+可在正常引导参数中加入 `plymouth.enable=0` 停用动画。
+
 ## 4. 自定义内核
 
 通过 `kernel_fragments` 添加配置片段，例如复制 `build/kernel/configs/custom-zram.config` 后修改。
@@ -142,6 +162,8 @@ zram 内核选项只提供能力，容量与算法由 rootfs 的服务配置决�
 `build/kernel/source.json` 记录的 NanoSic 平板模式、FPC IRQ 等补丁，不改写源码目录。
 改用其他提交时，需自行核对并合入 `build/kernel/patches/` 中适用的补丁。
 Fedora 目标还叠加 `build/kernel/configs/fedora.config`，启用 SELinux。
+自定义配置时保留 `CONFIG_BACKLIGHT_KTZ8866=y` 和 `CONFIG_SM_DISPCC_8450=m`，
+以保持正常系统的背光接管顺序；独立安装内核使用自己的配置。
 
 ### 可选：回收 MTE 预留
 

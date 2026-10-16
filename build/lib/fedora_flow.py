@@ -34,6 +34,15 @@ class FedoraFlow(Flow):
             builder=sha(PROJECT/'build/scripts/build-fedora-root.py'),oci=sha(PROJECT/'build/lib/fedora_oci.py'),
             refresh=self.refresh),build,['assembled/root.tar.gz','assembled/packages.tsv'])/'assembled/root.tar.gz'
 
+    def boot_splash_runtime(self):
+        if 'plymouth' not in self.recipe['packages']:return None
+        archive=self.target_runtime_root()
+        def build(out):self.target_action('splash',archive,out/'assembled')
+        return self.stage('fedora-splash-runtime',dict(base=sha(archive),
+            builder=sha(PROJECT/'build/scripts/build-fedora-root.py'),
+            collector=sha(PROJECT/'build/lib/plymouth_runtime.py'),refresh=self.refresh),
+            build,['assembled/runtime.tar.gz','assembled/runtime.json'])/'assembled'
+
     def sensors(self):
         archive=self.target_runtime_root();board=self.board()
         def build(out):self.target_action('sensors',archive,out/'assembled',rom_sensors=board/'sensors',jobs=self.data.get('jobs',12))

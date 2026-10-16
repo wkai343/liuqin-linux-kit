@@ -20,15 +20,17 @@ dtc=$kernel_out/scripts/dtc/dtc
 fdtoverlay=$kernel_out/scripts/dtc/fdtoverlay
 image=${KERNEL_IMAGE:-$kernel_out/arch/arm64/boot/Image}
 raw_dtb=${KERNEL_DTB:-$kernel_out/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dtb}
-cmdline=$(cat "$project_root/device/native-bootargs.txt")
 
 die() { printf 'build-liuqin-native-boot: %s\n' "$*" >&2; exit 1; }
 sha() { sha256sum "$1" | cut -d' ' -f1; }
 case $root_profile in native-updatable|installer) ;; *) die 'unsupported root profile' ;; esac
 if [ "$root_profile" = installer ]; then
     [ -n "${INSTALLER_RUNTIME:-}" ] || die 'independent installer requires INSTALLER_RUNTIME'
+    cmdline=$(cat "$project_root/device/installer-bootargs.txt")
 elif [ -n "${INSTALLER_RUNTIME:-}" ]; then
     die 'build the RAM image separately with build-liuqin-installer.sh'
+else
+    cmdline=$(cat "$project_root/device/native-bootargs.txt")
 fi
 
 case $out_dir in
@@ -67,6 +69,12 @@ source_epoch=$(git -C "$kernel_source" show -s --format=%ct HEAD)
 charger_mode=auto
 storage_mode=persistent
 if [ "$root_profile" = installer ]; then charger_mode=0; storage_mode=readonly; fi
+ramdisk_compression=gzip
+ramdisk_suffix=gz
+if [ "$root_profile" = native-updatable ] && grep -qx 'CONFIG_RD_ZSTD=y' "$kernel_out/.config"; then
+    ramdisk_compression=zstd
+    ramdisk_suffix=zst
+fi
 mkdir -p "$out_dir"
 case ${LIUQIN_RECLAIM_MTE:-0} in
 0) ;;
@@ -94,6 +102,7 @@ CONTRACT
 fi
 
 LIUQIN_STORAGE_MODE="$storage_mode" LIUQIN_ROOT_PROFILE="$root_profile" LIUQIN_EMBED_ROOTFS=0 \
+	LIUQIN_INITRAMFS_COMPRESSION="$ramdisk_compression" \
 	LIUQIN_CHARGER_MODE="$charger_mode" \
 	INSTALLER_KERNEL_RELEASE="$kernel_out/include/config/kernel.release" \
 	KERNEL_CONFIG="$kernel_out/.config" \
@@ -108,14 +117,11 @@ LIUQIN_STORAGE_MODE="$storage_mode" LIUQIN_ROOT_PROFILE="$root_profile" LIUQIN_E
 	DSP_FIRMWARE_DIR="$firmware_pool/dsp-sm8475/vendor/qcom/sm8475/liuqin" \
 	AUDIO_TOPOLOGY="$audio_topology" \
 	NATIVE_ROOT_CONTRACT="$out_dir/native-root.contract" \
+	BOOT_SPLASH_RUNTIME="${BOOT_SPLASH_RUNTIME:-}" SPLASH_KERNEL_MODULES_DIR="${KERNEL_MODULES_DIR:-}" \
 	OUT_DIR="$out_dir/initramfs" sh "$project_root/build/lib/build-initramfs.sh"
 
-python3 - "$out_dir/initramfs/liuqin-firstboot.cpio.gz" "$out_dir/liuqin-firstboot.cpio.gz" <<'PY'
-import gzip, sys
-from pathlib import Path
-raw = gzip.decompress(Path(sys.argv[1]).read_bytes())
-Path(sys.argv[2]).write_bytes(gzip.compress(raw, compresslevel=1, mtime=0))
-PY
+ramdisk="$out_dir/liuqin-firstboot.cpio.$ramdisk_suffix"
+cp "$out_dir/initramfs/liuqin-firstboot.cpio.$ramdisk_suffix" "$ramdisk"
 
 # ABL takes the kernel command line from /chosen; keep the boot header empty.
 python3 - "$cmdline" "$out_dir/cmdline-overlay.dts" <<'PY'
@@ -128,7 +134,7 @@ PY
 "$fdtoverlay" -i "$raw_dtb" -o "$out_dir/input.dtb" "$out_dir/cmdline-overlay.dtbo"
 
 KERNEL_OUT="$kernel_out" IMAGE="$image" DTB="$out_dir/input.dtb" \
-	RAMDISK="$out_dir/liuqin-firstboot.cpio.gz" DTC="$dtc" FDTOVERLAY="$fdtoverlay" \
+	RAMDISK="$ramdisk" DTC="$dtc" FDTOVERLAY="$fdtoverlay" \
 	MKBOOTIMG_DIR="$mk_dir" STOCK_OVERLAY_DIR="$stock_overlay_dir" STOCK_BASE_DIR="$stock_base_dir" \
 	ABL_OVERLAY_SINK=1 ABL_DTB02_IDS=0 CMDLINE="$cmdline" HEADER_CMDLINE= \
 	OUT_DIR="$out_dir/boot" sh "$project_root/build/lib/build-bootimg.sh"
@@ -146,7 +152,8 @@ mv "$out_dir/boot/boot-liuqin-firstboot.img" "$out_dir/boot-liuqin-native.img"
 	else
 		printf 'contract_sha256=%s\n' "$(sha "$out_dir/native-root.contract")"
 	fi
-	printf 'ramdisk_sha256=%s\n' "$(sha "$out_dir/liuqin-firstboot.cpio.gz")"
+	printf 'ramdisk_compression=%s\n' "$ramdisk_compression"
+	printf 'ramdisk_sha256=%s\n' "$(sha "$ramdisk")"
 	printf 'boot_sha256=%s\n' "$(sha "$out_dir/boot-liuqin-native.img")"
 } >"$out_dir/native-boot.identity"
 cat "$out_dir/native-boot.identity"

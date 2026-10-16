@@ -251,6 +251,18 @@ def check_desktop_runtime(root, *, first_boot_setup=False):
         chroot(root,[binary,'--help'],timeout=30,stdout=subprocess.DEVNULL)
 
 
+def boot_splash_files():
+    return {
+        'etc/plymouth/plymouthd.conf':'[Daemon]\nTheme=spinner\nShowDelay=0\nDeviceTimeout=5\n',
+        # The initramfs may already have a daemon owning the display.
+        'etc/systemd/system/plymouth-start.service.d/10-liuqin.conf':
+            '[Service]\nExecStart=\nExecStart=/bin/sh -c '\
+            "'/usr/bin/plymouth --ping || exec /usr/bin/plymouthd --mode=boot --pid-file=/run/plymouth/pid --attach-to-session'\n",
+        'etc/systemd/system/plymouth-quit.service.d/10-liuqin.conf':
+            '[Service]\nExecStart=\nExecStart=-/usr/bin/plymouth quit --retain-splash\n',
+    }
+
+
 def configure(root, data, output):
     check_skeleton(root/'etc/skel')
     configure_flatpak(root)
@@ -289,6 +301,10 @@ def configure(root, data, output):
     link('display-manager.service','/usr/lib/systemd/system/plasmalogin.service')
     link('graphical.target.wants/plasmalogin.service','/usr/lib/systemd/system/plasmalogin.service')
     link('default.target','/usr/lib/systemd/system/graphical.target')
+    if 'plymouth' in data.get('packages',[]):
+        for name,content in boot_splash_files().items():common.write_config(root,name,content)
+        for target,name in (('sysinit','start'),('multi-user','quit'),('multi-user','quit-wait')):
+            link(target+'.target.wants/plymouth-'+name+'.service','/usr/lib/systemd/system/plymouth-'+name+'.service')
     for name in ('NetworkManager','bluetooth','chronyd','systemd-resolved'):
         link('multi-user.target.wants/'+name+'.service','/usr/lib/systemd/system/'+name+'.service')
     if (root/'usr/lib/systemd/system/sshd.service').is_file():
@@ -321,7 +337,7 @@ def configure(root, data, output):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=('runtime','apps','extract','sensors','kernel-files','stats','fingerprint'))
+    parser.add_argument('action',choices=('runtime','apps','extract','sensors','kernel-files','stats','fingerprint','splash'))
     parser.add_argument('--archive',type=Path,required=True);parser.add_argument('--archive-sha256',required=True)
     parser.add_argument('--out',type=Path,required=True);parser.add_argument('--recipe',type=Path)
     parser.add_argument('--rpms',type=Path);parser.add_argument('--rom-sensors',type=Path)
@@ -340,6 +356,17 @@ def main():
     if args.action=='runtime':extract_oci(args.archive,args.archive_sha256,root)
     else:common.extract(args.archive,args.archive_sha256,root)
     if args.action=='extract':return
+    if args.action=='splash':
+        with mounted_root(root):
+            enable_documentation(root)
+            dnf(root,'install','plymouth','plymouth-theme-spinner','systemd-udev')
+            collector=root/'tmp/liuqin-plymouth-runtime.py'
+            shutil.copyfile(PROJECT/'build/lib/plymouth_runtime.py',collector)
+            chroot(root,['python3','/tmp/liuqin-plymouth-runtime.py','--out','/tmp/liuqin-splash-runtime'])
+            for name in ('runtime.tar.gz','runtime.json'):
+                shutil.copyfile(root/'tmp/liuqin-splash-runtime'/name,output/name)
+        shutil.rmtree(root)
+        return
     if args.action=='sensors':
         if not args.rom_sensors:parser.error('需要原厂传感器配置。')
         with arm64_execution():

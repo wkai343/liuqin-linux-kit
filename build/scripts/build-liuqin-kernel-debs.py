@@ -16,7 +16,7 @@ sys.path.insert(0, str(PROJECT / 'shared'))
 from liuqin_kernel import build_contract, parse_contract, digest, extract_modules
 from liuqin_artifacts import boot_interface
 
-TOOLS_VERSION = '0.1.2'
+TOOLS_VERSION = '0.1.3'
 
 
 def put(root, name, content, mode=0o644):
@@ -57,7 +57,7 @@ def build(kernel, modules, boot_image, output, version, kernel_source=None, pack
     with tempfile.TemporaryDirectory(prefix='.kernel-debs-', dir=output.parent) as directory:
         work = Path(directory); packages = work / 'packages'; packages.mkdir()
         tools = work / 'tools'
-        control(tools, 'liuqin-boot-tools', TOOLS_VERSION, 'python3 (>= 3.11)',
+        control(tools, 'liuqin-boot-tools', TOOLS_VERSION, 'python3 (>= 3.11), python3-zstandard (>= 0.23)',
                 'Liuqin versioned kernel boot update and recovery tools')
         put(tools, 'usr/lib/liuqin/boot-update.py', (PROJECT / 'device/boot/boot-update.py').read_bytes(), 0o755)
         put(tools, 'etc/liuqin-root-interface', b'liuqin-root-v2\n')
@@ -126,7 +126,7 @@ def build(kernel, modules, boot_image, output, version, kernel_source=None, pack
                 if root==tools:
                     shutil.rmtree(root/'etc/apt')
                     shutil.rmtree(root/'etc/kernel')
-                    dependencies=['python3 >= 3.11'];pre=[];posttrans=''
+                    dependencies=['python3 >= 3.11','python3-zstandard >= 0.23'];pre=[];posttrans=''
                 elif root==module:
                     dependencies=['kmod'];pre=['liuqin-boot-tools >= '+TOOLS_VERSION];posttrans=''
                 elif root==image:

@@ -307,17 +307,25 @@ if [ -n "$rootfs" ]; then
 	echo "stage 2: $rootfs" >&2
 fi
 
+compression=${LIUQIN_INITRAMFS_COMPRESSION:-gzip}
+case $compression in
+gzip) archive_suffix=gz ;;
+zstd)
+    command -v zstd >/dev/null || { echo 'error: Zstd compression requires zstd' >&2; exit 1; }
+    archive_suffix=zst ;;
+*) echo 'error: unsupported initramfs compression' >&2; exit 1 ;;
+esac
 mkdir -p "$out_dir"
 # The cpio below runs inside `cd "$staging"`, so every path it is handed has to
 # be absolute. The built-in default already is; a relative OUT_DIR= on the
 # command line was not, and failed there with a message about a file it had
 # created moments earlier.
 out_dir=$(CDPATH= cd -- "$out_dir" && pwd)
-archive="$out_dir/liuqin-firstboot.cpio.gz"
+archive="$out_dir/liuqin-firstboot.cpio.$archive_suffix"
 raw_archive="$out_dir/.liuqin-firstboot.cpio.$$"
 staging=$(mktemp -d "$out_dir/.staging.XXXXXX")
 cleanup() {
-	rm -f "$raw_archive" "$raw_archive.gz"
+	rm -f "$raw_archive" "$raw_archive.gz" "$raw_archive.zst"
 	rm -rf "$staging"
 }
 trap cleanup EXIT HUP INT TERM
@@ -484,6 +492,14 @@ fi
 python3 "$project_root/build/lib/usb_identity.py" --output-directory "$staging/etc"
 python3 "$project_root/build/lib/root_filesystems.py" --kernel-config "${KERNEL_CONFIG:?set KERNEL_CONFIG}" \
     --output "$staging/etc/liuqin-filesystems"
+if [ -n "${BOOT_SPLASH_RUNTIME:-}" ]; then
+    [ "$root_profile" = native-updatable ] && [ "$storage_mode" = persistent ] && [ "$embed_rootfs" = 0 ] || {
+        echo 'error: boot splash belongs only to a native persistent image' >&2; exit 1;
+    }
+    python3 "$project_root/build/lib/boot_splash.py" --runtime "$BOOT_SPLASH_RUNTIME" \
+        --modules "${SPLASH_KERNEL_MODULES_DIR:?set SPLASH_KERNEL_MODULES_DIR}" \
+        --contract "$native_root_contract" --staging "$staging"
+fi
 if grep -qx btrfs "$staging/etc/liuqin-filesystems" && [ "$root_profile" = installer ]; then
     [ -x "$staging/usr/sbin/mkfs.btrfs" ] && [ -x "$staging/usr/bin/btrfs" ] || {
         echo 'error: Btrfs-capable installer requires mkfs.btrfs and btrfs tools' >&2; exit 1;
@@ -497,8 +513,14 @@ find "$staging" -exec touch -h -d "@$source_epoch" {} +
 		cpio --null --create --format=newc --owner=0:0 --reproducible \
 			--file="$raw_archive"
 )
-gzip -n -9 "$raw_archive"
-mv "$raw_archive.gz" "$archive"
+case $compression in
+gzip)
+    gzip -n -9 "$raw_archive"
+    mv "$raw_archive.gz" "$archive" ;;
+zstd)
+    zstd --quiet -10 --single-thread --stdout "$raw_archive" >"$raw_archive.zst"
+    mv "$raw_archive.zst" "$archive" ;;
+esac
 
 if [ -n "$rootfs" ]; then
 	sha256sum "$archive" "$busybox" "$rootfs"
@@ -509,6 +531,7 @@ printf 'bluetooth firmware: %s files, set sha256 %s\n' \
 	"$(printf '%s\n' "$bt_firmware_names" | wc -l)" "$bt_firmware_set_sha256"
 printf 'initramfs: %s bytes\n' "$(stat -c %s "$archive")"
 printf 'initramfs: %s\n' "$archive"
+printf 'initramfs compression: %s\n' "$compression"
 printf 'storage mode: %s\n' "$storage_mode"
 printf 'embedded rootfs: %s\n' "$embed_rootfs"
 printf 'root profile: %s\n' "$root_profile"

@@ -118,11 +118,113 @@ class SourceTests(unittest.TestCase):
         for name in ('boot','installer'):
             self.assertNotEqual(stages[0][name],stages[1][name])
 
+    def test_boot_argument_changes_invalidate_only_the_selected_image(self):
+        device=self.project/'device';device.mkdir()
+        for name in ('native-bootargs.txt','installer-bootargs.txt'):
+            shutil.copyfile(PROJECT/'device'/name,device/name)
+        data=builder.config(PROJECT/'build/devbox/build.example.json')
+        pipeline=flow.Flow(data,lambda *_a,**_k:self.fail('unexpected build'),distribution='fedora')
+        records={}
+        def capture(name,dependency,_build,_artifacts):
+            records[name]=helpers.key(dependency)
+            return self.root
+        def digest(path):
+            return helpers.sha(path) if path.name in ('native-bootargs.txt','installer-bootargs.txt') else str(path)
+        with patch.object(flow,'PROJECT',self.project), \
+             patch.object(pipeline,'kernel',return_value=(self.root,self.root)), \
+             patch.object(pipeline,'modules',return_value=self.root), \
+             patch.object(pipeline,'runtime',return_value=self.root), \
+             patch.object(pipeline,'board',return_value=self.root), \
+             patch.object(pipeline,'board_inputs',return_value={}), \
+             patch.object(flow,'sha',side_effect=digest), \
+             patch.object(flow,'tree_identity',side_effect=lambda path:str(path)), \
+             patch.object(pipeline,'stage',side_effect=capture):
+            pipeline.boot();pipeline.boot(True);first=dict(records)
+            path=device/'native-bootargs.txt';path.write_text(path.read_text()+' consoleblank=0\n')
+            pipeline.boot();pipeline.boot(True);second=dict(records)
+            self.assertNotEqual(first['boot'],second['boot'])
+            self.assertEqual(first['installer'],second['installer'])
+            path=device/'installer-bootargs.txt';path.write_text(path.read_text()+' consoleblank=0\n')
+            pipeline.boot();pipeline.boot(True)
+            self.assertEqual(second['boot'],records['boot'])
+            self.assertNotEqual(second['installer'],records['installer'])
+
+    def test_splash_runtime_reaches_only_target_boot_and_has_an_independent_cache_identity(self):
+        data=builder.config(PROJECT/'build/devbox/build.example.json')
+        pipeline=flow.Flow(data,lambda *_a,**_k:None,distribution='fedora')
+        runtime=self.root/'splash-runtime';runtime.mkdir();revision=['first'];records={}
+        def identity(path):return revision[0] if path==runtime else str(path)
+        def capture(name,dependency,build,_artifacts):
+            records[name]=helpers.key(dependency);build(self.root/name);return self.root/name
+        with patch.object(pipeline,'kernel',return_value=(self.root,self.root)), \
+             patch.object(pipeline,'modules',return_value=self.root), \
+             patch.object(pipeline,'runtime',return_value=self.root), \
+             patch.object(pipeline,'board',return_value=self.root), \
+             patch.object(pipeline,'board_inputs',return_value={}), \
+             patch.object(pipeline,'boot_splash_runtime',return_value=runtime) as splash, \
+             patch.object(flow,'sha',side_effect=lambda path:str(path)), \
+             patch.object(flow,'tree_identity',side_effect=identity), \
+             patch.object(pipeline,'stage',side_effect=capture),patch.object(pipeline,'run') as run:
+            pipeline.boot();pipeline.boot(True);before=dict(records)
+            self.assertEqual(run.call_args_list[0].kwargs['env']['BOOT_SPLASH_RUNTIME'],str(runtime))
+            self.assertNotIn('BOOT_SPLASH_RUNTIME',run.call_args_list[1].kwargs['env'])
+            revision[0]='updated'
+            pipeline.boot();pipeline.boot(True)
+            self.assertNotEqual(before['boot'],records['boot'])
+            self.assertEqual(before['installer'],records['installer'])
+            self.assertEqual(splash.call_count,2)
+
     def test_missing_rom_stops_full_build_before_network_or_privileged_work(self):
         data=builder.config(PROJECT/'build/devbox/build.example.json');data['rom_images']=str(self.root/'missing')
         with patch.object(flow,'PROJECT',self.project), patch.object(flow,'download',side_effect=AssertionError('network')):
             with self.assertRaisesRegex(ValueError,'原厂 ROM 缺少'):
                 flow.execute(data,'all',lambda *_a,**_k:self.fail('unexpected command'))
+
+    def test_native_display_fragment_reaches_build_and_only_invalidates_target_kernel(self):
+        data=builder.config(PROJECT/'build/devbox/build.example.json')
+        data['kernel_fragments']=['/custom/override.config']
+        pipeline=flow.Flow(data,lambda *_a,**_k:None,distribution='fedora')
+        records={};revision=['first']
+        native='build/kernel/configs/native-display.config'
+        def digest(path):
+            return revision[0] if str(path).endswith(native) else str(path)
+        def capture(name,dependency,build,_artifacts):
+            records[name]=helpers.key(dependency)
+            build(self.root/name)
+            return self.root/name
+        with patch.object(pipeline,'kernel_source',return_value=(self.root,'a'*40)), \
+             patch.object(pipeline,'stage',side_effect=capture), \
+             patch.object(flow.shutil,'which',return_value='/compiler/gcc'), \
+             patch.object(flow,'sha',side_effect=digest), \
+             patch.object(flow,'tree_identity',side_effect=lambda path:str(path)), \
+             patch.object(pipeline,'run') as run:
+            pipeline.kernel();pipeline.kernel(True);first=dict(records)
+            target=run.call_args_list[0].args[0];installer=run.call_args_list[1].args[0]
+            self.assertLess(target.index(str(PROJECT/native)),target.index('/custom/override.config'))
+            self.assertNotIn(str(PROJECT/native),installer)
+            revision[0]='changed'
+            pipeline.kernel();pipeline.kernel(True)
+            self.assertNotEqual(first['kernel'],records['kernel'])
+            self.assertEqual(first['installer-kernel'],records['installer-kernel'])
+        self.assertEqual(data['kernel_fragments'],['/custom/override.config'])
+        explicit=dict(data,kernel_fragments=[native,'/custom/override.config'])
+        self.assertEqual(flow.kernel_fragments(explicit).count(native),1)
+
+    def test_configure_only_uses_the_same_native_fragment_order(self):
+        data=builder.config(PROJECT/'build/devbox/build.example.json')
+        data['kernel_fragments']=['/custom/override.config']
+        native=str(self.project/'build/kernel/configs/native-display.config')
+        with patch.object(flow,'PROJECT',self.project), \
+             patch.object(flow.Flow,'kernel_source',return_value=(self.root,'b'*40)), \
+             patch.object(flow,'sha',side_effect=lambda path:str(path)), \
+             patch.object(flow,'tree_identity',side_effect=lambda path:str(path)), \
+             contextlib.redirect_stdout(io.StringIO()):
+            commands=[]
+            run=lambda argv,**_kwargs:commands.append(argv)
+            flow.execute(data,'kernel',run,configure_only=True)
+            flow.execute(data,'installer-kernel',run,configure_only=True)
+        self.assertLess(commands[0].index(native),commands[0].index('/custom/override.config'))
+        self.assertNotIn(native,commands[1])
 
     def test_kernel_only_dispatch_does_not_require_rootfs_or_rom(self):
         data=builder.config(PROJECT/'build/devbox/build.example.json');data['rom_images']=str(self.root/'missing')

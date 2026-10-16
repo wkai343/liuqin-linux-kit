@@ -104,6 +104,12 @@ storage_dev_root=${LIUQIN_STORAGE_DEV_ROOT:-/dev}
 storage_sys_block=${LIUQIN_STORAGE_SYS_BLOCK:-/sys/class/block}
 storage_mounts=${LIUQIN_STORAGE_MOUNTS:-/proc/mounts}
 storage_installer_marker=${LIUQIN_STORAGE_INSTALLER_MARKER:-/etc/liuqin-installer}
+storage_splash_state=/run/liuqin-boot-splash
+storage_splash_helper=/usr/libexec/liuqin-boot-splash
+if [ "${LIUQIN_INIT_STORAGE_TEST_ONLY:-0}" = 1 ]; then
+	storage_splash_state=${LIUQIN_STORAGE_SPLASH_STATE:-$storage_splash_state}
+	storage_splash_helper=${LIUQIN_STORAGE_SPLASH_HELPER:-$storage_splash_helper}
+fi
 storage_probe_root=${LIUQIN_STORAGE_PROBE_ROOT:-/mnt/persistent-root}
 storage_newroot=${LIUQIN_STORAGE_NEWROOT:-/newroot}
 storage_target_name=
@@ -709,7 +715,18 @@ storage_switch_persistent_root() {
 
 	storage_moved=
 	storage_move_failed=false
-	for storage_mountpoint in /proc /sys /dev; do
+	storage_mountpoints='/proc /sys /dev'
+	if [ -d "$storage_splash_state" ]; then
+		if [ -L "$storage_newroot/run" ] || { [ -e "$storage_newroot/run" ] && [ ! -d "$storage_newroot/run" ]; }; then
+			log 'persistent root has an invalid splash runtime directory'
+			storage_abort || ufs_safe=false
+			return 1
+		fi
+		mkdir -p "$storage_newroot/run"
+		"$storage_splash_helper" stop-udev
+		storage_mountpoints="$storage_mountpoints /run"
+	fi
+	for storage_mountpoint in $storage_mountpoints; do
 		if mount -o move "$storage_mountpoint" \
 			"$storage_newroot$storage_mountpoint"; then
 			storage_moved="$storage_mountpoint $storage_moved"
@@ -740,9 +757,9 @@ storage_switch_persistent_root() {
 		log "persistent root UFS state changed immediately before switch_root"
 		# /dev has moved, so restore it before the normal abort path tries to
 		# unmount/relock the rejected root.
-		mount -o move "$storage_newroot/dev" /dev 2>/dev/null || true
-		mount -o move "$storage_newroot/sys" /sys 2>/dev/null || true
-		mount -o move "$storage_newroot/proc" /proc 2>/dev/null || true
+		for storage_mountpoint in $storage_moved; do
+			mount -o move "$storage_newroot$storage_mountpoint" "$storage_mountpoint" 2>/dev/null || true
+		done
 		storage_abort || ufs_safe=false
 		return 1
 	fi
@@ -750,6 +767,9 @@ storage_switch_persistent_root() {
 	# place: if its final handoff fails or returns, PID 1 dies and the kernel
 	# panics rather than allowing this writable half-handoff to resume any RAM
 	# rescue service.
+	if [ -x "$storage_splash_helper" ]; then
+		"$storage_splash_helper" handoff "$storage_newroot"
+	fi
 	log "persistent root handoff: profile=$storage_profile pid=$$ exec=$BB switch_root $storage_newroot $storage_init"
 	exec "$BB" switch_root "$storage_newroot" "$storage_init"
 }
@@ -783,6 +803,13 @@ mount -t pstore pstore /sys/fs/pstore 2>/dev/null || true
 hostname liuqin-firstboot
 [ ! -w /proc/sys/kernel/hotplug ] || echo /sbin/mdev >/proc/sys/kernel/hotplug
 mdev -s
+
+# A separately packaged, graphics-only runtime may render while the existing
+# storage guard works. It cannot admit a root or alter its protection checks.
+if [ "$storage_mode" = persistent ] && [ "$storage_profile" = native-updatable ] &&
+   [ -x "$storage_splash_helper" ]; then
+	"$storage_splash_helper" start
+fi
 
 log "waiting for SCSI/UFS block devices and marking them read-only"
 found_block=false

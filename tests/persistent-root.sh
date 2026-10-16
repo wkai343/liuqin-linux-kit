@@ -73,6 +73,7 @@ done
 if [ "$count" = "${TEST_MUTATE_AFTER_MOUNT_NUMBER:-0}" ]; then
 	case ${TEST_MUTATE_AFTER_MOUNT:-none} in
 	add) : >"$TEST_DEV/sdc"; printf '1\n' >"$TEST_STATE/sdc" ;;
+	add-newroot) : >"$TEST_NEWROOT/dev/sdc"; printf '1\n' >"$TEST_STATE/sdc" ;;
 	remove) rm -f "$TEST_DEV/sdb" "$TEST_STATE/sdb" ;;
 	alias) mv "$TEST_DEV/sdb" "$TEST_DEV/real-sdb"; ln -s real-sdb "$TEST_DEV/sdb" ;;
 	esac
@@ -275,6 +276,8 @@ reset_base_fixture() {
 	TEST_NATIVE_MARKER_STAT='644 0 0 22'
 	TEST_MUTATE_NATIVE_ON_CHROOT=0 TEST_MUTATE_NATIVE=none
 	LIUQIN_STORAGE_PROFILE_FILE= LIUQIN_STORAGE_GNOME_CONTRACT= LIUQIN_STORAGE_NATIVE_CONTRACT=
+	LIUQIN_STORAGE_SPLASH_STATE=$case_root/splash-state
+	LIUQIN_STORAGE_SPLASH_HELPER=$case_root/splash-helper
 	export case_root dev sys probe newroot state command_log mount_count umount_count
 	export init_log ro_nodes TEST_HOME_LABEL_PATH
 	export chroot_count
@@ -292,6 +295,7 @@ reset_base_fixture() {
 	export LIUQIN_STORAGE_PROFILE_FILE LIUQIN_STORAGE_GNOME_CONTRACT
 	export TEST_NATIVE_MARKER_STAT TEST_MUTATE_NATIVE_ON_CHROOT TEST_MUTATE_NATIVE
 	export LIUQIN_STORAGE_NATIVE_CONTRACT
+	export LIUQIN_STORAGE_SPLASH_STATE LIUQIN_STORAGE_SPLASH_HELPER
 }
 
 
@@ -312,6 +316,8 @@ run_init() {
 		LIUQIN_STORAGE_PROFILE_FILE="${LIUQIN_STORAGE_PROFILE_FILE:-}" \
 		LIUQIN_STORAGE_GNOME_CONTRACT="${LIUQIN_STORAGE_GNOME_CONTRACT:-}" \
 		LIUQIN_STORAGE_NATIVE_CONTRACT="${LIUQIN_STORAGE_NATIVE_CONTRACT:-}" \
+		LIUQIN_STORAGE_SPLASH_STATE="$LIUQIN_STORAGE_SPLASH_STATE" \
+		LIUQIN_STORAGE_SPLASH_HELPER="$LIUQIN_STORAGE_SPLASH_HELPER" \
 		TEST_NATIVE_MARKER_STAT="$TEST_NATIVE_MARKER_STAT" \
 		TEST_MUTATE_NATIVE_ON_CHROOT="$TEST_MUTATE_NATIVE_ON_CHROOT" \
 		TEST_MUTATE_NATIVE="$TEST_MUTATE_NATIVE" \
@@ -638,6 +644,41 @@ grep -q "^switch_root $newroot /usr/lib/systemd/systemd$" "$command_log" || fail
 # The real handoff and slot parsing remain in the exercised init script.
 grep -F -q 'exec "$BB" switch_root "$storage_newroot" "$storage_init"' "$init" || fail 'handoff not exec'
 grep -q '^storage_init=/usr/lib/systemd/systemd$' "$init" || fail 'systemd handoff changed'
+
+make_splash_fixture() {
+	mkdir -p "$LIUQIN_STORAGE_SPLASH_STATE"
+	cat >"$LIUQIN_STORAGE_SPLASH_HELPER" <<'SPLASH'
+#!/bin/sh
+printf 'splash %s\n' "$*" >>"$TEST_COMMAND_LOG"
+SPLASH
+	chmod 0755 "$LIUQIN_STORAGE_SPLASH_HELPER"
+	TEST_STORAGE_PHASE=switch; export TEST_STORAGE_PHASE
+}
+
+reset_fixture; make_splash_fixture
+if run_init; then fail 'returned splash switch_root was accepted'; fi
+grep -q "mount7 -o move /run $newroot/run" "$command_log" || fail 'splash runtime mount was not carried'
+grep -q "splash handoff $newroot" "$command_log" || fail 'admitted splash daemon was not handed over'
+grep -q "switch_root $newroot /usr/lib/systemd/systemd" "$command_log" || fail 'splash prevented systemd handoff'
+
+reset_fixture; make_splash_fixture
+ln -s /tmp "$newroot/run"
+expect_rejected splash-runtime-symlink
+! grep -q '^splash handoff' "$command_log" || fail 'invalid root received the splash daemon'
+
+reset_fixture; make_splash_fixture
+TEST_FAIL_MOUNT_NUMBER=7; export TEST_FAIL_MOUNT_NUMBER
+expect_rejected splash-runtime-move-failure
+! grep -q '^splash handoff\|^switch_root' "$command_log" || fail 'failed runtime move reached the handoff'
+grep -q -- "-o move $newroot/dev /dev" "$command_log" || fail 'kernel mounts were not restored'
+
+reset_fixture; make_splash_fixture
+TEST_MUTATE_AFTER_MOUNT_NUMBER=7; TEST_MUTATE_AFTER_MOUNT=add-newroot
+export TEST_MUTATE_AFTER_MOUNT_NUMBER TEST_MUTATE_AFTER_MOUNT
+expect_rejected splash-last-snapshot-change
+! grep -q '^splash handoff\|^switch_root' "$command_log" || fail 'changed UFS namespace received the splash daemon'
+grep -q -- "-o move $newroot/run /run" "$command_log" || fail 'splash runtime was not restored on final rejection'
+
 reset_fixture; native_expect_success final-valid
 
 

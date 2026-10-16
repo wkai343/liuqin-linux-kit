@@ -20,6 +20,15 @@ def load_module(name, path):
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
 
 
+def kernel_fragments(data, installer=False):
+    prefix='installer_' if installer else ''
+    fragments=list(data.get(prefix+'kernel_fragments',[]))
+    native='build/kernel/configs/native-display.config'
+    if not installer and native not in fragments:
+        fragments.insert(0,native)
+    return fragments
+
+
 class Flow:
     def __init__(self, data, run, *, refresh=False, distribution='ubuntu'):
         self.data, self.run = data, run
@@ -99,7 +108,7 @@ class Flow:
     def kernel(self,installer=False):
         source,commit=self.kernel_source(installer)
         prefix='installer_' if installer else ''
-        fragments=self.data.get(prefix+'kernel_fragments',[])
+        fragments=kernel_fragments(self.data,installer)
         inputs=dict(commit=commit,config=self.data.get(prefix+'kernel_config'),
                     fragments={str(p):sha(p) for p in [self.resolve(v) for v in fragments]},
                     localversion=self.data.get(prefix+'kernel_localversion','-liuqin-installer' if installer else '-liuqin1'),
@@ -173,6 +182,9 @@ class Flow:
         return self.stage('runtime',dict(base=sha(archive),builder=sha(PROJECT/'build/lib/build-installer-runtime.py')),
                           build,['runtime'])/'runtime'
 
+    def boot_splash_runtime(self):
+        return None
+
     def boot(self,installer=False):
         source,kernel=self.kernel(installer)
         inputs=self.board_inputs()
@@ -182,6 +194,7 @@ class Flow:
                         usb_strings=self.usb,usb_builder=sha(PROJECT/'build/lib/usb_identity.py'),
                         filesystem_builder=sha(PROJECT/'build/lib/root_filesystems.py'),
                         filesystem_interface=sha(PROJECT/'shared/liuqin_filesystems.py'),
+                        bootargs=sha(PROJECT/'device'/('installer-bootargs.txt' if installer else 'native-bootargs.txt')),
                         init=tree_identity(PROJECT/'device/boot'),
                         dtb_tools=sha(PROJECT/'build/lib/build-bootimg.sh'))
         if not installer:
@@ -197,9 +210,14 @@ class Flow:
             result=self.stage('installer',dependency,build,['image/installer.img'])
             return result/'image/installer.img'
         modules=self.modules();dependency['modules']=sha(modules/'kernel.build.json')
+        splash=self.boot_splash_runtime()
+        if splash:
+            dependency.update(splash=tree_identity(splash),splash_stager=sha(PROJECT/'build/lib/boot_splash.py'),
+                              splash_interface=sha(PROJECT/'build/lib/plymouth_runtime.py'))
         def build(out):
             self.run(['sh','build/scripts/build-liuqin-native-boot.sh'],env=dict(env,
                 KERNEL_MODULES_DIR=str(modules),LIUQIN_ROOT_PROFILE='native-updatable',OUT_DIR=str(out/'image'),INSTALLER_RUNTIME='',
+                BOOT_SPLASH_RUNTIME=str(splash) if splash else '',
                 LIUQIN_RECLAIM_MTE='1' if self.data.get('kernel_reclaim_mte',False) else '0'))
         result=self.stage('boot',dependency,build,['image/boot-liuqin-native.img','image/native-root.contract'])
         return result/'image/boot-liuqin-native.img'
@@ -373,7 +391,7 @@ def execute(data,action,run,*,refresh=False,configure_only=False):
         if action in ('kernel','installer-kernel') and configure_only:
             installer=action=='installer-kernel';prefix='installer_' if installer else ''
             source,commit=flow.kernel_source(installer)
-            fragments=data.get(prefix+'kernel_fragments',[])
+            fragments=kernel_fragments(data,installer)
             configuration=data.get(prefix+'kernel_config')
             suffix=data[prefix+'kernel_localversion']
             identity=key(dict(commit=commit,config=configuration,fragments={v:sha(flow.resolve(v)) for v in fragments},

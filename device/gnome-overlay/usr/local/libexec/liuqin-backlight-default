@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT
-# One normal-systemd-boot correction after Canonical restores stale state.
+# Restore normal brightness without racing the DRM panel's backlight sequence.
 set -eu
 
 backlight=${LIUQIN_BACKLIGHT_ROOT:-/sys/class/backlight/ktz8866-backlight}
@@ -29,13 +29,16 @@ for field in brightness actual_brightness max_brightness bl_power; do
 done
 [ "$(cat "$backlight/max_brightness")" = 2047 ] ||
 	fail 'refusing a backlight whose maximum is not 2047'
-[ -w "$backlight/brightness" ] && [ -w "$backlight/bl_power" ] ||
+[ -w "$backlight/brightness" ] ||
 	fail 'backlight controls are not writable'
 
+# A panel may still be in reset when this service runs. Preserve its power
+# state; drm_panel_enable() will unblank it after preparing a valid display.
 printf '%s\n' 1500 >"$backlight/brightness" || fail 'brightness write failed'
-printf '%s\n' 0 >"$backlight/bl_power" || fail 'bl_power write failed'
 [ "$(cat "$backlight/brightness")" = 1500 ] || fail 'brightness readback is not 1500'
-[ "$(cat "$backlight/actual_brightness")" = 1500 ] || fail 'actual brightness readback is not 1500'
-[ "$(cat "$backlight/bl_power")" = 0 ] || fail 'bl_power readback is not 0'
+if [ "$(cat "$backlight/bl_power")" = 0 ]; then
+	[ "$(cat "$backlight/actual_brightness")" = 1500 ] || fail 'actual brightness readback is not 1500'
+fi
 
-printf 'liuqin-backlight-default: brightness=1500 actual=1500 max=2047 bl_power=0\n'
+printf 'liuqin-backlight-default: brightness=1500 actual=%s max=2047 bl_power=%s (managed by DRM)\n' \
+	"$(cat "$backlight/actual_brightness")" "$(cat "$backlight/bl_power")"

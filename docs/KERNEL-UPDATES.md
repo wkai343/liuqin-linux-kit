@@ -21,7 +21,7 @@
 
 - 每次发布提高 `package_version`。
 - 源码或配置改变时更换 `kernel_localversion`；release 只用小写字母、数字、点、加号和连字符，并包含 `liuqin`。
-- 仅改变 `kernel_reclaim_mte` 时可保留 release，但仍提高包版本；范围见 [MTE 说明](BUILD.md#可选回收-mte-预留)。
+- 仅改变引导打包、压缩或 `kernel_reclaim_mte` 时可保留 release，但仍提高包版本；MTE 范围见 [说明](BUILD.md#可选回收-mte-预留)。
 
 首次安装执行 `devbox run build`。已有系统仅需生成升级包：
 
@@ -46,6 +46,7 @@ devbox run kernel-packages
 | `liuqin-boot-tools` | 计划、升级、确认与恢复工具 |
 
 旧载荷包不会直接替换为空元包，避免删除仍在使用的模块。
+`liuqin-boot-tools` 声明 `python3-zstandard` 依赖，由包管理器安装，以读取 Zstd 引导镜像。
 内核包附带源码提交、配置和许可证；发布者还需提供对应源码与修改。
 
 ## 已安装系统更新

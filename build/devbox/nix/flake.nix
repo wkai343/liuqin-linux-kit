@@ -15,7 +15,7 @@
           # A static musl libc keeps the RAM helpers independent of the host's
           # Nix glibc loader and the target rootfs distribution.
           cross = pkgs.pkgsCross.aarch64-multiplatform-musl;
-          python = pkgs.python311.withPackages (p: [ p.pyelftools ]);
+          python = pkgs.python311.withPackages (p: [ p.pyelftools p.zstandard ]);
           crossTools = pkgs.buildEnv {
             name = "liuqin-arm64-tools";
             paths = [ cross.buildPackages.gcc cross.buildPackages.binutils ];

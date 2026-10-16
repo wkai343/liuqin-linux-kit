@@ -3,18 +3,73 @@
 """Package admission tests on synthetic files; no USB or device operations."""
 import io
 import hashlib
+import gzip
 import json
 from pathlib import Path
 import sys
+import struct
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 import subprocess
+import zstandard
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'installer'))
 from liuqin_gui.demo import DemoEngine, demo_image
 from liuqin_gui.engine import Engine, InstallerError
 from liuqin_gui.artifacts import ArtifactError, inspect_package, boot_interface
+from liuqin_artifacts import bounded_initramfs
+
+
+def zstd_ramdisk(path):
+    data=path.read_bytes();header=bytearray(data[:4096])
+    page=struct.unpack_from('<I',data,36)[0]
+    align=lambda n:(n+page-1)//page*page
+    start=page+align(struct.unpack_from('<I',data,8)[0])
+    size=struct.unpack_from('<I',data,16)[0]
+    encoded=zstandard.ZstdCompressor().compress(gzip.decompress(data[start:start+size]))
+    struct.pack_into('<I',header,16,len(encoded))
+    path.write_bytes(bytes(header)+data[page:start]+encoded+b'\0'*(align(len(encoded))-len(encoded))+data[start+align(size):])
+
+
+class CompressionTests(unittest.TestCase):
+    def test_gzip_and_zstd_decode_the_same_interface(self):
+        content=b'interface\n'*100
+        for encoded in (gzip.compress(content),zstandard.ZstdCompressor().compress(content)):
+            self.assertEqual(bounded_initramfs(encoded,4096),content)
+
+    def test_known_oversize_is_rejected_before_decoder_allocation(self):
+        encoded=zstandard.ZstdCompressor().compress(b'x'*4096)
+        with mock.patch.object(zstandard,'ZstdDecompressor') as decoder:
+            with self.assertRaisesRegex(ArtifactError,'过大'):bounded_initramfs(encoded,1024)
+            decoder.assert_not_called()
+
+    def test_unknown_content_size_remains_bounded(self):
+        parameters=zstandard.ZstdCompressionParameters.from_level(3,window_log=10,write_content_size=0)
+        compressor=zstandard.ZstdCompressor(compression_params=parameters)
+        self.assertEqual(bounded_initramfs(compressor.compress(b'valid'),4096),b'valid')
+        with self.assertRaisesRegex(ArtifactError,'过大'):
+            bounded_initramfs(compressor.compress(b'x'*8192),4096)
+
+    def test_large_window_is_rejected_before_decoder_allocation(self):
+        encoded=b'\x28\xb5\x2f\xfd\x00\x90\x01\x00\x00'
+        with mock.patch.object(zstandard,'ZstdDecompressor') as decoder:
+            with self.assertRaisesRegex(ArtifactError,'窗口过大'):bounded_initramfs(encoded,1024*1024)
+            decoder.assert_not_called()
+
+    def test_truncation_checksum_damage_and_trailing_frames_are_rejected(self):
+        encoded=zstandard.ZstdCompressor(write_checksum=True).compress(b'valid archive'*10)
+        corrupt=bytearray(encoded);corrupt[-1]^=1
+        for data in (encoded[:-1],bytes(corrupt),encoded+b'extra',encoded+encoded):
+            with self.subTest(data=data[-8:]):
+                with self.assertRaises(ArtifactError):bounded_initramfs(data,4096)
+
+    def test_missing_decoder_has_an_actionable_error_and_gzip_still_works(self):
+        encoded=zstandard.ZstdCompressor().compress(b'valid')
+        with mock.patch.dict(sys.modules,{'zstandard':None}):
+            with self.assertRaisesRegex(ArtifactError,'zstandard'):bounded_initramfs(encoded,4096)
+            self.assertEqual(bounded_initramfs(gzip.compress(b'valid'),4096),b'valid')
 
 
 class ArtifactTests(unittest.TestCase):
@@ -49,6 +104,20 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(self.engine.manifest['root_profile'], 'native-updatable')
         self.assertEqual(self.engine.manifest['status'], 'CUSTOM_UNVERIFIED')
         self.assertEqual(set(self.engine.manifest['files']), {'boot.img', 'installer.img', 'rootfs.tar.gz'})
+
+    def test_zstd_target_keeps_gzip_installer_independent(self):
+        original=(self.bundle/'installer.img').read_bytes()
+        before=boot_interface(self.bundle/'boot.img')
+        zstd_ramdisk(self.bundle/'boot.img')
+        self.assertEqual(boot_interface(self.bundle/'boot.img'),before)
+        self.engine.validate_bundle(self.bundle)
+        self.assertEqual((self.bundle/'installer.img').read_bytes(),original)
+
+    def test_zstd_installer_is_also_readable(self):
+        before=boot_interface(self.bundle/'installer.img',installer=True)
+        zstd_ramdisk(self.bundle/'installer.img')
+        self.assertEqual(boot_interface(self.bundle/'installer.img',installer=True),before)
+        self.engine.validate_bundle(self.bundle)
 
     def test_cli_offline_check_accepts_independent_kernel(self):
         manifest_path = self.bundle / 'bundle.json'

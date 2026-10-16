@@ -20,6 +20,7 @@
   "dtb": "qcom/sm8475-xiaomi-liuqin.dtb",
   "target_patches": [
     "build/kernel/patches/0001-nanosic-keyboard-tablet-mode.patch",
-    "build/kernel/patches/0002-fpc-irq-level.patch"
+    "build/kernel/patches/0002-fpc-irq-level.patch",
+    "build/kernel/patches/0003-liuqin-backlight-handoff.patch"
   ]
 }

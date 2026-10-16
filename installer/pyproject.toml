@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: MIT
 [project]
 name = "liuqin-linux-kit-installer"
-version = "0.3.0"
+version = "0.4.0"
 description = "Liuqin Linux Kit 的 Qt Quick 安装器"
 requires-python = ">=3.11"
-dependencies = ["PySide6-Essentials>=6.8,<7"]
+dependencies = ["PySide6-Essentials>=6.8,<7", "zstandard>=0.23,<1"]
 
 [tool.uv]
 package = false

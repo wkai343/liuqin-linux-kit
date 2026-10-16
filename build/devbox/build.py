@@ -171,12 +171,13 @@ def stage(data, action, configure_only=False):
     path = lambda key: str(resolve(data[key]))
     python = shutil.which('python3')
     if action in ('kernel', 'installer-kernel'):
+        from source_flow import kernel_fragments
         prefix = 'installer_' if action == 'installer-kernel' else ''
         command = [python, 'build/scripts/build-liuqin-kernel.py', '--custom', '--source', path(prefix + 'kernel_source'),
                    '--out', path(prefix + 'kernel_out'), '--jobs', str(data.get('jobs', 12))]
         if data.get(prefix + 'kernel_config'):
             command += ['--config', str(resolve(data[prefix + 'kernel_config']))]
-        for fragment in data.get(prefix + 'kernel_fragments', []):
+        for fragment in kernel_fragments(data, action == 'installer-kernel'):
             command += ['--config-fragment', str(resolve(fragment))]
         if data.get(prefix + 'kernel_localversion'):
             command += ['--localversion=' + data[prefix + 'kernel_localversion']]
@@ -273,7 +274,7 @@ def doctor():
 
 
 def test():
-    for name in ('project-identity.py', 'project-structure.py', 'devbox-build.py', 'source-build.py', 'stock-rom.py', 'fedora-build.py', 'selinux-packaging.py', 'first-boot-setup.py', 'mkbootimg-fetch.py', 'initramfs-inputs.py', 'sensor-build-environment.py', 'gui-artifacts.py', 'filesystems.py', 'windows-installer.py', 'usb-installer-network.py', 'custom-kernel.py', 'kernel-updates.py', 'gui-engine.py', 'gui-worker.py', 'install-root-single.py'):
+    for name in ('project-identity.py', 'project-structure.py', 'devbox-build.py', 'source-build.py', 'stock-rom.py', 'fedora-build.py', 'selinux-packaging.py', 'first-boot-setup.py', 'backlight-default.py', 'boot-splash.py', 'mkbootimg-fetch.py', 'initramfs-inputs.py', 'sensor-build-environment.py', 'gui-artifacts.py', 'filesystems.py', 'windows-installer.py', 'usb-installer-network.py', 'custom-kernel.py', 'kernel-updates.py', 'gui-engine.py', 'gui-worker.py', 'install-root-single.py'):
         run([shutil.which('python3'), 'tests/' + name])
 
 

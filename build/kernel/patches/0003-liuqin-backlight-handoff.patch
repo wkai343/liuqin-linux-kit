@@ -1,0 +1,48 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] Keep Liuqin backlight off until the DRM panel is enabled
+
+Keep the requested brightness but let the board request an initially
+powered-off LED output. Pair this with the native display-clock module:
+the built-in backlight blanks the LEDs before clock takeover, and DRM
+enables them only after panel initialization. Userspace brightness
+restoration must preserve bl_power. LCD bias settings are unchanged.
+Use a device-node property because ABL rewrites the root compatible.
+
+--- a/drivers/video/backlight/ktz8866.c
++++ b/drivers/video/backlight/ktz8866.c
+@@ -176,6 +176,10 @@
+ 	props.type = BACKLIGHT_RAW;
+ 	props.max_brightness = MAX_BRIGHTNESS;
+ 	props.brightness = DEFAULT_BRIGHTNESS;
++	/* Keep the requested brightness, but let the panel enable the LEDs. */
++	if (of_property_read_bool(client->dev.of_node,
++				  "kinetic,backlight-initially-off"))
++		props.power = BACKLIGHT_POWER_OFF;
+ 	props.scale = BACKLIGHT_SCALE_LINEAR;
+ 
+ 	backlight_dev = devm_backlight_device_register(&client->dev, "ktz8866-backlight",
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+@@ -714,6 +714,7 @@
+ 		enable-gpios = <&tlmm 6 GPIO_ACTIVE_HIGH>;
+ 
+ 		current-num-sinks = <5>;
++		kinetic,backlight-initially-off;
+ 		kinetic,current-ramp-delay-ms = <128>;
+ 		kinetic,led-enable-ramp-delay-ms = <1>;
+ 		kinetic,enable-lcd-bias;
+--- a/Documentation/devicetree/bindings/leds/backlight/kinetic,ktz8866.yaml
++++ b/Documentation/devicetree/bindings/leds/backlight/kinetic,ktz8866.yaml
+@@ -51,6 +51,12 @@
+       mapped to 512μs because ktz8866 can't ramp faster than it.
+     enum: [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
+ 
++  kinetic,backlight-initially-off:
++    description: |
++      Keep the LED output powered off after probe until the display panel
++      enables its backlight. This does not disable the LCD bias outputs.
++    type: boolean
++
+   kinetic,enable-lcd-bias:
+     description: Set if we want to output bias power supply for LCD.
+     type: boolean

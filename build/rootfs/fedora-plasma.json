@@ -10,6 +10,7 @@
     "curl", "wget", "rsync", "nano", "less", "fastfetch",
     "zip", "unzip", "xz", "bzip2",
     "libatomic",
+    "plymouth", "plymouth-theme-spinner",
     "openssh-clients", "openssh-server",
     "man-db", "man-pages", "mandoc",
     "udisks2", "dosfstools", "exfatprogs", "ntfs-3g", "usbutils",
