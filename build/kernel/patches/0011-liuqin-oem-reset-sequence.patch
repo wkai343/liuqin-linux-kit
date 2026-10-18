@@ -1,0 +1,77 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] drm/panel: use the OEM M81 reset waveform on Liuqin
+
+Both M81 panel nodes in OS2.0.6.0.VMYCNXM specify physical low/high/low/high
+with 10/3/3/15 ms waits. The shipped msm_drm.ko applies these levels with
+raw GPIO writes and uses an upper sleep bound 100 us above each dwell.
+Give Liuqin a dedicated reset helper; leave Pipa and Yudi unchanged.
+
+Keep the existing GPIO polarity, probe/unprepare levels, supply ownership,
+all additional 120 ms waits, mode, clocks and panel initialization writes.
+This ports the reset waveform only, not full-off/TDDI-retention supply
+control or first-frame backlight gating. See docs/BUILD.md for the scope
+of combined OEM panel adaptation and hardware validation.
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+@@ -1110,9 +1110,9 @@
+ 
+ 	status = "okay";
+ 
+ 	/*
+-	 * The shared reset helper drives physical low/high/low/high and must end
++	 * The Liuqin reset helper drives physical low/high/low/high and must end
+ 	 * high (out of reset). Keep GPIO_ACTIVE_HIGH for that existing waveform.
+ 	 */
+ 	panel: panel@0 {
+ 		compatible = "xiaomi,liuqin-nt36532", "xiaomi,pipa-nt36532";
+diff --git a/drivers/gpu/drm/panel/panel-novatek-nt36532.c b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -47,8 +47,23 @@
+ 
+ static struct mipi_dsi_device *nt36532_cmd_dsi(struct nt36532 *ctx)
+ {
+ 	return ctx->dsi[1] ?: ctx->dsi[0];
++}
++
++/* Physical levels and delays from both OS2.0.6.0 M81 panel descriptions.
++ * Liuqin keeps its legacy GPIO_ACTIVE_HIGH binding, so 0/1 are low/high.
++ */
++static void liuqin_reset(struct nt36532 *ctx)
++{
++	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
++	usleep_range(10000, 10100);
++	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++	usleep_range(3000, 3100);
++	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
++	usleep_range(3000, 3100);
++	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++	usleep_range(15000, 15100);
+ }
+ 
+ static void pipa_reset(struct nt36532 *ctx)
+ {
+@@ -486,9 +501,9 @@
+ 	.reset_sequence = pipa_reset
+ };
+ 
+ /*
+- * Keep the initialization and reset sequence already validated on Liuqin.
++ * Keep the existing initialization sequence; use the OEM Liuqin reset waveform.
+  * A separate description allows board-specific timing changes without changing
+  * Pipa. Do not infer an OEM panel variant from the shared command sequence.
+  */
+ static const struct panel_desc liuqin_desc = {
+@@ -512,9 +527,9 @@
+ 	.format = MIPI_DSI_FMT_RGB888,
+ 	.mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_CLOCK_NON_CONTINUOUS,
+ 	.drm_mode = liuqin_mode_120,
+ 	.init_sequence = pipa_init_sequence,
+-	.reset_sequence = pipa_reset,
++	.reset_sequence = liuqin_reset,
+ };
+ 
+ static const struct panel_desc yudi_desc = {
+ 	.dsi_info = {

@@ -1,0 +1,329 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] drm: defer Liuqin backlight until DPU frame transmission
+
+Opt in only for known OEM Liuqin panel selections. Keep panel commands,
+power, reset, clocks, mode and brightness values unchanged. Defer only
+the backlight, never the panel enable callback, until DPU TX completion
+after kickoff. Do not treat -EWOULDBLOCK as successful transmission.
+
+Serialize the backlight update against disable and reject stale completion
+cookies across enable cycles. Errors remain dark and retry on a later
+frame; no fixed sleep, background work or synchronous pre-kickoff wait
+is added. Other panels retain immediate backlight enable.
+See docs/BUILD.md for the hardware validation scope and opt-out parameter.
+
+diff --git a/drivers/gpu/drm/bridge/panel.c b/drivers/gpu/drm/bridge/panel.c
+--- a/drivers/gpu/drm/bridge/panel.c
++++ b/drivers/gpu/drm/bridge/panel.c
+@@ -234,6 +234,35 @@
+ EXPORT_SYMBOL(drm_bridge_is_panel);
+ 
+ /**
++ * drm_panel_bridge_get_first_frame_cookie - snapshot a deferred backlight
++ * @bridge: bridge in an encoder's chain
++ *
++ * Return: Pending panel generation, or zero for other bridges and panels.
++ */
++unsigned int drm_panel_bridge_get_first_frame_cookie(struct drm_bridge *bridge)
++{
++	if (!drm_bridge_is_panel(bridge))
++		return 0;
++	return drm_panel_get_first_frame_cookie(
++		drm_bridge_to_panel_bridge(bridge)->panel);
++}
++EXPORT_SYMBOL(drm_panel_bridge_get_first_frame_cookie);
++
++/**
++ * drm_panel_bridge_complete_first_frame - complete a deferred backlight
++ * @bridge: panel bridge
++ * @cookie: generation captured before waiting for successful pixel transmission
++ */
++void drm_panel_bridge_complete_first_frame(struct drm_bridge *bridge,
++					 unsigned int cookie)
++{
++	if (drm_bridge_is_panel(bridge))
++		drm_panel_complete_first_frame(
++			drm_bridge_to_panel_bridge(bridge)->panel, cookie);
++}
++EXPORT_SYMBOL(drm_panel_bridge_complete_first_frame);
++
++/**
+  * drm_panel_bridge_add - Creates a &drm_bridge and &drm_connector that
+  * just calls the appropriate functions from &drm_panel.
+  *
+diff --git a/drivers/gpu/drm/drm_panel.c b/drivers/gpu/drm/drm_panel.c
+--- a/drivers/gpu/drm/drm_panel.c
++++ b/drivers/gpu/drm/drm_panel.c
+@@ -65,6 +65,10 @@
+ 	INIT_LIST_HEAD(&panel->list);
+ 	INIT_LIST_HEAD(&panel->followers);
+ 	mutex_init(&panel->follower_lock);
++	mutex_init(&panel->backlight_lock);
++	panel->backlight_after_first_frame = false;
++	panel->backlight_pending = false;
++	panel->backlight_cookie = 0;
+ 	panel->dev = dev;
+ 	panel->funcs = funcs;
+ 	panel->connector_type = connector_type;
+@@ -202,8 +206,9 @@
+  * @panel: DRM panel
+  *
+  * Calling this function will cause the panel display drivers to be turned on
+- * and the backlight to be enabled. Content will be visible on screen after
+- * this call completes. This function cannot fail (as it is called from the
++ * and normally enables its backlight. Opted-in panels keep the backlight off
++ * until drm_panel_complete_first_frame(). This function cannot fail (as it is
++ * called from the
+  * enable call chain). There will always be a call to drm_panel_disable()
+  * afterwards.
+  */
+@@ -224,14 +229,82 @@
+ 		if (ret < 0)
+ 			return;
+ 	}
++	mutex_lock(&panel->backlight_lock);
+ 	panel->enabled = true;
++	if (panel->backlight_after_first_frame && panel->backlight) {
++		if (!++panel->backlight_cookie)
++			++panel->backlight_cookie;
++		panel->backlight_pending = true;
++		dev_info(panel->dev, "backlight awaiting first frame: cycle %u\n",
++			 panel->backlight_cookie);
++		mutex_unlock(&panel->backlight_lock);
++		return;
++	}
+ 
+ 	ret = backlight_enable(panel->backlight);
+ 	if (ret < 0)
+ 		DRM_DEV_INFO(panel->dev, "failed to enable backlight: %d\n",
+ 			     ret);
++	mutex_unlock(&panel->backlight_lock);
+ }
+ EXPORT_SYMBOL(drm_panel_enable);
++
++/**
++ * drm_panel_get_first_frame_cookie - snapshot a pending backlight generation
++ * @panel: DRM panel
++ *
++ * Return: Nonzero cookie if enabled and awaiting a first frame, zero otherwise.
++ * The caller must obtain this cookie before waiting for pixel transmission.
++ */
++unsigned int drm_panel_get_first_frame_cookie(struct drm_panel *panel)
++{
++	unsigned int cookie = 0;
++
++	if (!panel || !panel->backlight_after_first_frame)
++		return 0;
++
++	mutex_lock(&panel->backlight_lock);
++	if (panel->enabled && panel->backlight_pending)
++		cookie = panel->backlight_cookie;
++	mutex_unlock(&panel->backlight_lock);
++	return cookie;
++}
++EXPORT_SYMBOL(drm_panel_get_first_frame_cookie);
++
++/**
++ * drm_panel_complete_first_frame - enable backlight after pixel transmission
++ * @panel: DRM panel
++ * @cookie: Generation captured before waiting for a successfully sent frame
++ *
++ * Call in sleepable context, after kickoff and successful TX completion.
++ * Disable cancels pending work; a later enable gets a different cookie.
++ * A failed backlight update remains pending for a later completed frame.
++ */
++void drm_panel_complete_first_frame(struct drm_panel *panel, unsigned int cookie)
++{
++	int ret;
++
++	if (!panel || !cookie || !panel->backlight_after_first_frame)
++		return;
++
++	mutex_lock(&panel->backlight_lock);
++	if (!panel->enabled || !panel->backlight_pending ||
++	    panel->backlight_cookie != cookie)
++		goto unlock;
++
++	ret = backlight_enable(panel->backlight);
++	if (ret < 0) {
++		dev_err_ratelimited(panel->dev,
++			"failed to enable backlight after first frame: %d\n", ret);
++		goto unlock;
++	}
++	panel->backlight_pending = false;
++	dev_info(panel->dev, "backlight enabled after first frame: cycle %u\n",
++		 cookie);
++unlock:
++	mutex_unlock(&panel->backlight_lock);
++}
++EXPORT_SYMBOL(drm_panel_complete_first_frame);
+ 
+ /**
+  * drm_panel_disable - disable a panel
+@@ -262,17 +335,22 @@
+ 		return;
+ 	}
+ 
++	mutex_lock(&panel->backlight_lock);
++	panel->backlight_pending = false;
+ 	ret = backlight_disable(panel->backlight);
+ 	if (ret < 0)
+ 		DRM_DEV_INFO(panel->dev, "failed to disable backlight: %d\n",
+ 			     ret);
++	mutex_unlock(&panel->backlight_lock);
+ 
+ 	if (panel->funcs && panel->funcs->disable) {
+ 		ret = panel->funcs->disable(panel);
+ 		if (ret < 0)
+ 			return;
+ 	}
++	mutex_lock(&panel->backlight_lock);
+ 	panel->enabled = false;
++	mutex_unlock(&panel->backlight_lock);
+ }
+ EXPORT_SYMBOL(drm_panel_disable);
+ 
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
+@@ -14,6 +14,7 @@
+ #include <linux/of_irq.h>
+ #include <linux/pm_opp.h>
+ 
++#include <drm/drm_bridge.h>
+ #include <drm/drm_crtc.h>
+ #include <drm/drm_file.h>
+ #include <drm/drm_framebuffer.h>
+@@ -487,6 +488,29 @@
+ 	DPU_ATRACE_END("kms_complete_commit");
+ }
+ 
++/* Panel enable runs before kickoff; never wait for a frame from there. */
++static void dpu_kms_complete_panel_first_frame(struct drm_encoder *encoder)
++{
++	struct drm_bridge *bridge;
++	unsigned int cookie;
++	int ret;
++
++	drm_for_each_bridge_in_chain(encoder, bridge) {
++		cookie = drm_panel_bridge_get_first_frame_cookie(bridge);
++		if (!cookie)
++			continue;
++
++		ret = dpu_encoder_wait_for_tx_complete(encoder);
++		/* In this driver -EWOULDBLOCK can mean a disabled encoder. */
++		if (ret) {
++			dev_warn_ratelimited(encoder->dev->dev,
++				"panel first-frame TX not complete: %d\n", ret);
++			continue;
++		}
++		drm_panel_bridge_complete_first_frame(bridge, cookie);
++	}
++}
++
+ static void dpu_kms_wait_for_commit_done(struct msm_kms *kms,
+ 		struct drm_crtc *crtc)
+ {
+@@ -525,6 +549,8 @@
+ 			DPU_ERROR("wait for commit done returned %d\n", ret);
+ 			break;
+ 		}
++		if (!ret)
++			dpu_kms_complete_panel_first_frame(encoder);
+ 	}
+ }
+ 
+diff --git a/drivers/gpu/drm/panel/panel-novatek-nt36532.c b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -20,6 +20,11 @@
+ #include <drm/drm_probe_helper.h>
+ #include <drm/display/drm_dsc.h>
+ #include <drm/display/drm_dsc_helper.h>
++
++static bool first_frame_backlight = true;
++module_param(first_frame_backlight, bool, 0444);
++MODULE_PARM_DESC(first_frame_backlight,
++	"Wait for DPU pixel transmission before enabling known Liuqin panel backlight");
+ 
+ struct nt36532 {
+ 	struct drm_panel panel;
+@@ -1409,8 +1414,11 @@
+ 
+ 	drm_panel_init(&ctx->panel, dev, &nt36532_panel_funcs,
+ 		       DRM_MODE_CONNECTOR_DSI);
+-	if (ctx->desc == &liuqin_desc)
++	if (ctx->desc == &liuqin_desc) {
+ 		liuqin_select_oem_panel(ctx);
++		ctx->panel.backlight_after_first_frame =
++			first_frame_backlight && ctx->oem_panel;
++	}
+ 	ctx->panel.prepare_prev_first = true;
+ 
+ 	ret = drm_panel_of_backlight(&ctx->panel);
+diff --git a/include/drm/drm_bridge.h b/include/drm/drm_bridge.h
+--- a/include/drm/drm_bridge.h
++++ b/include/drm/drm_bridge.h
+@@ -1447,6 +1447,9 @@
+ 
+ #ifdef CONFIG_DRM_PANEL_BRIDGE
+ bool drm_bridge_is_panel(const struct drm_bridge *bridge);
++unsigned int drm_panel_bridge_get_first_frame_cookie(struct drm_bridge *bridge);
++void drm_panel_bridge_complete_first_frame(struct drm_bridge *bridge,
++					 unsigned int cookie);
+ struct drm_bridge *drm_panel_bridge_add(struct drm_panel *panel);
+ struct drm_bridge *drm_panel_bridge_add_typed(struct drm_panel *panel,
+ 					      u32 connector_type);
+@@ -1462,6 +1465,17 @@
+ 					     struct drm_panel *panel);
+ struct drm_connector *drm_panel_bridge_connector(struct drm_bridge *bridge);
+ #else
++static inline unsigned int
++drm_panel_bridge_get_first_frame_cookie(struct drm_bridge *bridge)
++{
++	return 0;
++}
++
++static inline void drm_panel_bridge_complete_first_frame(struct drm_bridge *bridge,
++						       unsigned int cookie)
++{
++}
++
+ static inline bool drm_bridge_is_panel(const struct drm_bridge *bridge)
+ {
+ 	return false;
+diff --git a/include/drm/drm_panel.h b/include/drm/drm_panel.h
+--- a/include/drm/drm_panel.h
++++ b/include/drm/drm_panel.h
+@@ -208,6 +208,22 @@
+ 	struct backlight_device *backlight;
+ 
+ 	/**
++	 * @backlight_after_first_frame:
++	 *
++	 * Defer the backlight until the display driver confirms a transmitted
++	 * frame. Only opt in with a display driver providing the completion
++	 * notification. Panel enable must not depend on the backlight being on.
++	 */
++	bool backlight_after_first_frame;
++
++	/** @backlight_lock: Serializes deferred completion and backlight off. */
++	struct mutex backlight_lock;
++	/** @backlight_pending: A first-frame completion is required. */
++	bool backlight_pending;
++	/** @backlight_cookie: Nonzero enable generation; stale completions are ignored. */
++	unsigned int backlight_cookie;
++
++	/**
+ 	 * @funcs:
+ 	 *
+ 	 * Operations that can be performed on the panel.
+@@ -320,6 +336,8 @@
+ void drm_panel_unprepare(struct drm_panel *panel);
+ 
+ void drm_panel_enable(struct drm_panel *panel);
++unsigned int drm_panel_get_first_frame_cookie(struct drm_panel *panel);
++void drm_panel_complete_first_frame(struct drm_panel *panel, unsigned int cookie);
+ void drm_panel_disable(struct drm_panel *panel);
+ 
+ int drm_panel_get_modes(struct drm_panel *panel, struct drm_connector *connector);

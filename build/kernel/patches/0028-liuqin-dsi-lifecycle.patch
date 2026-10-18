@@ -1,0 +1,507 @@
+From: Liuqin Linux Kit <build@liuqin.invalid>
+Subject: [PATCH] drm: coordinate Liuqin DSI panel stages and clock gating
+
+Add independently selectable boot-time controls for video start after
+ON/PPS, video stop before OFF with link shutdown before panel rails,
+and OEM pixel/master-PHY dynamic gating. All controls default off.
+Only a known Liuqin OEM panel on the bonded SM8450 pair opts in.
+
+The command mutex serializes stage changes with paired transfers.
+DISPCC updates use its shared regmap and preserve unrelated fields.
+Clear gating before stopping HS clocks; never gate the slave PHY.
+Keep the established command tables, PHY timings and panel delays.
+
+Signed-off-by: Liuqin Linux Kit <build@liuqin.invalid>
+---
+diff --git a/include/drm/drm_mipi_dsi.h b/include/drm/drm_mipi_dsi.h
+--- a/include/drm/drm_mipi_dsi.h
++++ b/include/drm/drm_mipi_dsi.h
+@@ -64,11 +64,21 @@
+ int mipi_dsi_create_packet(struct mipi_dsi_packet *packet,
+ 			   const struct mipi_dsi_msg *msg);
+ 
++/* Optional panel/host lifecycle coordination, called outside transfers. */
++enum mipi_dsi_panel_stage {
++	MIPI_DSI_PANEL_PREPARED,
++	MIPI_DSI_PANEL_DISABLING,
++	MIPI_DSI_PANEL_UNPREPARING,
++	MIPI_DSI_PANEL_PREPARE_FAILED,
++};
++
+ /**
+  * struct mipi_dsi_host_ops - DSI bus operations
+  * @attach: attach DSI device to DSI host
+  * @detach: detach DSI device from DSI host
+  * @transfer: transmit a DSI packet
++ * @panel_stage: optional sleepable panel lifecycle notification; no transfer
++ *     lock may be held by the caller. Returns zero or a negative error.
+  * @transfer_batch: optional ordered write group with no interleaved commands.
+  *     All messages use the same channel and transfer flags. Returns the sum
+  *     of payload lengths, or a negative error; a failed group must not be
+@@ -98,6 +108,8 @@
+ 		      struct mipi_dsi_device *dsi);
+ 	ssize_t (*transfer)(struct mipi_dsi_host *host,
+ 			    const struct mipi_dsi_msg *msg);
++	int (*panel_stage)(struct mipi_dsi_host *host,
++			   enum mipi_dsi_panel_stage stage);
+ 	ssize_t (*transfer_batch)(struct mipi_dsi_host *host,
+ 				  const struct mipi_dsi_msg *msgs, size_t count);
+ };
+@@ -145,6 +157,9 @@
+ /* transmit data ending at the same time for all lanes within one hsync */
+ #define MIPI_DSI_HS_PKT_END_ALIGNED	BIT(12)
+ 
++/* Panel coordinates commands and rails with an optional host callback. */
++#define MIPI_DSI_MODE_PANEL_STAGES	BIT(13)
++
+ enum mipi_dsi_pixel_format {
+ 	MIPI_DSI_FMT_RGB888,
+ 	MIPI_DSI_FMT_RGB666,
+@@ -271,6 +286,15 @@
+ devm_mipi_dsi_device_register_full(struct device *dev, struct mipi_dsi_host *host,
+ 				   const struct mipi_dsi_device_info *info);
+ struct mipi_dsi_device *of_find_mipi_dsi_device_by_node(struct device_node *np);
++static inline int mipi_dsi_panel_stage(struct mipi_dsi_device *dsi,
++				       enum mipi_dsi_panel_stage stage)
++{
++	if (!(dsi->mode_flags & MIPI_DSI_MODE_PANEL_STAGES) ||
++	    !dsi->host->ops->panel_stage)
++		return 0;
++	return dsi->host->ops->panel_stage(dsi->host, stage);
++}
++
+ int mipi_dsi_attach(struct mipi_dsi_device *dsi);
+ int mipi_dsi_detach(struct mipi_dsi_device *dsi);
+ int devm_mipi_dsi_attach(struct device *dev, struct mipi_dsi_device *dsi);
+diff --git a/drivers/gpu/drm/msm/dsi/dsi.h b/drivers/gpu/drm/msm/dsi/dsi.h
+--- a/drivers/gpu/drm/msm/dsi/dsi.h
++++ b/drivers/gpu/drm/msm/dsi/dsi.h
+@@ -58,6 +58,8 @@
+ void msm_dsi_manager_unregister(struct msm_dsi *msm_dsi);
+ void msm_dsi_manager_tpg_enable(void);
+ 
++int msm_dsi_manager_panel_stage(int id, enum mipi_dsi_panel_stage stage);
++
+ /* dsi host */
+ struct msm_dsi_host;
+ int msm_dsi_host_xfer_prepare(struct mipi_dsi_host *host,
+@@ -72,6 +74,7 @@
+ 					const struct mipi_dsi_msg *msg);
+ void msm_dsi_host_cmd_xfer_commit(struct mipi_dsi_host *host,
+ 					u32 dma_base, u32 len);
++int msm_dsi_host_stop_video(struct mipi_dsi_host *host);
+ int msm_dsi_host_enable(struct mipi_dsi_host *host);
+ int msm_dsi_host_disable(struct mipi_dsi_host *host);
+ void msm_dsi_host_enable_irq(struct mipi_dsi_host *host);
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_host.c b/drivers/gpu/drm/msm/dsi/dsi_host.c
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -8,6 +8,7 @@
+ #include <linux/dma-mapping.h>
+ #include <linux/err.h>
+ #include <linux/interrupt.h>
++#include <linux/iopoll.h>
+ #include <linux/mfd/syscon.h>
+ #include <linux/of.h>
+ #include <linux/of_graph.h>
+@@ -1762,11 +1763,20 @@
+ 	return ret;
+ }
+ 
++static int dsi_host_panel_stage(struct mipi_dsi_host *host,
++				enum mipi_dsi_panel_stage stage)
++{
++	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
++
++	return msm_dsi_manager_panel_stage(msm_host->id, stage);
++}
++
+ static const struct mipi_dsi_host_ops dsi_host_ops = {
+ 	.attach = dsi_host_attach,
+ 	.detach = dsi_host_detach,
+ 	.transfer = dsi_host_transfer,
+ 	.transfer_batch = dsi_host_transfer_batch,
++	.panel_stage = dsi_host_panel_stage,
+ };
+ 
+ /*
+@@ -2462,6 +2472,29 @@
+ 	return 0;
+ }
+ 
++/* Keep the command engine available for panel OFF and POST_OFF. */
++int msm_dsi_host_stop_video(struct mipi_dsi_host *host)
++{
++	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
++	u32 value;
++	int ret;
++
++	if (!msm_host->power_on)
++		return -EIO;
++	value = dsi_read(msm_host, REG_DSI_CTRL);
++	dsi_write(msm_host, REG_DSI_CTRL, value & ~DSI_CTRL_VID_MODE_EN);
++	ret = read_poll_timeout(dsi_read, value,
++				!(value & DSI_STATUS0_VIDEO_MODE_ENGINE_BUSY),
++				1000, 50000, false, msm_host, REG_DSI_STATUS0);
++	/* Match the OEM busy-engine fallback, without resetting idle hosts. */
++	if (ret) {
++		dev_warn(&msm_host->pdev->dev, "Video stop timed out; reset host\n");
++		dsi_sw_reset(msm_host);
++	}
++	msm_host->enabled = false;
++	return 0;
++}
++
+ int msm_dsi_host_disable(struct mipi_dsi_host *host)
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_manager.c b/drivers/gpu/drm/msm/dsi/dsi_manager.c
+--- a/drivers/gpu/drm/msm/dsi/dsi_manager.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_manager.c
+@@ -2,6 +2,11 @@
+ /*
+  * Copyright (c) 2015, The Linux Foundation. All rights reserved.
+  */
++
++#include <linux/module.h>
++#include <linux/of_address.h>
++#include <linux/pm_runtime.h>
++#include <linux/regmap.h>
+ 
+ #include "drm/drm_bridge_connector.h"
+ 
+@@ -277,6 +282,238 @@
+ 	dsi_mgr_phy_disable(id);
+ }
+ 
++/* Boot-only controls: all-off preserves the existing bridge path. */
++static bool liuqin_oem_video_order;
++module_param(liuqin_oem_video_order, bool, 0400);
++MODULE_PARM_DESC(liuqin_oem_video_order, "Start Liuqin video after panel ON/PPS");
++static bool liuqin_oem_shutdown_order;
++module_param(liuqin_oem_shutdown_order, bool, 0400);
++MODULE_PARM_DESC(liuqin_oem_shutdown_order, "Stop Liuqin video before panel OFF");
++static bool liuqin_oem_clk_gating;
++module_param(liuqin_oem_clk_gating, bool, 0400);
++MODULE_PARM_DESC(liuqin_oem_clk_gating, "Gate Liuqin pixels and master PHY");
++
++/* DISPCC MISC_CMD fields shared by the bonded pair, excluding MDP. */
++#define LIUQIN_DISP_CC_MISC_CMD	0xf000
++#define LIUQIN_DSI_GATING_MASK	((u32)GENMASK(10, 5))
++#define LIUQIN_DSI_GATING_ON	((u32)(BIT(5) | BIT(6) | BIT(9)))
++
++static struct {
++	bool active;
++	bool powered;
++	bool gated;
++	unsigned int video;
++} liuqin_dsi;
++
++static bool liuqin_dsi_requested(void)
++{
++	unsigned long required = MIPI_DSI_MODE_PANEL_STAGES |
++		MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST |
++		MIPI_DSI_CLOCK_NON_CONTINUOUS;
++	struct msm_dsi *dsi;
++	int i;
++
++	if (!(liuqin_oem_video_order || liuqin_oem_shutdown_order ||
++	      liuqin_oem_clk_gating) || !IS_BONDED_DSI() ||
++	    !IS_SYNC_NEEDED() || !IS_MASTER_DSI_LINK(DSI_CLOCK_MASTER))
++		return false;
++	for (i = 0; i < DSI_MAX; i++) {
++		dsi = dsi_mgr_get_dsi(i);
++		if (!dsi || !dsi->host ||
++		    !of_device_is_compatible(dsi->pdev->dev.of_node,
++					     "qcom,sm8450-dsi-ctrl") ||
++		    (msm_dsi_host_get_mode_flags(dsi->host) & required) != required)
++			return false;
++	}
++	return true;
++}
++
++static int liuqin_dsi_set_gating(bool on)
++{
++	struct device *dev = &dsi_mgr_get_dsi(DSI_CLOCK_MASTER)->pdev->dev;
++	struct of_phandle_args args;
++	struct platform_device *provider;
++	struct resource resource;
++	struct regmap *map;
++	int index, ret;
++
++	index = of_property_match_string(dev->of_node, "clock-names", "byte");
++	if (index < 0)
++		return index;
++	ret = of_parse_phandle_with_args(dev->of_node, "clocks",
++					 "#clock-cells", index, &args);
++	if (ret)
++		return ret;
++	if (!of_device_is_compatible(args.np, "qcom,sm8475-dispcc") ||
++	    of_address_to_resource(args.np, 0, &resource) ||
++	    resource_size(&resource) < LIUQIN_DISP_CC_MISC_CMD + sizeof(u32)) {
++		of_node_put(args.np);
++		return -ENODEV;
++	}
++	provider = of_find_device_by_node(args.np);
++	of_node_put(args.np);
++	if (!provider)
++		return -ENODEV;
++
++	/* Serialize with provider unbind; never cache a devm-owned regmap. */
++	device_lock(&provider->dev);
++	map = provider->dev.driver ? dev_get_regmap(&provider->dev, NULL) : NULL;
++	ret = map ? pm_runtime_resume_and_get(&provider->dev) : -ENODEV;
++	if (ret >= 0) {
++		ret = regmap_update_bits(map, LIUQIN_DISP_CC_MISC_CMD,
++					 LIUQIN_DSI_GATING_MASK,
++					 on ? LIUQIN_DSI_GATING_ON : 0);
++		pm_runtime_put(&provider->dev);
++	}
++	device_unlock(&provider->dev);
++	put_device(&provider->dev);
++	if (!ret)
++		dev_info(dev, "Liuqin DSI gating %s, mask %#x value %#x\n",
++			 on ? "on" : "off", LIUQIN_DSI_GATING_MASK,
++			 on ? LIUQIN_DSI_GATING_ON : 0);
++	return ret;
++}
++
++/* All helpers below run under dsi_cmd_lock, outside host cmd_mutex. */
++static int liuqin_dsi_video_start(void)
++{
++	int i, ret;
++
++	if (!liuqin_dsi.powered)
++		return -EIO;
++	for (i = 0; i < DSI_MAX; i++) {
++		if (liuqin_dsi.video & BIT(i))
++			continue;
++		ret = msm_dsi_host_enable(dsi_mgr_get_dsi(i)->host);
++		if (ret)
++			return ret;
++		liuqin_dsi.video |= BIT(i);
++	}
++	pr_info("Liuqin DSI: video pair started, after_pps=%u\n",
++		liuqin_oem_video_order);
++	return 0;
++}
++
++static int liuqin_dsi_video_stop(void)
++{
++	int i, ret;
++
++	for (i = 0; i < DSI_MAX; i++) {
++		if (!(liuqin_dsi.video & BIT(i)))
++			continue;
++		ret = msm_dsi_host_stop_video(dsi_mgr_get_dsi(i)->host);
++		if (ret)
++			return ret;
++		liuqin_dsi.video &= ~BIT(i);
++	}
++	return 0;
++}
++
++static int liuqin_dsi_power_off(void)
++{
++	struct msm_dsi *master = dsi_mgr_get_dsi(DSI_CLOCK_MASTER);
++	int i, id, ret;
++
++	if (!liuqin_dsi.powered)
++		return 0;
++	if (liuqin_dsi.gated) {
++		ret = liuqin_dsi_set_gating(false);
++		if (ret)
++			return ret; /* Keep clocks/rails until a safe retry. */
++		liuqin_dsi.gated = false;
++	}
++	for (i = 0; i < DSI_MAX; i++) {
++		msm_dsi_host_disable(dsi_mgr_get_dsi(i)->host);
++		msm_dsi_host_disable_irq(dsi_mgr_get_dsi(i)->host);
++	}
++	liuqin_dsi.video = 0;
++	msm_dsi_phy_pll_save_state(master->phy);
++	for (i = 0; i < DSI_MAX; i++) {
++		id = liuqin_oem_shutdown_order ? DSI_MAX - 1 - i : i;
++		msm_dsi_host_power_off(dsi_mgr_get_dsi(id)->host);
++	}
++	dsi_mgr_phy_disable(DSI_CLOCK_MASTER);
++	liuqin_dsi.powered = false;
++	pr_info("Liuqin DSI: link pair off, before_rails=%u\n",
++		liuqin_oem_shutdown_order);
++	return 0;
++}
++
++static int liuqin_dsi_power_on(struct drm_bridge *bridge)
++{
++	int ret;
++
++	if (liuqin_dsi.powered)
++		return -EBUSY;
++	liuqin_dsi.active = true;
++	liuqin_dsi.video = 0;
++	liuqin_dsi.gated = false;
++	if (liuqin_oem_clk_gating) {
++		ret = liuqin_dsi_set_gating(false);
++		if (ret)
++			return ret;
++	}
++	ret = dsi_mgr_bridge_power_on(bridge);
++	if (ret)
++		return ret;
++	liuqin_dsi.powered = true;
++	if (liuqin_oem_clk_gating) {
++		/* A failed write may be partial; require a clear before teardown. */
++		liuqin_dsi.gated = true;
++		ret = liuqin_dsi_set_gating(true);
++		if (ret)
++			goto fail;
++	}
++	pr_info("Liuqin DSI: command pair ready, video=%u shutdown=%u gating=%u\n",
++		liuqin_oem_video_order, liuqin_oem_shutdown_order,
++		liuqin_oem_clk_gating);
++	if (liuqin_oem_video_order)
++		return 0;
++	ret = liuqin_dsi_video_start();
++	if (!ret)
++		return 0;
++fail:
++	liuqin_dsi_power_off();
++	return ret;
++}
++
++int msm_dsi_manager_panel_stage(int id, enum mipi_dsi_panel_stage stage)
++{
++	int ret = 0;
++
++	if (id != DSI_CLOCK_MASTER || !liuqin_dsi_requested())
++		return 0;
++	mutex_lock(&dsi_cmd_lock);
++	if (!liuqin_dsi.active) {
++		ret = -EIO;
++		goto out;
++	}
++	switch (stage) {
++	case MIPI_DSI_PANEL_PREPARED:
++		ret = liuqin_dsi_video_start();
++		break;
++	case MIPI_DSI_PANEL_DISABLING:
++		if (liuqin_oem_shutdown_order) {
++			ret = liuqin_dsi_video_stop();
++			if (!ret)
++				pr_info("Liuqin DSI: video stopped before panel OFF\n");
++		}
++		break;
++	case MIPI_DSI_PANEL_UNPREPARING:
++		if (liuqin_oem_shutdown_order)
++			ret = liuqin_dsi_power_off();
++		break;
++	case MIPI_DSI_PANEL_PREPARE_FAILED:
++		ret = liuqin_dsi_power_off();
++		break;
++	default:
++		ret = -EINVAL;
++	}
++out:
++	mutex_unlock(&dsi_cmd_lock);
++	return ret;
++}
++
+ static void dsi_mgr_bridge_pre_enable(struct drm_bridge *bridge)
+ {
+ 	int id = dsi_mgr_bridge_get_id(bridge);
+@@ -291,6 +528,15 @@
+ 	/* Do nothing with the host if it is slave-DSI in case of bonded DSI */
+ 	if (is_bonded_dsi && !IS_MASTER_DSI_LINK(id))
+ 		return;
++
++	if (liuqin_dsi_requested()) {
++		mutex_lock(&dsi_cmd_lock);
++		ret = liuqin_dsi_power_on(bridge);
++		mutex_unlock(&dsi_cmd_lock);
++		if (ret)
++			dev_err(&msm_dsi->pdev->dev, "DSI staged power on: %d\n", ret);
++		return;
++	}
+ 
+ 	ret = dsi_mgr_bridge_power_on(bridge);
+ 	if (ret) {
+@@ -343,6 +589,17 @@
+ 	int ret;
+ 
+ 	DBG("id=%d", id);
++
++	if (liuqin_dsi.active) {
++		if (!IS_MASTER_DSI_LINK(id))
++			return;
++		mutex_lock(&dsi_cmd_lock);
++		ret = liuqin_dsi_power_off();
++		mutex_unlock(&dsi_cmd_lock);
++		if (ret)
++			dev_err(&msm_dsi->pdev->dev, "DSI staged power off: %d\n", ret);
++		return;
++	}
+ 
+ 	/*
+ 	 * Do nothing with the host if it is slave-DSI in case of bonded DSI.
+diff --git a/drivers/gpu/drm/panel/panel-novatek-nt36532.c b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -1688,6 +1688,7 @@
+ 	ret = nt36532_enable_supplies(ctx);
+ 	if (ret < 0) {
+ 		dev_err(dev, "Failed to enable regulators: %d\n", ret);
++		mipi_dsi_panel_stage(ctx->dsi[0], MIPI_DSI_PANEL_PREPARE_FAILED);
+ 		return ret;
+ 	}
+ 
+@@ -1728,9 +1729,15 @@
+ 
+ 	msleep(120);
+ 
++	ret = mipi_dsi_panel_stage(ctx->dsi[0], MIPI_DSI_PANEL_PREPARED);
++	if (ret)
++		goto fail;
+ 	return 0;
+ 
+ fail:
++	/* On a host cleanup error keep rails until the later disable retry. */
++	if (mipi_dsi_panel_stage(ctx->dsi[0], MIPI_DSI_PANEL_PREPARE_FAILED))
++		return ret;
+ 	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+ 	nt36532_disable_supplies(ctx);
+ 	return ret;
+@@ -1780,6 +1787,9 @@
+ 
+ 	liuqin_esd_stop(ctx, false);
+ 	liuqin_cancel_dimming(ctx, false);
++	ret = mipi_dsi_panel_stage(ctx->dsi[0], MIPI_DSI_PANEL_DISABLING);
++	if (ret)
++		return ret;
+ 	ret = nt36532_off(ctx);
+ 	if (ret < 0)
+ 		dev_err(dev, "Failed to un-initialize panel: %d\n", ret);
+@@ -1790,10 +1800,15 @@
+ static int nt36532_unprepare(struct drm_panel *panel)
+ {
+ 	struct nt36532 *ctx = to_nt36532(panel);
++	int ret;
+ 
+ 	liuqin_esd_stop(ctx, false);
+ 
+ 	liuqin_cancel_dimming(ctx, false);
++
++	ret = mipi_dsi_panel_stage(ctx->dsi[0], MIPI_DSI_PANEL_UNPREPARING);
++	if (ret)
++		return ret;
+ 
+ 	ctx->dsi[0]->mode_flags &= ~MIPI_DSI_MODE_LPM;
+ 	if (ctx->dsi[1])
+@@ -1986,6 +2001,8 @@
+ 		ctx->dsi[i]->lanes = 4;
+ 		ctx->dsi[i]->format = MIPI_DSI_FMT_RGB888;
+ 		ctx->dsi[i]->mode_flags = ctx->desc->mode_flags;
++		if (ctx->desc == &liuqin_desc && ctx->oem_panel)
++			ctx->dsi[i]->mode_flags |= MIPI_DSI_MODE_PANEL_STAGES;
+ 
+ 		ret = devm_mipi_dsi_attach(dev, ctx->dsi[i]);
+ 

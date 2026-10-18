@@ -1,0 +1,13 @@
+[Unit]
+Description=Restore saved Liuqin display policy
+ConditionPathExists=/etc/liuqin/display-policy.json
+After=systemd-udev-trigger.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/liuqin-display-policy apply
+TimeoutStartSec=10
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+[Unit]
+Description=Liuqin panel fault monitoring and bounded Wayland recovery
+ConditionPathExists=/usr/bin/kscreen-doctor
+ConditionUser=!root
+
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/liuqin-display-recovery
+Environment=LIUQIN_DISPLAY_RECOVERY=1
+Restart=on-failure
+RestartSec=15
+KillMode=mixed
+TimeoutStopSec=25
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

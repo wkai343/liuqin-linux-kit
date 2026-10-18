@@ -63,6 +63,22 @@ class FedoraTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'越界'):fedora_oci.extract(archive,digest,root)
         self.assertFalse(root.exists());self.assertFalse((self.work/'escape').exists())
 
+    def test_display_recovery_user_unit_is_activated_in_board_payload(self):
+        spec=importlib.util.spec_from_file_location('board_payload_test',PROJECT/'build/scripts/build-liuqin-rpms.py')
+        board=importlib.util.module_from_spec(spec);spec.loader.exec_module(board)
+        busybox=self.work/'busybox';busybox.write_bytes(b'fixture');busybox.chmod(0o755)
+        root=self.work/'board';root.mkdir()
+        board.board_overlay(root,busybox)
+        unit=root/'etc/systemd/user/liuqin-display-recovery.service'
+        link=root/'etc/systemd/user/default.target.wants/liuqin-display-recovery.service'
+        helper=root/'usr/local/libexec/liuqin-display-recovery'
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(link.resolve(),unit)
+        self.assertTrue(helper.stat().st_mode & 0o111)
+        self.assertEqual(helper.read_bytes(),(PROJECT/'device/gnome-overlay/usr/local/libexec/liuqin-display-recovery').read_bytes())
+        self.assertIn('ConditionUser=!root',unit.read_text())
+        self.assertIn('NoNewPrivileges=yes',unit.read_text())
+
     def test_fedora_target_retains_an_independent_ubuntu_installer(self):
         original=dict(rootfs_config=str(PROJECT/'build/rootfs/fedora-plasma.json'),kernel_fragments=[],
             kernel_localversion='-liuqin-test',kernel_source='sources/test',package_version='0.1.0',jobs=2)

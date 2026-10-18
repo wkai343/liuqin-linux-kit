@@ -298,6 +298,7 @@ def configure(root, data, output):
         link('multi-user.target.wants/'+name+'.service','../'+name+'.service')
     link('multi-user.target.wants/iio-sensor-proxy.service','/usr/lib/systemd/system/iio-sensor-proxy.service')
     link('graphical.target.wants/liuqin-backlight-default.service','../liuqin-backlight-default.service')
+    link('multi-user.target.wants/liuqin-display-policy.service','../liuqin-display-policy.service')
     link('display-manager.service','/usr/lib/systemd/system/plasmalogin.service')
     link('graphical.target.wants/plasmalogin.service','/usr/lib/systemd/system/plasmalogin.service')
     link('default.target','/usr/lib/systemd/system/graphical.target')

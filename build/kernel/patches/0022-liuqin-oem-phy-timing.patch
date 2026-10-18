@@ -1,0 +1,183 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] drm/msm/dsi: add guarded Liuqin OEM PHY timing profile
+
+Use the shipped M81 PHY timing table only for a connected Liuqin
+panel and known OEM selector. ABL overwrites the root compatible, so
+verify the available panel graph, SM8450 dual-DSI host, and exact
+host PHY phandle instead of trusting the root board name. Require
+D-PHY v4.3, both valid links, and the audited 1.007032320 GHz rate
+within PLL rounding tolerance. Refuse a changed native timing set.
+Keep a local register-programming copy so shared host clock-out
+timers remain unchanged. No PLL, analog drive, panel-command, supply
+or reset changes. The boot parameter msm.liuqin_oem_dphy_timing=0
+disables this profile. Both links were checked at boot and resume on
+one Tianma Liuqin, followed by a normal restart and two cold boots.
+Long-term stability and the CSOT variant still need hardware coverage.
+
+diff --git a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c
+--- a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c
++++ b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c
+@@ -8,6 +8,10 @@
+ #include <linux/clk.h>
+ #include <linux/clk-provider.h>
+ #include <linux/iopoll.h>
++#include <linux/ctype.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/of_graph.h>
+ 
+ #include "dsi_phy.h"
+ #include "dsi.xml.h"
+@@ -916,6 +920,134 @@
+ 	}
+ }
+ 
++static bool liuqin_oem_dphy_timing = true;
++module_param(liuqin_oem_dphy_timing, bool, 0444);
++MODULE_PARM_DESC(liuqin_oem_dphy_timing,
++		 "Use fixed-ROM PHY timings for known Liuqin panels at 1.007 GHz");
++
++static bool dsi_7nm_liuqin_panel_known(const char *args)
++{
++	static const char key[] = "msm_drm.dsi_display0=";
++	static const char * const names[] = {
++		"qcom,mdss_dsi_m81_36_02_0a_dualdsi_dsc_lcd_video",
++		"qcom,mdss_dsi_m81_42_02_0b_dualdsi_dsc_lcd_video",
++	};
++	unsigned int selected = 0;
++
++	if (!args)
++		return false;
++	while (*args) {
++		const char *end, *name, *colon;
++		unsigned int candidate = 0, i;
++		size_t length;
++
++		while (isspace((unsigned char)*args))
++			args++;
++		if (!*args)
++			break;
++		end = args;
++		while (*end && !isspace((unsigned char)*end))
++			end++;
++		if ((size_t)(end - args) < sizeof(key) - 1 ||
++		    strncmp(args, key, sizeof(key) - 1)) {
++			args = end;
++			continue;
++		}
++		name = args + sizeof(key) - 1;
++		colon = memchr(name, ':', end - name);
++		length = (colon ? colon : end) - name;
++		for (i = 0; i < ARRAY_SIZE(names); i++)
++			if (strlen(names[i]) == length && !strncmp(name, names[i], length))
++				candidate = i + 1;
++		if (!candidate || (selected && selected != candidate))
++			return false;
++		selected = candidate;
++		args = end;
++	}
++	return selected != 0;
++}
++
++/* ABL replaces the root compatible with qcom,cape-mtp. Identify the
++ * board-specific panel through its graph and this PHY's host phandle instead.
++ */
++static bool dsi_7nm_liuqin_phy_connected(struct msm_dsi_phy *phy)
++{
++	struct device_node *panel, *host, *host_phy;
++	bool connected;
++
++	if (!phy->pdev->dev.of_node)
++		return false;
++	for_each_compatible_node(panel, NULL, "xiaomi,liuqin-nt36532") {
++		if (!of_device_is_available(panel))
++			continue;
++		host = of_graph_get_remote_node(panel, phy->id, -1);
++		if (!host)
++			continue;
++		connected = false;
++		if (of_device_is_compatible(host, "qcom,sm8450-dsi-ctrl") &&
++		    of_property_read_bool(host, "qcom,dual-dsi-mode")) {
++			host_phy = of_parse_phandle(host, "phys", 0);
++			connected = host_phy == phy->pdev->dev.of_node;
++			of_node_put(host_phy);
++		}
++		of_node_put(host);
++		if (connected) {
++			of_node_put(panel);
++			return true;
++		}
++	}
++	return false;
++}
++
++/* OS2.0.6.0.VMYCNXM DTBO entry 15 supplies the same 14 bytes for both M81
++ * panels. Apply only the five differing PHY registers, at the audited rate.
++ * The private copy deliberately preserves the host's shared clock-out timers.
++ */
++static bool dsi_7nm_liuqin_oem_timing(struct msm_dsi_phy *phy,
++				      const struct msm_dsi_phy_clk_request *clk_req,
++				      struct msm_dsi_dphy_timing *out)
++{
++	const struct msm_dsi_dphy_timing *native = &phy->timing;
++	struct device_node *chosen;
++	const char *args;
++	bool known;
++
++	if (!liuqin_oem_dphy_timing || phy->cphy_mode || phy->id < 0 || phy->id > 1 ||
++	    phy->cfg->quirks != DSI_PHY_7NM_QUIRK_V4_3 ||
++	    clk_req->bitclk_rate < 1007031320UL ||
++	    clk_req->bitclk_rate > 1007033320UL ||
++	    !dsi_7nm_liuqin_phy_connected(phy))
++		return false;
++	chosen = of_find_node_by_path("/chosen");
++	if (!chosen)
++		return false;
++	known = !of_property_read_string(chosen, "bootargs", &args) &&
++		dsi_7nm_liuqin_panel_known(args);
++	of_node_put(chosen);
++	if (!known)
++		return false;
++	/* A changed calculator or mode must keep its own complete timing set. */
++	if (native->clk_zero != 0x22 || native->clk_prepare != 0x08 ||
++	    native->clk_trail != 0x0a || native->hs_exit != 0x25 ||
++	    native->hs_zero != 0x23 || native->hs_prepare != 0x09 ||
++	    native->hs_trail != 0x09 || native->hs_rqst != 0x06 ||
++	    native->shared_timings.clk_pre != 0x1f ||
++	    native->shared_timings.clk_post != 0x19 ||
++	    !native->shared_timings.byte_intf_clk_div_2 ||
++	    native->shared_timings.clk_pre_inc_by_2)
++		return false;
++	*out = *native;
++	out->clk_trail = 0x09;
++	out->hs_exit = 0x19;
++	out->hs_rqst = 0x09;
++	out->shared_timings.clk_pre = 0x1c;
++	out->shared_timings.clk_post = 0x0e;
++	dev_info(&phy->pdev->dev,
++		 "Liuqin OEM D-PHY timing applied: link %d, bitrate %lu\n",
++		 phy->id, clk_req->bitclk_rate);
++	return true;
++}
++
+ static int dsi_7nm_phy_enable(struct msm_dsi_phy *phy,
+ 			      struct msm_dsi_phy_clk_request *clk_req)
+ {
+@@ -924,6 +1056,7 @@
+ 	u32 const delay_us = 5;
+ 	u32 const timeout_us = 1000;
+ 	struct msm_dsi_dphy_timing *timing = &phy->timing;
++	struct msm_dsi_dphy_timing oem_timing;
+ 	void __iomem *base = phy->base;
+ 	bool less_than_1500_mhz;
+ 	u32 vreg_ctrl_0, vreg_ctrl_1, lane_ctrl0;
+@@ -943,6 +1076,9 @@
+ 			      "%s: PHY timing calculation failed\n", __func__);
+ 		return -EINVAL;
+ 	}
++
++	if (dsi_7nm_liuqin_oem_timing(phy, clk_req, &oem_timing))
++		timing = &oem_timing;
+ 
+ 	if (dsi_phy_hw_v4_0_is_pll_on(phy))
+ 		pr_warn("PLL turned on before configuring PHY\n");

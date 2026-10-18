@@ -27,18 +27,29 @@ for field in brightness actual_brightness max_brightness bl_power; do
 	path=$backlight/$field
 	[ -e "$path" ] || fail "missing $field"
 done
-[ "$(cat "$backlight/max_brightness")" = 2047 ] ||
-	fail 'refusing a backlight whose maximum is not 2047'
+maximum=$(cat "$backlight/max_brightness")
+case $maximum in
+2047) target=1500 ;;
+4095)
+	[ "$(cat "$backlight/brightness_curve" 2>/dev/null)" = liuqin-oem ] ||
+		fail 'unknown 4095-step brightness curve'
+	target=$(cat "$backlight/default_brightness")
+	case $target in ''|*[!0-9]*) fail 'invalid logical default' ;; esac
+	[ "$target" -gt 0 ] && [ "$target" -le "$maximum" ] ||
+		fail 'logical default is outside the supported range'
+	;;
+*) fail 'unsupported backlight scale' ;;
+esac
 [ -w "$backlight/brightness" ] ||
 	fail 'backlight controls are not writable'
 
 # A panel may still be in reset when this service runs. Preserve its power
 # state; drm_panel_enable() will unblank it after preparing a valid display.
-printf '%s\n' 1500 >"$backlight/brightness" || fail 'brightness write failed'
-[ "$(cat "$backlight/brightness")" = 1500 ] || fail 'brightness readback is not 1500'
+printf '%s\n' "$target" >"$backlight/brightness" || fail 'brightness write failed'
+[ "$(cat "$backlight/brightness")" = "$target" ] || fail 'brightness readback differs'
 if [ "$(cat "$backlight/bl_power")" = 0 ]; then
-	[ "$(cat "$backlight/actual_brightness")" = 1500 ] || fail 'actual brightness readback is not 1500'
+	[ "$(cat "$backlight/actual_brightness")" = "$target" ] || fail 'actual brightness readback differs'
 fi
 
-printf 'liuqin-backlight-default: brightness=1500 actual=%s max=2047 bl_power=%s (managed by DRM)\n' \
-	"$(cat "$backlight/actual_brightness")" "$(cat "$backlight/bl_power")"
+printf 'liuqin-backlight-default: brightness=%s actual=%s max=%s bl_power=%s (managed by DRM)\n' \
+	"$target" "$(cat "$backlight/actual_brightness")" "$maximum" "$(cat "$backlight/bl_power")"

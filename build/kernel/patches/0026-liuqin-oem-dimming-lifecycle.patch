@@ -1,0 +1,229 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] drm/panel: apply M81 OEM delayed dimming after first-frame setup
+
+Use the exact OS2.0.6.0 M81 dimming-on packets and effective ROM
+delay. Tianma has a misspelled DT property so the shipped parser
+falls back to zero; CSOT uses 300 ms. Both run asynchronously after
+first-frame setup. Preserve grouped long writes and separate short
+writes. Queue after successful first-frame/backlight normal-display
+setup; serialize with core backlight disable, reject stale
+generations and cancel before panel teardown. Do not change KTZ PWM
+mode, brightness mapping, supply/reset or ON/OFF tables.
+
+diff --git a/drivers/gpu/drm/panel/panel-novatek-nt36532.c b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -45,6 +45,10 @@
+ 	struct regulator_bulk_data supplies[3];
+ 	unsigned int supply_votes;
+ 	bool keep_iovdd;
++	struct delayed_work dimming_work;
++	unsigned int dimming_cookie;
++	bool dimming_pending;
++	bool dimming_stopping;
+ 	/* Serializes IRQ enable depth and fault/generation state. */
+ 	struct mutex esd_lock;
+ 	struct delayed_work esd_arm_work;
+@@ -483,6 +487,7 @@
+ 	const char *label;
+ 	const struct liuqin_oem_cmd *on;
+ 	size_t on_count;
++	unsigned int dimming_delay_ms;
+ };
+ 
+ static const struct liuqin_oem_cmd liuqin_tm_on[] = {
+@@ -917,11 +922,14 @@
+ 		.label = "m81_36_02_0a (Tianma)",
+ 		.on = liuqin_tm_on,
+ 		.on_count = ARRAY_SIZE(liuqin_tm_on),
++		/* The shipped parser falls back to 0 for the misspelled TM key. */
++		.dimming_delay_ms = 0,
+ 	}, {
+ 		.boot_name = "qcom,mdss_dsi_m81_42_02_0b_dualdsi_dsc_lcd_video",
+ 		.label = "m81_42_02_0b (CSOT)",
+ 		.on = liuqin_csot_on,
+ 		.on_count = ARRAY_SIZE(liuqin_csot_on),
++		.dimming_delay_ms = 300,
+ 	},
+ };
+ 
+@@ -1527,6 +1535,106 @@
+ 	return ret;
+ }
+ 
++/* Exact M81 ROM dimming-on packets; the first pair is one command group. */
++static const struct liuqin_oem_cmd liuqin_oem_dimming_on[] = {
++	{ 0x39, 0x40, 0, 2, { 0xff, 0x27 } },
++	{ 0x39, 0, 0, 2, { 0xd1, 0x28 } },
++	{ 0x15, 0, 0, 2, { 0xff, 0x10 } },
++	{ 0x15, 0, 0, 2, { 0x53, 0x2c } },
++};
++
++static bool oem_delayed_dimming = true;
++module_param(oem_delayed_dimming, bool, 0444);
++MODULE_PARM_DESC(oem_delayed_dimming,
++		 "Apply M81 dimming after successful first-frame backlight setup");
++
++static int liuqin_send_dimming_on(struct nt36532 *ctx)
++{
++	struct mipi_dsi_device *dsi = nt36532_cmd_dsi(ctx);
++	const struct mipi_dsi_host_ops *ops = dsi->host->ops;
++	size_t i;
++	int ret;
++
++	if (!ops || !ops->transfer)
++		return -EOPNOTSUPP;
++	/* Preserve the ROM's long-write batch and the two separate short writes. */
++	ret = liuqin_send_oem_cmds(ctx, liuqin_oem_dimming_on, 2);
++	if (ret)
++		return ret;
++	for (i = 2; i < ARRAY_SIZE(liuqin_oem_dimming_on); i++) {
++		const struct liuqin_oem_cmd *cmd = &liuqin_oem_dimming_on[i];
++		struct mipi_dsi_msg msg = {
++			.channel = dsi->channel,
++			.type = cmd->type,
++			.flags = MIPI_DSI_MSG_USE_LPM,
++			.tx_len = cmd->len,
++			.tx_buf = cmd->data,
++		};
++		ssize_t sent = ops->transfer(dsi->host, &msg);
++
++		if (sent < 0)
++			return sent;
++		if (sent < cmd->len)
++			return -EIO;
++	}
++	return 0;
++}
++
++static void liuqin_dimming_work(struct work_struct *work)
++{
++	struct nt36532 *ctx = container_of(to_delayed_work(work),
++					 struct nt36532, dimming_work);
++	struct drm_panel *panel = &ctx->panel;
++	int ret;
++
++	/* Serialize with first-frame completion and the start of backlight off. */
++	mutex_lock(&panel->backlight_lock);
++	if (!ctx->dimming_pending)
++		goto unlock;
++	ctx->dimming_pending = false;
++	if (ctx->dimming_stopping || READ_ONCE(ctx->esd_pending) ||
++	    !oem_delayed_dimming || !ctx->oem_panel ||
++	    !panel->enabled || panel->backlight_pending ||
++	    ctx->dimming_cookie != panel->backlight_cookie ||
++	    !panel->backlight || !backlight_get_brightness(panel->backlight))
++		goto unlock;
++	ret = liuqin_send_dimming_on(ctx);
++	if (ret)
++		dev_err(panel->dev, "Liuqin OEM delayed dimming failed: %d\n", ret);
++	else
++		dev_info(panel->dev, "Liuqin OEM delayed dimming enabled: cycle %u\n",
++			 ctx->dimming_cookie);
++unlock:
++	mutex_unlock(&panel->backlight_lock);
++}
++
++/* Called from the post-backlight hook with the core backlight lock held. */
++static void liuqin_schedule_dimming(struct nt36532 *ctx)
++{
++	struct drm_panel *panel = &ctx->panel;
++
++	lockdep_assert_held(&panel->backlight_lock);
++	if (!oem_delayed_dimming || !ctx->oem_panel || ctx->dimming_stopping ||
++	    !panel->enabled || !panel->backlight_after_first_frame)
++		return;
++	ctx->dimming_cookie = panel->backlight_cookie;
++	ctx->dimming_pending = true;
++	mod_delayed_work(system_wq, &ctx->dimming_work,
++			 msecs_to_jiffies(ctx->oem_panel->dimming_delay_ms));
++	dev_info(panel->dev, "Liuqin OEM dimming queued: cycle %u, delay %u ms\n",
++		 ctx->dimming_cookie, ctx->oem_panel->dimming_delay_ms);
++}
++
++static void liuqin_cancel_dimming(struct nt36532 *ctx, bool stopping)
++{
++	mutex_lock(&ctx->panel.backlight_lock);
++	ctx->dimming_pending = false;
++	ctx->dimming_stopping |= stopping;
++	mutex_unlock(&ctx->panel.backlight_lock);
++	/* Never wait for work while holding the lock that the worker needs. */
++	cancel_delayed_work_sync(&ctx->dimming_work);
++}
++
+ static int nt36532_prepare(struct drm_panel *panel)
+ {
+ 	struct nt36532 *ctx = to_nt36532(panel);
+@@ -1536,6 +1644,8 @@
+ 	int ret;
+ 
+ 	liuqin_esd_stop(ctx, false);
++
++	liuqin_cancel_dimming(ctx, false);
+ 
+ 	/* Match the retained-power resume path: reset low before digital rails. */
+ 	if (ctx->desc == &liuqin_desc && ctx->keep_iovdd &&
+@@ -1636,6 +1746,7 @@
+ 	int ret;
+ 
+ 	liuqin_esd_stop(ctx, false);
++	liuqin_cancel_dimming(ctx, false);
+ 	ret = nt36532_off(ctx);
+ 	if (ret < 0)
+ 		dev_err(dev, "Failed to un-initialize panel: %d\n", ret);
+@@ -1648,6 +1759,8 @@
+ 	struct nt36532 *ctx = to_nt36532(panel);
+ 
+ 	liuqin_esd_stop(ctx, false);
++
++	liuqin_cancel_dimming(ctx, false);
+ 
+ 	ctx->dsi[0]->mode_flags &= ~MIPI_DSI_MODE_LPM;
+ 	if (ctx->dsi[1])
+@@ -1689,10 +1802,12 @@
+ 	const struct mipi_dsi_host_ops *ops;
+ 	size_t i;
+ 
+-	if (!oem_normal_display || !ctx->oem_panel)
++	if (!ctx->oem_panel)
+ 		return 0;
+ 	dsi = nt36532_cmd_dsi(ctx);
+ 	ops = dsi->host->ops;
++	if (!oem_normal_display)
++		goto ready;
+ 	if (!ops || !ops->transfer)
+ 		return -EOPNOTSUPP;
+ 	for (i = 0; i < ARRAY_SIZE(liuqin_oem_normal_display); i++) {
+@@ -1712,6 +1827,8 @@
+ 			return -EIO;
+ 	}
+ 	dev_info(panel->dev, "Liuqin OEM post-backlight: normal display restored\n");
++ready:
++	liuqin_schedule_dimming(ctx);
+ 	liuqin_esd_start(ctx);
+ 	return 0;
+ }
+@@ -1786,6 +1903,7 @@
+ 
+ 	drm_panel_init(&ctx->panel, dev, &nt36532_panel_funcs,
+ 		       DRM_MODE_CONNECTOR_DSI);
++	INIT_DELAYED_WORK(&ctx->dimming_work, liuqin_dimming_work);
+ 	mutex_init(&ctx->esd_lock);
+ 	INIT_DELAYED_WORK(&ctx->esd_arm_work, liuqin_esd_arm_work);
+ 	ctx->esd_irq[0] = -1;
+@@ -1839,6 +1957,7 @@
+ 		ret = devm_mipi_dsi_attach(dev, ctx->dsi[i]);
+ 
+ 		if (ret < 0) {
++			liuqin_cancel_dimming(ctx, true);
+ 			liuqin_esd_shutdown(ctx);
+ 			drm_panel_remove(&ctx->panel);
+ 			return dev_err_probe(dev, ret,
+@@ -1853,6 +1972,7 @@
+ {
+ 	struct nt36532 *ctx = mipi_dsi_get_drvdata(dsi);
+ 	liuqin_esd_shutdown(ctx);
++	liuqin_cancel_dimming(ctx, true);
+ 	drm_panel_remove(&ctx->panel);
+ }
+ 

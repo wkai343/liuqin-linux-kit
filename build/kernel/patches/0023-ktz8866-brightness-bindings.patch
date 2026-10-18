@@ -1,0 +1,20 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] dt-bindings: backlight: describe the optional M81 brightness curve
+
+Document the M81 nonlinear brightness scale used by Liuqin.
+Keep the generic KTZ8866 raw interface unchanged.
+
+diff --git a/Documentation/devicetree/bindings/leds/backlight/kinetic,ktz8866.yaml b/Documentation/devicetree/bindings/leds/backlight/kinetic,ktz8866.yaml
+--- a/Documentation/devicetree/bindings/leds/backlight/kinetic,ktz8866.yaml
++++ b/Documentation/devicetree/bindings/leds/backlight/kinetic,ktz8866.yaml
+@@ -38,6 +38,10 @@
+     description: number of the LED current sinks' channels.
+     $ref: /schemas/types.yaml#/definitions/uint32
+     enum: [1, 2, 3, 4, 5, 6]
++
++  xiaomi,liuqin-brightness-curve:
++    description: Use the M81 nonlinear curve with a 0 to 4095 logical scale.
++    type: boolean
+ 
+   kinetic,blanked-current-sink-mask:
+     description: |

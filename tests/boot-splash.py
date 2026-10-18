@@ -68,6 +68,20 @@ class ReadinessTests(unittest.TestCase):
         self.assertEqual(result,0);self.assertTrue(marker.exists())
         self.assertFalse((self.root/'escaped').exists())
 
+    def test_supported_raw_and_oem_scales_only(self):
+        source=(PROJECT/'device/boot/liuqin-boot-splash.sh').read_text()
+        start=source.index('wait_backlight_scale() {')
+        function=source[start:source.index('\n}',start)+2]
+        script=self.root/'scale.sh'
+        script.write_text('BB='+shlex.quote(str(self.box))+'\n'+function+'\nwait_backlight_scale "$1"\n')
+        for maximum,curve,want in [(2047,None,True),(4095,'liuqin-oem',True),(4095,'linear',False),(255,None,False),(4095,None,False)]:
+            with self.subTest(maximum=maximum,curve=curve):
+                (self.root/'max_brightness').write_text(str(maximum))
+                (self.root/'brightness_curve').unlink(missing_ok=True)
+                if curve is not None:(self.root/'brightness_curve').write_text(curve)
+                result=subprocess.run(['sh',str(script),str(self.root)],capture_output=True,timeout=3)
+                self.assertEqual(result.returncode==0,want,result.stderr)
+
     def test_absent_device_times_out_without_advancing(self):
         result,marker=self.run_wait(self.root/'missing')
         self.assertNotEqual(result,0);self.assertFalse(marker.exists())

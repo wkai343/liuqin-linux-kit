@@ -1,0 +1,143 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] drm/panel: restore M81 normal display after backlight
+
+OS2.0.6.0.VMYCNXM sends command set 0x5a when M81 brightness rises from
+zero. The shipped table selects page 0x10 with a short packet, then exits
+black mode with the long 0x13 0x00 packet. The native ON table alone does
+not include this post-backlight step.
+
+Apply the sequence to each DRM backlight-enable cycle of known Liuqin
+panels, after the existing first-frame gate and backlight enable. A failed
+callback leaves deferred completion pending; stale generations stay inert.
+No userspace brightness interception, enter-black policy, power sequencing,
+voltage, reset, touch firmware or extra wait changes are introduced.
+This change depends on the OEM grouped command transport adaptation.
+
+diff --git a/drivers/gpu/drm/drm_panel.c b/drivers/gpu/drm/drm_panel.c
+--- a/drivers/gpu/drm/drm_panel.c
++++ b/drivers/gpu/drm/drm_panel.c
+@@ -201,6 +201,20 @@
+ }
+ EXPORT_SYMBOL(drm_panel_unprepare);
+ 
++static int drm_panel_enable_backlight(struct drm_panel *panel)
++{
++	int ret;
++
++	if (!panel->backlight)
++		return 0;
++	ret = backlight_enable(panel->backlight);
++	if (ret < 0)
++		return ret;
++	if (panel->funcs && panel->funcs->post_backlight_enable)
++		return panel->funcs->post_backlight_enable(panel);
++	return 0;
++}
++
+ /**
+  * drm_panel_enable - enable a panel
+  * @panel: DRM panel
+@@ -241,7 +255,7 @@
+ 		return;
+ 	}
+ 
+-	ret = backlight_enable(panel->backlight);
++	ret = drm_panel_enable_backlight(panel);
+ 	if (ret < 0)
+ 		DRM_DEV_INFO(panel->dev, "failed to enable backlight: %d\n",
+ 			     ret);
+@@ -292,7 +306,7 @@
+ 	    panel->backlight_cookie != cookie)
+ 		goto unlock;
+ 
+-	ret = backlight_enable(panel->backlight);
++	ret = drm_panel_enable_backlight(panel);
+ 	if (ret < 0) {
+ 		dev_err_ratelimited(panel->dev,
+ 			"failed to enable backlight after first frame: %d\n", ret);
+diff --git a/drivers/gpu/drm/panel/panel-novatek-nt36532.c b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -1439,12 +1439,60 @@
+ 	return drm_connector_helper_get_modes_fixed(connector, mode);
+ }
+ 
++/* Exact M81 ROM post-backlight sequence: select DCS page, exit black mode.
++ * Keep the short 0x15 page-select and long 0x39 NORMAL_MODE packets intact.
++ * This does not introduce the separate OEM enter-black/dimming policies.
++ */
++static const struct liuqin_oem_cmd liuqin_oem_normal_display[] = {
++	{ 0x15, 0, 0, 2, { 0xff, 0x10 } },
++	{ 0x39, 0, 0, 2, { 0x13, 0x00 } },
++};
++
++static bool oem_normal_display = true;
++module_param(oem_normal_display, bool, 0444);
++MODULE_PARM_DESC(oem_normal_display,
++		 "Restore known Liuqin panel normal display mode after backlight enable");
++
++static int nt36532_post_backlight_enable(struct drm_panel *panel)
++{
++	struct nt36532 *ctx = to_nt36532(panel);
++	struct mipi_dsi_device *dsi;
++	const struct mipi_dsi_host_ops *ops;
++	size_t i;
++
++	if (!oem_normal_display || !ctx->oem_panel)
++		return 0;
++	dsi = nt36532_cmd_dsi(ctx);
++	ops = dsi->host->ops;
++	if (!ops || !ops->transfer)
++		return -EOPNOTSUPP;
++	for (i = 0; i < ARRAY_SIZE(liuqin_oem_normal_display); i++) {
++		const struct liuqin_oem_cmd *cmd = &liuqin_oem_normal_display[i];
++		struct mipi_dsi_msg msg = {
++			.channel = dsi->channel,
++			.type = cmd->type,
++			.flags = MIPI_DSI_MSG_USE_LPM,
++			.tx_len = cmd->len,
++			.tx_buf = cmd->data,
++		};
++		ssize_t ret = ops->transfer(dsi->host, &msg);
++
++		if (ret < 0)
++			return ret;
++		if (ret < cmd->len)
++			return -EIO;
++	}
++	dev_info(panel->dev, "Liuqin OEM post-backlight: normal display restored\n");
++	return 0;
++}
++
+ static const struct drm_panel_funcs nt36532_panel_funcs = {
+ 	.prepare = nt36532_prepare,
+ 	.enable = nt36532_enable,
+ 	.disable = nt36532_disable,
+ 	.unprepare = nt36532_unprepare,
+ 	.get_modes = nt36532_get_modes,
++	.post_backlight_enable = nt36532_post_backlight_enable,
+ };
+ 
+ static int nt36532_probe(struct mipi_dsi_device *dsi)
+diff --git a/include/drm/drm_panel.h b/include/drm/drm_panel.h
+--- a/include/drm/drm_panel.h
++++ b/include/drm/drm_panel.h
+@@ -144,6 +144,18 @@
+ 	 * Allows panels to create panels-specific debugfs files.
+ 	 */
+ 	void (*debugfs_init)(struct drm_panel *panel, struct dentry *root);
++
++	/**
++	 * @post_backlight_enable:
++	 *
++	 * Optional panel activation after a successful DRM-controlled backlight
++	 * enable. Deferred panels reach this only after first-frame completion.
++	 * Called in sleepable context with backlight_lock held; must not reenter
++	 * panel enable/disable or backlight updates. Return zero or a negative
++	 * error. A deferred failure keeps the generation pending for retry.
++	 * This does not intercept userspace brightness adjustments.
++	 */
++	int (*post_backlight_enable)(struct drm_panel *panel);
+ };
+ 
+ struct drm_panel_follower_funcs {

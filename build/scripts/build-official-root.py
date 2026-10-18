@@ -194,6 +194,7 @@ def configure(root, data, output):
     # cancel KWin's pending accelerometer claim during the first login.
     link('multi-user.target.wants/iio-sensor-proxy.service','/usr/lib/systemd/system/iio-sensor-proxy.service')
     link('graphical.target.wants/liuqin-backlight-default.service','../liuqin-backlight-default.service')
+    link('multi-user.target.wants/liuqin-display-policy.service','../liuqin-display-policy.service')
     link('default.target','/usr/lib/systemd/system/graphical.target')
     link('display-manager.service','/usr/lib/systemd/system/sddm.service')
     (root/'etc/X11').mkdir(exist_ok=True)

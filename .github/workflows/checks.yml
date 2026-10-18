@@ -49,6 +49,12 @@ jobs:
           sudo python3 tests/fingerprint-enrol-preflight.py
           sudo python3 tests/fingerprint-release.py
           python3 tests/shell-defaults.py
+          python3 tests/display-clock.py
+          python3 tests/backlight-default.py
+          python3 tests/boot-splash.py
+          python3 tests/display-recovery.py
+          python3 tests/display-policy.py
+          python3 tests/wlan-mac.py
           python3 tests/memory-reclaim.py
           python3 tests/mkbootimg-fetch.py
           python3 tests/initramfs-inputs.py
@@ -63,6 +69,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y busybox-static
+          python3 tests/storage-seal.py
+          python3 tests/storage-ready.py
+          python3 tests/storage-paths.py
           sh tests/persistent-root.sh
       - name: Adreno 传感器读取
         run: |

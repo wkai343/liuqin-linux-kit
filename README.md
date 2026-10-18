@@ -23,6 +23,9 @@
 磁吸键盘平板模式、U 盘、电池显示、Adreno 监测、指纹锁屏及后摄；前摄未启用。
 本机 256GB 已通过 Linux GUI 单根 Btrfs 安装、桌面启动与正常重启，Windows GUI 安装也已验证成功；其他容量仍待实测，见 [硬件说明](docs/HARDWARE.md)。
 
+仍有偶发开机显示异常和待机提前唤醒；显示自动恢复可缓解故障，待机功耗尚无可靠结论。
+当前限制与后续工作见 [待改进与验证](docs/DEVELOPMENT-STATUS.md)，CABC 用法见 [显示与画质](docs/DISPLAY.md)。
+
 ## 构建
 
 在 Linux 主机安装 Devbox/Nix，然后运行：

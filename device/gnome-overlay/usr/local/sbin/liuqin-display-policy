@@ -1,0 +1,105 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: MIT
+"""查看、切换或保存 Liuqin 原厂 CABC 策略；不调整电压、频率或亮度。"""
+import argparse
+import json
+import os
+from pathlib import Path
+import tempfile
+import time
+
+MODES = ('off', 'ui', 'still', 'movie')
+SYSFS = Path('/sys/bus/mipi-dsi/devices')
+CONFIG = Path('/etc/liuqin/display-policy.json')
+
+
+def panel(root=SYSFS):
+    found = [p for p in root.glob('*/cabc_mode') if (p.parent/'cabc_status').is_file()]
+    if len(found) != 1:
+        raise ValueError('未找到唯一的 CABC 面板接口；需要支持此功能的 Liuqin 内核。')
+    return found[0].parent
+
+
+def status(node):
+    return {'panel': node.name, 'requested': (node/'cabc_mode').read_text().strip(),
+            'status': (node/'cabc_status').read_text().strip(),
+            'note': 'programmed 表示命令发送成功，不是硬件寄存器回读。'}
+
+
+def select(node, mode):
+    if mode not in MODES:
+        raise ValueError('CABC 模式必须为 off、ui、still 或 movie。')
+    (node/'cabc_mode').write_text(mode+'\n')
+    result = status(node)
+    if result['requested'] != mode:
+        raise ValueError('内核没有保留请求的模式。')
+    return result
+
+
+def read_config(path=CONFIG):
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict) or set(data) != {'cabc'} or data['cabc'] not in MODES:
+        raise ValueError('显示策略配置无效；格式应为 {"cabc": "off|ui|still|movie"}。')
+    return data['cabc']
+
+
+def save(mode, path=CONFIG):
+    if mode not in MODES:
+        raise ValueError('无效的 CABC 模式。')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, prefix='.display-policy-', delete=False) as f:
+            temp = Path(f.name)
+            json.dump({'cabc': mode}, f)
+            f.write('\n')
+            f.flush()
+            os.fsync(f.fileno())
+        temp.chmod(0o644)
+        temp.replace(path)
+    finally:
+        if temp is not None:
+            temp.unlink(missing_ok=True)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    sub = ap.add_subparsers(dest='action', required=True)
+    sub.add_parser('status', help='查看请求与发送状态')
+    switch = sub.add_parser('set', help='切换模式；不加 --save 时仅本次启动有效')
+    switch.add_argument('mode', choices=MODES)
+    switch.add_argument('--save', action='store_true', help='同时保存为之后的开机策略')
+    sub.add_parser('apply', help='应用保存的策略，供启动服务调用')
+    args = ap.parse_args()
+    try:
+        if args.action == 'status':
+            result = status(panel())
+        else:
+            if os.geteuid() != 0:
+                raise ValueError('修改显示策略需要 sudo。')
+            if args.action == 'apply':
+                if not CONFIG.exists():
+                    return
+                mode = read_config()
+                deadline = time.monotonic()+5
+                while True:
+                    try:
+                        node = panel()
+                        break
+                    except ValueError:
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(0.1)
+            else:
+                mode, node = args.mode, panel()
+            result = select(node, mode)
+            if args.action == 'set' and args.save:
+                save(mode)
+                result['saved'] = str(CONFIG)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    except (OSError, ValueError) as e:
+        ap.exit(1, '显示策略：'+str(e)+'\n')
+
+
+if __name__ == '__main__':
+    main()

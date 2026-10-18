@@ -13,11 +13,12 @@
 | `image.yml`：系统镜像构建 | 专用 Linux 自托管 runner，仅可信 `main` | 三个安装文件 |
 
 离线和 QML 演示不连接平板；Windows CI 也不验证 USB 驱动或真机安装。
+依赖阶段内核源码和 ROM 证明材料的显示测试单独运行，尚未纳入此工作流，见 [测试说明](../tests/README.md)。
 
 ## 目标内核
 
 使用 `build/devbox/build.example.json` 的默认 Fedora 配方，在 CI 中设置并行数为 2，
-执行 `devbox run kernel` 和 `devbox run modules`，包含默认目标配置及键盘/指纹补丁。
+执行 `devbox run kernel` 和 `devbox run modules`，包含来源清单选定的键盘、指纹、显示和电池接口补丁。
 不需要原厂 ROM，不构建 boot、rootfs 或安装镜像。
 Devbox 使用固定版本的[官方安装 Action](https://github.com/jetify-com/devbox-install-action)，依赖由锁文件选择。
 

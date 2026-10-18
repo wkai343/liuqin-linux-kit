@@ -258,10 +258,14 @@ def doctor():
     run(['qemu-aarch64', str(binary)])
     for name, source in (
         ('slot-success', 'device/boot/liuqin-mark-slot-successful.c'),
+        ('storage-seal', 'device/boot/liuqin-storage-seal.c'),
         ('charger-exit', 'device/charger-mode/liuqin-charger-mode-exit.c'),
         ('charger-power-key', 'device/charger-mode/liuqin-charger-mode-power-key.c'),
     ):
-        run([cross + 'gcc', '-static', '-Os', source, '-o', str(probe / name)])
+        sources = [source]
+        if name == 'storage-seal':
+            sources.append('device/boot/liuqin-storage-ready.c')
+        run([cross + 'gcc', '-static', '-Os', *sources, '-o', str(probe / name)])
         # Never execute helpers that can access real partitions.
     native = probe / 'native.c'
     native.write_text('#include <openssl/crypto.h>\n#include <libelf.h>\nint main(void) { return elf_version(EV_CURRENT) == EV_NONE || !OpenSSL_version(0); }\n')
@@ -274,7 +278,7 @@ def doctor():
 
 
 def test():
-    for name in ('project-identity.py', 'project-structure.py', 'devbox-build.py', 'source-build.py', 'stock-rom.py', 'fedora-build.py', 'selinux-packaging.py', 'first-boot-setup.py', 'backlight-default.py', 'boot-splash.py', 'mkbootimg-fetch.py', 'initramfs-inputs.py', 'sensor-build-environment.py', 'gui-artifacts.py', 'filesystems.py', 'windows-installer.py', 'usb-installer-network.py', 'custom-kernel.py', 'kernel-updates.py', 'gui-engine.py', 'gui-worker.py', 'install-root-single.py'):
+    for name in ('project-identity.py', 'project-structure.py', 'devbox-build.py', 'source-build.py', 'stock-rom.py', 'fedora-build.py', 'selinux-packaging.py', 'first-boot-setup.py', 'backlight-default.py', 'boot-splash.py', 'display-clock.py', 'display-policy.py', 'display-recovery.py', 'wlan-mac.py', 'storage-seal.py', 'storage-ready.py', 'storage-paths.py', 'mkbootimg-fetch.py', 'initramfs-inputs.py', 'sensor-build-environment.py', 'gui-artifacts.py', 'filesystems.py', 'windows-installer.py', 'usb-installer-network.py', 'custom-kernel.py', 'kernel-updates.py', 'gui-engine.py', 'gui-worker.py', 'install-root-single.py'):
         run([shutil.which('python3'), 'tests/' + name])
 
 

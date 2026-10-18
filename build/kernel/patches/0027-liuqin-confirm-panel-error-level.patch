@@ -1,0 +1,60 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] drm/panel: confirm the M81 error level before recovery
+
+Keep inactive level interrupts armed after the generic IRQ
+acknowledgment. A GPIO read failure masks and retries qualification
+instead of inventing a fault or spinning on a high-level interrupt.
+Software test injection remains independent of the GPIO, and
+esd_confirm_level=0 preserves the old behavior for a controlled
+comparison. No panel commands, voltages or waits change.
+
+diff --git a/drivers/gpu/drm/panel/panel-novatek-nt36532.c b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -1333,6 +1333,10 @@
+ module_param(esd_monitor, bool, 0444);
+ MODULE_PARM_DESC(esd_monitor, "Monitor qualified M81 error GPIOs; report faults without resetting in IRQ");
+ 
++static bool esd_confirm_level = true;
++module_param(esd_confirm_level, bool, 0444);
++MODULE_PARM_DESC(esd_confirm_level, "Confirm an asserted error level before latching a hardware fault");
++
+ /* esd_lock protects IRQ enable depth, event state and the active generation. */
+ static void liuqin_esd_mask_locked(struct nt36532 *ctx)
+ {
+@@ -1356,6 +1360,35 @@
+ 	    ctx->esd_pending || (!injected && !(ctx->esd_armed & BIT(line)))) {
+ 		mutex_unlock(&ctx->esd_lock);
+ 		return false;
++	}
++	if (!injected && esd_confirm_level) {
++		int level = gpiod_get_value_cansleep(ctx->esd_gpio[line]);
++
++		/* A pending interrupt may outlive the level seen during startup.
++		 * The generic IRQ handler acknowledges it; leave an inactive line
++		 * armed instead of resetting a potentially healthy display.
++		 */
++		if (!level) {
++			dev_info_ratelimited(ctx->panel.dev,
++					     "Liuqin panel IRQ ignored: line %u level=0 cycle %u\n",
++					     line, ctx->esd_cycle);
++			mutex_unlock(&ctx->esd_lock);
++			return false;
++		}
++		if (level < 0) {
++			/* Avoid a level-IRQ storm if the GPIO cannot be read. */
++			liuqin_esd_mask_locked(ctx);
++			mod_delayed_work(system_wq, &ctx->esd_arm_work,
++					 msecs_to_jiffies(2000));
++			dev_warn_ratelimited(ctx->panel.dev,
++					     "Liuqin panel IRQ deferred: line %u GPIO error %d\n",
++					     line, level);
++			mutex_unlock(&ctx->esd_lock);
++			return false;
++		}
++		dev_info_ratelimited(ctx->panel.dev,
++				     "Liuqin panel IRQ confirmed: line %u level=1 cycle %u\n",
++				     line, ctx->esd_cycle);
+ 	}
+ 	ctx->esd_pending = true;
+ 	event = ++ctx->esd_events;

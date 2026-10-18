@@ -1,0 +1,366 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+"""Recover only the active local Plasma panel through its existing Wayland session."""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import math
+import os
+from pathlib import Path
+import re
+import select
+import signal
+import stat
+import subprocess
+import threading
+import time
+
+PANEL_ROOT = Path('/sys/bus/mipi-dsi/devices')
+BACKLIGHT = Path('/sys/class/backlight/ktz8866-backlight')
+DOCTOR = '/usr/bin/kscreen-doctor'
+STOP = threading.Event()
+
+
+def log(event, **fields):
+    print(json.dumps(dict(event=event, **fields), ensure_ascii=False), flush=True)
+
+
+def parse_status(text):
+    values = {}
+    for word in text.split():
+        key, value = word.split('=', 1)
+        if key in values or not value.isdecimal():
+            raise ValueError('invalid panel status')
+        values[key] = int(value)
+    required = {'version', 'available', 'enabled', 'pending', 'armed', 'cycle', 'events', 'last', 'age_ms'}
+    if set(values) != required or values['version'] != 1:
+        raise ValueError('unsupported panel status')
+    if any(values[k] not in (0, 1) for k in ('available', 'enabled', 'pending')) or values['armed'] > 3:
+        raise ValueError('invalid panel flags')
+    return values
+
+
+def panel_path():
+    nodes = []
+    for path in PANEL_ROOT.glob('*/esd_status'):
+        compatible = (path.parent / 'of_node/compatible').read_bytes().split(b'\0')
+        if b'xiaomi,liuqin-nt36532' in compatible:
+            nodes.append(path)
+    if len(nodes) != 1:
+        raise ValueError('unique Liuqin fault interface unavailable')
+    return nodes[0]
+
+
+def cabc_pwm_policy(panel, cycle):
+    """A content-dependent PWM value alone cannot establish a panel fault."""
+    unknown = dict(pwm_fault_eligible=False, pwm_content_adaptive=False, cabc_mode='unknown')
+    try:
+        text = (panel.parent / 'cabc_status').read_text()
+    except FileNotFoundError:
+        return dict(pwm_fault_eligible=True, pwm_content_adaptive=False, cabc_mode='legacy')
+    except (OSError, UnicodeError):
+        return unknown
+    try:
+        words = [word.split('=', 1) for word in text.split()]
+        values = dict(words)
+        if len(words) != len(values) or set(values) != {'requested', 'programmed', 'cycle', 'ready', 'error'}:
+            return unknown
+        requested, programmed = values['requested'], values['programmed']
+        adaptive = {'ui', 'still', 'movie'}
+        if requested not in adaptive | {'off', 'unchanged'} or programmed not in adaptive | {'off', 'unknown'}:
+            return unknown
+        if not values['cycle'].isdecimal() or values['ready'] != '1' or values['error'] != '0':
+            return unknown
+        generation = int(values['cycle'])
+        if requested == 'unchanged' and programmed == 'unknown' and generation == 0:
+            return dict(pwm_fault_eligible=True, pwm_content_adaptive=False, cabc_mode='unchanged')
+        if requested != programmed or generation != cycle or not generation:
+            return unknown
+        return dict(pwm_fault_eligible=requested == 'off',
+                    pwm_content_adaptive=requested in adaptive, cabc_mode=requested)
+    except (ValueError, TypeError):
+        return unknown
+
+
+def snapshot(panel):
+    data = parse_status(panel.read_text())
+    for name in ('brightness', 'max_brightness', 'bl_power', 'raw_brightness', 'pwm_level'):
+        text = (BACKLIGHT / name).read_text().strip()
+        if not text.isdecimal():
+            raise ValueError('invalid backlight data')
+        data[name] = int(text)
+    if data['max_brightness'] not in (2047, 4095) or not 0 <= data['brightness'] <= data['max_brightness']:
+        raise ValueError('unknown brightness scale')
+    if data['raw_brightness'] > 2047 or data['pwm_level'] > 2047:
+        raise ValueError('invalid hardware readback')
+    data.update(cabc_pwm_policy(panel, data['cycle']))
+    return data
+
+
+class Policy:
+    """No action on blanking, startup, a stale IRQ, or one transient PWM sample."""
+    def __init__(self, saved=None):
+        saved = saved if isinstance(saved, dict) else {}
+        attempts = saved.get('attempts', [])
+        attempts = attempts if isinstance(attempts, list) else []
+        self.attempts = [float(x) for x in attempts if isinstance(x, (int, float)) and math.isfinite(x) and x >= 0]
+        handled = saved.get('handled', 0)
+        self.handled = handled if isinstance(handled, int) and handled >= 0 else 0
+        self.zero_since = None
+        self.cycle = None
+
+    def reason(self, s, now):
+        if self.cycle != s['cycle']:
+            self.cycle = s['cycle']
+            self.zero_since = None
+        if not s['available'] or not s['enabled'] or not s['cycle'] or s['age_ms'] < 3000 or s['bl_power'] != 0 or s['raw_brightness'] == 0:
+            self.zero_since = None
+            return None
+        self.attempts = [x for x in self.attempts if 0 <= now - x < 600]
+        if s['pwm_level'] == 0 and s.get('pwm_fault_eligible', True):
+            if self.zero_since is None:
+                self.zero_since = now
+        else:
+            self.zero_since = None
+        if len(self.attempts) >= 2 or self.attempts and now - self.attempts[-1] < 60:
+            return None
+        if s['pending'] and s['events'] > self.handled:
+            return 'panel-irq' if s['last'] != 2 else 'software-test'
+        if self.zero_since is not None and now - self.zero_since >= 4:
+            return 'persistent-zero-pwm'
+        return None
+
+    def reserve(self, s, now):
+        self.attempts.append(now)
+        self.handled = max(self.handled, s['events'])
+        self.zero_since = None
+
+    def data(self):
+        return {'attempts': self.attempts, 'handled': self.handled}
+
+
+def command(argv, *, env=None, timeout=5):
+    return subprocess.run(argv, env=env, capture_output=True, text=True, timeout=timeout, check=True).stdout
+
+
+class Deferred(ValueError):
+    def __init__(self, message, delay=2):
+        super().__init__(message)
+        self.delay = delay
+
+
+def active_session(uid):
+    state = subprocess.run(['/usr/bin/systemctl', 'is-system-running'], capture_output=True, text=True, timeout=3).stdout.strip()
+    if state not in ('starting', 'running', 'degraded'):
+        raise Deferred('system is stopping or unavailable', delay=10)
+    sid = command(['/usr/bin/loginctl', 'show-seat', 'seat0', '-p', 'ActiveSession', '--value']).strip()
+    if not re.fullmatch(r'[A-Za-z0-9_-]+', sid):
+        raise Deferred('no active local session')
+    text = command(['/usr/bin/loginctl', 'show-session', sid, '-p', 'User', '-p', 'Type', '-p', 'Active', '-p', 'Remote', '-p', 'Seat'])
+    props = dict(line.split('=', 1) for line in text.splitlines() if '=' in line)
+    expected = {'User': str(uid), 'Type': 'wayland', 'Active': 'yes', 'Remote': 'no', 'Seat': 'seat0'}
+    if props != expected:
+        raise Deferred('this user does not own the active local Wayland session', delay=10)
+    try:
+        pids = command(['/usr/bin/pgrep', '-u', str(uid), '-x', 'kwin_wayland']).split()
+    except subprocess.CalledProcessError as exc:
+        if exc.returncode == 1:
+            raise Deferred('unique KWin compositor unavailable') from exc
+        raise
+    if len(pids) != 1:
+        raise Deferred('unique KWin compositor unavailable')
+    runtime = Path('/run/user') / str(uid)
+    if runtime.is_symlink() or runtime.stat().st_uid != uid:
+        raise ValueError('runtime directory ownership mismatch')
+    sockets = [x for x in runtime.glob('wayland-*') if not x.is_symlink() and stat.S_ISSOCK(x.stat().st_mode) and x.stat().st_uid == uid]
+    if len(sockets) != 1 or not stat.S_ISSOCK((runtime / 'bus').stat().st_mode):
+        raise Deferred('unique session socket unavailable')
+    env = dict(os.environ, XDG_RUNTIME_DIR=str(runtime), WAYLAND_DISPLAY=sockets[0].name,
+               DBUS_SESSION_BUS_ADDRESS='unix:path=' + str(runtime / 'bus'), QT_QPA_PLATFORM='wayland')
+    return sid, env
+
+
+def excluded_outputs(config):
+    outputs = config.get('outputs')
+    if not isinstance(outputs, list):
+        raise ValueError('missing output configuration')
+    names = [o.get('name') for o in outputs]
+    if any(not isinstance(n, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', n) for n in names) or len(names) != len(set(names)):
+        raise ValueError('ambiguous output names')
+    internal = [o for o in outputs if o['name'] == 'DSI-1' and o.get('connected') is True and o.get('enabled') is True]
+    if len(internal) != 1:
+        raise ValueError('active internal DSI-1 output unavailable')
+    return sorted(n for n in names if n != 'DSI-1')
+
+
+class Session:
+    def __init__(self, uid, panel):
+        self.uid, self.panel = uid, panel
+        self.sid, self.env = active_session(uid)
+        config = json.loads(command([DOCTOR, '--json'], env=self.env))
+        excluded = set(excluded_outputs(config))
+        # Also exclude currently disconnected connectors from a hotplug race.
+        for status in Path('/sys/class/drm').glob('card*-*/status'):
+            name = status.parent.name.split('-', 1)[1]
+            if name != 'DSI-1' and re.fullmatch(r'[A-Za-z0-9_-]+', name):
+                excluded.add(name)
+        self.argv = [DOCTOR]
+        for name in sorted(excluded):
+            self.argv += ['--dpms-excluded', name]
+
+    def still_active(self):
+        sid, env = active_session(self.uid)
+        return sid == self.sid and env['WAYLAND_DISPLAY'] == self.env['WAYLAND_DISPLAY']
+
+    def restore_allowed(self):
+        # Do not turn the screen back on after a real shutdown or seat handoff.
+        try:
+            state = subprocess.run(['/usr/bin/systemctl', 'is-system-running'], capture_output=True, text=True, timeout=3).stdout.strip()
+            if state in ('stopping', 'offline'):
+                return False
+            sid = command(['/usr/bin/loginctl', 'show-seat', 'seat0', '-p', 'ActiveSession', '--value']).strip()
+            return not sid or sid == self.sid
+        except (OSError, subprocess.SubprocessError):
+            return True  # A diagnostic failure must not strand our own off request.
+
+    def power(self, mode):
+        command(self.argv + ['--dpms', mode], env=self.env)
+
+    def read(self):
+        return snapshot(self.panel)
+
+    def wait(self, seconds):
+        STOP.wait(seconds)
+
+
+def completed_frame(s, previous_cycle):
+    return (s['enabled'] and s['cycle'] != previous_cycle and s['bl_power'] == 0
+            and s['raw_brightness'] > 0
+            and (s['pwm_level'] > 0 or s.get('pwm_content_adaptive', False)))
+
+
+def recover(session, before):
+    if not session.still_active():
+        raise ValueError('active session changed before recovery')
+    off_attempted = False
+    try:
+        off_attempted = True
+        session.power('off')
+        # DPMS commits are asynchronous. A slow commit can miss the first
+        # sample, or input can wake the output before we observe blanking.
+        for _ in range(6):
+            session.wait(0.5)
+            off = session.read()
+            if off['bl_power'] != 0:
+                break
+            if completed_frame(off, before['cycle']):
+                break
+        else:
+            raise RuntimeError('output did not power off')
+    finally:
+        # Restore through the same compositor even after an off command failure.
+        if off_attempted:
+            if not session.restore_allowed():
+                raise RuntimeError('session ended or system is stopping; preserving its power state')
+            session.power('on')
+    for _ in range(8):
+        session.wait(0.5)
+        after = session.read()
+        if completed_frame(after, before['cycle']):
+            return after
+    raise RuntimeError('new first frame or backlight PWM did not recover')
+
+
+def run(check=False):
+    if os.geteuid() == 0:
+        raise ValueError('run in the ordinary display user session, not as root')
+    if os.environ.get('LIUQIN_DISPLAY_RECOVERY', '1') != '1':
+        return 0
+    try:
+        panel = panel_path()
+        first = snapshot(panel)
+    except (OSError, ValueError):
+        if check:
+            raise
+        return 0  # Older kernels and other machines need no recovery worker.
+    if check:
+        session = Session(os.getuid(), panel)
+        log('check', panel=str(panel), status=first, active_session_verified=True, dpms_not_performed=True)
+        return 0
+    runtime = Path('/run/user') / str(os.getuid())
+    directory = runtime / 'liuqin-display-recovery'
+    directory.mkdir(mode=0o700, exist_ok=True)
+    if directory.is_symlink() or directory.stat().st_uid != os.getuid():
+        raise ValueError('state directory ownership mismatch')
+    lock = os.open(directory / 'lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+    statefile = directory / 'state.json'
+    saved = {}
+    if statefile.exists() and not statefile.is_symlink():
+        try:
+            saved = json.loads(statefile.read_text())
+        except (OSError, ValueError):
+            saved = {}
+    policy = Policy(saved if isinstance(saved, dict) and saved.get('boot_id') == boot else {})
+    fd = os.open(panel, os.O_RDONLY | os.O_CLOEXEC)
+    poll = select.poll()
+    poll.register(fd, select.POLLPRI | select.POLLERR)
+    last_error = None
+    not_before = 0.0
+    log('monitor-start', scale=first['max_brightness'], recovery_limit='2 per user per 600s; minimum 60s apart')
+    try:
+        while not STOP.is_set():
+            os.lseek(fd, 0, os.SEEK_SET)
+            if not os.read(fd, 4096):
+                raise OSError('panel interface was removed')
+            try:
+                now = time.monotonic()
+                current = snapshot(panel)
+                reason = policy.reason(current, now)
+                if reason and now >= not_before:
+                    session = Session(os.getuid(), panel)
+                    fresh = session.read()
+                    if fresh['cycle'] != current['cycle'] or fresh['bl_power'] != 0 or not policy.reason(fresh, time.monotonic()):
+                        continue
+                    policy.reserve(fresh, time.monotonic())
+                    pending = dict(policy.data(), boot_id=boot)
+                    temp = directory / 'state.tmp'
+                    temp.write_text(json.dumps(pending))
+                    temp.chmod(0o600)
+                    temp.replace(statefile)
+                    log('recovery-start', reason=reason, cycle=fresh['cycle'], events=fresh['events'], pwm=fresh['pwm_level'], before=fresh)
+                    after = recover(session, fresh)
+                    log('recovery-complete', cycle=after['cycle'], pwm=after['pwm_level'], after=after)
+                    last_error = None
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+                error = str(exc)
+                if error != last_error:
+                    log('recovery-deferred-or-failed', reason=error)
+                    last_error = error
+                not_before = time.monotonic() + (exc.delay if isinstance(exc, Deferred) else 10)
+            if not STOP.is_set():
+                poll.poll(2000)
+    finally:
+        os.close(fd)
+        os.close(lock)
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--check', action='store_true', help='read-only session and hardware preflight')
+    args = parser.parse_args()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *_: STOP.set())
+    try:
+        return run(args.check)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        log('unavailable', reason=str(exc))
+        return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

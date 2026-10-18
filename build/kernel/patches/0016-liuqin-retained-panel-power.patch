@@ -1,0 +1,287 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] drm/panel: retain Liuqin M81 IOVDD while blanked
+
+Keep IOVDD and the backlight-owned bias outputs while blanked, releasing
+only LDO then buck as in the shipped M81 retained-power branch. Hold the
+boot-on supplies before publishing the panel and track each vote so the
+first prepare reuses them, failures unwind only new votes, and off errors
+do not silently lose reference tracking. Touch followers quiesce before
+unprepare and reload their firmware after prepare as before.
+
+Remove always-on only from the two digital rails, retaining boot-on and
+all voltages. The liuqin_retained_power=0 comparison keeps digital votes
+and gates IOVDD, reproducing the former steady-state power policy. Other
+boards keep bulk regulator calls. No gesture-wake feature is enabled,
+and full five-rail shutdown/bias ownership is outside this change.
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+@@ -96,10 +96,10 @@
+ 	 * its positive and negative LCD bias outputs. That is why they are
+ 	 * consumed by backlight@11 as vddpos/vddneg rather than by the panel.
+ 	 *
+-	 * regulator-always-on throughout, as on yudi: nothing here can be
+-	 * sequenced off safely while the bootloader's splash is still scanning
+-	 * out, and the panel driver's unprepare path would otherwise drop rails
+-	 * the earlycon framebuffer still depends on.
++	 * Bias outputs remain always-on and owned by the backlight. The two
++	 * 1.3 V rails stay boot-on until the panel driver holds their votes,
++	 * before publishing the panel to touch followers. During blanking the
++	 * M81 retained-power path keeps IOVDD/bias and gates only these rails.
+ 	 */
+ 	backlight_gpio_regulator_vsn: backlight-gpio-reg-vsn {
+ 		compatible = "regulator-fixed";
+@@ -133,7 +133,6 @@
+ 		gpio = <&tlmm 2 GPIO_ACTIVE_HIGH>;
+ 		enable-active-high;
+ 		regulator-boot-on;
+-		regulator-always-on;
+ 	};
+ 
+ 	display_panel_dvdd_ldo: display-panel-dvdd-ldo {
+@@ -144,7 +143,6 @@
+ 		gpio = <&tlmm 93 GPIO_ACTIVE_HIGH>;
+ 		enable-active-high;
+ 		regulator-boot-on;
+-		regulator-always-on;
+ 	};
+ 
+ 	/*
+diff --git a/drivers/gpu/drm/panel/panel-novatek-nt36532.c b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -26,6 +26,11 @@
+ MODULE_PARM_DESC(first_frame_backlight,
+ 	"Wait for DPU pixel transmission before enabling known Liuqin panel backlight");
+ 
++static bool liuqin_retained_power = true;
++module_param(liuqin_retained_power, bool, 0444);
++MODULE_PARM_DESC(liuqin_retained_power,
++	"Keep Liuqin IOVDD/bias and gate the two digital rails while blanked");
++
+ struct nt36532 {
+ 	struct drm_panel panel;
+ 	struct mipi_dsi_device *dsi[2];
+@@ -33,6 +38,8 @@
+ 	const struct liuqin_oem_panel *oem_panel;
+ 	struct drm_dsc_config dsc;
+ 	struct regulator_bulk_data supplies[3];
++	unsigned int supply_votes;
++	bool keep_iovdd;
+ 	struct gpio_desc *reset_gpio;
+ };
+ 
+@@ -1132,34 +1139,48 @@
+ 	.reset_sequence = yudi_reset
+ };
+ 
+-/* OEM order for the three supplies currently owned by the panel.
+- * VSP/VSN ownership and the bootloader-retention constraints are unchanged.
+- */
+-static int liuqin_disable_supply_prefix(struct nt36532 *ctx, unsigned int count)
++/* Track the panel's votes, not the regulator core's boot-on state. */
++#define LIUQIN_IOVDD_VOTE BIT(0)
++#define LIUQIN_DIGITAL_VOTES (BIT(1) | BIT(2))
++#define LIUQIN_ALL_VOTES (LIUQIN_IOVDD_VOTE | LIUQIN_DIGITAL_VOTES)
++
++static void liuqin_log_supplies(struct nt36532 *ctx, const char *stage)
++{
++	dev_info(ctx->panel.dev,
++		 "Liuqin power %s: retained=%d votes=%x iovdd=%d buck=%d ldo=%d\n",
++		 stage, ctx->keep_iovdd, ctx->supply_votes,
++		 regulator_is_enabled(ctx->supplies[0].consumer),
++		 regulator_is_enabled(ctx->supplies[1].consumer),
++		 regulator_is_enabled(ctx->supplies[2].consumer));
++}
++
++static int liuqin_release_supply_votes(struct nt36532 *ctx, unsigned int mask)
+ {
+ 	int first_error = 0;
+-	int ret;
+-
+-	while (count) {
+-		unsigned int i = --count;
+-
++	int i, ret;
++
++	for (i = ARRAY_SIZE(ctx->supplies) - 1; i >= 0; i--) {
++		if (!(mask & ctx->supply_votes & BIT(i)))
++			continue;
+ 		ret = regulator_disable(ctx->supplies[i].consumer);
+ 		if (ret) {
+ 			dev_warn(ctx->panel.dev, "Failed to release %s: %d\n",
+ 				 ctx->supplies[i].supply, ret);
+ 			if (!first_error)
+ 				first_error = ret;
++		} else {
++			ctx->supply_votes &= ~BIT(i);
+ 		}
+ 		/* OEM post-off waits: IOVDD=2 ms, buck=2 ms, LDO=0. */
+ 		if (i != 2)
+ 			usleep_range(2000, 2010);
+ 	}
+-
+ 	return first_error;
+ }
+ 
+ static int nt36532_enable_supplies(struct nt36532 *ctx)
+ {
++	unsigned int original_votes = ctx->supply_votes;
+ 	unsigned int i;
+ 	int ret;
+ 
+@@ -1167,25 +1188,59 @@
+ 		return regulator_bulk_enable(ARRAY_SIZE(ctx->supplies), ctx->supplies);
+ 
+ 	for (i = 0; i < ARRAY_SIZE(ctx->supplies); i++) {
++		if (ctx->supply_votes & BIT(i))
++			continue;
+ 		ret = regulator_enable(ctx->supplies[i].consumer);
+ 		if (ret) {
+-			liuqin_disable_supply_prefix(ctx, i);
++			/* Never unwind votes retained from the preceding cycle. */
++			liuqin_release_supply_votes(ctx,
++				ctx->supply_votes & ~original_votes);
+ 			return ret;
+ 		}
++		ctx->supply_votes |= BIT(i);
+ 		/* OEM post-on waits: IOVDD=2 ms, buck=0, LDO=2 ms. */
+ 		if (i != 1)
+ 			usleep_range(2000, 2010);
+ 	}
+-
+ 	return 0;
+ }
+ 
+ static void nt36532_disable_supplies(struct nt36532 *ctx)
+ {
+-	if (ctx->desc == &liuqin_desc)
+-		liuqin_disable_supply_prefix(ctx, ARRAY_SIZE(ctx->supplies));
+-	else
++	if (ctx->desc == &liuqin_desc) {
++		/* OEM retained mode keeps IOVDD; legacy comparison keeps 1.3 V. */
++		liuqin_release_supply_votes(ctx, ctx->keep_iovdd ?
++			LIUQIN_DIGITAL_VOTES : LIUQIN_IOVDD_VOTE);
++		liuqin_log_supplies(ctx, "off");
++	} else {
+ 		regulator_bulk_disable(ARRAY_SIZE(ctx->supplies), ctx->supplies);
++	}
++}
++
++static void liuqin_release_boot_supplies(void *data)
++{
++	struct nt36532 *ctx = data;
++
++	liuqin_release_supply_votes(ctx, LIUQIN_ALL_VOTES);
++}
++
++static int liuqin_hold_boot_supplies(struct nt36532 *ctx)
++{
++	bool cold = false;
++	unsigned int i;
++	int ret;
++
++	for (i = 0; i < ARRAY_SIZE(ctx->supplies); i++)
++		cold |= regulator_is_enabled(ctx->supplies[i].consumer) <= 0;
++	ret = nt36532_enable_supplies(ctx);
++	if (ret)
++		return ret;
++	/* The touch probe needs the existing Novatek 10 ms POR settling time
++	 * if late unused-regulator cleanup switched a boot-on rail off.
++	 */
++	if (cold)
++		usleep_range(10000, 11000);
++	return 0;
+ }
+ 
+ static int nt36532_off(struct nt36532 *ctx)
+@@ -1224,12 +1279,19 @@
+ 	struct drm_dsc_picture_parameter_set pps;
+ 	int ret;
+ 
++	/* Match the retained-power resume path: reset low before digital rails. */
++	if (ctx->desc == &liuqin_desc && ctx->keep_iovdd &&
++	    (ctx->supply_votes & LIUQIN_DIGITAL_VOTES) != LIUQIN_DIGITAL_VOTES)
++		gpiod_set_value_cansleep(ctx->reset_gpio, 0);
++
+ 	ret = nt36532_enable_supplies(ctx);
+ 	if (ret < 0) {
+ 		dev_err(dev, "Failed to enable regulators: %d\n", ret);
+ 		return ret;
+ 	}
+ 
++	if (ctx->desc == &liuqin_desc)
++		liuqin_log_supplies(ctx, "prepare");
+ 	msleep(120);
+ 
+ 	ctx->dsi[0]->mode_flags |= MIPI_DSI_MODE_LPM;
+@@ -1416,6 +1478,7 @@
+ 		       DRM_MODE_CONNECTOR_DSI);
+ 	if (ctx->desc == &liuqin_desc) {
+ 		liuqin_select_oem_panel(ctx);
++		ctx->keep_iovdd = liuqin_retained_power && ctx->oem_panel;
+ 		ctx->panel.backlight_after_first_frame =
+ 			first_frame_backlight && ctx->oem_panel;
+ 	}
+@@ -1424,6 +1487,20 @@
+ 	ret = drm_panel_of_backlight(&ctx->panel);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "Failed to get backlight\n");
++
++	if (ctx->desc == &liuqin_desc) {
++		/* All dependencies are ready. Preserve boot-on rails before the
++		 * panel is published to followers; the first prepare reuses votes.
++		 * This also protects them from unused-regulator cleanup.
++		 */
++		ret = liuqin_hold_boot_supplies(ctx);
++		if (ret)
++			return dev_err_probe(dev, ret, "Failed to hold boot supplies\n");
++		ret = devm_add_action_or_reset(dev, liuqin_release_boot_supplies, ctx);
++		if (ret)
++			return ret;
++		liuqin_log_supplies(ctx, "probe");
++	}
+ 
+ 	drm_panel_add(&ctx->panel);
+ 
+diff --git a/drivers/input/touchscreen/nt36523/nt36xxx.c b/drivers/input/touchscreen/nt36523/nt36xxx.c
+--- a/drivers/input/touchscreen/nt36523/nt36xxx.c
++++ b/drivers/input/touchscreen/nt36523/nt36xxx.c
+@@ -1507,12 +1507,36 @@
+ return:
+ 	Executive outcomes. 0---succeed. negative---failed
+ *******************************************************/
++/* The Liuqin panel owns the TDDI supplies. Do not read chip trim before
++ * its probe has taken the boot-on votes and published the panel.
++ */
++static int nvt_wait_liuqin_panel(struct device *dev)
++{
++	struct device_node *node;
++	struct drm_panel *panel;
++
++	node = of_parse_phandle(dev->of_node, "panel", 0);
++	if (!node)
++		return 0;
++	if (!of_device_is_compatible(node, "xiaomi,liuqin-nt36532")) {
++		of_node_put(node);
++		return 0;
++	}
++	panel = of_drm_find_panel(node);
++	of_node_put(node);
++	return PTR_ERR_OR_ZERO(panel);
++}
++
+ static int32_t nvt_ts_probe(struct spi_device *client)
+ {
+ 	int32_t ret = 0;
+ #if (TOUCH_KEY_NUM > 0)
+ 	int32_t retry = 0;
+ #endif
++
++	ret = nvt_wait_liuqin_panel(&client->dev);
++	if (ret)
++		return dev_err_probe(&client->dev, ret, "Waiting for Liuqin panel supplies\n");
+ 
+ 	NVT_LOG("probe start\n");
+ 

@@ -10,7 +10,7 @@ PROJECT = Path(__file__).resolve().parents[1]
 
 def broken_links():
     paths = list(PROJECT.glob('*.md')) + list((PROJECT/'docs').glob('*.md'))
-    paths += [PROJECT/name/'README.md' for name in ('build', 'installer', 'shared')]
+    paths += [PROJECT/name/'README.md' for name in ('build', 'installer', 'shared', 'tests')]
     failures = []
     for source in paths:
         if not source.is_file():

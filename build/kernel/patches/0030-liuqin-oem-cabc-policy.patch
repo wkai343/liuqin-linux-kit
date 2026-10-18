@@ -1,0 +1,264 @@
+From: Liuqin Linux Kit <build@liuqin.invalid>
+Subject: [PATCH] drm/panel: expose exact M81 CABC modes with lifecycle replay
+
+Add the four verified OS2.0.6.0 M81 CABC command pairs as an explicit
+policy. Keep existing reset/ON behavior by default. Serialize updates
+with first-frame completion, dimming and the start of backlight blanking.
+Defer requests while inactive and replay at the next first frame.
+
+Track successful command submission separately from the requested mode;
+propagate short/failed writes without blocking the display or recovery.
+Keep the brightness curve, supplies, timing and DSI clock policy unchanged.
+Expose no attributes on unrecognized panels and issue no diagnostic reads.
+
+Signed-off-by: Liuqin Linux Kit <build@liuqin.invalid>
+---
+diff --git a/drivers/gpu/drm/panel/panel-novatek-nt36532.c b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -38,6 +38,11 @@
+ 
+ struct nt36532 {
+ 	bool off_deferred;
++	int cabc_requested;
++	int cabc_applied;
++	int cabc_error;
++	unsigned int cabc_cycle;
++	bool cabc_ready;
+ 	struct drm_panel panel;
+ 	struct mipi_dsi_device *dsi[2];
+ 	const struct panel_desc *desc;
+@@ -1569,6 +1574,173 @@
+ 	return ret;
+ }
+ 
++/* Exact M81 CABC modes. -1 leaves the panel's reset/ON-table state alone. */
++static int oem_cabc = -1;
++module_param(oem_cabc, int, 0444);
++MODULE_PARM_DESC(oem_cabc, "M81 initial CABC: -1 unchanged, 0 off, 1 UI, 2 still, 3 movie");
++
++static const char * const liuqin_cabc_modes[] = {
++	"off", "ui", "still", "movie",
++};
++
++static const char *liuqin_cabc_name(int mode)
++{
++	if (mode < 0 || mode >= (int)ARRAY_SIZE(liuqin_cabc_modes))
++		return "unknown";
++	return liuqin_cabc_modes[mode];
++}
++
++/* Caller holds backlight_lock, also used by dimming and the start of blanking. */
++static int liuqin_cabc_apply(struct nt36532 *ctx)
++{
++	struct drm_panel *panel = &ctx->panel;
++	struct mipi_dsi_device *dsi = nt36532_cmd_dsi(ctx);
++	const struct mipi_dsi_host_ops *ops = dsi->host->ops;
++	u8 packets[2][2] = { { 0xff, 0x10 }, { 0x55, ctx->cabc_requested } };
++	unsigned int i;
++	int ret = 0;
++
++	lockdep_assert_held(&panel->backlight_lock);
++	if (ctx->cabc_requested < 0)
++		return 0;
++	if (ctx->cabc_requested >= (int)ARRAY_SIZE(liuqin_cabc_modes))
++		return -EINVAL;
++	if (ctx->cabc_applied == ctx->cabc_requested &&
++	    ctx->cabc_cycle == panel->backlight_cookie && !ctx->cabc_error)
++		return 0;
++	ctx->cabc_applied = -1;
++	ctx->cabc_cycle = 0;
++	if (!ops || !ops->transfer) {
++		ret = -EOPNOTSUPP;
++		goto done;
++	}
++	/* ROM uses two separate DCS short writes, in LP, on the bonded path. */
++	for (i = 0; i < ARRAY_SIZE(packets); i++) {
++		struct mipi_dsi_msg msg = {
++			.channel = dsi->channel,
++			.type = MIPI_DSI_DCS_SHORT_WRITE_PARAM,
++			.flags = MIPI_DSI_MSG_USE_LPM,
++			.tx_len = sizeof(packets[i]),
++			.tx_buf = packets[i],
++		};
++		ssize_t sent = ops->transfer(dsi->host, &msg);
++
++		if (sent < 0 || sent < sizeof(packets[i])) {
++			ret = sent < 0 ? sent : -EIO;
++			goto done;
++		}
++	}
++	if (READ_ONCE(ctx->esd_pending)) {
++		ret = -EAGAIN;
++		goto done;
++	}
++	ctx->cabc_applied = ctx->cabc_requested;
++	ctx->cabc_cycle = panel->backlight_cookie;
++done:
++	ctx->cabc_error = ret;
++	return ret;
++}
++
++static bool liuqin_cabc_can_update(struct nt36532 *ctx)
++{
++	struct drm_panel *panel = &ctx->panel;
++
++	lockdep_assert_held(&panel->backlight_lock);
++	return ctx->oem_panel && ctx->cabc_ready && !ctx->dimming_stopping &&
++		!READ_ONCE(ctx->esd_pending) && panel->enabled &&
++		!panel->backlight_pending && panel->backlight &&
++		!backlight_is_blank(panel->backlight);
++}
++
++/* Called only after normal-display setup, with the core backlight lock held. */
++static void liuqin_cabc_first_frame(struct nt36532 *ctx)
++{
++	int ret;
++
++	lockdep_assert_held(&ctx->panel.backlight_lock);
++	ctx->cabc_ready = !ctx->dimming_stopping && !READ_ONCE(ctx->esd_pending);
++	if (!ctx->oem_panel || !ctx->cabc_ready)
++		return;
++	ret = liuqin_cabc_apply(ctx);
++	if (ret)
++		dev_err(ctx->panel.dev, "Liuqin CABC setup failed: %d\n", ret);
++	/* An optional policy failure must not block first-frame completion/recovery. */
++}
++
++static ssize_t cabc_mode_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	struct nt36532 *ctx = dev_get_drvdata(dev);
++	ssize_t size;
++
++	mutex_lock(&ctx->panel.backlight_lock);
++	size = sysfs_emit(buf, "%s\n", ctx->cabc_requested < 0 ?
++			  "unchanged" : liuqin_cabc_name(ctx->cabc_requested));
++	mutex_unlock(&ctx->panel.backlight_lock);
++	return size;
++}
++
++static ssize_t cabc_mode_store(struct device *dev, struct device_attribute *attr,
++			       const char *buf, size_t count)
++{
++	struct nt36532 *ctx = dev_get_drvdata(dev);
++	int mode, ret = 0;
++
++	mode = sysfs_match_string(liuqin_cabc_modes, buf);
++	if (mode < 0)
++		return -EINVAL;
++	mutex_lock(&ctx->panel.backlight_lock);
++	if (!ctx->oem_panel || ctx->dimming_stopping) {
++		ret = -ENODEV;
++		goto unlock;
++	}
++	ctx->cabc_requested = mode;
++	if (liuqin_cabc_can_update(ctx))
++		ret = liuqin_cabc_apply(ctx);
++unlock:
++	mutex_unlock(&ctx->panel.backlight_lock);
++	return ret ? ret : count;
++}
++static DEVICE_ATTR_RW(cabc_mode);
++
++static ssize_t cabc_status_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	struct nt36532 *ctx = dev_get_drvdata(dev);
++	ssize_t size;
++
++	mutex_lock(&ctx->panel.backlight_lock);
++	size = sysfs_emit(buf, "requested=%s programmed=%s cycle=%u ready=%u error=%d\n",
++			  ctx->cabc_requested < 0 ? "unchanged" :
++			  liuqin_cabc_name(ctx->cabc_requested),
++			  liuqin_cabc_name(ctx->cabc_applied), ctx->cabc_cycle,
++			  liuqin_cabc_can_update(ctx), ctx->cabc_error);
++	mutex_unlock(&ctx->panel.backlight_lock);
++	return size;
++}
++static DEVICE_ATTR_RO(cabc_status);
++
++static struct attribute *liuqin_cabc_attrs[] = {
++	&dev_attr_cabc_mode.attr,
++	&dev_attr_cabc_status.attr,
++	NULL,
++};
++
++static const struct attribute_group liuqin_cabc_group = {
++	.attrs = liuqin_cabc_attrs,
++};
++
++static int liuqin_cabc_init(struct nt36532 *ctx)
++{
++	ctx->cabc_requested = -1;
++	ctx->cabc_applied = -1;
++	if (!ctx->oem_panel)
++		return 0;
++	if (oem_cabc >= -1 && oem_cabc < (int)ARRAY_SIZE(liuqin_cabc_modes))
++		ctx->cabc_requested = oem_cabc;
++	else
++		dev_warn(ctx->panel.dev, "Invalid CABC boot mode; leaving panel unchanged\n");
++	return devm_device_add_group(ctx->panel.dev, &liuqin_cabc_group);
++}
++
+ /* Exact M81 ROM dimming-on packets; the first pair is one command group. */
+ static const struct liuqin_oem_cmd liuqin_oem_dimming_on[] = {
+ 	{ 0x39, 0x40, 0, 2, { 0xff, 0x27 } },
+@@ -1664,6 +1836,9 @@
+ 	mutex_lock(&ctx->panel.backlight_lock);
+ 	ctx->dimming_pending = false;
+ 	ctx->dimming_stopping |= stopping;
++	ctx->cabc_ready = false;
++	ctx->cabc_applied = -1;
++	ctx->cabc_cycle = 0;
+ 	mutex_unlock(&ctx->panel.backlight_lock);
+ 	/* Never wait for work while holding the lock that the worker needs. */
+ 	cancel_delayed_work_sync(&ctx->dimming_work);
+@@ -1898,8 +2073,9 @@
+ 	}
+ 	dev_info(panel->dev, "Liuqin OEM post-backlight: normal display restored\n");
+ ready:
++	liuqin_esd_start(ctx);
++	liuqin_cabc_first_frame(ctx);
+ 	liuqin_schedule_dimming(ctx);
+-	liuqin_esd_start(ctx);
+ 	return 0;
+ }
+ 
+@@ -2003,6 +2179,10 @@
+ 			return ret;
+ 		liuqin_log_supplies(ctx, "probe");
+ 	}
++
++	ret = liuqin_cabc_init(ctx);
++	if (ret)
++		return ret;
+ 
+ 	ret = liuqin_esd_init(ctx);
+ 	if (ret)
+diff --git a/Documentation/ABI/testing/sysfs-driver-liuqin-cabc b/Documentation/ABI/testing/sysfs-driver-liuqin-cabc
+new file mode 100644
+--- /dev/null
++++ b/Documentation/ABI/testing/sysfs-driver-liuqin-cabc
+@@ -0,0 +1,23 @@
++What:           /sys/bus/mipi-dsi/devices/.../cabc_mode
++Date:           October 2026
++Contact:        Liuqin Linux Kit <build@liuqin.invalid>
++Description:    Present only for recognized M81 panels. Root may write off, ui,
++                still, or movie. Shows the requested mode; unchanged means no
++                explicit policy has been requested since probe. An explicit
++                selection survives blanking, suspend and display recovery until
++                driver removal/reboot. Writes while blanked are deferred until
++                successful normal-display/first-frame setup. A failed transfer
++                returns its error and retains the request for an explicit retry
++                or the next enable cycle. There is no automatic retry loop.
++                Boot parameter panel_novatek_nt36532.oem_cabc=-1 (default) keeps
++                the existing ON-table/reset behavior; 0..3 select these modes.
++                The reset state and Android userspace default are not inferred.
++
++What:           /sys/bus/mipi-dsi/devices/.../cabc_status
++Date:           October 2026
++Contact:        Liuqin Linux Kit <build@liuqin.invalid>
++Description:    Read-only requested/programmed mode, enable cycle, readiness and
++                last transfer error. programmed records successful command
++                submission, not a hardware register readback. unknown is used
++                before explicit programming, after blanking or after a failed
++                transfer. Reading these attributes issues no DSI commands.

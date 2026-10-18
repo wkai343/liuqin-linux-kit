@@ -101,6 +101,8 @@ slot_from_cmdline() {
 }
 
 storage_dev_root=${LIUQIN_STORAGE_DEV_ROOT:-/dev}
+storage_seal_helper=/bin/liuqin-storage-seal
+storage_ready_state=/run/liuqin-storage-ready
 storage_sys_block=${LIUQIN_STORAGE_SYS_BLOCK:-/sys/class/block}
 storage_mounts=${LIUQIN_STORAGE_MOUNTS:-/proc/mounts}
 storage_installer_marker=${LIUQIN_STORAGE_INSTALLER_MARKER:-/etc/liuqin-installer}
@@ -424,19 +426,38 @@ storage_root_ok() {
 storage_collect_sd_nodes() {
 	storage_nodes_root=${1:-$storage_dev_root}
 	storage_collected_nodes=
-	for storage_block in "$storage_nodes_root"/sd*; do
+	storage_expected_paths=
+	set -- "$storage_nodes_root"/sd*
+	for storage_block in "$@"; do
 		[ -e "$storage_block" ] || [ -L "$storage_block" ] || continue
 		storage_path_is_block "$storage_block" || return 1
-		[ "$("$BB" readlink -f "$storage_block" 2>/dev/null || true)" = "$storage_block" ] || return 1
 		storage_node_name=${storage_block##*/}
 		if [ -n "$storage_collected_nodes" ]; then
 			storage_collected_nodes="$storage_collected_nodes
 $storage_node_name"
+			storage_expected_paths="$storage_expected_paths
+$storage_block"
 		else
 			storage_collected_nodes=$storage_node_name
+			storage_expected_paths=$storage_block
 		fi
 	done
 	[ -n "$storage_collected_nodes" ] || return 1
+	# Canonicalize the captured path list in one pinned BusyBox process. Exact
+	# equality rejects directory and node aliases, not merely a changed count.
+	if storage_actual_paths=$("$BB" realpath "$@" 2>/dev/null); then
+		[ "$storage_actual_paths" = "$storage_expected_paths" ] || return 1
+		for storage_block in "$@"; do
+			storage_path_is_block "$storage_block" && [ ! -L "$storage_block" ] || return 1
+		done
+	else
+		# A BusyBox without this applet keeps the original per-node checks.
+		# Recheck types too: a failed batch may have observed a disappearing node.
+		for storage_block in "$@"; do
+			storage_path_is_block "$storage_block" || return 1
+			[ "$("$BB" readlink -f "$storage_block" 2>/dev/null || true)" = "$storage_block" ] || return 1
+		done
+	fi
 	printf '%s\n' "$storage_collected_nodes"
 }
 
@@ -458,6 +479,7 @@ storage_snapshot_sd_nodes() {
 		storage_home=
 	fi
 	storage_sd_nodes_snapshot_taken=true
+	log 'persistent root canonical node snapshot captured'
 }
 
 storage_lock_all() {
@@ -488,6 +510,114 @@ storage_lock_all() {
 		storage_lock_namespace_ok=false
 	fi
 	[ "$storage_lock_ok" = true ] && [ "$storage_lock_namespace_ok" = true ]
+}
+
+# Optimize only the initial repeated seal. The independent final lock and
+# admission/rollback checks below deliberately retain the pinned BusyBox path.
+storage_seal_scan() {
+	storage_scan_found=false
+	for storage_path in "$storage_dev_root"/sd*; do
+		storage_path_is_block "$storage_path" || continue
+		storage_scan_found=true
+		break
+	done
+	[ "$storage_scan_found" = true ] || return 0
+	if [ -x "$storage_seal_helper" ] && "$storage_seal_helper" --seal >/dev/null; then
+		return 0
+	fi
+	log "warning: batch storage seal unavailable or failed; using BusyBox"
+	storage_scan_ok=true
+	for storage_path in "$storage_dev_root"/sd*; do
+		storage_path_is_block "$storage_path" || continue
+		if ! "$BB" blockdev --setro "$storage_path"; then
+			log "warning: failed to mark read-only: $storage_path"
+			storage_scan_ok=false
+		fi
+	done
+	[ "$storage_scan_ok" = true ]
+}
+
+storage_clock_read() {
+	# /proc/uptime has two decimal places. Prefix the fractional part with 1
+	# before arithmetic so a value such as 08 is never interpreted as octal.
+	IFS='. ' read -r storage_clock_seconds storage_clock_fraction _ </proc/uptime || return 1
+	case $storage_clock_seconds in ''|*[!0-9]*) return 1 ;; esac
+	case $storage_clock_fraction in [0-9][0-9]) ;; *) return 1 ;; esac
+	storage_wait_now=$((storage_clock_seconds * 100 + 1$storage_clock_fraction - 100))
+}
+
+storage_wait_for_ufs() {
+	found_block=false
+	storage_wait_fast=false
+	storage_wait_complete=false
+	storage_wait_proven_once=false
+	storage_wait_previous_proof=
+	# Only normal native boots may finish early. Installer and low-power
+	# charging retain the original ten scan/sleep rounds.
+	if [ "$storage_mode" = persistent ] && [ "$storage_profile" = native-updatable ]; then
+		case " $1 " in *' androidboot.mode=charger '*) ;; *) storage_wait_fast=true ;; esac
+	fi
+	if [ "$storage_wait_fast" = true ]; then
+		if storage_clock_read; then
+			storage_wait_deadline=$((storage_wait_now + 1000))
+		else
+			storage_wait_fast=false
+		fi
+	fi
+	for storage_wait_attempt in 1 2 3 4 5 6 7 8 9 10; do
+		"$BB" mdev -s
+		storage_wait_scan_ok=false
+		storage_seal_scan && storage_wait_scan_ok=true
+		[ "$storage_scan_found" != true ] || found_block=true
+		if [ "$storage_wait_fast" = true ] && [ "$storage_wait_scan_ok" = true ] &&
+		   [ "$storage_scan_found" = true ] && [ -x "$storage_seal_helper" ]; then
+			if storage_clock_read; then
+				# Bound a potentially slow descriptor query within the original
+				# wall-clock window, rather than adding a timeout on every round.
+				storage_wait_left=$((storage_wait_deadline - storage_wait_now))
+				if [ "$storage_wait_left" -ge 100 ] &&
+				   "$BB" timeout 1 "$storage_seal_helper" --ready \
+				       >"$storage_ready_state.result" 2>"$storage_ready_state.log"; then
+					IFS= read -r storage_ready_description <"$storage_ready_state.result" || storage_ready_description=
+					# Preserve one scan interval while asynchronous device probes
+					# finish. A second full GPT/sysfs proof is required, rather
+					# than admitting the first momentarily complete namespace.
+					if [ "$storage_wait_proven_once" = true ] &&
+					   [ "$storage_wait_previous_proof" = "$storage_ready_description" ]; then
+						log "UFS/GPT enumeration complete after $storage_wait_attempt scan(s): $storage_ready_description"
+						storage_wait_complete=true
+						break
+					fi
+					storage_wait_proven_once=true
+					storage_wait_previous_proof=$storage_ready_description
+				else
+					storage_wait_proven_once=false
+					storage_wait_previous_proof=
+				fi
+			else
+				storage_wait_fast=false
+			fi
+		else
+			storage_wait_proven_once=false
+			storage_wait_previous_proof=
+		fi
+		storage_wait_sleep=1
+		if [ "$storage_wait_fast" = true ]; then
+			if storage_clock_read; then
+				storage_wait_left=$((storage_wait_deadline - storage_wait_now))
+				[ "$storage_wait_left" -gt 0 ] || break
+				if [ "$storage_wait_left" -lt 100 ]; then
+					storage_wait_sleep=$(printf '0.%02d' "$storage_wait_left")
+				fi
+			else
+				storage_wait_fast=false
+			fi
+		fi
+		"$BB" sleep "$storage_wait_sleep"
+	done
+	if [ "$storage_wait_fast" = true ] && [ "$storage_wait_complete" != true ]; then
+		log 'UFS enumeration proof unavailable; completed the bounded wait'
+	fi
 }
 
 storage_snapshot_all_ro() {
@@ -812,18 +942,7 @@ if [ "$storage_mode" = persistent ] && [ "$storage_profile" = native-updatable ]
 fi
 
 log "waiting for SCSI/UFS block devices and marking them read-only"
-found_block=false
-for attempt in 1 2 3 4 5 6 7 8 9 10; do
-	mdev -s
-	for blockdev_path in /dev/sd*; do
-		[ -b "$blockdev_path" ] || continue
-		found_block=true
-		if ! blockdev --setro "$blockdev_path"; then
-			log "warning: failed to mark read-only: $blockdev_path"
-		fi
-	done
-	sleep 1
-done
+storage_wait_for_ufs "$("$BB" cat /proc/cmdline 2>/dev/null)"
 
 ufs_safe=false
 if [ "$found_block" != true ]; then

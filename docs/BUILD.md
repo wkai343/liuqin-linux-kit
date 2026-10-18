@@ -132,12 +132,16 @@ rootfs.tar.gz
 各命令自动补齐依赖，结束时打印实际产物路径。
 首次准备完整安装目录使用 `devbox run build`。
 
-正常系统引导不显示屏幕调试日志，参数在 `device/native-bootargs.txt`；
-临时安装环境保留屏幕日志，参数独立位于 `device/installer-bootargs.txt`。
-日志仍可在系统内读取。
-正常系统额外应用 `build/kernel/configs/native-display.config`：背光驱动内置，
-显示时钟驱动作为模块加载，配合板级背光补丁保持先熄灯、后接管显示。
-正式版本已通过真机启动与正常重启验证：无灰闪，亮度调节和睡眠唤醒正常。
+### 启动与设备适配
+
+目标内核包含键盘、指纹、显示和电池接口补丁，顺序以 `build/kernel/source.json` 为准。
+正常系统使用 `device/native-bootargs.txt` 和 `build/kernel/configs/native-display.config`；
+独立安装环境使用自己的内核与启动参数，不随这些目标补丁改变。
+显示策略、CABC 用法和调试参数见 [显示与画质](DISPLAY.md)，未完成事项见 [待改进与验证](DEVELOPMENT-STATUS.md)。
+
+电池补丁修正容量单位并停止提供固件固定的 10 W 占位值，已在临时内核核对读数。
+它不改变充电或供电策略；容量刷新仍有延迟，不能用短时容量差计算可靠的待机功耗。
+
 正常引导还设置 `deferred_probe_timeout=60`，让驱动能等到根系统装配完毕并加载模块；
 依赖就绪便继续，不会强制等待 60 秒。
 
@@ -151,6 +155,14 @@ Plymouth Spinner 运行包，再将它和匹配的显示模块放入 `boot.img`�
 Fedora 标志、转圈及登录界面切换已通过真机与正常重启验证。
 早期显示设备就绪后即继续，检查间隔为 50 毫秒，等待上限为 5 秒。
 可在正常引导参数中加入 `plymouth.enable=0` 停用动画。
+正常启动会核对 UFS 逻辑单元、双份 GPT 与内核分区节点，连续两轮完整就绪后提前结束存储等待；
+无法证明就绪时保留约 10 秒等待上限，随后仍执行独立只读校验。安装和充电模式保留原等待流程。
+初始只读操作使用静态批量工具，工具缺失或失败时退回 BusyBox。
+存储节点快照通过 BusyBox 批量解析规范路径，保留每个交接阶段的完整节点和只读状态核对。
+兼容 ABL 留下旧备用数组校验值的情况：主表必须有效、主备条目必须完全相同；检查不改写 GPT。
+Fastboot 刷写或设置槽位后的首次启动仍可能走完整等待；正常重启已验证可以提前结束。
+根系统配置原厂 Wi-Fi MAC 时只等待目标网卡完成 udev 初始化，不等待全局设备队列；
+配置成功后才启动 NetworkManager，已通过真机正常重启验证。
 
 ## 4. 自定义内核
 
@@ -159,7 +171,7 @@ Fedora 标志、转圈及登录界面切换已通过真机与正常重启验证�
 zram 内核选项只提供能力，容量与算法由 rootfs 的服务配置决定。
 
 修改内核代码后提交 Git，并更新 `kernel_localversion`。默认固定基础提交会在构建缓存中自动应用
-`build/kernel/source.json` 记录的 NanoSic 平板模式、FPC IRQ 等补丁，不改写源码目录。
+`build/kernel/source.json` 记录的板级补丁，不改写源码目录。
 改用其他提交时，需自行核对并合入 `build/kernel/patches/` 中适用的补丁。
 Fedora 目标还叠加 `build/kernel/configs/fedora.config`，启用 SELinux。
 自定义配置时保留 `CONFIG_BACKLIGHT_KTZ8866=y` 和 `CONFIG_SM_DISPCC_8450=m`，

@@ -1,0 +1,97 @@
+From: Liuqin Linux Kit <build@liuqin.invalid>
+Subject: [PATCH] drm: defer Liuqin OFF until after DPU encoder disable
+
+The OEM bridge calls display_pre_disable from disable, but performs
+video stop and panel OFF from post_disable. Stopping video in panel
+disable can leave the DPU feeding a stopped link, causing FIFO errors.
+
+Query the opted-in host policy without changing hardware in disable.
+When selected, stop video and send OFF from panel unprepare, after
+encoder disable but before link shutdown and panel rail release.
+Keep early backlight blanking and worker cancellation unchanged.
+Consume the deferred flag before OFF so a partial write is not replayed.
+The shutdown-order boot switch still selects the unmodified old path.
+
+Signed-off-by: Liuqin Linux Kit <build@liuqin.invalid>
+---
+diff --git a/include/drm/drm_mipi_dsi.h b/include/drm/drm_mipi_dsi.h
+--- a/include/drm/drm_mipi_dsi.h
++++ b/include/drm/drm_mipi_dsi.h
+@@ -70,6 +70,8 @@
+ 	MIPI_DSI_PANEL_DISABLING,
+ 	MIPI_DSI_PANEL_UNPREPARING,
+ 	MIPI_DSI_PANEL_PREPARE_FAILED,
++	/* Query only: positive means send OFF from panel unprepare. */
++	MIPI_DSI_PANEL_DEFER_OFF,
+ };
+ 
+ /**
+@@ -78,7 +80,8 @@
+  * @detach: detach DSI device from DSI host
+  * @transfer: transmit a DSI packet
+  * @panel_stage: optional sleepable panel lifecycle notification; no transfer
+- *     lock may be held by the caller. Returns zero or a negative error.
++ *     lock may be held by the caller. Returns zero or a negative error;
++ *     the DEFER_OFF query returns positive to defer OFF until post_disable.
+  * @transfer_batch: optional ordered write group with no interleaved commands.
+  *     All messages use the same channel and transfer flags. Returns the sum
+  *     of payload lengths, or a negative error; a failed group must not be
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_manager.c b/drivers/gpu/drm/msm/dsi/dsi_manager.c
+--- a/drivers/gpu/drm/msm/dsi/dsi_manager.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_manager.c
+@@ -489,6 +489,9 @@
+ 		goto out;
+ 	}
+ 	switch (stage) {
++	case MIPI_DSI_PANEL_DEFER_OFF:
++		ret = liuqin_oem_shutdown_order && liuqin_dsi.powered;
++		break;
+ 	case MIPI_DSI_PANEL_PREPARED:
+ 		ret = liuqin_dsi_video_start();
+ 		break;
+diff --git a/drivers/gpu/drm/panel/panel-novatek-nt36532.c b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -37,6 +37,7 @@
+ 	"Keep Liuqin IOVDD/bias and gate the two digital rails while blanked");
+ 
+ struct nt36532 {
++	bool off_deferred;
+ 	struct drm_panel panel;
+ 	struct mipi_dsi_device *dsi[2];
+ 	const struct panel_desc *desc;
+@@ -1787,6 +1788,15 @@
+ 
+ 	liuqin_esd_stop(ctx, false);
+ 	liuqin_cancel_dimming(ctx, false);
++	ret = mipi_dsi_panel_stage(ctx->dsi[0], MIPI_DSI_PANEL_DEFER_OFF);
++	if (ret < 0)
++		return ret;
++	if (ret > 0) {
++		/* DRM disables the DPU encoder between disable and unprepare. */
++		ctx->off_deferred = true;
++		dev_info(dev, "Liuqin DSI: panel OFF deferred until post-disable\n");
++		return 0;
++	}
+ 	ret = mipi_dsi_panel_stage(ctx->dsi[0], MIPI_DSI_PANEL_DISABLING);
+ 	if (ret)
+ 		return ret;
+@@ -1805,6 +1815,18 @@
+ 	liuqin_esd_stop(ctx, false);
+ 
+ 	liuqin_cancel_dimming(ctx, false);
++
++	if (ctx->off_deferred) {
++		/* The DPU has stopped feeding the link at this bridge phase. */
++		ret = mipi_dsi_panel_stage(ctx->dsi[0], MIPI_DSI_PANEL_DISABLING);
++		if (ret)
++			return ret;
++		/* Never replay an OFF group after a partial command failure. */
++		ctx->off_deferred = false;
++		ret = nt36532_off(ctx);
++		if (ret < 0)
++			dev_err(panel->dev, "Failed to un-initialize panel: %d\n", ret);
++	}
+ 
+ 	ret = mipi_dsi_panel_stage(ctx->dsi[0], MIPI_DSI_PANEL_UNPREPARING);
+ 	if (ret)

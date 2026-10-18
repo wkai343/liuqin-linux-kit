@@ -182,7 +182,7 @@ shift
 printf 'busybox %s\n' "$command $*" >>"$TEST_COMMAND_LOG"
 exec "$TEST_FAKE_BIN/$command" "$@"
 EOF
-	for applet in cut grep head readlink sha256sum cat uname awk dd od tr mkdir; do
+	for applet in cut grep head readlink realpath sha256sum cat uname awk dd od tr mkdir; do
 		cat >"$test_root/bin/$applet" <<EOF
 #!/bin/sh
 exec /usr/bin/$applet "\$@"

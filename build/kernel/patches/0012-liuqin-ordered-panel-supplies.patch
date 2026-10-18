@@ -1,0 +1,113 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] drm/panel: order Liuqin panel-owned supply requests
+
+Independent of the OEM reset waveform patch.
+OS2.0.6.0 supplies 0/1/2 are IOVDD/buck/LDO with post-on
+waits 2/0/2 ms and post-off waits 2/2/0 ms. Use that order for the panel's
+existing three consumer handles, releasing only successful votes on error.
+Preserve the regulator constraints, voltages, bias supply ownership,
+reset behavior and all extra waits. This does not claim physical rail
+sequencing while fixed rails are always-on, or port full-off/gesture policy.
+Pipa and Yudi retain the existing bulk regulator operations.
+
+diff --git a/drivers/gpu/drm/panel/panel-novatek-nt36532.c b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -540,8 +540,64 @@
+ 	.init_sequence = yudi_init_sequence,
+ 	.reset_sequence = yudi_reset
+ };
+ 
++/* OEM order for the three supplies currently owned by the panel.
++ * VSP/VSN ownership and the bootloader-retention constraints are unchanged.
++ */
++static int liuqin_disable_supply_prefix(struct nt36532 *ctx, unsigned int count)
++{
++	int first_error = 0;
++	int ret;
++
++	while (count) {
++		unsigned int i = --count;
++
++		ret = regulator_disable(ctx->supplies[i].consumer);
++		if (ret) {
++			dev_warn(ctx->panel.dev, "Failed to release %s: %d\n",
++				 ctx->supplies[i].supply, ret);
++			if (!first_error)
++				first_error = ret;
++		}
++		/* OEM post-off waits: IOVDD=2 ms, buck=2 ms, LDO=0. */
++		if (i != 2)
++			usleep_range(2000, 2010);
++	}
++
++	return first_error;
++}
++
++static int nt36532_enable_supplies(struct nt36532 *ctx)
++{
++	unsigned int i;
++	int ret;
++
++	if (ctx->desc != &liuqin_desc)
++		return regulator_bulk_enable(ARRAY_SIZE(ctx->supplies), ctx->supplies);
++
++	for (i = 0; i < ARRAY_SIZE(ctx->supplies); i++) {
++		ret = regulator_enable(ctx->supplies[i].consumer);
++		if (ret) {
++			liuqin_disable_supply_prefix(ctx, i);
++			return ret;
++		}
++		/* OEM post-on waits: IOVDD=2 ms, buck=0, LDO=2 ms. */
++		if (i != 1)
++			usleep_range(2000, 2010);
++	}
++
++	return 0;
++}
++
++static void nt36532_disable_supplies(struct nt36532 *ctx)
++{
++	if (ctx->desc == &liuqin_desc)
++		liuqin_disable_supply_prefix(ctx, ARRAY_SIZE(ctx->supplies));
++	else
++		regulator_bulk_disable(ARRAY_SIZE(ctx->supplies), ctx->supplies);
++}
++
+ static int nt36532_off(struct nt36532 *ctx)
+ {
+ 	struct mipi_dsi_device *dsi = nt36532_cmd_dsi(ctx);
+ 	struct device *dev = &dsi->dev;
+@@ -572,9 +628,9 @@
+ 	struct device *dev = &dsi->dev;
+ 	struct drm_dsc_picture_parameter_set pps;
+ 	int ret;
+ 
+-	ret = regulator_bulk_enable(ARRAY_SIZE(ctx->supplies), ctx->supplies);
++	ret = nt36532_enable_supplies(ctx);
+ 	if (ret < 0) {
+ 		dev_err(dev, "Failed to enable regulators: %d\n", ret);
+ 		return ret;
+ 	}
+@@ -614,9 +670,9 @@
+ 	return 0;
+ 
+ fail:
+ 	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+-	regulator_bulk_disable(ARRAY_SIZE(ctx->supplies), ctx->supplies);
++	nt36532_disable_supplies(ctx);
+ 	return ret;
+ }
+ 
+ static int nt36532_enable(struct drm_panel *panel)
+@@ -672,9 +728,9 @@
+ 	if (ctx->dsi[1])
+ 		ctx->dsi[1]->mode_flags &= ~MIPI_DSI_MODE_LPM;
+ 
+ 	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+-	regulator_bulk_disable(ARRAY_SIZE(ctx->supplies), ctx->supplies);
++	nt36532_disable_supplies(ctx);
+ 
+ 	return 0;
+ }
+ 

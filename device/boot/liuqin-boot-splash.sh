@@ -13,6 +13,24 @@ wait_writable() {
         while [ ! -w "$1" ]; do "$2" sleep 0.05; done
     ' sh "$1" "$BB"
 }
+wait_backlight_scale() {
+    # The curve attributes are published just after the backlight class device.
+    # Accept the old raw scale and the explicitly identified M81 logical scale.
+    "$BB" timeout 1 "$BB" sh -c '
+        while :; do
+            maximum=$("$2" cat "$1/max_brightness" 2>/dev/null) || exit 1
+            case $maximum in
+                2047) exit 0 ;;
+                4095)
+                    curve=$("$2" cat "$1/brightness_curve" 2>/dev/null || :)
+                    case $curve in liuqin-oem) exit 0 ;; "") ;; *) exit 1 ;; esac
+                    ;;
+                *) exit 1 ;;
+            esac
+            "$2" sleep 0.05
+        done
+    ' sh "$1" "$BB"
+}
 stop_udev() {
     [ -f "$state/udev-started" ] || return 0
     "$BB" timeout 5 /usr/bin/udevadm control --exit 2>/dev/null || :
@@ -32,8 +50,7 @@ start() {
     mkdir -p "$state" /run/plymouth
     log 'starting graphics preparation'
     backlight=/sys/class/backlight/ktz8866-backlight
-    if ! wait_writable "$backlight/bl_power" ||
-       [ "$(cat "$backlight/max_brightness" 2>/dev/null)" != 2047 ]; then
+    if ! wait_writable "$backlight/bl_power" || ! wait_backlight_scale "$backlight"; then
         log 'backlight not ready; continuing normal boot'; return 0;
     fi
     # Complete an actual backlight update before either display dependency is

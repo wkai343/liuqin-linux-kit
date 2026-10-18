@@ -35,6 +35,9 @@ def board_overlay(root, busybox):
         target=root/rel;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(source,target)
         target.chmod(0o755 if source.stat().st_mode&0o111 else 0o644)
     guard=root/'usr/local/sbin/liuqin-gnome-storage-guard';text=guard.read_text()
+    recovery=root/'etc/systemd/user/default.target.wants/liuqin-display-recovery.service'
+    recovery.parent.mkdir(parents=True,exist_ok=True)
+    recovery.symlink_to('../liuqin-display-recovery.service')
     old='marker=${LIUQIN_GNOME_GUARD_TEST_MARKER:-/etc/liuqin-gnome-root}'
     if text.count(old)!=1:raise ValueError('存储保护脚本标记不符。')
     text=text.replace(old,'marker=/etc/liuqin-native-root').replace(

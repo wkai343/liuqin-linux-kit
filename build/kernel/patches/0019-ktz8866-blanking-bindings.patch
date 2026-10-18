@@ -1,0 +1,33 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] dt-bindings: backlight: document KTZ8866 blanking controls
+
+Describe retained LED sink-enable bits and post-disable settling time.
+These settings do not change LCD bias voltage or active current limits.
+
+diff --git a/Documentation/devicetree/bindings/leds/backlight/kinetic,ktz8866.yaml b/Documentation/devicetree/bindings/leds/backlight/kinetic,ktz8866.yaml
+--- a/Documentation/devicetree/bindings/leds/backlight/kinetic,ktz8866.yaml
++++ b/Documentation/devicetree/bindings/leds/backlight/kinetic,ktz8866.yaml
+@@ -38,6 +38,23 @@
+     description: number of the LED current sinks' channels.
+     $ref: /schemas/types.yaml#/definitions/uint32
+     enum: [1, 2, 3, 4, 5, 6]
++
++  kinetic,blanked-current-sink-mask:
++    description: |
++      LED1 through LED6 enable bits retained while the global backlight enable
++      bit is clear. Defaults to all configured sinks. Must be a subset of the
++      channels selected by current-num-sinks; never includes BL_EN or reset.
++    $ref: /schemas/types.yaml#/definitions/uint32
++    minimum: 0
++    maximum: 63
++
++  kinetic,backlight-disable-delay-ms:
++    description: |
++      Settling time after disabling the backlight and before clearing the
++      brightness registers. Does not delay positive brightness changes.
++    minimum: 0
++    maximum: 100
++    default: 0
+ 
+   kinetic,current-ramp-delay-ms:
+     description: |

@@ -1,0 +1,361 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] drm/panel: report qualified M81 fault events with bounded IRQ handling
+
+Preserve display timing and commands. Qualify low before arming the two
+ROM high-level error IRQs, mask both on the first fault, and expose
+status for the active session recovery coordinator. No reset from IRQ.
+
+diff --git a/drivers/gpu/drm/panel/panel-novatek-nt36532.c b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -7,6 +7,10 @@
+ #include <linux/delay.h>
+ #include <linux/gpio/consumer.h>
+ #include <linux/module.h>
++#include <linux/interrupt.h>
++#include <linux/jiffies.h>
++#include <linux/mutex.h>
++#include <linux/workqueue.h>
+ #include <linux/slab.h>
+ #include <linux/of.h>
+ #include <linux/of_device.h>
+@@ -41,6 +45,20 @@
+ 	struct regulator_bulk_data supplies[3];
+ 	unsigned int supply_votes;
+ 	bool keep_iovdd;
++	/* Serializes IRQ enable depth and fault/generation state. */
++	struct mutex esd_lock;
++	struct delayed_work esd_arm_work;
++	struct gpio_desc *esd_gpio[2];
++	int esd_irq[2];
++	bool esd_available;
++	bool esd_enabled;
++	bool esd_stopping;
++	bool esd_pending;
++	unsigned int esd_armed;
++	unsigned int esd_cycle;
++	unsigned int esd_last_line;
++	unsigned long esd_started;
++	u64 esd_events;
+ 	struct gpio_desc *reset_gpio;
+ };
+ 
+@@ -1303,6 +1321,212 @@
+ 	return 0;
+ }
+ 
++static bool esd_monitor = true;
++module_param(esd_monitor, bool, 0444);
++MODULE_PARM_DESC(esd_monitor, "Monitor qualified M81 error GPIOs; report faults without resetting in IRQ");
++
++/* esd_lock protects IRQ enable depth, event state and the active generation. */
++static void liuqin_esd_mask_locked(struct nt36532 *ctx)
++{
++	unsigned int i;
++
++	lockdep_assert_held(&ctx->esd_lock);
++	for (i = 0; i < ARRAY_SIZE(ctx->esd_irq); i++) {
++		if (ctx->esd_armed & BIT(i))
++			disable_irq_nosync(ctx->esd_irq[i]);
++	}
++	ctx->esd_armed = 0;
++}
++
++static bool liuqin_esd_fault(struct nt36532 *ctx, unsigned int line, bool injected)
++{
++	u64 event;
++	unsigned int cycle;
++
++	mutex_lock(&ctx->esd_lock);
++	if (!ctx->esd_available || !ctx->esd_enabled || ctx->esd_stopping ||
++	    ctx->esd_pending || (!injected && !(ctx->esd_armed & BIT(line)))) {
++		mutex_unlock(&ctx->esd_lock);
++		return false;
++	}
++	ctx->esd_pending = true;
++	event = ++ctx->esd_events;
++	ctx->esd_last_line = line;
++	cycle = ctx->esd_cycle;
++	liuqin_esd_mask_locked(ctx);
++	mutex_unlock(&ctx->esd_lock);
++	dev_warn(ctx->panel.dev, "Liuqin panel fault: event %llu cycle %u source %s%u\n",
++		 (unsigned long long)event, cycle, injected ? "test" : "irq", line);
++	/* kernfs POLLPRI wakes the session coordinator; no DCS read or reset here. */
++	sysfs_notify(&ctx->panel.dev->kobj, NULL, "esd_status");
++	return true;
++}
++
++static irqreturn_t liuqin_esd_irq(int irq, void *data)
++{
++	struct nt36532 *ctx = data;
++	unsigned int line = irq == ctx->esd_irq[0] ? 0 : 1;
++
++	liuqin_esd_fault(ctx, line, false);
++	return IRQ_HANDLED;
++}
++
++static void liuqin_esd_arm_work(struct work_struct *work)
++{
++	struct nt36532 *ctx = container_of(to_delayed_work(work), struct nt36532, esd_arm_work);
++	struct drm_panel *panel = &ctx->panel;
++	unsigned int i;
++	unsigned long ready;
++	bool retry = false;
++
++	/* Same ordering as the post-backlight hook: core lock before esd_lock. */
++	mutex_lock(&panel->backlight_lock);
++	mutex_lock(&ctx->esd_lock);
++	if (!esd_monitor || !ctx->esd_enabled || ctx->esd_stopping || ctx->esd_pending ||
++	    !panel->enabled || panel->backlight_pending ||
++	    ctx->esd_cycle != panel->backlight_cookie)
++		goto unlock;
++	ready = ctx->esd_started + msecs_to_jiffies(1000);
++	if (time_before(jiffies, ready)) {
++		mod_delayed_work(system_wq, &ctx->esd_arm_work, ready - jiffies);
++		goto unlock;
++	}
++	for (i = 0; i < ARRAY_SIZE(ctx->esd_irq); i++) {
++		int level;
++
++		if (ctx->esd_armed & BIT(i))
++			continue;
++		level = gpiod_get_value_cansleep(ctx->esd_gpio[i]);
++		/* A healthy unit can boot with the second line high. Do not invent
++		 * a polarity or treat that initial unqualified level as an event.
++		 */
++		if (level != 0) {
++			retry = true;
++			continue;
++		}
++		ctx->esd_armed |= BIT(i);
++		enable_irq(ctx->esd_irq[i]);
++	}
++	if (retry)
++		mod_delayed_work(system_wq, &ctx->esd_arm_work, msecs_to_jiffies(2000));
++unlock:
++	mutex_unlock(&ctx->esd_lock);
++	mutex_unlock(&panel->backlight_lock);
++}
++
++/* Called with the core backlight lock held, after successful first-frame setup. */
++static void liuqin_esd_start(struct nt36532 *ctx)
++{
++	lockdep_assert_held(&ctx->panel.backlight_lock);
++	mutex_lock(&ctx->esd_lock);
++	if (esd_monitor && ctx->esd_available && !ctx->esd_stopping &&
++	    ctx->panel.backlight_after_first_frame && ctx->panel.backlight_cookie) {
++		ctx->esd_enabled = true;
++		ctx->esd_pending = false;
++		ctx->esd_cycle = ctx->panel.backlight_cookie;
++		ctx->esd_started = jiffies;
++		mod_delayed_work(system_wq, &ctx->esd_arm_work, msecs_to_jiffies(1000));
++	}
++	mutex_unlock(&ctx->esd_lock);
++	sysfs_notify(&ctx->panel.dev->kobj, NULL, "esd_status");
++}
++
++static void liuqin_esd_stop(struct nt36532 *ctx, bool stopping)
++{
++	mutex_lock(&ctx->esd_lock);
++	ctx->esd_enabled = false;
++	ctx->esd_stopping |= stopping;
++	liuqin_esd_mask_locked(ctx);
++	mutex_unlock(&ctx->esd_lock);
++	/* Atomic disable may hold modeset locks. Never wait for the worker here. */
++	cancel_delayed_work(&ctx->esd_arm_work);
++}
++
++static void liuqin_esd_shutdown(struct nt36532 *ctx)
++{
++	unsigned int i;
++
++	liuqin_esd_stop(ctx, true);
++	cancel_delayed_work_sync(&ctx->esd_arm_work);
++	for (i = 0; i < ARRAY_SIZE(ctx->esd_irq); i++)
++		if (ctx->esd_irq[i] >= 0)
++			synchronize_irq(ctx->esd_irq[i]);
++}
++
++static ssize_t esd_status_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	struct nt36532 *ctx = dev_get_drvdata(dev);
++	ssize_t size;
++
++	mutex_lock(&ctx->esd_lock);
++	size = sysfs_emit(buf,
++			  "version=1 available=%u enabled=%u pending=%u armed=%u cycle=%u events=%llu last=%u age_ms=%u\n",
++		ctx->esd_available, ctx->esd_enabled, ctx->esd_pending, ctx->esd_armed,
++		ctx->esd_cycle, (unsigned long long)ctx->esd_events, ctx->esd_last_line,
++		ctx->esd_enabled ? jiffies_to_msecs(jiffies - ctx->esd_started) : 0);
++	mutex_unlock(&ctx->esd_lock);
++	return size;
++}
++static DEVICE_ATTR_RO(esd_status);
++
++static ssize_t esd_inject_store(struct device *dev, struct device_attribute *attr,
++				const char *buf, size_t count)
++{
++	struct nt36532 *ctx = dev_get_drvdata(dev);
++	unsigned int value;
++
++	if (kstrtouint(buf, 10, &value) || value != 1)
++		return -EINVAL;
++	/* Privileged test event only: never alter voltage or panel registers. */
++	if (!liuqin_esd_fault(ctx, 2, true))
++		return -EBUSY;
++	return count;
++}
++static DEVICE_ATTR_WO(esd_inject);
++
++static struct attribute *liuqin_esd_attrs[] = {
++	&dev_attr_esd_status.attr,
++	&dev_attr_esd_inject.attr,
++	NULL,
++};
++
++static const struct attribute_group liuqin_esd_group = {
++	.attrs = liuqin_esd_attrs,
++};
++
++static int liuqin_esd_init(struct nt36532 *ctx)
++{
++	struct device *dev = ctx->panel.dev;
++	unsigned int i;
++	int ret;
++
++	if (!ctx->oem_panel || ctx->desc != &liuqin_desc || !esd_monitor ||
++	    !of_find_property(dev->of_node, "error-gpios", NULL))
++		return 0;
++	for (i = 0; i < ARRAY_SIZE(ctx->esd_irq); i++) {
++		ctx->esd_gpio[i] = devm_gpiod_get_index(dev, "error", i, GPIOD_IN);
++		if (IS_ERR(ctx->esd_gpio[i]))
++			return dev_err_probe(dev, PTR_ERR(ctx->esd_gpio[i]),
++					     "ESD GPIO unavailable\n");
++		ret = gpiod_to_irq(ctx->esd_gpio[i]);
++		if (ret < 0)
++			return dev_err_probe(dev, ret, "ESD IRQ unavailable\n");
++		ctx->esd_irq[i] = ret;
++		ret = devm_request_threaded_irq(dev, ctx->esd_irq[i], NULL, liuqin_esd_irq,
++						IRQF_TRIGGER_HIGH | IRQF_ONESHOT | IRQF_NO_AUTOEN,
++						i ? "liuqin-esd1" : "liuqin-esd0", ctx);
++		if (ret) {
++			ctx->esd_irq[i] = -1;
++			return dev_err_probe(dev, ret, "ESD IRQ request failed\n");
++		}
++	}
++	ctx->esd_available = true;
++	ret = devm_device_add_group(dev, &liuqin_esd_group);
++	if (ret)
++		ctx->esd_available = false;
++	return ret;
++}
++
+ static int nt36532_prepare(struct drm_panel *panel)
+ {
+ 	struct nt36532 *ctx = to_nt36532(panel);
+@@ -1310,6 +1534,8 @@
+ 	struct device *dev = &dsi->dev;
+ 	struct drm_dsc_picture_parameter_set pps;
+ 	int ret;
++
++	liuqin_esd_stop(ctx, false);
+ 
+ 	/* Match the retained-power resume path: reset low before digital rails. */
+ 	if (ctx->desc == &liuqin_desc && ctx->keep_iovdd &&
+@@ -1409,6 +1635,7 @@
+ 	struct device *dev = &ctx->dsi[0]->dev;
+ 	int ret;
+ 
++	liuqin_esd_stop(ctx, false);
+ 	ret = nt36532_off(ctx);
+ 	if (ret < 0)
+ 		dev_err(dev, "Failed to un-initialize panel: %d\n", ret);
+@@ -1419,6 +1646,8 @@
+ static int nt36532_unprepare(struct drm_panel *panel)
+ {
+ 	struct nt36532 *ctx = to_nt36532(panel);
++
++	liuqin_esd_stop(ctx, false);
+ 
+ 	ctx->dsi[0]->mode_flags &= ~MIPI_DSI_MODE_LPM;
+ 	if (ctx->dsi[1])
+@@ -1483,6 +1712,7 @@
+ 			return -EIO;
+ 	}
+ 	dev_info(panel->dev, "Liuqin OEM post-backlight: normal display restored\n");
++	liuqin_esd_start(ctx);
+ 	return 0;
+ }
+ 
+@@ -1556,6 +1786,10 @@
+ 
+ 	drm_panel_init(&ctx->panel, dev, &nt36532_panel_funcs,
+ 		       DRM_MODE_CONNECTOR_DSI);
++	mutex_init(&ctx->esd_lock);
++	INIT_DELAYED_WORK(&ctx->esd_arm_work, liuqin_esd_arm_work);
++	ctx->esd_irq[0] = -1;
++	ctx->esd_irq[1] = -1;
+ 	if (ctx->desc == &liuqin_desc) {
+ 		liuqin_select_oem_panel(ctx);
+ 		ctx->keep_iovdd = liuqin_retained_power && ctx->oem_panel;
+@@ -1582,6 +1816,10 @@
+ 		liuqin_log_supplies(ctx, "probe");
+ 	}
+ 
++	ret = liuqin_esd_init(ctx);
++	if (ret)
++		return ret;
++
+ 	drm_panel_add(&ctx->panel);
+ 
+ 	memcpy(&ctx->dsc, &ctx->desc->dsc, sizeof(ctx->desc->dsc));
+@@ -1601,6 +1839,7 @@
+ 		ret = devm_mipi_dsi_attach(dev, ctx->dsi[i]);
+ 
+ 		if (ret < 0) {
++			liuqin_esd_shutdown(ctx);
+ 			drm_panel_remove(&ctx->panel);
+ 			return dev_err_probe(dev, ret,
+ 					     "Failed to attach to DSI%d\n", i);
+@@ -1613,6 +1852,7 @@
+ static void nt36532_remove(struct mipi_dsi_device *dsi)
+ {
+ 	struct nt36532 *ctx = mipi_dsi_get_drvdata(dsi);
++	liuqin_esd_shutdown(ctx);
+ 	drm_panel_remove(&ctx->panel);
+ }
+ 
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+@@ -1122,6 +1122,8 @@
+ 		dvddldo-supply = <&display_panel_dvdd_ldo>;
+ 
+ 		reset-gpios = <&tlmm 0 GPIO_ACTIVE_HIGH>;
++		error-gpios = <&tlmm 20 GPIO_ACTIVE_HIGH>,
++			      <&tlmm 116 GPIO_ACTIVE_HIGH>;
+ 		backlight = <&backlight>;
+ 
+ 		pinctrl-0 = <&sde_dsi_active>;
+diff --git a/Documentation/ABI/testing/sysfs-driver-liuqin-panel b/Documentation/ABI/testing/sysfs-driver-liuqin-panel
+new file mode 100644
+--- /dev/null
++++ b/Documentation/ABI/testing/sysfs-driver-liuqin-panel
+@@ -0,0 +1,17 @@
++What:           /sys/bus/mipi-dsi/devices/*/esd_status
++Date:           October 2026
++Contact:        Liuqin Linux Kit contributors
++Description:    Read-only version=1 key/value record: available, enabled,
++                pending, armed (two-bit mask), cycle, events, last (0/1 IRQ,
++                2 privileged test), age_ms since completed first-frame setup.
++                POLLPRI notification announces a latched fault. Interrupts
++                remain masked until another successful display activation.
++                A line must first be sampled low before its high IRQ is armed.
++                No DCS read or display reset is performed in interrupt context.
++
++What:           /sys/bus/mipi-dsi/devices/*/esd_inject
++Date:           October 2026
++Contact:        Liuqin Linux Kit contributors
++Description:    Root-only write of 1 injects a software test event while active.
++                This does not write panel/voltage registers. The active display
++                session may act on the event by cycling its output power.

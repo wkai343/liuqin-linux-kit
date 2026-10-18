@@ -1,0 +1,23 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] drm/panel: nt36532: use the OEM video traffic mode for Liuqin
+
+Both Liuqin M81 panel descriptions in OS2.0.6.0.VMYCNXM select burst_mode.
+The inherited Pipa description selects non-burst sync-event traffic instead.
+Select burst traffic only in the Liuqin description, retaining all command
+tables, lane settings, mode timings, clock flags, supplies and delays.
+
+This aligns the traffic mode with the OEM configuration; burst mode alone
+did not resolve intermittent first-enable corruption during hardware tests.
+
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -525,7 +525,8 @@ static const struct panel_desc liuqin_desc = {
+ 		.block_pred_enable = true,
+ 	},
+ 	.format = MIPI_DSI_FMT_RGB888,
+-	.mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_CLOCK_NON_CONTINUOUS,
++	.mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST |
++		      MIPI_DSI_CLOCK_NON_CONTINUOUS,
+ 	.drm_mode = liuqin_mode_120,
+ 	.init_sequence = pipa_init_sequence,
+ 	.reset_sequence = liuqin_reset,

@@ -11,7 +11,7 @@ Kernel
 The kernel is maintained separately in linux-sm8450-liuqin, based on
 https://github.com/sm8450-mainline/linux.git. Its COPYING, LICENSES directory,
 file-level SPDX identifiers and original authorship are retained. The exact
-revision is recorded in kernel/source.json.
+revision is recorded in build/kernel/source.json.
 
 Sensor stack
 ------------

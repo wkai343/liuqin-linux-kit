@@ -16,6 +16,10 @@ Liuqin Linux Kit 衍生自 **yzddmr6** 的[xiaomipad-6pro-mainline](https://gith
 - 本项目使用的确切来源与提交记录在 `build/kernel/source.json`。
 - 文件中的 SPDX、Copyright、作者说明及补丁来源继续有效。
 
+显示时钟的上游修正保留补丁作者、评审与来源链接；面板命令、PHY、背光和电池接口的
+本机对照使用 OS2.0.6.0.VMYCNXM 原厂资料，版本与镜像校验锁见 `shared/liuqin-rom-images.json`。
+这些适配补丁继续遵循所修改内核文件的许可，不由项目根目录的 MIT 许可替代。
+
 ## 第三方组件
 
 [NOTICE](NOTICE) 保留传感器、充电、GNOME、AOSP、BusyBox、指纹和固件等来源声明。

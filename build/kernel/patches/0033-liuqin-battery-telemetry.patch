@@ -1,0 +1,74 @@
+From: Liuqin Linux Kit build <build@liuqin.invalid>
+Subject: [PATCH] power: supply: qcom_battmgr: correct M81 charge units
+
+M81 reports full capacities in uAh and the remaining charge counter in
+mAh. The full capacity values match the sum of the two fuel gauges.
+Expose them without the unrelated SC8280XP unit gate, and convert the
+counter to the power_supply uAh ABI with overflow checking.
+
+The firmware POWER_NOW field remains fixed at 10000000 despite changing
+current, so return ENODATA instead of presenting it as measured power.
+Other variants, properties and firmware transactions remain unchanged.
+This does not address fuel-gauge refresh latency or standby power.
+
+diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -7,6 +7,7 @@
+ #include <linux/auxiliary_bus.h>
+ #include <linux/ctype.h>
+ #include <linux/hex.h>
++#include <linux/limits.h>
+ #include <linux/swab.h>
+ #include <linux/module.h>
+ #include <linux/mutex.h>
+@@ -1233,6 +1234,15 @@
+ 	return ret;
+ }
+ 
++/* M81 full capacities are uAh; its remaining counter is reported in mAh. */
++static int qcom_battmgr_sm8475_charge_value(u32 raw, u32 scale, int *value)
++{
++	if (raw > INT_MAX / scale)
++		return -ERANGE;
++	*value = raw * scale;
++	return 0;
++}
++
+ static int qcom_battmgr_bat_get_property(struct power_supply *psy,
+ 					 enum power_supply_property psp,
+ 					 union power_supply_propval *val)
+@@ -1289,14 +1299,23 @@
+ 			val->intval = -val->intval;
+ 		break;
+ 	case POWER_SUPPLY_PROP_POWER_NOW:
++		/* M81 firmware returns a fixed placeholder, not measured power. */
++		if (battmgr->variant == QCOM_BATTMGR_SM8475)
++			return -ENODATA;
+ 		val->intval = battmgr->status.power_now;
+ 		break;
+ 	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
++		if (battmgr->variant == QCOM_BATTMGR_SM8475)
++			return qcom_battmgr_sm8475_charge_value(
++				battmgr->info.design_capacity, 1, &val->intval);
+ 		if (unit != QCOM_BATTMGR_UNIT_mAh)
+ 			return -ENODATA;
+ 		val->intval = battmgr->info.design_capacity;
+ 		break;
+ 	case POWER_SUPPLY_PROP_CHARGE_FULL:
++		if (battmgr->variant == QCOM_BATTMGR_SM8475)
++			return qcom_battmgr_sm8475_charge_value(
++				battmgr->info.last_full_capacity, 1, &val->intval);
+ 		if (unit != QCOM_BATTMGR_UNIT_mAh)
+ 			return -ENODATA;
+ 		val->intval = battmgr->info.last_full_capacity;
+@@ -1312,6 +1331,9 @@
+ 		val->intval = battmgr->status.capacity;
+ 		break;
+ 	case POWER_SUPPLY_PROP_CHARGE_COUNTER:
++		if (battmgr->variant == QCOM_BATTMGR_SM8475)
++			return qcom_battmgr_sm8475_charge_value(
++				battmgr->info.charge_count, 1000, &val->intval);
+ 		val->intval = battmgr->info.charge_count;
+ 		break;
+ 	case POWER_SUPPLY_PROP_ENERGY_FULL_DESIGN:

@@ -1,0 +1,161 @@
+From: Liuqin Linux Kit <build@liuqin.invalid>
+Subject: [PATCH] drm/panel: describe Liuqin separately from Pipa
+
+Give Xiaomi Pad 6 Pro its own panel description and preferred compatible.
+Keep the validated 120 Hz mode, DSC geometry, DSI flags, reset waveform,
+command sequence and all delays unchanged. Retain the Pipa fallback for
+older kernels using the same initial settings.
+
+The previous DTS comment claimed that this unit selected m81_42_02_0b.
+Its bootloader command line instead selects m81_36_02_0a; no panel ID was
+read directly. Remove the unsupported variant claim rather than changing
+the working initialization to a different vendor command blob.
+
+This separates future Liuqin timing work from the other boards; it does
+not reduce startup delays. This is a local Liuqin Linux Kit patch.
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+@@ -1086,26 +1086,10 @@
+ };
+ 
+ /*
+- * Display. The panel is an 1800x2880 Novatek NT36532 driven at 120 Hz over two
+- * bonded DSI links with DSC 1.1, 450x20 slices. Every number below is taken
+- * from the m81_42_02_0b panel node in the device tree this unit's bootloader
+- * hands the vendor kernel, abl-final-fdt.dts:26160-26294 -- never from
+- * sources/sm8450-fdt/liuqin.dts, whose pretty-printer renders any integer that
+- * happens to equal a phandle as a <&label> and silently corrupts exactly the
+- * numbers that matter here.
+- *
+- * The timings live in the panel driver rather than in this file, and they are
+- * verifiable: running the vendor's porches (2*(100,2,46) horizontal, 26/2/214
+- * vertical) through dsi_host.c's own arithmetic -- compression-adjusted pclk,
+- * bonded halving, byte clock -- reproduces the vendor's declared per-lane rate
+- * of 1 007 032 320 Hz bit for bit. See docs/DISPLAY_RECON.zh-CN.md.
+- *
+- * Deliberately left alone: /chosen/bootargs, framebuffer@b8000000 and
+- * splash_region. earlycon=simplefb is still the only channel that can show a
+- * failure before device_initcall, and initcall_blacklist=simplefb_driver_init
+- * keeps fbcon off that same memory. Once DRM comes up it registers its own
+- * fb0, fbcon binds to it, and the earlycon simply goes blind -- which costs
+- * nothing now that telnet and a full dmesg are available on this board.
++ * 1800x2880 at 120 Hz over bonded DSI, with DSC 1.1 and 450x20 slices.
++ * Mode parameters and initialization are defined in the Liuqin panel driver
++ * description. Bootloader panel selection can differ from the OEM variant
++ * whose command sequence was used for the original mainline adaptation.
+  */
+ &mdss {
+ 	status = "okay";
+@@ -1127,34 +1111,11 @@
+ 	status = "okay";
+ 
+ 	/*
+-	 * Reuse pipa's description rather than adding a liuqin one. Every field
+-	 * of pipa_desc (drivers/gpu/drm/panel/panel-novatek-nt36532.c:442-461)
+-	 * matches this unit's m81_42_02_0b: mode, porches, 120 Hz, 450x20
+-	 * slices, 2 slices per link, 8 bpc, 8 bpp, block prediction, physical
+-	 * size. Its init sequence agrees with the vendor's 194-command blob in
+-	 * 183 places, including the one command that encodes this panel's
+-	 * porches, 3b 03 d8 1a 0a 0a 00, where 0xd8 is VBP+2 and 0x1a is VFP.
+-	 *
+-	 * reset-gpios is GPIO_ACTIVE_HIGH and that is not a copy of yudi.
+-	 * pipa_reset() (:48-57) drives the line 0,1,0,1 with 12 ms between each
+-	 * step and *ends on 1*, whereas yudi_reset() (:59-67) ends on 0. Only
+-	 * one polarity makes each of them leave the panel out of reset, and for
+-	 * pipa_reset() that is active-high: it then produces low, high, low,
+-	 * high, which is the vendor's own reset waveform
+-	 * qcom,mdss-dsi-reset-sequence = <0 10 1 3 0 3 1 15> (:26205) in shape,
+-	 * ending deasserted, differing only in the dwell times. With
+-	 * GPIO_ACTIVE_LOW the same helper inverts to high, low, high, low and
+-	 * leaves NT36532 nRESET asserted for the whole init sequence and PPS --
+-	 * every DSI write would still report success and the panel would stay
+-	 * black with nothing in dmesg to explain it.
+-	 *
+-	 * No te-gpios: this is video mode, so there is no tear-effect
+-	 * handshake. The vendor wires TE to gpio86 with the mdp_vsync function
+-	 * (:32985, sde_te_active) for its command-mode paths; mainline's msm
+-	 * DSI has no consumer for it here.
++	 * The shared reset helper drives physical low/high/low/high and must end
++	 * high (out of reset). Keep GPIO_ACTIVE_HIGH for that existing waveform.
+ 	 */
+ 	panel: panel@0 {
+-		compatible = "xiaomi,pipa-nt36532";
++		compatible = "xiaomi,liuqin-nt36532", "xiaomi,pipa-nt36532";
+ 		reg = <0>;
+ 
+ 		vddio-supply = <&pm8350c_l2>;
+diff --git a/drivers/gpu/drm/panel/panel-novatek-nt36532.c b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -431,6 +431,21 @@
+ 	.type = DRM_MODE_TYPE_DRIVER,
+ };
+ 
++static const struct drm_display_mode liuqin_mode_120 = {
++	.clock = (1800 + 200 + 4 + 92) * (2880 + 26 + 2 + 214) * 120 / 1000,
++	.hdisplay = 1800,
++	.hsync_start = 1800 + 200,
++	.hsync_end = 1800 + 200 + 4,
++	.htotal = 1800 + 200 + 4 + 92,
++	.vdisplay = 2880,
++	.vsync_start = 2880 + 26,
++	.vsync_end = 2880 + 26 + 2,
++	.vtotal = 2880 + 26 + 2 + 214,
++	.width_mm = 148,
++	.height_mm = 237,
++	.type = DRM_MODE_TYPE_DRIVER,
++};
++
+ static const struct drm_display_mode yudi_mode_120 = {
+ 	.clock = 2 * (1440 + 65 + 10 + 38) * (1800 + 26 + 2 + 118) * 120 / 1000,
+ 	.hdisplay = 2 * (1440),
+@@ -471,6 +486,36 @@
+ 	.reset_sequence = pipa_reset
+ };
+ 
++/*
++ * Keep the initialization and reset sequence already validated on Liuqin.
++ * A separate description allows board-specific timing changes without changing
++ * Pipa. Do not infer an OEM panel variant from the shared command sequence.
++ */
++static const struct panel_desc liuqin_desc = {
++	.dsi_info = {
++		.type = "liuqin",
++		.channel = 0,
++		.node = NULL,
++	},
++	.dsc = {
++		.dsc_version_major = 1,
++		.dsc_version_minor = 1,
++		.slice_height = 20,
++		.slice_width = 450,
++		/* Downstream sets this while parsing DT */
++		.slice_count = 2,
++
++		.bits_per_component = 8,
++		.bits_per_pixel = 8 << 4, /* 4 fractional bits */
++		.block_pred_enable = true,
++	},
++	.format = MIPI_DSI_FMT_RGB888,
++	.mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_CLOCK_NON_CONTINUOUS,
++	.drm_mode = liuqin_mode_120,
++	.init_sequence = pipa_init_sequence,
++	.reset_sequence = pipa_reset,
++};
++
+ static const struct panel_desc yudi_desc = {
+ 	.dsi_info = {
+ 		.type = "yudi",
+@@ -753,6 +798,10 @@
+ 
+ static const struct of_device_id nt36532_of_match[] = {
+ 	{
++		.compatible = "xiaomi,liuqin-nt36532",
++		.data = &liuqin_desc,
++	},
++	{
+ 		.compatible = "xiaomi,pipa-nt36532",
+ 		.data = &pipa_desc,
+ 	},

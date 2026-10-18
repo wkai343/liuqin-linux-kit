@@ -86,6 +86,8 @@ dsp_firmware_dir=${DSP_FIRMWARE_DIR:-"$project_root/inputs/firmware-liuqin/dsp-s
 dsp_firmware_count=68
 dsp_firmware_set_sha256=7f9b43d3815b6592f541e0b870357010488980bc040b925e93bbf12d01282908
 slot_success_source="$project_root/device/boot/liuqin-mark-slot-successful.c"
+storage_seal_source="$project_root/device/boot/liuqin-storage-seal.c"
+storage_ready_source="$project_root/device/boot/liuqin-storage-ready.c"
 slot_success_gcc=$(command -v "${SLOT_SUCCESS_GCC:-aarch64-linux-gnu-gcc}" || true)
 charger_mode_source="$project_root/device/charger-mode/liuqin-charger-mode"
 charger_key_source="$project_root/device/charger-mode/liuqin-charger-mode-power-key.c"
@@ -279,6 +281,9 @@ if [ -n "$rootfs" ] && [ ! -r "$rootfs" ]; then
 fi
 
 # Authenticate the selected kernel contract before building a persistent image.
+[ -r "$storage_seal_source" ] && [ -r "$storage_ready_source" ] && [ -x "$slot_success_gcc" ] || {
+    echo 'error: storage seal source/toolchain is unavailable' >&2; exit 1;
+}
 if [ "$storage_mode" = persistent ]; then
     [ "$root_profile" = native-updatable ] && [ -n "$native_root_contract" ] || {
         echo 'error: persistent mode requires the current root contract' >&2; exit 1;
@@ -342,6 +347,14 @@ cp "$source_dir/etc/issue" "$staging/etc/issue"
 cp "$source_dir/etc/mdev.conf" "$staging/etc/mdev.conf"
 chmod 0644 "$staging/etc/mdev.conf"
 chmod 0755 "$staging/init" "$staging/bin/busybox"
+"$slot_success_gcc" -static -Os -s -Wall -Wextra -Werror \
+    "$storage_seal_source" "$storage_ready_source" -o "$staging/bin/liuqin-storage-seal"
+chmod 0755 "$staging/bin/liuqin-storage-seal"
+if ! readelf -h "$staging/bin/liuqin-storage-seal" | grep -q 'Machine:.*AArch64' ||
+    readelf -l "$staging/bin/liuqin-storage-seal" | grep -q INTERP; then
+    echo 'error: storage seal helper is not a static AArch64 ELF' >&2
+    exit 1
+fi
 printf '%s\n' "$storage_mode" >"$staging/etc/liuqin-storage-mode"
 chmod 0644 "$staging/etc/liuqin-storage-mode"
 if [ "$root_profile" = native-updatable ]; then

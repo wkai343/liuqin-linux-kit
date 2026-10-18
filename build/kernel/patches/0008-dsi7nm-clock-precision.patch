@@ -1,0 +1,88 @@
+From: Liuqin Linux Kit <build@liuqin.invalid>
+Subject: [PATCH] drm/msm/dsi/phy_7nm: report stable, realizable PLL rates
+
+The 7nm PHY reports a requested rate unchanged from round_rate, while
+recalc_rate derives a lower rate from the 18-bit fractional divider.
+On liuqin this produces repeated clock reconfiguration during panel DCS
+transfers. Pair the DSI host rounding fixes with a realizable PHY rate.
+
+Select the largest divider whose integer-Hz readback does not exceed the
+request, as required by the parent-rate-propagating divider search.
+Include the sub-Hz readback truncation in the inverse calculation so that
+rounding an already representable rate is idempotent. Use the nearest
+coefficient in set_rate to recover that divider without losing one step
+on each restore. Keep rates inside the PHY's supported range.
+
+A nearest-rate prototype violated the divider constraint and failed pixel
+clock setup with -EINVAL; the arithmetic and clock-chain regression tests
+cover that case. This is a Liuqin Linux Kit patch, not an upstream commit.
+The approach follows the review discussion at:
+https://lists.openwall.net/linux-kernel/2025/11/27/655
+
+diff --git a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c
+index 8c98f91a5..f1506c548 100644
+--- a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c
++++ b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c
+@@ -123,17 +123,18 @@ static void dsi_pll_calc_dec_frac(struct dsi_pll_7nm *pll, struct dsi_pll_config
+ 	u32 frac;
+ 	u64 multiplier;
+ 
+ 	pll_freq = pll->vco_current_rate;
+ 
+ 	divider = fref * 2;
+ 
+ 	multiplier = 1 << FRAC_BITS;
+-	dec_multiple = div_u64(pll_freq * multiplier, divider);
++	/* Match round_rate and recover the same fractional divider on restore. */
++	dec_multiple = DIV_ROUND_CLOSEST_ULL(pll_freq * multiplier, divider);
+ 	dec = div_u64_rem(dec_multiple, multiplier, &frac);
+ 
+ 	if (pll->phy->cfg->quirks & DSI_PHY_7NM_QUIRK_PRE_V4_1) {
+ 		config->pll_clock_inverters = 0x28;
+ 	} else if ((pll->phy->cfg->quirks & DSI_PHY_7NM_QUIRK_V7_0)) {
+ 		if (pll_freq < 163000000ULL)
+ 			config->pll_clock_inverters = 0xa0;
+ 		else if (pll_freq < 175000000ULL)
+@@ -560,23 +561,36 @@ static unsigned long dsi_pll_7nm_vco_recalc_rate(struct clk_hw *hw,
+ 
+ 	return (unsigned long)vco_rate;
+ }
+ 
+ static long dsi_pll_7nm_clk_round_rate(struct clk_hw *hw,
+ 		unsigned long rate, unsigned long *parent_rate)
+ {
+ 	struct dsi_pll_7nm *pll_7nm = to_pll_7nm(hw);
++	u64 ref = VCO_REF_CLK_RATE * 2ULL;
++	u64 multiplier = 1ULL << FRAC_BITS;
++	u64 min_div, max_div, divider;
++
++	/* Report the rate represented by the hardware's 18-bit fraction. */
++	min_div = DIV_ROUND_UP_ULL((u64)pll_7nm->phy->cfg->min_pll_rate *
++				 multiplier, ref);
++	max_div = div64_u64((u64)pll_7nm->phy->cfg->max_pll_rate *
++			   multiplier, ref);
++	rate = clamp(rate, pll_7nm->phy->cfg->min_pll_rate,
++		     pll_7nm->phy->cfg->max_pll_rate);
++	/*
++	 * Parent-rate-propagating dividers require a rate no higher than the
++	 * request. Include recalc_rate's sub-Hz truncation in this inverse,
++	 * so rounding an already representable integer-Hz rate is stable.
++	 */
++	divider = div64_u64(((u64)rate + 1) * multiplier - 1, ref);
++	divider = clamp(divider, min_div, max_div);
+ 
+-	if      (rate < pll_7nm->phy->cfg->min_pll_rate)
+-		return  pll_7nm->phy->cfg->min_pll_rate;
+-	else if (rate > pll_7nm->phy->cfg->max_pll_rate)
+-		return  pll_7nm->phy->cfg->max_pll_rate;
+-	else
+-		return rate;
++	return div64_u64(divider * ref, multiplier);
+ }
+ 
+ static const struct clk_ops clk_ops_dsi_pll_7nm_vco = {
+ 	.round_rate = dsi_pll_7nm_clk_round_rate,
+ 	.set_rate = dsi_pll_7nm_vco_set_rate,
+ 	.recalc_rate = dsi_pll_7nm_vco_recalc_rate,
+ 	.prepare = dsi_pll_7nm_vco_prepare,
+ 	.unprepare = dsi_pll_7nm_vco_unprepare,

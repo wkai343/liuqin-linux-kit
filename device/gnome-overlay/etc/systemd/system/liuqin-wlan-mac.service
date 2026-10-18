@@ -6,8 +6,10 @@ Documentation=file:///usr/local/sbin/liuqin-wlan-mac
 # private secret fails networking closed rather than silently falling back to
 # a shared test identity.
 Before=NetworkManager.service network-pre.target
-After=systemd-udev-settle.service
-Wants=systemd-udev-settle.service
+# Wait for coldplug to be submitted, then let the helper wait only for the
+# QCA6490 netdev's udev initialization (including its final interface name).
+# A global settle also blocks sysinit.target on unrelated device events.
+After=systemd-udev-trigger.service
 
 [Service]
 Type=oneshot

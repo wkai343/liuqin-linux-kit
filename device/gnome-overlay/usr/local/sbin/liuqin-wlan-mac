@@ -9,11 +9,13 @@ set -eu
 state=${LIUQIN_WLAN_MAC_STATE:-/var/lib/liuqin-private/wlan-mac}
 sys_class_net=${LIUQIN_SYS_CLASS_NET:-/sys/class/net}
 ip=${LIUQIN_IP:-/usr/sbin/ip}
+udevadm=${LIUQIN_UDEVADM:-/usr/bin/udevadm}
 wait_seconds=${LIUQIN_WLAN_MAC_WAIT_SECONDS:-30}
 
 die() { printf '%s\n' "liuqin-wlan-mac: $*" >&2; exit 1; }
 
 [ -x "$ip" ] || die 'ip is unavailable'
+[ -x "$udevadm" ] || die 'udevadm is unavailable'
 case $wait_seconds in ''|*[!0-9]*) die 'invalid wait limit';; esac
 
 # A symlink lets an attacker swap the object after metadata inspection.  The
@@ -46,6 +48,10 @@ find_wlan()
 		[ -e "$node/device/vendor" ] && [ -e "$node/device/device" ] || continue
 		[ "$(cat "$node/device/vendor" 2>/dev/null || :)" = 0x17cb ] || continue
 		[ "$(cat "$node/device/device" 2>/dev/null || :)" = 0x1103 ] || continue
+		# A netdev can exist before udev finishes renaming it. Query only this
+		# device, without waiting for unrelated events or extending each retry
+		# by another timeout. A rename during the query is retried by the scan.
+		"$udevadm" wait --timeout=0 --initialized=yes "$node" >/dev/null 2>&1 || continue
 		basename "$node"
 		return 0
 	done
