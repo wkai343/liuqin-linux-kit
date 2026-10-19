@@ -25,14 +25,14 @@ class SelinuxTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)
         self.root = self.base/'root'
-        for name in ('usr/sbin/setfiles', 'usr/sbin/matchpathcon', 'usr/bin/xargs',
+        for name in ('usr/sbin/setfiles', 'usr/sbin/matchpathcon',
                      'etc/selinux/targeted/contexts/files/file_contexts',
                      'etc/selinux/targeted/policy/policy.35'):
             path = self.root/name; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'fixture')
 
     def lookup(self, command, **kwargs):
-        if '/usr/bin/xargs' in command:
-            count = kwargs['input'].count(b'\0')
+        if '/usr/sbin/matchpathcon' in command:
+            count = len(command) - 7
             return subprocess.CompletedProcess(command, 0, stdout=b'system_u:object_r:fixture_t:s0\n'*count)
         return subprocess.CompletedProcess(command, 0)
 
@@ -48,6 +48,9 @@ class SelinuxTests(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
         self.assertIn('usr/sbin/matchpathcon', labels)
         self.assertEqual(labels['.'], 'system_u:object_r:fixture_t:s0')
+        self.assertFalse((self.root/'dev/null').exists())
+        self.assertFalse((self.root/'usr/bin/xargs').exists())
+        self.assertEqual(run.call_args.kwargs['stdin'], subprocess.DEVNULL)
 
     def test_policy_selection_is_numeric(self):
         (self.root/'etc/selinux/targeted/policy/policy.9').write_bytes(b'older')
@@ -56,13 +59,40 @@ class SelinuxTests(unittest.TestCase):
             packer.label_selinux_root(self.root)
         self.assertIn('/etc/selinux/targeted/policy/policy.35', run.call_args_list[0].args[0])
 
-    def test_filename_newlines_and_spaces_use_nul_input_and_label_only_output(self):
+    def test_filename_newlines_and_spaces_remain_one_argument(self):
         name = 'space and\nnewline'; (self.root/name).write_bytes(b'fixture')
         with patch.object(source_build, 'arm64_execution', contextlib.nullcontext), \
              patch.object(packer.subprocess, 'run', side_effect=self.lookup) as run:
             labels = packer.label_selinux_root(self.root)
-        self.assertIn(os.fsencode('/'+name)+b'\0', run.call_args.kwargs['input'])
+        self.assertIn('/'+name, run.call_args.args[0])
+        self.assertNotIn('input', run.call_args.kwargs)
         self.assertIn(name, labels)
+
+    def test_large_unicode_path_list_is_batched_without_losing_labels(self):
+        names = ['中'*50 + str(i) for i in range(450)]
+        for name in names:
+            (self.root/name).touch()
+        with patch.object(source_build, 'arm64_execution', contextlib.nullcontext), \
+             patch.object(packer.subprocess, 'run', side_effect=self.lookup) as run:
+            labels = packer.label_selinux_root(self.root)
+        queries = [call.args[0] for call in run.call_args_list if '/usr/sbin/matchpathcon' in call.args[0]]
+        self.assertGreater(len(queries), 1)
+        self.assertTrue(set(names) <= labels.keys())
+        self.assertEqual(sum(len(cmd)-7 for cmd in queries), len(labels))
+        for cmd in queries:
+            self.assertLessEqual(sum(len(os.fsencode(p))+17 for p in cmd[7:]), 65536)
+
+    def test_oversized_environment_stops_before_context_query(self):
+        with patch.object(packer.os, 'sysconf', return_value=8192), \
+             self.assertRaisesRegex(ValueError, '命令行容量'):
+            list(packer.selinux_path_batches(['/']))
+
+    def test_failed_lookup_batch_does_not_return_partial_labels(self):
+        failure = subprocess.CalledProcessError(1, ['matchpathcon'])
+        with patch.object(source_build, 'arm64_execution', contextlib.nullcontext), \
+             patch.object(packer.subprocess, 'run', side_effect=[subprocess.CompletedProcess([], 0), failure]), \
+             self.assertRaises(subprocess.CalledProcessError):
+            packer.label_selinux_root(self.root)
 
     def test_incomplete_lookup_output_is_rejected(self):
         with patch.object(source_build, 'arm64_execution', contextlib.nullcontext), \

@@ -23,7 +23,7 @@ BOARD_INPUTS = ('FIRMWARE_POOL', 'AUDIO_TOPOLOGY', 'WLAN_HSP2_TUPLE',
                 'STOCK_OVERLAY_DIR', 'STOCK_BASE_DIR', 'BUSYBOX', 'MKBOOTIMG_DIR')
 DEFAULTS = {
     **USB_DEFAULTS,
-    'kernel_source': 'sources/linux-sm8450-liuqin',
+    'kernel_source': 'sources/linux-liuqin-7.3',
     'root_source': 'out/build/root-custom-work',
     'kernel_fragments': ['build/kernel/configs/custom-zram.config'],
     'kernel_localversion': '-liuqin-custom',
@@ -36,7 +36,7 @@ DEFAULTS = {
     'image_work': 'out/build/devbox/images',
     'bundle_out': 'out/releases/devbox',
     'kernel_debs_out': 'out/releases/kernel-debs',
-    'package_version': '0.1.0',
+    'package_version': '0.3.1',
     # The installer keeps its own source/configuration and output defaults.
     'installer_kernel_source': 'sources/linux-sm8450-liuqin',
     'installer_kernel_out': 'out/build/devbox/installer-kernel',
@@ -122,6 +122,9 @@ def config(path, *, read_inputs=True):
         # Accept the built-in path from older local configurations after relocation.
         data[key] = ['build/kernel/configs/custom-zram.config' if value == 'kernel/configs/custom-zram.config'
                      else value for value in data[key]]
+    if data.get('kernel_source_lock') is not None and (
+            not isinstance(data['kernel_source_lock'],str) or not data['kernel_source_lock']):
+        raise RuntimeError('kernel_source_lock 必须是内核来源记录的路径。')
     return data
 
 
@@ -171,10 +174,11 @@ def stage(data, action, configure_only=False):
     path = lambda key: str(resolve(data[key]))
     python = shutil.which('python3')
     if action in ('kernel', 'installer-kernel'):
-        from source_flow import kernel_fragments
+        from source_flow import kernel_fragments, kernel_source_record
         prefix = 'installer_' if action == 'installer-kernel' else ''
         command = [python, 'build/scripts/build-liuqin-kernel.py', '--custom', '--source', path(prefix + 'kernel_source'),
                    '--out', path(prefix + 'kernel_out'), '--jobs', str(data.get('jobs', 12))]
+        command += ['--source-lock', str(resolve(kernel_source_record(data, action=='installer-kernel')))]
         if data.get(prefix + 'kernel_config'):
             command += ['--config', str(resolve(data[prefix + 'kernel_config']))]
         for fragment in kernel_fragments(data, action == 'installer-kernel'):

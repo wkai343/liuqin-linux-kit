@@ -6,7 +6,8 @@
 
 Fedora 44 / Plasma 已集成 FPC1264 专用识别栈，支持首个本地 UID 1000 账号的一枚指纹。
 在 256GB 开发设备上，KDE 设置录入、已录手指通过、未录手指拒绝、锁屏解锁及正常重启后验证已通过。
-正式内核 `6.17.0-rc1-liuqin-fedora-g58d0eaecf94e` 的 A 槽引导已固定并回读校验，SELinux 保持 Enforcing。
+默认 Linux 7.3 已复测录入、两种手指验证、睡眠唤醒及重启后的锁屏解锁，SELinux 保持 Enforcing；
+范围与限制见 [7.3 验证记录](KERNEL-7.3.md)。
 
 开机的 Plasma Login 仍使用密码；锁屏指纹验证不等于开机指纹登录已经支持。
 休眠恢复、长期可靠性、多用户、多指及 Android 往返共存未完成验收。

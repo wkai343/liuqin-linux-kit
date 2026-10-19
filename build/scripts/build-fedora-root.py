@@ -227,6 +227,20 @@ def desktop_dnf(root, data, *args):
     return dnf(root,*args,weak_deps=True,weak_excludes=data.get('remove',[]))
 
 
+def install_kernel_packages(root, packages):
+    # Cached desktops may predate new boot-tool dependencies (e.g. zstandard).
+    # Keep the offline RPM path when the entire transaction is satisfiable;
+    # otherwise let DNF resolve the local packages' declared dependencies.
+    try:
+        chroot(root,['rpm','-Uvh','--replacepkgs','--test',*packages],
+               capture_output=True,text=True)
+    except subprocess.CalledProcessError:
+        print('内核包预检未通过，使用 DNF 解析并补齐所需依赖……',flush=True)
+        dnf(root,'install',*packages)
+    else:
+        chroot(root,['rpm','-Uvh','--replacepkgs',*packages])
+
+
 def install_desktop_packages(root, data):
     desktop_dnf(root,data,'install',*DEVICE_PACKAGES,*PLASMA_PACKAGES,*data.get('packages',[]),
         *(FIRST_BOOT_PACKAGES if data['first_boot_setup'] else []))
@@ -424,10 +438,7 @@ def main():
             for file in sorted(args.rpms.glob('*.rpm')):shutil.copyfile(file,staging/file.name)
             packages=['/tmp/liuqin-packages/'+p.name for p in sorted(staging.glob('*.rpm'))]
             if args.action=='kernel-files':
-                # The runtime already contains kmod and Python. Install only
-                # the audited local kernel payloads, retaining dependency and
-                # transaction checks without refreshing online repositories.
-                chroot(root,['rpm','-Uvh','--replacepkgs',*packages])
+                install_kernel_packages(root,packages)
             else:
                 desktop_dnf(root,data,'install',*packages)
             shutil.rmtree(staging)

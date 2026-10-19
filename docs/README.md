@@ -9,6 +9,7 @@
 | 设备要求、分区布局和 Android 恢复准备 | [安装指南](FLASHING.md) |
 | CLI 安装与验收 | [安装步骤与验收](INSTALL-TESTING.md) |
 | 更新或回退内核 | [内核更新与恢复](KERNEL-UPDATES.md) |
+| 默认 Linux 7.3 的适配与验证范围 | [7.3 内核说明](KERNEL-7.3.md) |
 | 了解设备支持范围 | [硬件说明](HARDWARE.md) |
 | 调整亮度、CABC 或查看显示恢复日志 | [显示与画质](DISPLAY.md) |
 | 继续未完成的适配与验证 | [待改进与验证](DEVELOPMENT-STATUS.md) |

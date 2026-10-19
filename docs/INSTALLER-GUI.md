@@ -17,7 +17,9 @@ Linux 主机仍需正常图形会话及 Qt 系统运行库，GUI 以普通用户
 
 在界面选择镜像目录，或添加 `--bundle /path/to/images`。
 目录只需要 `installer.img`、`boot.img`、`rootfs.tar.gz`；可选 `bundle.json` 仅用于验收说明。
-程序读取实际镜像接口，核对 boot 与 rootfs 中的内核/模块身份，不要求目标内核与安装内核相同。
+`installer.img` 是平板临时运行的安装环境，`boot.img` 与 `rootfs.tar.gz` 是安装后的目标系统。
+当前默认由运行 6.17 的安装环境安装 7.3 系统。程序核对目标 boot 与 rootfs 中的内核/模块身份，
+安装环境自身的内核版本可以不同。
 自定义或尚未验收的包需在确认页接受其测试状态。
 
 ## 安装步骤

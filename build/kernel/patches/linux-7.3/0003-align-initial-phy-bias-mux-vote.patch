@@ -1,0 +1,41 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] Make the initial PHY bias vote program the system mux
+
+Linux 7.3 adds a reference count for 7 nm PHY PLL bias access. The PHY enable
+path starts with a vote and sets PLL_SHUTDOWNB directly. Subsequent prepare and
+rate-query votes therefore skip the helper's first-vote hardware programming,
+leaving PLL_SYSTEM_MUXES at zero after probe-time reads. On this Liuqin trial
+both display links had the expected pixel/byte rates, frame CRCs changed for
+linear colour/black patterns, and the panel answered GET_POWER_MODE with 0x9e,
+but the display stayed blank. The PLL mux read zero instead of the working
+6.17 value 0xc0.
+
+Program the same system mux value when establishing the initial vote, and
+clear it when the PHY's final shutdown clears all votes. Keep reference
+counting, frequencies, lane timings, and panel commands unchanged. Source
+regression tests exercise nested prepare/rate-query votes and repeated power
+cycles, including negative controls from the failing source.
+
+This is a candidate fix; hardware validation remains pending.
+
+diff --git a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c
+index 301dc86238a..c0b84e222aa 100644
+--- a/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c
++++ b/drivers/gpu/drm/msm/dsi/phy/dsi_phy_7nm.c
+@@ -1249,6 +1249,8 @@ static int dsi_7nm_phy_enable(struct msm_dsi_phy *phy,
+ 	data = DSI_7nm_PHY_CMN_CTRL_0_DIGTOP_PWRDN_B |
+ 	       DSI_7nm_PHY_CMN_CTRL_0_PLL_SHUTDOWNB;
+ 	writel(data, base + REG_DSI_7nm_PHY_CMN_CTRL_0);
++	/* The initial bias vote must program the same mux as later votes. */
++	writel(0xc0, phy->pll_base + REG_DSI_7nm_PHY_PLL_SYSTEM_MUXES);
+ 	spin_unlock_irqrestore(&pll->pll_enable_lock, flags);
+ 
+ 	/* Assert PLL core reset */
+@@ -1394,6 +1396,7 @@ static void dsi_7nm_phy_disable(struct msm_dsi_phy *phy)
+ 	spin_lock_irqsave(&pll->pll_enable_lock, flags);
+ 	pll->pll_enable_cnt = 0;
+ 	/* Turn off all PHY blocks */
++	writel(0, phy->pll_base + REG_DSI_7nm_PHY_PLL_SYSTEM_MUXES);
+ 	writel(0x00, base + REG_DSI_7nm_PHY_CMN_CTRL_0);
+ 	spin_unlock_irqrestore(&pll->pll_enable_lock, flags);
+ 

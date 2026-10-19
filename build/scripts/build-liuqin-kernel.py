@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Build the kernel revision selected by build/kernel/source.json."""
+"""Build the kernel revision selected by a pinned source record."""
 
 import argparse
 import fcntl
@@ -25,6 +25,8 @@ def main():
     project = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, default=project.parent / 'linux-sm8450-liuqin')
+    parser.add_argument('--source-lock', type=Path, default=project / 'build/kernel/source.json',
+                        help='Kernel source/configuration record; defaults to the product baseline')
     parser.add_argument('--out', type=Path, default=project / 'out/build/kernel')
     parser.add_argument('--jobs', type=int, default=min(os.cpu_count() or 1, 12))
     parser.add_argument('--configure-only', action='store_true')
@@ -41,7 +43,7 @@ def main():
     if args.localversion and not re.fullmatch(r'-[A-Za-z0-9._+-]+', args.localversion):
         parser.error('--localversion must start with - and contain safe release characters')
     source, out = args.source.resolve(), args.out.resolve()
-    lock = json.loads((project / 'build/kernel/source.json').read_text())
+    lock = json.loads(args.source_lock.read_text())
     pinned_commit = lock['commit']
     if args.custom:
         lock['commit'] = output('git', '-C', str(source), 'rev-parse', 'HEAD')
@@ -52,7 +54,7 @@ def main():
     if out == source or source in out.parents:
         parser.error('--out must be outside the kernel source tree')
     if output('git', '-C', str(source), 'rev-parse', 'HEAD') != lock['commit']:
-        parser.error('kernel source does not match build/kernel/source.json')
+        parser.error('kernel source does not match the selected source record')
     if output('git', '-C', str(source), 'status', '--porcelain', '--untracked-files=normal'):
         parser.error('kernel source must be clean')
     cross = os.environ.get('CROSS_COMPILE', 'aarch64-linux-gnu-')
@@ -66,6 +68,7 @@ def main():
     fragments += [path.resolve() for path in args.config_fragment]
     identity = {
         'source': str(source), 'commit': lock['commit'],
+        'source_lock_sha256': digest(args.source_lock),
         'upstream_base': lock['upstream_base'],
         'config_sha256': None if args.custom else lock['config_sha256'],
         'custom': args.custom, 'localversion': args.localversion,
@@ -116,7 +119,7 @@ def main():
         subprocess.run(make + ['olddefconfig'], env=env, check=True)
         config_sha256 = digest(out / '.config')
         if not args.custom and config_sha256 != lock['config_sha256']:
-            parser.error('generated configuration differs from build/kernel/source.json')
+            parser.error('generated configuration differs from the selected source record')
         if args.configure_only:
             print('Configuration verified; no Image or modules built.')
             return

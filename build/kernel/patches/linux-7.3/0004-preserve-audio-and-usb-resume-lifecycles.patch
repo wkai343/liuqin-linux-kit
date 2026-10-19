@@ -1,0 +1,88 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] Preserve the speaker format and USB PHY ownership on 7.3
+
+Restrict the Liuqin speaker backend to its existing 48 kHz, four-channel,
+24-bit wire format. The migrated fixup first added S16_LE, then added S24_LE
+without clearing the format mask; negotiation could select S16_LE, which the
+existing board-specific TDM media-format guard correctly rejects.
+
+Restore USB SW_PWRDN on every USB power-on, including when a DP reference
+keeps the common block initialized across USB exit/init. Leave shared pipe
+clock release to the common owner, and quiesce only the USB block on a failed
+power-on. This avoids both the retained power-down bit and double clock
+release seen during the connected-USB sleep trial.
+
+Explicitly request WQ_PERCPU for the Novatek ESD worker, preserving the prior
+implicit mode under the newer workqueue API. Firmware, voltage tables,
+calibration, and display policies remain unchanged. Source tests reproduce
+the audio and USB defects and cover the corrected constraints and lifetimes;
+hardware acceptance is still pending.
+
+diff --git a/drivers/input/touchscreen/nt36523/nt36xxx.c b/drivers/input/touchscreen/nt36523/nt36xxx.c
+index e87685ea1a3..54f1fc709a6 100644
+--- a/drivers/input/touchscreen/nt36523/nt36xxx.c
++++ b/drivers/input/touchscreen/nt36523/nt36xxx.c
+@@ -1765,7 +1765,8 @@ static int32_t nvt_ts_probe(struct spi_device *client)
+ 	NVT_LOG("NVT_TOUCH_ESD_PROTECT is %d\n", NVT_TOUCH_ESD_PROTECT);
+ #if NVT_TOUCH_ESD_PROTECT
+ 	INIT_DELAYED_WORK(&nvt_esd_check_work, nvt_esd_check_func);
+-	nvt_esd_check_wq = alloc_workqueue("nvt_esd_check_wq", WQ_MEM_RECLAIM, 1);
++	nvt_esd_check_wq = alloc_workqueue("nvt_esd_check_wq",
++					 WQ_MEM_RECLAIM | WQ_PERCPU, 1);
+ 	if (!nvt_esd_check_wq) {
+ 		NVT_ERR("nvt_esd_check_wq create workqueue failed\n");
+ 		ret = -ENOMEM;
+diff --git a/drivers/phy/qualcomm/phy-qcom-qmp-combo.c b/drivers/phy/qualcomm/phy-qcom-qmp-combo.c
+index e54d56f185d..8a084d7b92d 100644
+--- a/drivers/phy/qualcomm/phy-qcom-qmp-combo.c
++++ b/drivers/phy/qualcomm/phy-qcom-qmp-combo.c
+@@ -4438,6 +4438,8 @@ static int qmp_combo_dp_power_off(struct phy *phy)
+ 	return 0;
+ }
+ 
++static int qmp_combo_usb_power_off(struct phy *phy);
++
+ static int qmp_combo_usb_power_on(struct phy *phy)
+ {
+ 	struct qmp_combo *qmp = phy_get_drvdata(phy);
+@@ -4453,6 +4455,9 @@ static int qmp_combo_usb_power_on(struct phy *phy)
+ 	unsigned int val;
+ 	int ret;
+ 
++	/* DP can keep COM initialized while USB independently powers down. */
++	qphy_setbits(pcs, cfg->regs[QPHY_PCS_POWER_DOWN_CONTROL], SW_PWRDN);
++
+ 	qmp_configure(qmp->dev, serdes, cfg->serdes_tbl, cfg->serdes_tbl_num);
+ 
+ 	/* Tx, Rx, and PCS configurations */
+@@ -4484,15 +4489,12 @@ static int qmp_combo_usb_power_on(struct phy *phy)
+ 			PHY_INIT_COMPLETE_TIMEOUT);
+ 	if (ret) {
+ 		dev_err(qmp->dev, "phy initialization timed-out\n");
+-		goto err_disable_pipe_clk;
++		/* COM owns the shared pipe clock; unwind only the USB block. */
++		qmp_combo_usb_power_off(phy);
++		return ret;
+ 	}
+ 
+ 	return 0;
+-
+-err_disable_pipe_clk:
+-	clk_disable_unprepare(qmp->pipe_clk);
+-
+-	return ret;
+ }
+ 
+ static int qmp_combo_usb_power_off(struct phy *phy)
+diff --git a/sound/soc/qcom/sc8280xp.c b/sound/soc/qcom/sc8280xp.c
+index eacdba10186..5441459ad61 100644
+--- a/sound/soc/qcom/sc8280xp.c
++++ b/sound/soc/qcom/sc8280xp.c
+@@ -249,6 +249,7 @@ static int sc8280xp_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
+ 	if (!strcmp(rtd->card->name, "Xiaomi-Pad-6-Pro") &&
+ 	    cpu_dai->id == TERTIARY_TDM_RX_0) {
+ 		channels->min = channels->max = 4;
++		snd_mask_none(fmt);
+ 		snd_mask_set_format(fmt, SNDRV_PCM_FORMAT_S24_LE);
+ 		return 0;
+ 	}

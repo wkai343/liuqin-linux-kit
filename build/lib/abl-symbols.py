@@ -36,7 +36,11 @@ def decode(dtc, dtb_path):
 
 def extract_block(text, node_name):
     """Return the body of a top-level node, or None when it is absent."""
-    marker = re.search(rf"^\s*{re.escape(node_name)}\s*\{{\s*$", text, re.MULTILINE)
+    # Newer dtc restores labels from __symbols__ when decoding a blob. The
+    # inert sink can therefore have thousands of labels on its node header.
+    labels = r"(?:[A-Za-z_][A-Za-z0-9_]*:[ \t]*)*"
+    marker = re.search(rf"^[ \t]*{labels}{re.escape(node_name)}[ \t]*\{{[ \t]*$",
+                       text, re.MULTILINE)
     if marker is None:
         return None
     start = marker.end()

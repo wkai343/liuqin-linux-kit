@@ -28,13 +28,31 @@ def build_step(label):
     print(f'rootfs：{label}完成，耗时 {time.monotonic() - started:.1f} 秒。', flush=True)
 
 
+def selinux_path_batches(paths):
+    # Leave space for the inherited environment, fixed arguments and pointers.
+    environment_bytes = sum(len(os.fsencode(k + '=' + v)) + 17 for k, v in os.environ.items())
+    budget = min(65536, os.sysconf('SC_ARG_MAX') - environment_bytes - 8192)
+    batch, size = [], 0
+    for path in paths:
+        cost = len(os.fsencode(path)) + 17
+        if cost > budget:
+            raise ValueError('SELinux 查询路径或构建环境超过命令行容量。')
+        if batch and size + cost > budget:
+            yield batch
+            batch, size = [], 0
+        batch.append(path)
+        size += cost
+    if batch:
+        yield batch
+
+
 def label_selinux_root(root):
     """Validate and look up target labels without setting host filesystem xattrs."""
     root = Path(root).resolve()
     if root == Path('/'):
         raise ValueError('不能对主机根目录执行镜像标记。')
     contexts = root / 'etc/selinux/targeted/contexts/files/file_contexts'
-    for path in (contexts, root/'usr/sbin/setfiles', root/'usr/sbin/matchpathcon', root/'usr/bin/xargs'):
+    for path in (contexts, root/'usr/sbin/setfiles', root/'usr/sbin/matchpathcon'):
         if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(root):
             raise ValueError('Fedora SELinux 标记组件缺失或越界：' + str(path))
     policies = []
@@ -64,18 +82,24 @@ def label_selinux_root(root):
         paths.extend((Path(directory)/name).relative_to(root) for name in sorted(dirs + files))
     # Validate every matching context against the compiled target policy.
     # -n is essential: the host kernel need not know target-only types.
-    # xargs uses NUL-delimited paths, and -n on matchpathcon emits only labels,
-    # so whitespace/newlines in filenames cannot corrupt the association.
+    # Pass each path as an argv item, preserving whitespace/newlines. The image
+    # has no mounted /dev here, so do not use xargs: it opens /dev/null inside
+    # the chroot for every child. DEVNULL below is opened by the host instead.
+    values = []
     with arm64_execution():
         subprocess.run(['chroot', str(root), '/usr/sbin/setfiles', '-n', '-F', '-m',
                         '-c', '/' + policy.relative_to(root).as_posix(),
-                        '/' + contexts.relative_to(root).as_posix(), '/'], check=True)
-        result = subprocess.run(['chroot', str(root), '/usr/bin/xargs', '-0', '-r',
-                                 '/usr/sbin/matchpathcon', '-N', '-n', '-f',
-                                 '/' + contexts.relative_to(root).as_posix()],
-                                input=b''.join(os.fsencode('/' if p == Path('.') else '/'+p.as_posix()) + b'\0'
-                                               for p in paths), stdout=subprocess.PIPE, check=True)
-    values = result.stdout.decode('ascii').splitlines()
+                        '/' + contexts.relative_to(root).as_posix(), '/'],
+                       stdin=subprocess.DEVNULL, check=True)
+        names = ('/' if p == Path('.') else '/' + p.as_posix() for p in paths)
+        for batch in selinux_path_batches(names):
+            result = subprocess.run(['chroot', str(root), '/usr/sbin/matchpathcon', '-N', '-n', '-f',
+                                     '/' + contexts.relative_to(root).as_posix(), *batch],
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, check=True)
+            batch_values = result.stdout.decode('ascii').splitlines()
+            if len(batch_values) != len(batch):
+                raise ValueError('SELinux 目标标签数量与本批路径不一致。')
+            values.extend(batch_values)
     if len(values) != len(paths):
         raise ValueError('SELinux 目标标签数量与根目录条目不一致。')
     labels = {}

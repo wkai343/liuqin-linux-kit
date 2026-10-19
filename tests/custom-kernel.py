@@ -61,6 +61,17 @@ class KernelTests(unittest.TestCase):
         self.assertFalse(any('defconfig' in command for command in self.calls))
         self.assertTrue(any('Image' in command for command in self.calls))
 
+    def test_explicit_source_record_supplies_its_own_fragments_and_identity(self):
+        record=json.loads((project/'build/kernel/source.json').read_text())
+        record.update(commit=self.commit,upstream_base='2'*40,config_fragments=[str(self.config)])
+        lock=self.root/'source.json';lock.write_text(json.dumps(record))
+        self.invoke('--custom','--source-lock',str(lock),'--configure-only')
+        merge=next(command for command in self.calls if any(str(x).endswith('merge_config.sh') for x in command))
+        self.assertIn(str(self.config),merge)
+        identity=json.loads((self.out/'build-inputs.json').read_text())
+        self.assertEqual(identity['upstream_base'],'2'*40)
+        self.assertEqual(identity['source_lock_sha256'],hashlib.sha256(lock.read_bytes()).hexdigest())
+
     def test_locked_build_still_rejects_unlocked_source(self):
         with self.assertRaises(SystemExit): self.invoke('--configure-only')
         self.assertFalse(self.calls)

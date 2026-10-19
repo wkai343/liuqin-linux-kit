@@ -1,0 +1,64 @@
+From 0327d4547d7a6a2b95241c0166bf6c7b882d6964 Mon Sep 17 00:00:00 2001
+From: wk <58632380+wkai343@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 21:54:38 +0800
+Subject: [PATCH] Preserve DP probe ownership and failure state on Linux 7.3
+
+---
+ drivers/gpu/drm/msm/dp/dp_display.c       | 16 +++++++++++-----
+ drivers/phy/qualcomm/phy-qcom-qmp-combo.c |  2 +-
+ 2 files changed, 12 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/gpu/drm/msm/dp/dp_display.c b/drivers/gpu/drm/msm/dp/dp_display.c
+index 50f0baf9654..fbdcc3f91f3 100644
+--- a/drivers/gpu/drm/msm/dp/dp_display.c
++++ b/drivers/gpu/drm/msm/dp/dp_display.c
+@@ -910,7 +910,7 @@ enum drm_connector_status msm_dp_bridge_detect(struct drm_bridge *bridge,
+ 	struct msm_dp_display_private *priv;
+ 	u8 dpcd[DP_RECEIVER_CAP_SIZE];
+ 	struct drm_dp_desc desc;
+-	bool phy_deinit;
++	bool phy_deinit = false;
+ 	int ret;
+ 
+ 	dp = to_dp_bridge(bridge)->msm_dp_display;
+@@ -924,10 +924,6 @@ enum drm_connector_status msm_dp_bridge_detect(struct drm_bridge *bridge,
+ 		return status;
+ 	}
+ 
+-	phy_deinit = msm_dp_display_host_phy_init(priv);
+-
+-	msm_dp_aux_enable_xfers(priv->aux, true);
+-
+ 	ret = msm_dp_aux_is_link_connected(priv->aux);
+ 	DRM_DEBUG_DP("aux link status: %x\n", ret);
+ 	if (!priv->plugged && !ret) {
+@@ -936,6 +932,16 @@ enum drm_connector_status msm_dp_bridge_detect(struct drm_bridge *bridge,
+ 		goto end;
+ 	}
+ 
++	/* HPD can be read before powering the PHY or issuing AUX requests. */
++	phy_deinit = !priv->phy_initialized;
++	ret = msm_dp_display_host_phy_init(priv);
++	if (ret) {
++		priv->plugged = false;
++		goto end;
++	}
++
++	msm_dp_aux_enable_xfers(priv->aux, true);
++
+ 	ret = drm_dp_read_dpcd_caps(priv->aux, dpcd);
+ 	if (ret) {
+ 		DRM_DEBUG_DP("failed to read caps\n");
+diff --git a/drivers/phy/qualcomm/phy-qcom-qmp-combo.c b/drivers/phy/qualcomm/phy-qcom-qmp-combo.c
+index 8a084d7b92d..7898aa26d1d 100644
+--- a/drivers/phy/qualcomm/phy-qcom-qmp-combo.c
++++ b/drivers/phy/qualcomm/phy-qcom-qmp-combo.c
+@@ -4403,7 +4403,7 @@ static int qmp_combo_dp_power_on(struct phy *phy)
+ 	if (serdes_ret || cfg_ret)
+ 		writel(DP_PHY_PD_CTL_PSR_PWRDN, qmp->dp_dp_phy + QSERDES_DP_PHY_PD_CTL);
+ 
+-	qmp->dp_powered_on = true;
++	qmp->dp_powered_on = !serdes_ret && !cfg_ret;
+ 
+ 	mutex_unlock(&qmp->phy_mutex);
+ 

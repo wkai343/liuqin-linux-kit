@@ -16,6 +16,13 @@ Liuqin Linux Kit 衍生自 **yzddmr6** 的[xiaomipad-6pro-mainline](https://gith
 - 本项目使用的确切来源与提交记录在 `build/kernel/source.json`。
 - 文件中的 SPDX、Copyright、作者说明及补丁来源继续有效。
 
+默认 Linux 7.3 基于 Torvalds 主线 `v7.3`，来源锁见 `build/kernel/source.json`；旧版来源保留在 `source-6.17.json`。
+Iris SM8450 平台适配参考 [Seeker0472/liuqin-nixos](https://github.com/Seeker0472/liuqin-nixos/tree/73e8071e09880aeb47f0a427b9a65b8cc10927c4)
+的 `0006-liuqin-media-iris.patch`，按新版固件描述接口调整；原文件中的 Qualcomm、Linaro 等作者与许可保留。
+Caps Lock 指示灯的原厂管理命令参考同一提交的 `0002-liuqin-input-hid-touchscreen.patch`
+和 `docs/PORTING-NOTES.md`，结合本项目的连接状态与睡眠生命周期接入。
+其余设备适配由本项目现有内核迁移，未直接替换为该项目的整套补丁。
+
 显示时钟的上游修正保留补丁作者、评审与来源链接；面板命令、PHY、背光和电池接口的
 本机对照使用 OS2.0.6.0.VMYCNXM 原厂资料，版本与镜像校验锁见 `shared/liuqin-rom-images.json`。
 这些适配补丁继续遵循所修改内核文件的许可，不由项目根目录的 MIT 许可替代。

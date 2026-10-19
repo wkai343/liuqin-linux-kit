@@ -14,6 +14,7 @@
 | --- | --- |
 | 设备 | 仅 Xiaomi Pad 6 Pro；256GB 已实测，128GB / 512GB 容量规划通过离线检查 |
 | 系统 | Fedora 44 ARM64 + KDE Plasma，官方 Plasma Setup / Plasma Login；可选 Ubuntu 26.04 Plasma |
+| 内核 | 默认安装 Linux 7.3 + Liuqin 设备适配；`installer.img` 自身临时运行 6.17，支持安装 7.3 系统，见 [内核说明](docs/KERNEL-7.3.md) |
 | 定制 | 内核源码与配置、rootfs 软件增减、系统配置 overlay |
 | 安装 | 单根 ext4 或 Btrfs，使用整个 userdata，`/home` 位于其中，从 A 槽启动 |
 | 安装器 | QML 界面，独立备份、备份复用、方案确认、传输校验与引导回读 |

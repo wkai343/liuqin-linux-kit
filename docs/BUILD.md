@@ -33,27 +33,28 @@ Devbox 提供交叉编译器、QEMU、镜像和打包工具，三个文件共用
 
 ```json
 {
-  "kernel_source": "sources/linux-sm8450-liuqin",
+  "kernel_source": "sources/linux-liuqin-7.3",
   "kernel_fragments": ["build/kernel/configs/custom-zram.config"],
-  "kernel_localversion": "-liuqin-fedora",
+  "kernel_localversion": "-liuqin-fedora-v73",
   "rootfs_config": "build/rootfs/fedora-plasma.json",
   "usb_manufacturer": "Xiaomi",
   "usb_product": "Pad 6 Pro",
   "rom_images": "inputs/roms/liuqin/OS2.0.6.0.VMYCNXM/images",
-  "package_version": "0.1.0"
+  "package_version": "0.3.1"
 }
 ```
 
 | 配置项 | 用途 |
 | --- | --- |
 | `kernel_source` | 目标内核 Git 源码目录；不存在时获取 `build/kernel/source.json` 中的固定提交 |
+| `kernel_source_lock` | 可选，安装到平板的目标内核来源；默认 `build/kernel/source.json`（7.3）。安装环境自身运行的内核由 `source-6.17.json` 独立锁定 |
 | `kernel_fragments` | 叠加的内核配置片段，示例启用 zram |
 | `kernel_localversion` | 自定义内核版本后缀；修改源码或配置时更换，避免同名内核对应不同模块 |
 | `rootfs_config` | Fedora 或 Ubuntu 的 rootfs 配方路径 |
 | `usb_manufacturer`、`usb_product` | USB 显示名称，默认为 `Xiaomi`、`Pad 6 Pro` |
 | `rom_images` | 指定版本原厂 ROM 的 `images` 目录 |
 | `package_version` | 内核升级包版本，每次发布提高 |
-| `kernel_reclaim_mte` | 可选，默认 `false`；回收 512 MiB MTE 预留，见下文 |
+| `kernel_reclaim_mte` | 可选，默认 `false`；清理旧版设备树中的 512 MiB MTE 预留，当前 7.3 无需设置，见下文 |
 
 已有内核源码必须是干净的 Git 提交，修改后先提交再构建。
 切换到 Ubuntu 时，将 `rootfs_config` 改为 `build/rootfs/ubuntu-plasma.json`；其他发行版需要另行适配。
@@ -108,11 +109,12 @@ rootfs.tar.gz
 
 | 文件 | 构建输入 | 何时需要更新 |
 | --- | --- | --- |
-| `installer.img` | 独立安装内核、最小 ARM64 runtime、RAM 安装脚本及板级资料 | 安装能力、安装内核或通道改变时 |
-| `boot.img` | 目标内核、设备树、固件、启动脚本与模块身份 | 目标内核、设备树或启动配置改变时 |
+| `installer.img` | 安装环境的运行内核（默认 6.17）、最小 ARM64 runtime、RAM 安装脚本及板级资料 | 安装能力、安装环境内核或通道改变时 |
+| `boot.img` | 安装后运行的目标内核（默认 7.3）、设备树、固件、启动脚本与模块身份 | 目标内核、设备树或启动配置改变时 |
 | `rootfs.tar.gz` | 官方基础系统、桌面/软件配方、设备包、目标内核包及同版模块 | 用户态改变，或为新安装打包另一版内核时 |
 
-安装环境独立于目标内核和桌面。boot 与 rootfs 中的内核模块仍须配套；
+默认构建中，`installer.img` 临时运行 6.17，负责将 7.3 系统写入平板；安装完成后从目标 `boot.img` 启动。
+安装环境与目标系统的内核版本可以不同，但目标 boot 与 rootfs 中的内核模块必须配套；
 更换目标内核只需重打包最终 rootfs，已完成的桌面装配可以复用。
 已安装系统使用内核升级包，见 [内核更新](KERNEL-UPDATES.md)。
 
@@ -126,7 +128,7 @@ rootfs.tar.gz
 | `devbox run boot` | 目标引导镜像，不装配桌面 |
 | `devbox run kernel-packages` | 按配方生成版本化 RPM/DEB 内核升级包 |
 | `devbox run rootfs` | 装配用户态、设备包与目标内核，生成根归档 |
-| `devbox run build-installer` | 独立安装内核与 RAM 安装镜像 |
+| `devbox run build-installer` | 安装环境自身的运行内核与 RAM 安装镜像 |
 | `devbox run build -- --refresh` | 重新装配 APT/DNF 软件阶段，保留旧缓存 |
 
 各命令自动补齐依赖，结束时打印实际产物路径。
@@ -168,6 +170,9 @@ Fastboot 刷写或设置槽位后的首次启动仍可能走完整等待；正�
 
 ## 4. 自定义内核
 
+默认安装目标为保留现有设备适配的 Linux 7.3；安装环境自身的内核独立配置。
+迁移范围、已知问题和旧版构建方式见 [7.3 内核说明](KERNEL-7.3.md)；不能直接使用未适配的主线源码替换。
+
 通过 `kernel_fragments` 添加配置片段，例如复制 `build/kernel/configs/custom-zram.config` 后修改。
 项目板级配置先应用，自定义片段最后应用；用 `kernel --configure-only` 检查最终结果。
 zram 内核选项只提供能力，容量与算法由 rootfs 的服务配置决定。
@@ -182,11 +187,15 @@ Fedora 图形启动构建使用 `CONFIG_BACKLIGHT_KTZ8866=m`、`CONFIG_FB_SIMPLE
 
 ### 可选：回收 MTE 预留
 
-加入 `"kernel_reclaim_mte": true`，目标 boot 的 DTB 会移除 512 MiB MTE 预留节点。
+当前默认 7.3 设备树已不含这块 512 MiB 预留，**无需设置 `kernel_reclaim_mte`**。
+保留 `true` 也不会额外增加可用内存：节点不存在时，清理过程不改动 DTB，日志显示回收 `0 MiB`。
+
+使用仍含该预留的旧版或自定义设备树时，可加入 `"kernel_reclaim_mte": true`，
+从目标 boot 的 DTB 移除已核对的预留节点。
 该选项不改变 Image、模块或独立 installer；节点地址、大小、属性不符或被引用时构建停止。
 仅改变此项时可以保留内核 release，但仍须提高 `package_version` 并安装同批升级包。
 
-一台 8GB / 256GB、HW16.9.0 设备已通过内存读写、启动、重启及桌面主要功能检查，
+此前在 6.17 上，一台 8GB / 256GB、HW16.9.0 设备已通过内存读写、启动、重启及桌面主要功能检查，
 可管理内存从约 6.3 GiB 增至约 6.8 GiB。其余 116 MiB 由固件排除，保留原节点；
 MPSS 回收试验失败。此结果不覆盖其他批次，因此该选项默认关闭。
 

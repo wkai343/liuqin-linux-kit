@@ -13,7 +13,10 @@ PROJECT = Path(__file__).resolve().parents[1]
 PATCH = PROJECT / 'build/kernel/patches/0033-liuqin-battery-telemetry.patch'
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--baseline', type=Path, required=True)
-parser.add_argument('--source', type=Path)
+sources = parser.add_mutually_exclusive_group()
+sources.add_argument('--source', type=Path)
+sources.add_argument('--rebased-source', type=Path,
+                     help='Exercise a newer kernel getter against the legacy property contract')
 parser.add_argument('--report', type=Path)
 parser.add_argument('--cc', default='cc')
 args = parser.parse_args()
@@ -45,10 +48,21 @@ restored=restored.replace('/* M81 full capacities are uAh; its remaining counter
 restored=restored.replace(function(s,'qcom_battmgr_bat_get_property'),function(old,'qcom_battmgr_bat_get_property'),1)
 assert restored == old, 'Unexpected change outside battery getter'
 
+# A kernel migration may legitimately add generic power-supply properties.
+# Execute the new getter while comparing the pre-existing public properties;
+# firmware transport and the M81 arithmetic still have their strict checks.
+if args.rebased_source:
+ candidate = (args.rebased_source / relative).read_text()
+ assert function(candidate,'qcom_battmgr_sm8475_charge_value') == function(s,'qcom_battmgr_sm8475_charge_value')
+ s = candidate
+
 body=function(s,'qcom_battmgr_bat_get_property');baseline=function(old,'qcom_battmgr_bat_get_property').replace('qcom_battmgr_bat_get_property(','baseline_get_property(',1);helper=function(s,'qcom_battmgr_sm8475_charge_value')
 for name in ['qcom_battmgr_raw_property','qcom_battmgr_bat_sm8350_update','qcom_battmgr_bat_sc8280xp_update','qcom_battmgr_xm_set_value_locked']:
  assert function(s,name)==function(old,name)
-props=sorted(set(re.findall(r'POWER_SUPPLY_PROP_[A-Z_]+',body)));enum='enum power_supply_property {'+','.join(props)+'};\n'
+all_props=sorted(set(re.findall(r'POWER_SUPPLY_PROP_[A-Z_]+',body)))
+props=sorted(set(re.findall(r'POWER_SUPPLY_PROP_[A-Z_]+',baseline))) if args.rebased_source else all_props
+assert set(props)<=set(all_props)
+enum='enum power_supply_property {'+','.join(all_props)+'};\n'
 structs=[]
 for kind,name in [('enum','qcom_battmgr_variant'),('enum','qcom_battmgr_unit'),('struct','qcom_battmgr_info'),('struct','qcom_battmgr_status')]:
  m=re.search('^'+kind+' '+name+r' \{.*?^\};',s,re.M|re.S);assert m;structs.append(m[0])
@@ -108,6 +122,7 @@ with tempfile.TemporaryDirectory(prefix='battery-readings-test-') as td:
  count=int(subprocess.check_output([str(exe)],text=True));assert count==len(props)*6+9
 r={'all_passed':True,'runtime_c_checks':count,'getter_properties_compared':len(props),'variants_compared':3,'unit_modes_compared':2,'actual_getter_code_executed':True,'other_variant_behavior_preserved':True,'overflow_checked':True,'firmware_request_path_unchanged':True,'source_sha256':hashlib.sha256(s.encode()).hexdigest(),'automatic_writes_added':False}
 r['patch_sha256']=hashlib.sha256(PATCH.read_bytes()).hexdigest()
+r['rebased_source_checked']=bool(args.rebased_source)
 if args.report:
  args.report.write_text(json.dumps(r,indent=2)+'\n')
 print(json.dumps(r,indent=2))

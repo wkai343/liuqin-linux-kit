@@ -3,7 +3,8 @@
 [项目首页](../README.md) ｜ [构建指南](BUILD.md)
 
 所有工作流都只通过 **Actions → Run workflow** 手动触发，push 和 PR 不会自动启动。
-构建使用与本地相同的 Devbox 入口，内核来源由 `build/kernel/source.json` 选择。
+构建使用与本地相同的 Devbox 入口。目标系统内核由 `build/kernel/source.json` 选择；
+临时安装环境的运行内核独立锁定在 `build/kernel/source-6.17.json`，可用于安装 7.3 目标系统。
 
 | 工作流 | 执行环境 | 内容与产物 |
 | --- | --- | --- |

@@ -64,5 +64,21 @@ devbox run -- python3 tests/battery-readings.py \
 该测试在临时目录应用补丁，执行实际 getter，覆盖机型、单位、溢出及错误返回；
 不修改输入源码。它验证软件换算，不证明电量计刷新及时或待机测量准确。
 
+跨版本迁移到 7.3 时，将上例的 `--source` 换成 `--rebased-source`：执行新版 getter，
+保留原有属性换算和固件传输约束，允许主线新增属性。首帧背光另用
+`tests/kernel73-first-frame.py --source /path/to/kernel-7.3 --report out/test-reports/first-frame.json`，
+检查新版 DRM follower 锁、回调、延迟背光和取消竞态。
+`tests/kernel73-probe.py --source /path/to/kernel-7.3` 执行 GPIO 元数据与相机电源域选择代码，
+检查 GPIO 分类及所有父域均属于待注册集合；可用 `--baseline` 指向首版失败源码，验证反例。
+`tests/kernel73-pll-bias.py --source /path/to/fixed-kernel --baseline /path/to/before-fix`
+执行 PHY 偏置引用与 MMIO 代码，覆盖嵌套时钟查询、开关循环及旧版状态不一致的反例。
+`tests/kernel73-device-lifecycle.py` 使用相同的 `--source`、`--baseline` 参数，
+检查扬声器格式约束、USB 独立电源循环和共享时钟的失败清理，以及新版工作队列声明。
+`tests/kernel73-dp-lifecycle.py` 使用相同参数，检查未连接端口、PHY 初始化失败和已被其他路径
+使用时的探测清理，以及 DP 上电失败后的状态；旧版反例需复现。
+`tests/nanosic-caps-led.py` 使用相同参数，执行键盘 LED 报文转换、合并状态、有限重试及
+接回、睡眠、复位、移除路径，检查原有描述符和只读请求接口保持一致。
+这些测试需要实际源码，不在普通离线入口中。
+
 真机测试分别记录临时启动、固定引导后的重启、拔线冷启动及睡眠唤醒；
 故障后自动恢复必须单独记录，不能写成“首次显示正常”。

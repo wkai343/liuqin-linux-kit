@@ -32,7 +32,7 @@ class BuildTests(unittest.TestCase):
         legacy.write_text(json.dumps({'root_source': 'out/build/root-custom-work'}))
         self.data = builder.config(legacy)
         self.data.pop('inputs_file')
-        for key in ('kernel_source', 'kernel_out', 'modules_out', 'root_source', 'runtime_root', 'root_out', 'runtime_out', 'boot_out'):
+        for key in ('kernel_source', 'installer_kernel_source', 'kernel_out', 'modules_out', 'root_source', 'runtime_root', 'root_out', 'runtime_out', 'boot_out'):
             (self.root / self.data[key]).mkdir(parents=True, exist_ok=True)
         (self.root / self.data['installer_kernel_out']).mkdir(parents=True)
         image = self.root / self.data['installer_image']
@@ -101,6 +101,7 @@ class BuildTests(unittest.TestCase):
         self.assertNotIn('root', run.call_args.kwargs)
 
     def test_installer_kernel_does_not_receive_target_zram_fragment_or_suffix(self):
+        self.data['kernel_source_lock']='custom/target.json'
         with patch.object(builder, 'run') as run:
             builder.stage(self.data, 'installer-kernel', configure_only=True)
         argv = run.call_args.args[0]
@@ -108,6 +109,7 @@ class BuildTests(unittest.TestCase):
         self.assertIn('--localversion=-liuqin-installer', argv)
         self.assertNotIn('--config-fragment', argv)
         self.assertNotIn(str(self.root / self.data['kernel_out']), argv)
+        self.assertEqual(argv[argv.index('--source-lock')+1],str(self.root/'build/kernel/source-6.17.json'))
 
     def test_target_build_needs_no_runtime_root_and_never_rebuilds_installer(self):
         self.data['runtime_root'] = 'not-prepared'

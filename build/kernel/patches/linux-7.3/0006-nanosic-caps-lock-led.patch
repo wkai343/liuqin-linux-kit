@@ -1,0 +1,381 @@
+From 289672164829c3824c767634c67d485870e79bef Mon Sep 17 00:00:00 2001
+From: wk <58632380+wkai343@users.noreply.github.com>
+Date: Mon, 19 Oct 2026 23:14:35 +0800
+Subject: [PATCH] HID: nanosic: synchronize Caps Lock LED with the keypad
+
+Reference Seeker0472/liuqin-nixos 73e8071e09880aeb47f0a427b9a65b8cc10927c4.
+Translate the Caps Lock bit into the stock management command, preserve
+local connection handling, and replay only after valid application replies.
+---
+ drivers/hid/hid-nanosic.c                     | 193 +++++++++++++++++-
+ tools/testing/selftests/hid/nanosic-static.py |   4 +-
+ 2 files changed, 187 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/hid/hid-nanosic.c b/drivers/hid/hid-nanosic.c
+index 133b0bcc75b..ec41bbd34d7 100644
+--- a/drivers/hid/hid-nanosic.c
++++ b/drivers/hid/hid-nanosic.c
+@@ -50,6 +50,7 @@
+ #include <linux/mutex.h>
+ #include <linux/property.h>
+ #include <linux/regulator/consumer.h>
++#include <linux/slab.h>
+ #include <linux/sysfs.h>
+ #include <linux/workqueue.h>
+ 
+@@ -116,6 +117,21 @@ static const u8 nanosic_status_command[NANOSIC_VERSION_COMMAND_LEN] = {
+ 	0x4c, 0x32, 0x00, 0x4e, 0x31, 0x80, 0x38, 0xa1, 0x01, 0x01, 0xda,
+ };
+ 
++/*
++ * Caps Lock uses a keypad management command, not the bare HID LED report.
++ * Stock Android capture documented by Seeker0472/liuqin-nixos (73e8071e0988),
++ * pkgs/kernel/patches/0002-liuqin-input-hid-touchscreen.patch:
++ *   32 00 4e 31 80 38 26 01 01 5f (on), ... 00 5e (off).
++ * Prepend the bridge address and retain the 66-byte, zero-padded payload.
++ */
++#define NANOSIC_LED_COMMAND_LEN		NANOSIC_VERSION_COMMAND_LEN
++#define NANOSIC_LED_RETRIES		3
++#define NANOSIC_LED_RETRY_MS		25
++
++static const u8 nanosic_led_command[NANOSIC_LED_COMMAND_LEN] = {
++	0x4c, 0x32, 0x00, 0x4e, 0x31, 0x80, 0x38, 0x26, 0x01,
++};
++
+ static const u8 nanosic_keyboard_rdesc[] = {
+ 	0x05, 0x01,		/* Usage Page (Generic Desktop)		*/
+ 	0x09, 0x06,		/* Usage (Keyboard)			*/
+@@ -455,6 +471,7 @@ enum nanosic_i2c_operation {
+ 	NANOSIC_I2C_VERSION_WRITE,
+ 	NANOSIC_I2C_VERSION_READ,
+ 	NANOSIC_I2C_STATUS_WRITE,
++	NANOSIC_I2C_LED_WRITE,
+ };
+ 
+ struct nanosic {
+@@ -495,6 +512,19 @@ struct nanosic {
+ 	u8 keyboard_status;
+ 	u64 connection_reports;
+ 	u64 status_query_report;
++
++	/* Desired LED state survives detach, bridge reset and system sleep. */
++	struct delayed_work led_work;
++	bool led_ready;
++	bool led_transport_ready;
++	bool led_stopping;
++	bool caps_lock_known;
++	bool caps_lock_requested;
++	bool caps_lock_sent;
++	bool caps_lock_valid;
++	unsigned int led_attempts;
++	u64 led_write_count;
++	int last_led_errno;
+ };
+ 
+ static const struct nanosic_packet *nanosic_packet_by_id(u8 id)
+@@ -565,6 +595,8 @@ static const char *nanosic_i2c_operation_name(enum nanosic_i2c_operation operati
+ 		return "version-read";
+ 	case NANOSIC_I2C_STATUS_WRITE:
+ 		return "status-write";
++	case NANOSIC_I2C_LED_WRITE:
++		return "led-write";
+ 	default:
+ 		return "none";
+ 	}
+@@ -613,6 +645,87 @@ static int nanosic_read_frame(struct nanosic *nano,
+ 	return nanosic_i2c_transfer(nano, msg, ARRAY_SIZE(msg), operation);
+ }
+ 
++static void nanosic_queue_led(struct nanosic *nano)
++{
++	lockdep_assert_held(&nano->lock);
++
++	nano->caps_lock_valid = false;
++	nano->led_attempts = 0;
++	if (!nano->caps_lock_known || !nano->led_ready || !nano->led_transport_ready ||
++	    nano->led_stopping || nano->suspended ||
++	    (nano->connection_known && !nano->keyboard_connected))
++		return;
++
++	mod_delayed_work(system_dfl_wq, &nano->led_work, 0);
++}
++
++/* A valid application reply proves that I2C is ready after boot or resume. */
++static void nanosic_mark_led_ready(struct nanosic *nano)
++{
++	lockdep_assert_held(&nano->lock);
++	if (nano->led_transport_ready)
++		return;
++
++	nano->led_transport_ready = true;
++	nanosic_queue_led(nano);
++}
++
++static int nanosic_send_led_command(struct nanosic *nano, bool caps)
++{
++	u8 command[NANOSIC_LED_COMMAND_LEN];
++	struct i2c_msg msg = {
++		.addr = nano->client->addr,
++		.len = sizeof(command),
++		.buf = command,
++	};
++	bool was_awake;
++
++	lockdep_assert_held(&nano->lock);
++	if (nano->client->addr != nanosic_led_command[0])
++		return -ENXIO;
++
++	memcpy(command, nanosic_led_command, sizeof(command));
++	command[9] = caps;
++	command[10] = 0x5e + caps;
++	was_awake = nano->awake;
++	nanosic_wake(nano);
++	if (!was_awake)
++		usleep_range(NANOSIC_I2C_RETRY_US, NANOSIC_I2C_RETRY_US + 500);
++
++	return nanosic_i2c_transfer(nano, &msg, 1, NANOSIC_I2C_LED_WRITE);
++}
++
++static void nanosic_led_work(struct work_struct *work)
++{
++	struct nanosic *nano = container_of(to_delayed_work(work),
++					  struct nanosic, led_work);
++	int ret;
++
++	guard(mutex)(&nano->lock);
++	if (!nano->led_ready || !nano->led_transport_ready || nano->led_stopping ||
++	    nano->suspended || !nano->caps_lock_known ||
++	    (nano->connection_known && !nano->keyboard_connected))
++		return;
++	if (nano->caps_lock_valid &&
++	    nano->caps_lock_sent == nano->caps_lock_requested)
++		return;
++
++	nano->led_attempts++;
++	ret = nanosic_send_led_command(nano, nano->caps_lock_requested);
++	nano->last_led_errno = ret;
++	if (ret) {
++		nano->caps_lock_valid = false;
++		if (nano->led_attempts < NANOSIC_LED_RETRIES)
++			mod_delayed_work(system_dfl_wq, &nano->led_work,
++					 msecs_to_jiffies(NANOSIC_LED_RETRY_MS));
++		return;
++	}
++
++	nano->caps_lock_sent = nano->caps_lock_requested;
++	nano->caps_lock_valid = true;
++	nano->led_write_count++;
++}
++
+ static int nanosic_write_version_command(struct nanosic *nano)
+ {
+ 	struct i2c_client *client = nano->client;
+@@ -642,6 +755,8 @@ static void nanosic_reset_bridge(struct nanosic *nano)
+ 	gpiod_set_value_cansleep(nano->reset_gpio, 0);
+ 	msleep(NANOSIC_RESET_READY_MS);
+ 	nano->reset_recovery_count++;
++	nano->led_transport_ready = false;
++	nanosic_queue_led(nano);
+ }
+ 
+ static bool nanosic_version_error_needs_reset(int ret)
+@@ -711,7 +826,7 @@ static int nanosic_extract_firmware_version(const u8 *frame, size_t len,
+ static bool nanosic_parse_connection_status(struct nanosic *nano, const u8 *p,
+ 					   size_t len)
+ {
+-	bool changed;
++	bool changed, power_changed;
+ 
+ 	if (len < 10 || (p[0] != 0x22 && p[0] != 0x23 &&
+ 			 p[0] != 0x24 && p[0] != 0x26) ||
+@@ -719,6 +834,7 @@ static bool nanosic_parse_connection_status(struct nanosic *nano, const u8 *p,
+ 		return false;
+ 
+ 	changed = !nano->connection_known || nano->keyboard_connected != !!(p[9] & BIT(0));
++	power_changed = !!((nano->keyboard_status ^ p[9]) & BIT(1));
+ 	nano->keyboard_status = p[9];
+ 	nano->keyboard_connected = !!(p[9] & BIT(0));
+ 	nano->connection_known = true;
+@@ -728,6 +844,9 @@ static bool nanosic_parse_connection_status(struct nanosic *nano, const u8 *p,
+ 	input_sync(nano->tablet_mode_input);
+ 	if (changed)
+ 		kobject_uevent(&nano->client->dev.kobj, KOBJ_CHANGE);
++	if (changed || power_changed)
++		nanosic_queue_led(nano);
++	nanosic_mark_led_ready(nano);
+ 	return true;
+ }
+ 
+@@ -784,6 +903,7 @@ static void nanosic_parse_frame(struct nanosic *nano, u8 *frame, size_t len)
+ 			return;
+ 		}
+ 		nano->valid_report_count++;
++		nanosic_mark_led_ready(nano);
+ 		if (pkt->dest < 0)
+ 			nanosic_parse_connection_status(nano, p, pkt->wire_len);
+ 
+@@ -997,6 +1117,14 @@ static ssize_t bridge_health_show(struct device *dev,
+ 			     (unsigned long long)nano->bad_magic_count);
+ 	len += sysfs_emit_at(buf, len, "valid_reports=%llu\n",
+ 			     (unsigned long long)nano->valid_report_count);
++	len += sysfs_emit_at(buf, len, "caps_lock_requested=%d\n",
++			     nano->caps_lock_known ? nano->caps_lock_requested : -1);
++	len += sysfs_emit_at(buf, len, "caps_lock_sent=%d\n",
++			     nano->caps_lock_valid ? nano->caps_lock_sent : -1);
++	len += sysfs_emit_at(buf, len, "led_writes=%llu\n",
++			     (unsigned long long)nano->led_write_count);
++	len += sysfs_emit_at(buf, len, "last_led_errno=%d\n", nano->last_led_errno);
++	len += sysfs_emit_at(buf, len, "led_transport_ready=%d\n", nano->led_transport_ready);
+ 
+ 	return len;
+ }
+@@ -1079,13 +1207,39 @@ static int nanosic_hid_raw_request(struct hid_device *hid,
+ 	return -EOPNOTSUPP;
+ }
+ 
+-/*
+- * No output_report and no writable raw_request: the keyboard descriptor
+- * declares the five boot-protocol LEDs, but no command for setting them is
+- * known on the downstream side of the bridge, and the vendor driver never sent
+- * one either. Caps Lock therefore has no indicator; the alternative would be
+- * guessing at bytes to write onto the bus.
+- */
++/* HID's LED worker calls this hook; the I2C worker sends only Caps Lock. */
++static void nanosic_hid_request(struct hid_device *hid, struct hid_report *report,
++				int reqtype)
++{
++	struct nanosic *nano = dev_get_drvdata(hid->dev.parent);
++	u8 *buf;
++	bool caps;
++
++	if (hid != nano->hid[NANOSIC_HID_KEYBOARD] ||
++	    reqtype != HID_REQ_SET_REPORT || report->type != HID_OUTPUT_REPORT ||
++	    report->id != NANOSIC_ID_KEYBOARD || hid_report_len(report) != 2)
++		return;
++
++	/* The HID serializer needs padding beyond the two transmitted bytes. */
++	buf = hid_alloc_report_buf(report, GFP_KERNEL);
++	if (!buf)
++		return;
++	hid_output_report(report, buf);
++	caps = !!(buf[1] & BIT(1));
++	kfree(buf);
++
++	guard(mutex)(&nano->lock);
++	if (nano->led_stopping)
++		return;
++	if (nano->caps_lock_known && nano->caps_lock_valid &&
++	    nano->caps_lock_sent == caps)
++		return;
++
++	nano->caps_lock_requested = caps;
++	nano->caps_lock_known = true;
++	nanosic_queue_led(nano);
++}
++
+ static const struct hid_ll_driver nanosic_hid_ll_driver = {
+ 	.start = nanosic_hid_start,
+ 	.stop = nanosic_hid_stop,
+@@ -1093,6 +1247,7 @@ static const struct hid_ll_driver nanosic_hid_ll_driver = {
+ 	.close = nanosic_hid_close,
+ 	.parse = nanosic_hid_parse,
+ 	.raw_request = nanosic_hid_raw_request,
++	.request = nanosic_hid_request,
+ };
+ 
+ static void nanosic_destroy_hid(void *data)
+@@ -1147,6 +1302,9 @@ static void nanosic_power_off(void *data)
+ {
+ 	struct nanosic *nano = data;
+ 
++	scoped_guard(mutex, &nano->lock)
++		nano->led_stopping = true;
++	cancel_delayed_work_sync(&nano->led_work);
+ 	cancel_delayed_work_sync(&nano->status_work);
+ 	cancel_delayed_work_sync(&nano->idle_work);
+ 	gpiod_set_value_cansleep(nano->wake_gpio, 0);
+@@ -1234,6 +1392,9 @@ static int nanosic_probe(struct i2c_client *client)
+ 
+ 	INIT_DELAYED_WORK(&nano->idle_work, nanosic_idle_work);
+ 	INIT_DELAYED_WORK(&nano->status_work, nanosic_status_work);
++	INIT_DELAYED_WORK(&nano->led_work, nanosic_led_work);
++	/* New input devices start with LEDs clear; later HID requests win. */
++	nano->caps_lock_known = true;
+ 
+ 	/*
+ 	 * Only these two lines and the rail. The hall GPIOs stay with
+@@ -1307,8 +1468,13 @@ static int nanosic_probe(struct i2c_client *client)
+ 
+ 	/* Attribute reads are the only path which issues a version request. */
+ 	ret = sysfs_create_group(&dev->kobj, &nanosic_attr_group);
+-	if (!ret)
++	if (!ret) {
++		guard(mutex)(&nano->lock);
++
++		nano->led_ready = true;
++		nanosic_queue_led(nano);
+ 		mod_delayed_work(system_wq, &nano->status_work, msecs_to_jiffies(200));
++	}
+ 	return ret;
+ }
+ 
+@@ -1316,9 +1482,13 @@ static void nanosic_remove(struct i2c_client *client)
+ {
+ 	/* Stop new callbacks while all devm-managed driver state is still live. */
+ 	struct nanosic *nano = i2c_get_clientdata(client);
++
++	scoped_guard(mutex, &nano->lock)
++		nano->led_stopping = true;
+ 	sysfs_remove_group(&client->dev.kobj, &nanosic_attr_group);
+ 	/* Stop work before devm unregisters the switch input device. */
+ 	cancel_delayed_work_sync(&nano->status_work);
++	cancel_delayed_work_sync(&nano->led_work);
+ }
+ 
+ static int nanosic_suspend(struct device *dev)
+@@ -1333,11 +1503,14 @@ static int nanosic_suspend(struct device *dev)
+ 	 */
+ 	scoped_guard(mutex, &nano->lock) {
+ 		WRITE_ONCE(nano->suspended, true);
++		nano->caps_lock_valid = false;
++		nano->led_transport_ready = false;
+ 		gpiod_set_value_cansleep(nano->wake_gpio, 0);
+ 		nano->awake = false;
+ 	}
+ 	cancel_delayed_work_sync(&nano->idle_work);
+ 	cancel_delayed_work_sync(&nano->status_work);
++	cancel_delayed_work_sync(&nano->led_work);
+ 
+ 	if (!device_may_wakeup(dev))
+ 		return 0;
+@@ -1359,6 +1532,7 @@ static int nanosic_suspend(struct device *dev)
+ 			nano->data_pending = false;
+ 			nanosic_receive_frame(nano);
+ 		}
++		nanosic_queue_led(nano);
+ 	}
+ 
+ 	return ret;
+@@ -1385,6 +1559,7 @@ static int nanosic_resume(struct device *dev)
+ 			nano->data_pending = false;
+ 			nanosic_receive_frame(nano);
+ 		}
++		nanosic_queue_led(nano);
+ 	}
+ 
+ 	return ret;
+diff --git a/tools/testing/selftests/hid/nanosic-static.py b/tools/testing/selftests/hid/nanosic-static.py
+index 042721b458d..3b8fa7a1d13 100644
+--- a/tools/testing/selftests/hid/nanosic-static.py
++++ b/tools/testing/selftests/hid/nanosic-static.py
+@@ -370,7 +370,9 @@ class NanosicSourceContracts(unittest.TestCase):
+ 
+     def test_read_only_diagnostics_are_removed_before_devm_teardown(self):
+         remove = function_body("nanosic_remove")
+-        self.assertEqual(DRIVER.count("DEVICE_ATTR_RO("), 2)
++        self.assertEqual(set(re.findall(r"DEVICE_ATTR_RO\((\w+)\)", DRIVER)),
++                         {"firmware_version", "bridge_health", "keyboard_connected",
++                          "keyboard_status"})
+         self.assertNotRegex(DRIVER, r"DEVICE_ATTR_(?:RW|WO)\(")
+         self.assertIn("sysfs_remove_group", remove)
+         self.assertIn(".remove = nanosic_remove", DRIVER)

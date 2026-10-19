@@ -1,0 +1,70 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] Fix SM8475 GPIO ownership and CAMCC domain parent selection
+
+Linux 7.3 distinguishes GPIO pin functions in strict pinctrl arbitration. Mark
+the SM8475 GPIO function accordingly, as in the mainline SM8450 driver; retain
+strict arbitration rather than bypassing GPIO ownership checks.
+
+Reparent every registered TITAN_TOP child when selecting the SM8475 domain.
+The first migration missed BPS, IPE and SBI, leaving pointers to an unregistered
+SM8450 parent and causing genpd_add_subdomain to dereference uninitialized state.
+Keep both SoC variants' domain flags and firmware timings unchanged.
+
+The first hardware trial reached the existing Btrfs system over USB SSH but
+failed display/input/radio GPIO requests and hit the CAMCC Oops. Negative and
+positive source tests cover these two defects. Hardware retest is pending.
+
+diff --git a/drivers/clk/qcom/camcc-sm8450.c b/drivers/clk/qcom/camcc-sm8450.c
+index bb786a9d41d..79228d4da82 100644
+--- a/drivers/clk/qcom/camcc-sm8450.c
++++ b/drivers/clk/qcom/camcc-sm8450.c
+@@ -3073,6 +3073,22 @@ static struct gdsc *cam_cc_sm8450_gdscs[] = {
+ 	[TITAN_TOP_GDSC] = &titan_top_gdsc,
+ };
+ 
++static void cam_cc_sm8475_select_gdscs(void)
++{
++	unsigned int i;
++
++	cam_cc_sm8450_gdscs[IFE_0_GDSC] = &sm8475_ife_0_gdsc;
++	cam_cc_sm8450_gdscs[TITAN_TOP_GDSC] = &sm8475_titan_top_gdsc;
++
++	/* Every parent must belong to the domain set that will be registered. */
++	for (i = 0; i < ARRAY_SIZE(cam_cc_sm8450_gdscs); i++) {
++		struct gdsc *sc = cam_cc_sm8450_gdscs[i];
++
++		if (sc && sc->parent == &titan_top_gdsc.pd)
++			sc->parent = &sm8475_titan_top_gdsc.pd;
++	}
++}
++
+ static void cam_cc_sm8450_clk_regs_configure(struct device *dev,
+ 					      struct regmap *regmap)
+ {
+@@ -3149,12 +3165,7 @@ static int cam_cc_sm8450_probe(struct platform_device *pdev)
+ 		 * liuqin (PWR_ON polling + RETAIN_FF); SM8450 keeps CFG_GDSCR
+ 		 * polling.  Re-parent the other TITAN_TOP children as well.
+ 		 */
+-		cam_cc_sm8450_gdscs[IFE_0_GDSC] = &sm8475_ife_0_gdsc;
+-		cam_cc_sm8450_gdscs[TITAN_TOP_GDSC] = &sm8475_titan_top_gdsc;
+-		ife_1_gdsc.parent = &sm8475_titan_top_gdsc.pd;
+-		ife_2_gdsc.parent = &sm8475_titan_top_gdsc.pd;
+-		sfe_0_gdsc.parent = &sm8475_titan_top_gdsc.pd;
+-		sfe_1_gdsc.parent = &sm8475_titan_top_gdsc.pd;
++		cam_cc_sm8475_select_gdscs();
+ 
+ 		/* Update CAMCC PLL0 */
+ 		cam_cc_pll0.regs = clk_alpha_pll_regs[CLK_ALPHA_PLL_TYPE_LUCID_OLE];
+diff --git a/drivers/pinctrl/qcom/pinctrl-sm8475.c b/drivers/pinctrl/qcom/pinctrl-sm8475.c
+index 684c645c1d9..6f1aa51de6e 100644
+--- a/drivers/pinctrl/qcom/pinctrl-sm8475.c
++++ b/drivers/pinctrl/qcom/pinctrl-sm8475.c
+@@ -1275,7 +1275,7 @@ static const char * const vsense_trigger_groups[] = {
+ };
+ 
+ static const struct pinfunction sm8475_functions[] = {
+-	MSM_PIN_FUNCTION(gpio),
++	MSM_GPIO_PIN_FUNCTION(gpio),
+ 	MSM_PIN_FUNCTION(aon_cam),
+ 	MSM_PIN_FUNCTION(atest_char),
+ 	MSM_PIN_FUNCTION(atest_usb),

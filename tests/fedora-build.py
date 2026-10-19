@@ -308,6 +308,43 @@ class FedoraTests(unittest.TestCase):
                 self.assertIn('plasma-keyboard',requested)
                 self.assertIn('kate',requested)
 
+    def test_kernel_install_with_satisfied_dependencies_stays_offline(self):
+        packages=['/tmp/liuqin-packages/liuqin-boot-tools.rpm']
+        with patch.object(root_builder,'chroot') as chroot, \
+             patch.object(root_builder,'dnf',side_effect=AssertionError('unexpected online transaction')):
+            root_builder.install_kernel_packages(self.work,packages)
+        self.assertEqual(len(chroot.call_args_list),2)
+        self.assertIn('--test',chroot.call_args_list[0].args[1])
+        self.assertEqual(chroot.call_args_list[1].args[1],['rpm','-Uvh','--replacepkgs',*packages])
+
+    def test_cached_desktop_missing_boot_dependency_uses_dnf(self):
+        packages=['/tmp/liuqin-packages/liuqin-boot-tools.rpm','/tmp/liuqin-packages/liuqin-kernel-image.rpm']
+        missing=subprocess.CalledProcessError(4,['rpm'],stderr='python3-zstandard >= 0.23 is needed')
+        with patch.object(root_builder,'chroot',side_effect=missing) as chroot, \
+             patch.object(root_builder,'dnf') as dnf:
+            root_builder.install_kernel_packages(self.work,packages)
+        self.assertEqual(chroot.call_count,1)
+        dnf.assert_called_once_with(self.work,'install',*packages)
+
+    def test_unresolvable_kernel_dependencies_stop_installation(self):
+        packages=['/tmp/liuqin-packages/liuqin-boot-tools.rpm']
+        missing=subprocess.CalledProcessError(4,['rpm'])
+        failed=subprocess.CalledProcessError(1,['dnf'])
+        with patch.object(root_builder,'chroot',side_effect=missing) as chroot, \
+             patch.object(root_builder,'dnf',side_effect=failed):
+            with self.assertRaises(subprocess.CalledProcessError) as caught:
+                root_builder.install_kernel_packages(self.work,packages)
+        self.assertIs(caught.exception,failed)
+        self.assertEqual(chroot.call_count,1)
+
+    def test_kernel_transaction_failure_is_not_retried_as_dependency_resolution(self):
+        failed=subprocess.CalledProcessError(1,['rpm'],stderr='write failed')
+        with patch.object(root_builder,'chroot',side_effect=[subprocess.CompletedProcess(['rpm'],0),failed]), \
+             patch.object(root_builder,'dnf',side_effect=AssertionError('must preserve transaction failure')):
+            with self.assertRaises(subprocess.CalledProcessError) as caught:
+                root_builder.install_kernel_packages(self.work,['/tmp/liuqin-packages/kernel.rpm'])
+        self.assertIs(caught.exception,failed)
+
     def test_documentation_filter_preserves_other_transaction_flags_and_settings(self):
         root=self.work/'root';config=root/'etc/dnf/dnf.conf';config.parent.mkdir(parents=True)
         config.write_text('[main]\ntsflags = nodocs,nocontexts # keep this comment\ngpgcheck=True\n')

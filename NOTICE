@@ -99,3 +99,19 @@ The orientation signature and test fixtures are sparse pixel classifications
 from Xiaomi OS2.0.6.0.VMYCNXM imagefv.elf, not redistributed firmware or complete
 logo images. The pinned source hash and regeneration tool are documented in
 build/scripts/generate-boot-logo-signature.py.
+
+Linux 7.3 device adaptation
+--------------------------
+
+The default source record build/kernel/source.json pins Torvalds Linux
+v7.3 and a port of the existing Liuqin adaptations. The Iris SM8450 platform
+layout references Seeker0472/liuqin-nixos commit
+73e8071e09880aeb47f0a427b9a65b8cc10927c4,
+pkgs/kernel/patches/0006-liuqin-media-iris.patch:
+https://github.com/Seeker0472/liuqin-nixos
+The NanoSic Caps Lock management command also references that commit's
+pkgs/kernel/patches/0002-liuqin-input-hid-touchscreen.patch and
+docs/PORTING-NOTES.md, adapted to the local connection and suspend lifecycle.
+Original file-level authorship, SPDX identifiers and kernel licensing remain
+applicable. This source adaptation does not redistribute device firmware or
+private calibration data.

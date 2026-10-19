@@ -29,6 +29,12 @@ def kernel_fragments(data, installer=False):
     return fragments
 
 
+def kernel_source_record(data, installer=False):
+    if installer:
+        return 'build/kernel/source-6.17.json'
+    return data.get('kernel_source_lock') or 'build/kernel/source.json'
+
+
 class Flow:
     def __init__(self, data, run, *, refresh=False, distribution='ubuntu'):
         self.data, self.run = data, run
@@ -67,8 +73,11 @@ class Flow:
         for name,value in values.items():argv+=['--'+name.replace('_','-'),str(value)]
         self.run(argv,root=True)
 
+    def kernel_source_lock(self,installer=False):
+        return self.resolve(kernel_source_record(self.data,installer))
+
     def kernel_source(self,installer=False):
-        record=json.loads((PROJECT/'build/kernel/source.json').read_text())
+        record=json.loads(self.kernel_source_lock(installer).read_text())
         if installer:
             path=Path(self.data.get('source_installer_kernel','inputs/sources/linux-installer'))
             path=path.resolve() if path.is_absolute() else PROJECT/path
@@ -103,6 +112,10 @@ class Flow:
             path=cached/'source';commit=(cached/'source.commit').read_text().strip()
             if subprocess.check_output(['git','-C',str(path),'rev-parse','HEAD'],text=True).strip()!=commit:
                 raise ValueError('内核适配快照的 Git 身份与完成记录不同。')
+            if record.get('tested_source_tree'):
+                tree=subprocess.check_output(['git','-C',str(path),'rev-parse','HEAD^{tree}'],text=True).strip()
+                if tree!=record['tested_source_tree']:
+                    raise ValueError('目标内核补丁生成的源码树与核验记录不同。')
         return path,commit
 
     def kernel(self,installer=False):
@@ -114,13 +127,14 @@ class Flow:
                     localversion=self.data.get(prefix+'kernel_localversion','-liuqin-installer' if installer else '-liuqin1'),
                     board_configs=tree_identity(PROJECT/'device/configs'),
                     builder=sha(PROJECT/'build/scripts/build-liuqin-kernel.py'))
-        inputs['source_lock']=sha(PROJECT/'build/kernel/source.json')
+        inputs['source_lock']=sha(self.kernel_source_lock(installer))
         if inputs['config']:inputs['config_sha']=sha(self.resolve(inputs['config']))
         compiler=shutil.which(os.environ.get('CROSS_COMPILE','aarch64-unknown-linux-musl-')+'gcc')
         if not compiler:raise ValueError('请在 Devbox 中构建。')
         inputs['compiler']=sha(Path(compiler).resolve())
         def build(out):
             argv=[sys.executable,'build/scripts/build-liuqin-kernel.py','--custom','--source',str(source),
+                  '--source-lock',str(self.kernel_source_lock(installer)),
                   '--out',str(out/'kernel'),'--jobs',str(self.data.get('jobs',12)),
                   '--localversion='+inputs['localversion']]
             if inputs['config']:argv+=['--config',str(self.resolve(inputs['config']))]
@@ -396,9 +410,10 @@ def execute(data,action,run,*,refresh=False,configure_only=False):
             configuration=data.get(prefix+'kernel_config')
             suffix=data[prefix+'kernel_localversion']
             identity=key(dict(commit=commit,config=configuration,fragments={v:sha(flow.resolve(v)) for v in fragments},
-                              localversion=suffix))[:16]
+                              localversion=suffix,source_lock=sha(flow.kernel_source_lock(installer))))[:16]
             out=PROJECT/'out/build'/('kernel-config-'+identity)
             argv=[sys.executable,'build/scripts/build-liuqin-kernel.py','--custom','--source',str(source),
+                  '--source-lock',str(flow.kernel_source_lock(installer)),
                   '--out',str(out),'--localversion='+suffix,'--configure-only']
             if configuration:argv+=['--config',str(flow.resolve(configuration))]
             for fragment in fragments:argv+=['--config-fragment',str(flow.resolve(fragment))]

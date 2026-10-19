@@ -40,6 +40,19 @@ class SourceTests(unittest.TestCase):
         (self.project/'build').symlink_to(PROJECT/'build',target_is_directory=True)
     def tearDown(self):self.tmp.cleanup()
 
+    def test_target_source_lock_does_not_change_the_installer_baseline(self):
+        data=builder.config(PROJECT/'build/devbox/build.example.json')
+        pipeline=flow.Flow(data,lambda *_a,**_k:self.fail('unexpected build'),distribution='fedora')
+        self.assertEqual(pipeline.kernel_source_lock(),PROJECT/'build/kernel/source.json')
+        self.assertEqual(pipeline.kernel_source_lock(True),PROJECT/'build/kernel/source-6.17.json')
+        target=json.loads(pipeline.kernel_source_lock().read_text())
+        installer=json.loads(pipeline.kernel_source_lock(True).read_text())
+        self.assertEqual(target['branch'],'v7.3')
+        self.assertEqual(installer['commit'],'fe81794b5e1b8a3f11a165f3acbfdb8fa671dbb3')
+        data['kernel_source_lock']='custom/target.json'
+        self.assertEqual(pipeline.kernel_source_lock(),PROJECT/'custom/target.json')
+        self.assertEqual(pipeline.kernel_source_lock(True),PROJECT/'build/kernel/source-6.17.json')
+
     def test_verified_download_reuses_cache_and_rejects_changed_bytes(self):
         payload=b'official test bytes';target=self.root/'base.tar.gz';expected=hashlib.sha256(payload).hexdigest()
         with patch.object(helpers.urllib.request,'urlopen',return_value=io.BytesIO(payload)) as network:
@@ -213,6 +226,7 @@ class SourceTests(unittest.TestCase):
     def test_configure_only_uses_the_same_native_fragment_order(self):
         data=builder.config(PROJECT/'build/devbox/build.example.json')
         data['kernel_fragments']=['/custom/override.config']
+        data['kernel_source_lock']='custom/target.json'
         native=str(self.project/'build/kernel/configs/native-display.config')
         with patch.object(flow,'PROJECT',self.project), \
              patch.object(flow.Flow,'kernel_source',return_value=(self.root,'b'*40)), \
@@ -225,6 +239,10 @@ class SourceTests(unittest.TestCase):
             flow.execute(data,'installer-kernel',run,configure_only=True)
         self.assertLess(commands[0].index(native),commands[0].index('/custom/override.config'))
         self.assertNotIn(native,commands[1])
+        self.assertEqual(commands[0][commands[0].index('--source-lock')+1],
+                         str(self.project/'custom/target.json'))
+        self.assertEqual(commands[1][commands[1].index('--source-lock')+1],
+                         str(self.project/'build/kernel/source-6.17.json'))
 
     def test_kernel_only_dispatch_does_not_require_rootfs_or_rom(self):
         data=builder.config(PROJECT/'build/devbox/build.example.json');data['rom_images']=str(self.root/'missing')
@@ -561,6 +579,22 @@ class DevicePackageTests(unittest.TestCase):
             self.assertFalse((extracted/'usr/bin/gnome-control-center').exists())
             meta=next(out.glob('liuqin-device-base_*.deb'))
             self.assertNotIn('liuqin-kernel',subprocess.check_output(['dpkg-deb','-f',str(meta),'Depends'],text=True))
+
+
+class AblSymbolFormattingTests(unittest.TestCase):
+    def test_sink_extraction_accepts_restored_dtc_labels(self):
+        symbols=load('abl_symbols_test',PROJECT/'build/lib/abl-symbols.py')
+        for count in (0,1,1781):
+            labels=''.join('stock_'+str(i)+': ' for i in range(count))
+            text='/dts-v1/;\n/ {\n\t'+labels+'liuqin-abl-overlay-sink {\n\t\tphandle = <0x16e>;\n\t};\n};\n'
+            body=symbols.extract_block(text,'liuqin-abl-overlay-sink')
+            self.assertIsNotNone(body)
+            self.assertEqual(symbols.block_properties(body),{'phandle':'<0x16e>'})
+
+    def test_label_support_does_not_match_a_different_node_name(self):
+        symbols=load('abl_symbols_name_test',PROJECT/'build/lib/abl-symbols.py')
+        for name in ('other-liuqin-abl-overlay-sink','liuqin-abl-overlay-sink-other'):
+            self.assertIsNone(symbols.extract_block('label: '+name+' {\n};\n','liuqin-abl-overlay-sink'))
 
 
 if __name__=='__main__':unittest.main(verbosity=2)
