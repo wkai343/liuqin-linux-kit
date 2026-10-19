@@ -30,7 +30,7 @@ DEVICE_PACKAGES=['btrfs-progs','NetworkManager','NetworkManager-wifi','wpa_suppl
                  'libqmi','libgudev','iio-sensor-proxy','pipewire','pipewire-pulseaudio',
                  'pipewire-alsa','wireplumber','alsa-ucm','alsa-utils','libcanberra',
                  'python3-gobject-base','python3-dbus','selinux-policy-targeted','policycoreutils']
-# Fedora keeps KWin's upstream licenses in -doc; retain it with weak deps disabled.
+# Fedora keeps KWin's upstream licenses in -doc; retain it explicitly.
 PLASMA_PACKAGES=['plasma-desktop','plasma-workspace','kwin','kwin-doc','plasma-login-manager','plasma-nm',
                  'plasma-pa','polkit-kde','powerdevil','kscreen','bluedevil','xdg-desktop-portal-kde',
                  'plasma-keyboard','qt6-qtvirtualkeyboard','qt6-qtwayland','mesa-dri-drivers',
@@ -212,20 +212,30 @@ def chroot(root, command, **kwargs):
         *variables,*command],env=env,check=True,**kwargs)
 
 
-def dnf(root, *args):
-    return chroot(root,['dnf','-y','--setopt=install_weak_deps=False','--setopt=localpkg_gpgcheck=False',
-                        '--setopt=optional_metadata_types=',*args])
+def dnf(root, *args, weak_deps=False, weak_excludes=()):
+    options=['--setopt=install_weak_deps='+str(weak_deps),
+             '--setopt=localpkg_gpgcheck=False','--setopt=optional_metadata_types=']
+    if weak_deps and weak_excludes:
+        options.append('--setopt=exclude_from_weak='+','.join(weak_excludes))
+    return chroot(root,['dnf','-y',*options,*args])
+
+
+def desktop_dnf(root, data, *args):
+    # Desktop applications need their recommended integrations. Avoid pulling
+    # deliberately removed packages back through Recommends or Supplements;
+    # this does not filter strong dependencies or explicit install requests.
+    return dnf(root,*args,weak_deps=True,weak_excludes=data.get('remove',[]))
 
 
 def install_desktop_packages(root, data):
-    dnf(root,'install',*DEVICE_PACKAGES,*PLASMA_PACKAGES,*data.get('packages',[]),
+    desktop_dnf(root,data,'install',*DEVICE_PACKAGES,*PLASMA_PACKAGES,*data.get('packages',[]),
         *(FIRST_BOOT_PACKAGES if data['first_boot_setup'] else []))
-    dnf(root,'install','--allowerasing','fedora-release-kde','fedora-release-identity-kde')
+    desktop_dnf(root,data,'install','--allowerasing','fedora-release-kde','fedora-release-identity-kde')
 
 
 def check_desktop_runtime(root, *, first_boot_setup=False):
-    # With weak dependencies disabled, a package transaction can succeed while
-    # the login session cannot start. Probe the actual ARM64 session bus and PAM
+    # A successful package transaction alone does not verify the login session.
+    # Probe the actual ARM64 session bus and PAM
     # loader before publishing; the Wi-Fi identity helper also needs iproute.
     # PowerDevil talks to UPower over D-Bus, so shared-library dependencies
     # alone do not guarantee that battery reporting is available.
@@ -419,10 +429,10 @@ def main():
                 # transaction checks without refreshing online repositories.
                 chroot(root,['rpm','-Uvh','--replacepkgs',*packages])
             else:
-                dnf(root,'install',*packages)
+                desktop_dnf(root,data,'install',*packages)
             shutil.rmtree(staging)
             if args.action=='apps':
-                if data.get('remove'):dnf(root,'remove',*data['remove'])
+                if data.get('remove'):desktop_dnf(root,data,'remove',*data['remove'])
                 restore_core_manpages(root)
                 if data.get('overlay'):common.overlay(data['overlay'],root)
                 configure(root,data,output)

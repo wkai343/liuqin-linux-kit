@@ -227,7 +227,12 @@ Btrfs 使用单设备、元数据 DUP、Zstd 三级压缩，系统在 `native-ro
 
 overlay 只允许普通文件、目录及不离开目标根的相对链接，不可写入运行时挂载目录。
 可以扩展现有 overlay，或复制后改为自己的路径。
-软件安装关闭弱依赖，裁剪时须保留所需运行组件；常见依赖包括：
+Fedora 桌面装配会安装弱依赖（`Recommends`、`Supplements`），补齐推荐的插件和集成功能；
+`remove` 中的包不作为弱依赖自动引入，装配结束时仍按清单移除。
+构建工具、基础运行环境及独立启动运行包保持精简；Ubuntu 配方仍使用 `--no-install-recommends`。
+配方省略构建脚本已声明的 `konsole`、`dolphin`、`gdisk`、`e2fsprogs` 和 `glibc-langpack-zh`；
+`unzip`、`kio-extras` 由强依赖带入，`kate-plugins` 和 Discover 的 PackageKit／Flatpak 后端由推荐依赖带入。
+必需功能继续显式列包，裁剪时须保留所需运行组件；常见依赖包括：
 
 | 功能 | Fedora 组件 |
 | --- | --- |
