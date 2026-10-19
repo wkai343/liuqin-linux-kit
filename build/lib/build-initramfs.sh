@@ -505,13 +505,19 @@ fi
 python3 "$project_root/build/lib/usb_identity.py" --output-directory "$staging/etc"
 python3 "$project_root/build/lib/root_filesystems.py" --kernel-config "${KERNEL_CONFIG:?set KERNEL_CONFIG}" \
     --output "$staging/etc/liuqin-filesystems"
+if [ "$root_profile" = native-updatable ] &&
+   grep -qx 'CONFIG_BACKLIGHT_KTZ8866=m' "${KERNEL_CONFIG:?set KERNEL_CONFIG}" &&
+   [ -z "${BOOT_SPLASH_RUNTIME:-}" ]; then
+    echo 'error: modular Liuqin backlight requires the staged early-graphics runtime' >&2
+    exit 1
+fi
 if [ -n "${BOOT_SPLASH_RUNTIME:-}" ]; then
     [ "$root_profile" = native-updatable ] && [ "$storage_mode" = persistent ] && [ "$embed_rootfs" = 0 ] || {
         echo 'error: boot splash belongs only to a native persistent image' >&2; exit 1;
     }
     python3 "$project_root/build/lib/boot_splash.py" --runtime "$BOOT_SPLASH_RUNTIME" \
         --modules "${SPLASH_KERNEL_MODULES_DIR:?set SPLASH_KERNEL_MODULES_DIR}" \
-        --contract "$native_root_contract" --staging "$staging"
+        --contract "$native_root_contract" --staging "$staging" --kernel-config "$KERNEL_CONFIG" --cc "$slot_success_gcc"
 fi
 if grep -qx btrfs "$staging/etc/liuqin-filesystems" && [ "$root_profile" = installer ]; then
     [ -x "$staging/usr/sbin/mkfs.btrfs" ] && [ -x "$staging/usr/bin/btrfs" ] || {

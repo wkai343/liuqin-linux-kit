@@ -146,13 +146,15 @@ rootfs.tar.gz
 依赖就绪便继续，不会强制等待 60 秒。
 
 Fedora 配方包含 `plymouth` 时，构建会从官方 Fedora 基础系统生成并缓存独立的
-Plymouth Spinner 运行包，再将它和匹配的显示模块放入 `boot.img`。
+Plymouth 运行包（含官方 Spinner 素材和 script 插件），再将它与匹配的显示模块放入 `boot.img`。
+此时额外应用 `firmware-splash.config`，将 KTZ8866 改为模块，先绘制早期画面再接管背光。
 首次生成运行包需要与根系统装配相同的 root/ARM64 执行环境；内核更新可复用该运行包。
 桌面根归档不参与运行库收集，`installer.img` 保持独立。
 运行库中内容和权限相同的 ELF 文件在 CPIO 中共享数据，全部路径保持可用，配置文件仍独立。
 正常引导在目标内核启用 `CONFIG_RD_ZSTD=y` 时使用 Zstd 压缩，否则使用 gzip；
 独立安装环境继续使用 gzip。安装器与引导更新工具均可读取这两种格式。
-Fedora 标志、转圈及登录界面切换已通过真机与正常重启验证。
+开机方向从保留的小米标识别，关机方向跟随退出前的显示方向；原生驱动接手仍会短暂黑屏。
+方向规则、回退与验证范围见 [开关机画面](DISPLAY.md#开关机画面)。
 早期显示设备就绪后即继续，检查间隔为 50 毫秒，等待上限为 5 秒。
 可在正常引导参数中加入 `plymouth.enable=0` 停用动画。
 正常启动会核对 UFS 逻辑单元、双份 GPT 与内核分区节点，连续两轮完整就绪后提前结束存储等待；
@@ -174,8 +176,9 @@ zram 内核选项只提供能力，容量与算法由 rootfs 的服务配置决�
 `build/kernel/source.json` 记录的板级补丁，不改写源码目录。
 改用其他提交时，需自行核对并合入 `build/kernel/patches/` 中适用的补丁。
 Fedora 目标还叠加 `build/kernel/configs/fedora.config`，启用 SELinux。
-自定义配置时保留 `CONFIG_BACKLIGHT_KTZ8866=y` 和 `CONFIG_SM_DISPCC_8450=m`，
-以保持正常系统的背光接管顺序；独立安装内核使用自己的配置。
+Fedora 图形启动构建使用 `CONFIG_BACKLIGHT_KTZ8866=m`、`CONFIG_FB_SIMPLE=y` 和
+`CONFIG_SM_DISPCC_8450=m`，按帧缓冲绘制、背光、显示时钟的顺序接手。
+未启用 Plymouth 的目标仍使用内置 KTZ8866；独立安装内核使用自己的配置。
 
 ### 可选：回收 MTE 预留
 

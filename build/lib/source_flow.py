@@ -213,7 +213,8 @@ class Flow:
         splash=self.boot_splash_runtime()
         if splash:
             dependency.update(splash=tree_identity(splash),splash_stager=sha(PROJECT/'build/lib/boot_splash.py'),
-                              splash_interface=sha(PROJECT/'build/lib/plymouth_runtime.py'))
+                              splash_interface=sha(PROJECT/'build/lib/plymouth_runtime.py'),
+                              splash_assets=sha(PROJECT/'build/lib/splash_assets.py'))
         def build(out):
             self.run(['sh','build/scripts/build-liuqin-native-boot.sh'],env=dict(env,
                 KERNEL_MODULES_DIR=str(modules),LIUQIN_ROOT_PROFILE='native-updatable',OUT_DIR=str(out/'image'),INSTALLER_RUNTIME='',

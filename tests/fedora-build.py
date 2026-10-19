@@ -76,6 +76,10 @@ class FedoraTests(unittest.TestCase):
         self.assertEqual(link.resolve(),unit)
         self.assertTrue(helper.stat().st_mode & 0o111)
         self.assertEqual(helper.read_bytes(),(PROJECT/'device/gnome-overlay/usr/local/libexec/liuqin-display-recovery').read_bytes())
+        observer=root/'usr/libexec/liuqin-splash-output-observer'
+        self.assertTrue(observer.stat().st_mode & 0o111)
+        self.assertEqual(observer.read_bytes(),(PROJECT/'device/gnome-overlay/usr/libexec/liuqin-splash-output-observer').read_bytes())
+        self.assertTrue((root/'etc/systemd/system/liuqin-splash-orientation.service').is_file())
         self.assertIn('ConditionUser=!root',unit.read_text())
         self.assertIn('NoNewPrivileges=yes',unit.read_text())
 
@@ -85,12 +89,35 @@ class FedoraTests(unittest.TestCase):
         flow=FedoraFlow(original,lambda *_a,**_k:self.fail('unexpected build'))
         self.assertEqual(original['kernel_fragments'],[])
         self.assertIn('build/kernel/configs/fedora.config',flow.data['kernel_fragments'])
+        self.assertIn('build/kernel/configs/firmware-splash.config',flow.data['kernel_fragments'])
+        from source_flow import kernel_fragments
+        self.assertNotIn('build/kernel/configs/firmware-splash.config',kernel_fragments(flow.data,installer=True))
         self.assertIn('-fedora',flow.data['kernel_localversion'])
         self.assertEqual(flow.source['release'],'44')
         with patch('source_flow.download',return_value=self.work/'installer-base') as download:
             self.assertEqual(flow.base(),self.work/'installer-base')
         self.assertIn('ubuntu-base',str(download.call_args.args[1]))
         self.assertIn('fedora-plasma',flow.plan()['output'])
+
+    def test_firmware_splash_default_precedes_explicit_custom_fragments(self):
+        from source_flow import kernel_fragments
+        config=dict(rootfs_config=str(PROJECT/'build/rootfs/fedora-plasma.json'),
+                    kernel_fragments=['custom-display.config'],kernel_localversion='-liuqin-test',kernel_source='sources/test')
+        flow=FedoraFlow(config,lambda *_a,**_k:self.fail('unexpected build'))
+        fragments=kernel_fragments(flow.data)
+        self.assertLess(fragments.index('build/kernel/configs/native-display.config'),
+                        fragments.index('build/kernel/configs/firmware-splash.config'))
+        self.assertLess(fragments.index('build/kernel/configs/firmware-splash.config'),
+                        fragments.index('custom-display.config'))
+
+    def test_fedora_without_splash_keeps_builtin_backlight_default(self):
+        recipe=json.loads((PROJECT/'build/rootfs/fedora-plasma.json').read_text())
+        recipe['packages'].remove('plymouth')
+        path=self.work/'no-splash.json';path.write_text(json.dumps(recipe))
+        config=dict(rootfs_config=str(path),kernel_fragments=[],kernel_localversion='-liuqin-test',kernel_source='sources/test')
+        flow=FedoraFlow(config,lambda *_a,**_k:self.fail('unexpected build'))
+        self.assertNotIn('build/kernel/configs/firmware-splash.config',flow.data['kernel_fragments'])
+        self.assertIsNone(flow.boot_splash_runtime())
 
     def test_v2_root_accepts_only_the_known_fedora_sbin_merge(self):
         sys.path.insert(0,str(PROJECT/'tests'))

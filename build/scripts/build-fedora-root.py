@@ -18,6 +18,7 @@ sys.path.insert(0,str(PROJECT/'build/lib'))
 from source_build import mounted_root, sha, arm64_execution
 from fedora_oci import extract as extract_oci
 from shell_defaults import check_skeleton, ensure as ensure_shell_defaults
+from splash_assets import install_themes
 spec=importlib.util.spec_from_file_location('ubuntu_root_common',PROJECT/'build/scripts/build-official-root.py')
 common=importlib.util.module_from_spec(spec);spec.loader.exec_module(common)
 
@@ -252,7 +253,7 @@ def check_desktop_runtime(root, *, first_boot_setup=False):
 
 
 def boot_splash_files():
-    return {
+    files={
         'etc/plymouth/plymouthd.conf':'[Daemon]\nTheme=spinner\nShowDelay=0\nDeviceTimeout=5\n',
         # The initramfs may already have a daemon owning the display.
         'etc/systemd/system/plymouth-start.service.d/10-liuqin.conf':
@@ -261,6 +262,14 @@ def boot_splash_files():
         'etc/systemd/system/plymouth-quit.service.d/10-liuqin.conf':
             '[Service]\nExecStart=\nExecStart=-/usr/bin/plymouth quit --retain-splash\n',
     }
+    for name,mode in (('poweroff','shutdown'),('halt','shutdown'),('reboot','reboot')):
+        files['etc/systemd/system/plymouth-'+name+'.service.d/30-liuqin-orientation.conf']=(
+            '[Service]\nEnvironment="LIUQIN_PLYMOUTH_CMDLINE=rhgb quiet"\n'
+            'EnvironmentFile=-/run/liuqin-splash-orientation/plymouth.env\n'
+            'ExecStartPre=-/usr/bin/python3 /usr/libexec/liuqin-splash-orientation prepare\n'
+            'ExecStart=\nExecStart=/usr/bin/plymouthd --mode='+mode+' --attach-to-session '
+            '--kernel-command-line=${LIUQIN_PLYMOUTH_CMDLINE}\n')
+    return files
 
 
 def configure(root, data, output):
@@ -303,7 +312,10 @@ def configure(root, data, output):
     link('graphical.target.wants/plasmalogin.service','/usr/lib/systemd/system/plasmalogin.service')
     link('default.target','/usr/lib/systemd/system/graphical.target')
     if 'plymouth' in data.get('packages',[]):
+        install_themes(root)
         for name,content in boot_splash_files().items():common.write_config(root,name,content)
+        link('graphical.target.wants/liuqin-splash-orientation.service',
+             '../liuqin-splash-orientation.service')
         for target,name in (('sysinit','start'),('multi-user','quit'),('multi-user','quit-wait')):
             link(target+'.target.wants/plymouth-'+name+'.service','/usr/lib/systemd/system/plymouth-'+name+'.service')
     for name in ('NetworkManager','bluetooth','chronyd','systemd-resolved'):
@@ -360,7 +372,8 @@ def main():
     if args.action=='splash':
         with mounted_root(root):
             enable_documentation(root)
-            dnf(root,'install','plymouth','plymouth-theme-spinner','systemd-udev')
+            dnf(root,'install','plymouth','plymouth-theme-spinner','plymouth-plugin-script','fontconfig','systemd-udev')
+            install_themes(root)
             collector=root/'tmp/liuqin-plymouth-runtime.py'
             shutil.copyfile(PROJECT/'build/lib/plymouth_runtime.py',collector)
             chroot(root,['python3','/tmp/liuqin-plymouth-runtime.py','--out','/tmp/liuqin-splash-runtime'])

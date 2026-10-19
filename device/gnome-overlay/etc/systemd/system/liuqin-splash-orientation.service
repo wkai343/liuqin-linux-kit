@@ -1,0 +1,19 @@
+[Unit]
+Description=Remember display direction for shutdown splash
+After=dbus.service systemd-logind.service
+Before=display-manager.service
+ConditionKernelCommandLine=liuqin.splash_orientation=1
+ConditionKernelCommandLine=!plymouth.enable=0
+ConditionPathExists=/usr/share/plymouth/themes/liuqin-rotate-90/liuqin-rotate-90.plymouth
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/libexec/liuqin-splash-orientation watch
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=3
+KillMode=mixed
+UMask=0077
+
+[Install]
+WantedBy=graphical.target

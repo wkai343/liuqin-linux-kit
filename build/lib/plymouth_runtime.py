@@ -45,10 +45,11 @@ def permitted(path):
     exact={'etc/system-release','etc/os-release','usr/lib/os-release',
            'usr/lib/fedora-release',
            'etc/udev/rules.d/70-liuqin-splash.rules',
-           'usr/bin/plymouth','usr/bin/plymouthd','usr/bin/udevadm',
+           'usr/bin/plymouth','usr/bin/plymouthd','usr/bin/udevadm','usr/bin/fc-match',
            'bin/plymouth','bin/plymouthd','bin/udevadm',
            'lib/ld-linux-aarch64.so.1','usr/lib/ld-linux-aarch64.so.1',
-           'usr/lib/systemd/systemd-udevd','usr/libexec/plymouth/plymouthd-fd-escrow'}
+           'usr/lib/systemd/systemd-udevd','usr/libexec/plymouth/plymouthd-fd-escrow',
+           'usr/share/xml/fontconfig/fonts.dtd'}
     prefixes=('etc/plymouth/','etc/fonts/','usr/share/plymouth/','usr/share/fonts/',
               'usr/share/fontconfig/','usr/share/pixmaps/','usr/share/licenses/',
               'usr/share/X11/','usr/lib64/','lib64/','usr/lib/plymouth/')
@@ -84,7 +85,7 @@ def materialize(raw, output):
     return records,owners
 
 
-def collect(output):
+def collect(output, themes_dir=Path('/usr/share/plymouth/themes')):
     output=Path(output)
     if output.exists():raise ValueError('runtime output already exists')
     output.mkdir(parents=True)
@@ -92,10 +93,27 @@ def collect(output):
     helper=next((p for p in (Path('/usr/lib/plymouth/plymouth-populate-initrd'),
                             Path('/usr/libexec/plymouth/plymouth-populate-initrd')) if p.is_file()),None)
     if helper is None:raise ValueError('Fedora Plymouth population helper is missing')
-    env=dict(os.environ,LC_ALL='C',PLYMOUTH_THEME_NAME='spinner',SYSTEMD_UNIT_DIR='/nonexistent')
+    env=dict(os.environ,LC_ALL='C',PLYMOUTH_THEME_NAME='spinner',SYSTEMD_UNIT_DIR='/nonexistent',
+             HOME='/nonexistent',XDG_CONFIG_HOME='/nonexistent',XDG_DATA_HOME='/nonexistent')
     subprocess.run([str(helper),'-t',str(raw)],env=env,check=True)
     subprocess.run(['/usr/lib/dracut/dracut-install','-D',str(raw),'-l','-a',
-                    '/usr/bin/udevadm','/usr/lib/systemd/systemd-udevd'],env=env,check=True)
+                    '/usr/bin/udevadm','/usr/lib/systemd/systemd-udevd',
+                    '/usr/lib64/plymouth/script.so','/usr/bin/fc-match'],env=env,check=True)
+    # The official script plugin supplies image/text rendering; include its
+    # font configuration as well as the four generated project themes.
+    for directory in ('etc/fonts','usr/share/fontconfig'):
+        shutil.copytree(Path('/')/directory,raw/directory,symlinks=True,dirs_exist_ok=True)
+    dtd=raw/'usr/share/xml/fontconfig/fonts.dtd';dtd.parent.mkdir(parents=True,exist_ok=True)
+    shutil.copyfile('/usr/share/xml/fontconfig/fonts.dtd',dtd)
+    for angle in (0,90,180,270):
+        name='liuqin-rotate-'+str(angle)
+        for filename in ('theme.script',name+'.plymouth'):
+            source=Path(themes_dir)/name/filename
+            if source.is_symlink() or not source.is_file():
+                raise ValueError('generated splash theme is missing: '+str(source))
+            destination=raw/'usr/share/plymouth/themes'/name/filename
+            destination.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copyfile(source,destination)
     conf=raw/'etc/plymouth/plymouthd.conf';conf.parent.mkdir(parents=True,exist_ok=True)
     conf.write_text('[Daemon]\nTheme=spinner\nShowDelay=0\nDeviceTimeout=5\n')
     # The early daemon needs graphics metadata only, never storage or custom
@@ -124,12 +142,15 @@ def collect(output):
                 records[name]={'sha256':hashlib.sha256(content).hexdigest(),'mode':0o644,'size':len(content)}
     required=['usr/bin/plymouth','usr/bin/plymouthd','usr/bin/udevadm',
               'usr/lib/systemd/systemd-udevd','etc/plymouth/plymouthd.conf',
-              'usr/share/plymouth/themes/spinner/spinner.plymouth']
+              'usr/share/plymouth/themes/spinner/spinner.plymouth',
+              'usr/lib64/plymouth/script.so','usr/bin/fc-match',
+              'usr/lib64/plymouth/renderers/frame-buffer.so']
     for name in required:
         if name not in records:raise ValueError('required runtime file is missing: '+name)
     if not any(name.endswith('/renderers/drm.so') for name in records):
         raise ValueError('Plymouth DRM renderer is missing')
-    manifest={'schema':1,'architecture':'aarch64','theme':'spinner','files':records,'packages':metadata.splitlines()}
+    manifest={'schema':1,'architecture':'aarch64','theme':'spinner','firmware_splash':True,
+              'files':records,'packages':metadata.splitlines()}
     (output/'runtime.json').write_text(json.dumps(manifest,sort_keys=True,indent=2)+'\n')
     with (output/'runtime.tar.gz').open('wb') as file:
         with gzip.GzipFile(filename='',mode='wb',fileobj=file,mtime=0) as compressed:
@@ -144,4 +165,5 @@ def collect(output):
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--out',type=Path,required=True)
-    collect(parser.parse_args().out)
+    parser.add_argument('--themes-dir',type=Path,default=Path('/usr/share/plymouth/themes'))
+    args=parser.parse_args();collect(args.out,args.themes_dir)

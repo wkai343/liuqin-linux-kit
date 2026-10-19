@@ -16,6 +16,13 @@ class FedoraFlow(Flow):
         if fragment not in data['kernel_fragments']:data['kernel_fragments'].append(fragment)
         if '-fedora' not in data['kernel_localversion']:data['kernel_localversion']+='-fedora'
         super().__init__(data,run,refresh=refresh,distribution='fedora')
+        fragment='build/kernel/configs/firmware-splash.config'
+        if 'plymouth' in self.recipe['packages'] and fragment not in self.data['kernel_fragments']:
+            # Keep explicit custom fragments after the distribution defaults.
+            # kernel_fragments() inserts the common native fragment first.
+            native='build/kernel/configs/native-display.config'
+            index=self.data['kernel_fragments'].index(native)+1 if native in self.data['kernel_fragments'] else 0
+            self.data['kernel_fragments'].insert(index,fragment)
         self.code['build/lib/fedora_flow.py']=sha(PROJECT/'build/lib/fedora_flow.py')
 
     def target_base(self):
@@ -40,7 +47,9 @@ class FedoraFlow(Flow):
         def build(out):self.target_action('splash',archive,out/'assembled')
         return self.stage('fedora-splash-runtime',dict(base=sha(archive),
             builder=sha(PROJECT/'build/scripts/build-fedora-root.py'),
-            collector=sha(PROJECT/'build/lib/plymouth_runtime.py'),refresh=self.refresh),
+            collector=sha(PROJECT/'build/lib/plymouth_runtime.py'),
+            splash_assets=sha(PROJECT/'build/lib/splash_assets.py'),
+            theme=tree_identity(PROJECT/'device/boot/splash'),refresh=self.refresh),
             build,['assembled/runtime.tar.gz','assembled/runtime.json'])/'assembled'
 
     def sensors(self):
@@ -106,7 +115,9 @@ class FedoraFlow(Flow):
         inputs=dict(base=sha(archive),rpms=tree_identity(devices),recipe=self.recipe,
             builder=sha(PROJECT/'build/scripts/build-fedora-root.py'),
             input_env=sha(PROJECT/'build/rootfs/fedora-input-env.sh'),
-            shell_defaults=sha(PROJECT/'build/lib/shell_defaults.py'),refresh=self.refresh)
+            shell_defaults=sha(PROJECT/'build/lib/shell_defaults.py'),
+            splash_assets=sha(PROJECT/'build/lib/splash_assets.py'),
+            theme=tree_identity(PROJECT/'device/boot/splash'),refresh=self.refresh)
         inputs['stats_rpm']=sha(stats)
         inputs['fingerprint_rpm']=sha(fingerprint)
         if self.recipe.get('overlay'):inputs['overlay']=tree_identity(self.recipe['overlay'])
@@ -158,7 +169,7 @@ class FedoraFlow(Flow):
         result=super().plan();result['steps'][0]='官方 Fedora 44 ARM64 基础系统'
         result['output']='out/releases/fedora-plasma-<内容标识>/'
         result['installer_base']=self.installer_source
-        result['kernel_configuration']='额外启用 Fedora SELinux 片段'
+        result['kernel_configuration']='额外启用 Fedora SELinux 片段；图形启动包含固件帧缓冲配置'
         result['package_format']='rpm'
         if self.recipe['first_boot_setup']:
             result['steps']=[step.replace('登录前初始化组件（独立 ARM64 包）','Fedora 官方 plasma-setup 软件包') for step in result['steps']]

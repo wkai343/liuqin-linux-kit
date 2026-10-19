@@ -1,0 +1,113 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: MIT
+"""Read only wl_output metadata; no surfaces, input devices or framebuffer access."""
+import ctypes as C, ctypes.util, json, select, signal, sys
+
+class Interface(C.Structure):
+    _fields_ = [('name', C.c_char_p), ('version', C.c_int), ('method_count', C.c_int), ('methods', C.c_void_p), ('event_count', C.c_int), ('events', C.c_void_p)]
+
+def main():
+    lib = C.CDLL(ctypes.util.find_library('wayland-client'))
+
+    def bind(name, args, result):
+        f = getattr(lib, name)
+        f.argtypes = args
+        f.restype = result
+        return f
+    connect = bind('wl_display_connect', [C.c_char_p], C.c_void_p)
+    disconnect = bind('wl_display_disconnect', [C.c_void_p], None)
+    roundtrip = bind('wl_display_roundtrip', [C.c_void_p], C.c_int)
+    dispatch = bind('wl_display_dispatch', [C.c_void_p], C.c_int)
+    dispatch_pending = bind('wl_display_dispatch_pending', [C.c_void_p], C.c_int)
+    flush = bind('wl_display_flush', [C.c_void_p], C.c_int)
+    getfd = bind('wl_display_get_fd', [C.c_void_p], C.c_int)
+    version = bind('wl_proxy_get_version', [C.c_void_p], C.c_uint32)
+    marshal = bind('wl_proxy_marshal_flags', [C.c_void_p, C.c_uint32, C.POINTER(Interface), C.c_uint32, C.c_uint32], C.c_void_p)
+    listener = bind('wl_proxy_add_listener', [C.c_void_p, C.POINTER(C.c_void_p), C.c_void_p], C.c_int)
+    registry_interface = Interface.in_dll(lib, 'wl_registry_interface')
+    output_interface = Interface.in_dll(lib, 'wl_output_interface')
+    display = connect(None)
+    if not display:
+        raise SystemExit('Wayland display unavailable')
+    outputs = {}
+    refs = []
+    last = [None]
+
+    def emit():
+        active = [x for x in outputs.values() if x.get('name') == 'DSI-1' and 'transform' in x]
+        if len(active) == 1 and active[0]['transform'] in (0, 1, 2, 3):
+            t = active[0]['transform']
+            r = {'version': 1, 'output': 'DSI-1', 'transform': t, 'angle': {0: 0, 1: 270, 2: 180, 3: 90}[t]}
+        else:
+            r = {'version': 1, 'unavailable': True}
+        if r != last[0]:
+            print(json.dumps(r), flush=True)
+            last[0] = r
+
+    def geometry(data, proxy, x, y, pw, ph, subpixel, make, model, transform):
+        if int(data) in outputs:
+            outputs[int(data)]['transform'] = transform
+
+    def mode(*args):
+        pass
+
+    def done(*args):
+        emit()
+
+    def scale(*args):
+        pass
+
+    def name(data, proxy, value):
+        if int(data) in outputs:
+            outputs[int(data)]['name'] = value.decode('utf-8', errors='replace')
+
+    def description(*args):
+        pass
+    signatures = [(geometry, [C.c_void_p, C.c_void_p] + [C.c_int32] * 5 + [C.c_char_p, C.c_char_p, C.c_int32]), (mode, [C.c_void_p, C.c_void_p, C.c_uint32, C.c_int32, C.c_int32, C.c_int32]), (done, [C.c_void_p, C.c_void_p]), (scale, [C.c_void_p, C.c_void_p, C.c_int32]), (name, [C.c_void_p, C.c_void_p, C.c_char_p]), (description, [C.c_void_p, C.c_void_p, C.c_char_p])]
+    callbacks = [C.CFUNCTYPE(None, *args)(fn) for fn, args in signatures]
+    refs.extend(callbacks)
+    output_listener = (C.c_void_p * 6)(*[C.cast(f, C.c_void_p).value for f in callbacks])
+    refs.append(output_listener)
+
+    def global_(data, registry, ident, interface, ver):
+        if interface != b'wl_output' or ver < 4:
+            return
+        obj = marshal(registry, 0, C.byref(output_interface), min(4, ver), 0, C.c_uint32(ident), C.c_char_p(b'wl_output'), C.c_uint32(min(4, ver)), C.c_void_p())
+        if not obj:
+            return
+        outputs[ident] = {'proxy': obj}
+        listener(obj, output_listener, C.c_void_p(ident))
+
+    def remove(data, registry, ident):
+        if ident in outputs:
+            del outputs[ident]
+            emit()
+    g = C.CFUNCTYPE(None, C.c_void_p, C.c_void_p, C.c_uint32, C.c_char_p, C.c_uint32)(global_)
+    d = C.CFUNCTYPE(None, C.c_void_p, C.c_void_p, C.c_uint32)(remove)
+    refs.extend([g, d])
+    registry_listener = (C.c_void_p * 2)(C.cast(g, C.c_void_p).value, C.cast(d, C.c_void_p).value)
+    refs.append(registry_listener)
+    try:
+        registry = marshal(display, 1, C.byref(registry_interface), version(display), 0, C.c_void_p())
+        if not registry or listener(registry, registry_listener, None) != 0:
+            raise RuntimeError('registry unavailable')
+        for _ in range(2):
+            if roundtrip(display) < 0:
+                raise RuntimeError('display disconnected during discovery')
+        emit()
+
+        def stop(*args):
+            raise SystemExit(0)
+        for sig in [signal.SIGTERM, signal.SIGINT]:
+            signal.signal(sig, stop)
+        while True:
+            if dispatch_pending(display) < 0:
+                break
+            flush(display)
+            ready, _, _ = select.select([getfd(display)], [], [])
+            if ready and dispatch(display) < 0:
+                break
+    finally:
+        disconnect(display)
+if __name__ == '__main__':
+    main()

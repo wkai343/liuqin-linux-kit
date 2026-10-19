@@ -20,9 +20,25 @@ CI 的实际测试列表以 `.github/workflows/` 为准，不能把本地入口�
 | --- | --- |
 | `display-clock.py` | 补丁中的时钟取整、频率边界和 CCF 约束 |
 | `display-policy.py`、`display-recovery.py` | CABC 配置、活动会话、恢复限流、失败与退出处理 |
-| `backlight-default.py`、`boot-splash.py` | 亮度量程、初始化等待和启动显示交接 |
+| `backlight-default.py`、`boot-splash.py` | 亮度量程、初始化等待、背光/显示时钟装载顺序，以及充电与动画退出路径 |
+| `splash-handoff.py`、`splash-logo.py`、`splash-orientation.py` | 帧缓冲边界、绘制进程隔离与回退、四向特征识别、关机方向缓存及 systemd 直接入口 |
 | `storage-seal.py`、`storage-ready.py`、`storage-paths.py` | 批量只读设置、UFS/GPT 就绪证明、路径替换及回退 |
 | `wlan-mac.py` | 目标网卡 udev 初始化、命名竞态与设备身份 |
+
+### Plymouth 主题运行检查
+
+`tests/splash-theme.py` 使用实际的 Fedora script 插件、图片和文字库，显示对象在内存中模拟；
+不启动守护进程，也不访问屏幕或输入设备。需在已安装 `plymouth-plugin-script` 和
+`plymouth-theme-spinner` 的 Fedora 环境执行，每个组合使用独立进程：
+
+```sh
+python3 tests/splash-theme.py --width 900 --angle 90
+```
+
+覆盖宽度 `900`、`1800` 和方向 `0`、`90`、`180`、`270`，检查缩放、像素旋转、提示与密码遮罩。
+这项组件测试不属于无需 Fedora 环境的 `devbox run test`。
+方向识别测试只包含固定 ROM 的 224 点分类样本，不包含完整图像或设备截图。
+用 `build/scripts/generate-boot-logo-signature.py --help` 查看从已校验 `imagefv.elf` 重建特征表的方法。
 
 ## 内核源码阶段验证
 

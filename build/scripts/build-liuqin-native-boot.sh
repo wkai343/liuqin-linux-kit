@@ -66,6 +66,10 @@ if not re.fullmatch(rb'[A-Za-z0-9._+-]{1,255}\n', release):
     raise SystemExit('kernel release is invalid')
 PYTHON
 source_epoch=$(git -C "$kernel_source" show -s --format=%ct HEAD)
+if [ "$root_profile" = native-updatable ] && [ -n "${BOOT_SPLASH_RUNTIME:-}" ]; then
+    cmdline=$(python3 "$project_root/build/lib/splash_assets.py" --runtime "$BOOT_SPLASH_RUNTIME" \
+        --kernel-config "$kernel_out/.config" --bootargs="$cmdline")
+fi
 charger_mode=auto
 storage_mode=persistent
 if [ "$root_profile" = installer ]; then charger_mode=0; storage_mode=readonly; fi

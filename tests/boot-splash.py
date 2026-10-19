@@ -118,13 +118,21 @@ class SplashTests(unittest.TestCase):
             if extra:archive.addfile(extra)
         (self.runtime/'runtime.json').write_text(json.dumps(dict(schema=1,architecture='aarch64',theme='spinner',files=records)))
 
-    def write_modules(self,bad_clock=False):
+    def write_modules(self,bad_clock=False,backlight=False,bad_backlight=False,unsafe_dependency=False):
         prefix='usr/lib/modules/'+self.release+'/'
         clock='kernel/drivers/clk/qcom/dispcc-sm8450.ko'
         mux='kernel/drivers/usb/typec/mux/fsa4480.ko'
         dep='kernel/drivers/base/helper.ko'
         files={prefix+clock:elf(62 if bad_clock else 183),prefix+mux:elf(),prefix+dep:elf(),
                prefix+'modules.dep':f'{clock}: {dep}\n{mux}: {dep}\n{dep}:\n'.encode()}
+        if backlight:
+            light='kernel/drivers/video/backlight/ktz8866.ko'
+            regmap='kernel/drivers/base/regmap/regmap-i2c.ko'
+            files[prefix+light]=elf(62 if bad_backlight else 183)
+            files[prefix+regmap]=elf()
+            files[prefix+'modules.dep']=(
+                f'{clock}: {dep}\n{mux}: {dep} {regmap}\n{dep}:\n{regmap}:\n'
+                f'{light}: {clock if unsafe_dependency else regmap}\n').encode()
         manifest=''.join(hashlib.sha256(data).hexdigest()+'  '+name+'\n' for name,data in sorted(files.items())).encode()
         (self.modules/'modules.manifest').write_bytes(manifest)
         with tarfile.open(self.modules/'modules.tar','w') as archive:
@@ -133,7 +141,7 @@ class SplashTests(unittest.TestCase):
         self.contract.write_text('LIUQIN_ROOT_INTERFACE_V2\nkernel_release='+self.release+'\nimage_sha256='+'0'*64+
                                  '\nmodules_sha256='+hashlib.sha256(manifest).hexdigest()+'\n')
 
-    def run_stage(self):stage(self.runtime,self.modules,self.contract,self.output)
+    def run_stage(self,kernel_config=None):stage(self.runtime,self.modules,self.contract,self.output,kernel_config)
 
     def test_dependency_order_and_deduplication_preserve_the_complete_kernel_identity(self):
         self.run_stage()
@@ -142,6 +150,36 @@ class SplashTests(unittest.TestCase):
         self.assertEqual(len(list((self.output/'usr/lib/liuqin-splash').glob('*.ko'))),3)
         self.assertFalse((self.output/'etc/liuqin-native-root.contract').exists())
         self.assertEqual(self.contract.read_text().splitlines()[1],'kernel_release='+self.release)
+        self.assertEqual((self.output/'etc/liuqin-splash-backlight-modules.order').read_text(),'')
+
+    def test_modular_backlight_is_a_separate_phase_with_shared_dependencies_loaded_once(self):
+        self.write_modules(backlight=True)
+        config=self.root/'kernel.config';config.write_text('CONFIG_BACKLIGHT_KTZ8866=m\n')
+        self.run_stage(config)
+        self.assertEqual((self.output/'etc/liuqin-splash-backlight-modules.order').read_text().splitlines(),
+                         ['regmap_i2c','ktz8866'])
+        self.assertEqual((self.output/'etc/liuqin-splash-modules.order').read_text().splitlines(),
+                         ['helper','fsa4480','dispcc_sm8450'])
+        self.assertEqual(len(list((self.output/'usr/lib/liuqin-splash').glob('*.ko'))),5)
+        self.assertEqual(len((self.output/'etc/liuqin-splash-backlight-modules.sha256').read_text().splitlines()),2)
+        self.assertEqual(len((self.output/'etc/liuqin-splash-modules.sha256').read_text().splitlines()),5)
+
+    def test_missing_backlight_module_is_rejected_when_configuration_requires_it(self):
+        config=self.root/'kernel.config';config.write_text('CONFIG_BACKLIGHT_KTZ8866=m\n')
+        with self.assertRaisesRegex(ValueError,'kernel configuration'):self.run_stage(config)
+
+    def test_builtin_configuration_cannot_use_a_different_modular_payload(self):
+        self.write_modules(backlight=True)
+        config=self.root/'kernel.config';config.write_text('CONFIG_BACKLIGHT_KTZ8866=y\n')
+        with self.assertRaisesRegex(ValueError,'kernel configuration'):self.run_stage(config)
+
+    def test_backlight_dependencies_cannot_start_display_clocks(self):
+        self.write_modules(backlight=True,unsafe_dependency=True)
+        with self.assertRaisesRegex(ValueError,'unaudited dependency'):self.run_stage()
+
+    def test_foreign_backlight_module_is_refused(self):
+        self.write_modules(backlight=True,bad_backlight=True)
+        with self.assertRaisesRegex(ValueError,'not ARM64'):self.run_stage()
 
     def test_corrupt_runtime_is_not_accepted(self):
         manifest=self.runtime/'runtime.json';data=json.loads(manifest.read_text())
@@ -210,5 +248,140 @@ class SplashTests(unittest.TestCase):
         self.assertEqual(records['lib64/alias.so']['sha256'],hashlib.sha256(elf()).hexdigest())
         (raw/'escape').symlink_to('../outside')
         with self.assertRaisesRegex(ValueError,'escapes'):rooted(raw,'escape')
+
+
+@unittest.skipUnless(os.name=='posix' and shutil.which('timeout'), 'POSIX timeout required')
+class OwnershipOrderTests(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)
+        self.events=self.root/'events';self.state=self.root/'state';self.state.mkdir()
+        self.backlight=self.root/'backlight';self.panel=self.root/'panel';self.panel.mkdir()
+        self.modules=self.root/'modules';self.modules.mkdir();self.sysmodules=self.root/'sysmodules';self.sysmodules.mkdir()
+        self.cmdline=self.root/'cmdline';self.cmdline.write_text('rhgb\n')
+        self.mode=self.root/'mode';self.mode.write_text('persistent\n')
+        self.installer=self.root/'installer'
+        self.pre=self.root/'pre.order';self.pre.write_text('regmap_i2c\nktz8866\n')
+        self.post=self.root/'post.order';self.post.write_text('fsa4480\ndispcc_sm8450\n')
+        names=['regmap_i2c','ktz8866','fsa4480','dispcc_sm8450']
+        for name in names:(self.modules/(name+'.ko')).write_bytes(elf()+name.encode())
+        self.prehash=self.root/'pre.sha';self.allhash=self.root/'all.sha'
+        def hashes(selected):return ''.join(hashlib.sha256((self.modules/(n+'.ko')).read_bytes()).hexdigest()+'  '+str(self.modules/(n+'.ko'))+'\n' for n in selected)
+        self.prehash.write_text(hashes(names[:2]));self.allhash.write_text(hashes(names))
+        self.box=self.root/'busybox'
+        self.box.write_text(r"""#!/bin/sh
+case $1 in
+ timeout) shift; shift; exec "$@" ;;
+ insmod)
+  name=${2##*/}; name=${name%.ko}
+  printf 'insmod:%s\n' "$name" >>"$EVENTS"
+  [ "${FAIL_MODULE:-}" != "$name" ] || exit 1
+  if [ "$name" = ktz8866 ]; then
+   mkdir -p "$LIGHT"
+   printf '4\n' >"$LIGHT/bl_power"
+   printf '4095\n' >"$LIGHT/max_brightness"
+   printf 'liuqin-oem\n' >"$LIGHT/brightness_curve"
+  fi
+  if [ "$name" = dispcc_sm8450 ]; then
+   [ "$(cat "$LIGHT/bl_power")" = 4 ] || exit 99
+   grep -q '^log:backlight blanked before display clock takeover$' "$EVENTS" || exit 98
+   printf 'connected\n' >"$PANEL/status"
+   printf '1800x2880\n' >"$PANEL/modes"
+  fi
+  mkdir -p "$SYSMODULES/$name"
+  exit 0 ;;
+ *) exec "$@" ;;
+esac
+""");self.box.chmod(0o755)
+        self.programs={}
+        for name in ['plymouth','plymouthd','udevadm','udevd']:
+            path=self.root/name
+            path.write_text('#!/bin/sh\nprintf "%s\\n" "'+name+':$*" >>"$EVENTS"\n')
+            path.chmod(0o755);self.programs[name]=path
+        source=(PROJECT/'device/boot/liuqin-boot-splash.sh').read_text()
+        replacements={
+            '/etc/liuqin-splash-backlight-modules.order':self.pre,
+            '/etc/liuqin-splash-backlight-modules.sha256':self.prehash,
+            '/etc/liuqin-splash-modules.order':self.post,
+            '/etc/liuqin-splash-modules.sha256':self.allhash,
+            '/sys/class/backlight/ktz8866-backlight':self.backlight,
+            '/sys/class/drm/card0-DSI-1':self.panel,
+            '/usr/lib/systemd/systemd-udevd':self.programs['udevd'],
+            '/usr/bin/udevadm':self.programs['udevadm'],
+            '/usr/bin/plymouthd':self.programs['plymouthd'],
+            '/usr/bin/plymouth':self.programs['plymouth'],
+            '/usr/lib/liuqin-splash':self.modules,
+            '/run/liuqin-boot-splash':self.state,
+            '/run/plymouth':self.root/'plymouth-run',
+            '/etc/liuqin-installer':self.installer,
+            '/etc/liuqin-storage-mode':self.mode,
+            '/sys/module':self.sysmodules,
+            '/proc/cmdline':self.cmdline,
+            '/bin/busybox':self.box,
+        }
+        for original,replacement in sorted(replacements.items(),key=lambda x:-len(x[0])):
+            source=source.replace(original,str(replacement))
+        source=source.replace('log() { echo "liuqin-splash: $*" >/dev/kmsg 2>/dev/null || :; }',
+                              'log() { printf "log:%s\\n" "$*" >>"$EVENTS"; }')
+        self.script=self.root/'splash.sh';self.script.write_text(source)
+        self.env=dict(os.environ,EVENTS=str(self.events),LIGHT=str(self.backlight),PANEL=str(self.panel),SYSMODULES=str(self.sysmodules))
+
+    def tearDown(self):self.temp.cleanup()
+
+    def start(self):
+        result=subprocess.run(['sh',str(self.script),'start'],env=self.env,capture_output=True,text=True,timeout=8)
+        self.assertEqual(result.returncode,0,result.stderr)
+        return self.events.read_text().splitlines() if self.events.exists() else []
+
+    def test_backlight_blanking_precedes_display_clocks_and_animation(self):
+        events=self.start()
+        required=['insmod:regmap_i2c','insmod:ktz8866','log:backlight blanked before display clock takeover',
+                  'insmod:fsa4480','insmod:dispcc_sm8450','plymouth:show-splash']
+        positions=[events.index(x) for x in required]
+        self.assertEqual(positions,sorted(positions));self.assertTrue((self.state/'ready').exists())
+
+    def test_charging_blanks_without_loading_graphics(self):
+        self.cmdline.write_text('rhgb androidboot.mode=charger\n');events=self.start()
+        self.assertIn('insmod:ktz8866',events);self.assertEqual((self.backlight/'bl_power').read_text().strip(),'4')
+        self.assertFalse(any('dispcc_sm8450' in x or x.startswith('plymouth') for x in events))
+
+    def test_animation_optout_keeps_the_backlight_phase(self):
+        self.cmdline.write_text('rhgb plymouth.enable=0\n');events=self.start()
+        self.assertIn('insmod:ktz8866',events);self.assertNotIn('insmod:dispcc_sm8450',events)
+
+    def test_installer_never_loads_target_backlight_or_graphics(self):
+        self.installer.touch();self.assertEqual(self.start(),[])
+
+    def test_corrupt_backlight_stops_before_any_module_load(self):
+        (self.modules/'ktz8866.ko').write_bytes(b'corrupt');events=self.start()
+        self.assertFalse(any(x.startswith('insmod:') for x in events));self.assertFalse((self.state/'ready').exists())
+
+    def test_display_clock_cannot_be_smuggled_into_backlight_list(self):
+        self.pre.write_text('dispcc_sm8450\n');events=self.start()
+        self.assertIn('log:invalid backlight dependency',events)
+        self.assertFalse(any(x.startswith('insmod:') for x in events))
+
+    def test_failed_backlight_never_advances_to_display_clocks(self):
+        self.env['FAIL_MODULE']='ktz8866';events=self.start()
+        self.assertIn('insmod:ktz8866',events);self.assertNotIn('insmod:dispcc_sm8450',events)
+
+    def test_builtin_backlight_keeps_the_existing_path(self):
+        self.pre.write_text('');self.backlight.mkdir()
+        for name,value in [('bl_power','4'),('max_brightness','2047')]:
+            (self.backlight/name).write_text(value+'\n')
+        events=self.start();self.assertNotIn('insmod:ktz8866',events)
+        self.assertLess(events.index('log:backlight blanked before display clock takeover'),events.index('insmod:dispcc_sm8450'))
+        self.assertTrue((self.state/'ready').exists())
+
+    def test_modular_native_backlight_requires_the_early_runtime_at_build_time(self):
+        source=(PROJECT/'build/lib/build-initramfs.sh').read_text()
+        start=source.index('if [ "$root_profile" = native-updatable ] &&\n   grep -qx \'CONFIG_BACKLIGHT_KTZ8866=m\'')
+        guard=source[start:source.index('\nfi',start)+3]
+        config=self.root/'kernel.config';script=self.root/'guard.sh';script.write_text(guard+'\n')
+        for profile,choice,runtime,success in [('native-updatable','m','',False),('native-updatable','m','runtime',True),('native-updatable','y','',True),('installer','m','',True)]:
+            with self.subTest(profile=profile,choice=choice,runtime=runtime):
+                config.write_text('CONFIG_BACKLIGHT_KTZ8866='+choice+'\n')
+                result=subprocess.run(['sh',str(script)],env=dict(self.env,root_profile=profile,KERNEL_CONFIG=str(config),BOOT_SPLASH_RUNTIME=runtime),capture_output=True)
+                self.assertEqual(result.returncode==0,success)
+
 
 if __name__=='__main__':unittest.main()

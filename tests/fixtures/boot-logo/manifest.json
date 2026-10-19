@@ -1,0 +1,23 @@
+{
+  "rom": "OS2.0.6.0.VMYCNXM",
+  "imagefv_sha256": "423555b84edafde237a03f73b9e8acb08bc33f7c5d2d5fb5486463bc07698b3b",
+  "meaning": "224 scalar samples from each stock logo frame; no full framebuffer or image payload. Index 0: normal boot, 1: unlocked boot, 2: Fastboot, 3: error screen.",
+  "files": {
+    "oem-0-0.bin": "9dfab256523a01510b78465985acee68b1216da494b1121a19fe2707676e38cb",
+    "oem-0-1.bin": "9dfab256523a01510b78465985acee68b1216da494b1121a19fe2707676e38cb",
+    "oem-0-2.bin": "6d51c7a92e5edd93a692b09c37ac3ac4183b5fc6c877b96a808c1aedb88d4e37",
+    "oem-0-3.bin": "d7e83aac2f93f0c3711d95752616598cfdb0ca727eadaa835414daf6fbf9253f",
+    "oem-180-0.bin": "2e52a4530c20bf5728bda1fb7b58c8ed8e9a15a32bf90eec9bdc2a53d0c74a5c",
+    "oem-180-1.bin": "2e52a4530c20bf5728bda1fb7b58c8ed8e9a15a32bf90eec9bdc2a53d0c74a5c",
+    "oem-180-2.bin": "f6661ac37598885399caffb4203e6649d8f8e3b55981d291622e727194c10c0c",
+    "oem-180-3.bin": "cc97cc53450d37990a3bdcec2df6da8730fce66ffd344fc9515441b6a04fc38d",
+    "oem-270-0.bin": "0c5642ddfd7c3ffb7931c38d6d2cba13da2c12159402eb251a9396d1573df897",
+    "oem-270-1.bin": "0c5642ddfd7c3ffb7931c38d6d2cba13da2c12159402eb251a9396d1573df897",
+    "oem-270-2.bin": "af2106251ee7f4e57a5cd007b19d962480a0ae85b27f5ab7edd5d08bafecba5c",
+    "oem-270-3.bin": "d3d0cd5436baaade51f2113016f3a67681363607675d8f52376e2a0d393bd219",
+    "oem-90-0.bin": "bd91a2fcda8f2ea0a56ef71b1a9b6503c3bd58e1377945bc5f23120dadb983b2",
+    "oem-90-1.bin": "bd91a2fcda8f2ea0a56ef71b1a9b6503c3bd58e1377945bc5f23120dadb983b2",
+    "oem-90-2.bin": "5fad112a376c7d20e2add1065235a28e04af94df69afe7f2f3c65e2420ec0d95",
+    "oem-90-3.bin": "b7ca88edafd5a275e1b9d6b51712e5b6853e536de114bf1d9c30752fbd3b45b2"
+  }
+}

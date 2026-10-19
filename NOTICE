@@ -85,3 +85,17 @@ The fprintd original source remains external and hash-pinned; distribution of
 binaries must include corresponding source/adaptation as required by its license.
 OEM TA firmware, credentials, HATs, templates, raw images and private calibration
 are not included in this source repository.
+
+Boot and shutdown artwork
+-------------------------
+
+The generated Plymouth themes use Fedora's official spinner and logo assets
+from the installed plymouth-theme-spinner package. Those assets and the
+Plymouth plugins retain their package licenses and trademarks; they are not
+covered by the project's MIT license. The runtime export includes the source
+RPM identities and package license files.
+
+The orientation signature and test fixtures are sparse pixel classifications
+from Xiaomi OS2.0.6.0.VMYCNXM imagefv.elf, not redistributed firmware or complete
+logo images. The pinned source hash and regeneration tool are documented in
+build/scripts/generate-boot-logo-signature.py.

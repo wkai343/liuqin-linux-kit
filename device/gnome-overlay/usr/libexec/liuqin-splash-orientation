@@ -1,0 +1,288 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: MIT
+"""Keep read-only output state, then pass direction to directly launched Plymouth."""
+import json, os, pwd, re, signal, stat, subprocess, time
+from pathlib import Path
+STATE = Path('/run/liuqin-splash-orientation')
+OBSERVER = '/usr/libexec/liuqin-splash-output-observer'
+ANGLES = (0, 90, 180, 270)
+
+def log(event, **data):
+    print(json.dumps({'event': event, **data}), flush=True)
+
+def enabled():
+    return 'liuqin.splash_orientation=1' in Path('/proc/cmdline').read_text().split()
+
+def boot_id():
+    return Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+
+def fallback():
+    try:
+        value = Path('/run/liuqin-boot-splash/orientation').read_text().strip()
+        if value in ('0', '90', '180', '270'):
+            return int(value)
+    except OSError:
+        pass
+    return 90
+
+def parse_observation(message):
+    if not isinstance(message, dict) or message.get('version') != 1:
+        raise ValueError('invalid observer message')
+    if message.get('unavailable') is True:
+        return None
+    t = message.get('transform')
+    a = message.get('angle')
+    if message.get('output') != 'DSI-1' or type(t) is not int or t not in (0, 1, 2, 3):
+        raise ValueError('invalid output metadata')
+    if type(a) is not int or a != {0: 0, 1: 270, 2: 180, 3: 90}[t]:
+        raise ValueError('inconsistent transform')
+    return a
+
+class DirectionCache:
+
+    def __init__(self):
+        self.last = None
+
+    def observe(self, message, session, uid, now):
+        angle = parse_observation(message)
+        # Keep the last image direction through compositor teardown.
+        if angle is None:
+            return False
+        self.last = {'angle': angle, 'session': session, 'uid': uid, 'monotonic': now}
+        return True
+
+    def selection(self, default):
+        if self.last:
+            return (self.last['angle'], 'wayland-output-cache', self.last['session'])
+        return (default, 'boot-fallback', None)
+
+def active_session():
+
+    def cmd(args):
+        return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL, timeout=1).strip()
+    sid = cmd(['/usr/bin/loginctl', 'show-seat', 'seat0', '-p', 'ActiveSession', '--value'])
+    if not re.fullmatch('[A-Za-z0-9_-]{1,32}', sid):
+        raise ValueError('no active session')
+    props = dict((x.split('=', 1) for x in cmd(['/usr/bin/loginctl', 'show-session', sid, '-p', 'User', '-p', 'Type', '-p', 'Active', '-p', 'Remote', '-p', 'Seat']).splitlines()))
+    if any((props.get(k) != v for k, v in {'Type': 'wayland', 'Active': 'yes', 'Remote': 'no', 'Seat': 'seat0'}.items())):
+        raise ValueError('active local Wayland session required')
+    uid = int(props['User'])
+    runtime = Path('/run/user') / str(uid)
+    if uid <= 0 or runtime.is_symlink() or runtime.stat().st_uid != uid:
+        raise ValueError('invalid runtime owner')
+    sockets = [p for p in runtime.glob('wayland-*') if not p.is_symlink() and stat.S_ISSOCK(p.stat().st_mode) and (p.stat().st_uid == uid)]
+    if len(sockets) != 1:
+        raise ValueError('unique Wayland socket required')
+    return (sid, uid, runtime, sockets[0].name)
+
+def ensure_state():
+    STATE.mkdir(mode=0o700, exist_ok=True)
+    s = STATE.lstat()
+    if not stat.S_ISDIR(s.st_mode) or s.st_uid != 0 or s.st_mode & 0o077:
+        raise ValueError('unsafe state directory')
+
+def atomic(path, data, mode=0o600):
+    tmp = path.with_name(path.name + '.tmp')
+    fd = os.open(tmp, os.O_CREAT | os.O_TRUNC | os.O_WRONLY | os.O_NOFOLLOW, mode)
+    with os.fdopen(fd, 'w') as f:
+        f.write(data)
+    tmp.replace(path)
+
+def command_line(angle, words):
+    if type(angle) is not int or angle not in ANGLES:
+        raise ValueError('invalid angle')
+    value = ' '.join((w for w in words if not w.startswith('plymouth.splash='))) + ' plymouth.splash=liuqin-rotate-' + str(angle)
+    if len(value) > 16384 or any((x in value for x in ['\n', '\r', '\x00'])):
+        raise ValueError('invalid command line')
+    return value
+
+def write_selection(angle, source, session=None):
+    ensure_state()
+    args = command_line(angle, Path('/proc/cmdline').read_text().split())
+    atomic(STATE / 'plymouth.env', 'LIUQIN_PLYMOUTH_CMDLINE=' + json.dumps(args, ensure_ascii=False) + '\n')
+    record = {'version': 2, 'boot_id': boot_id(), 'angle': angle, 'source': source, 'session': session, 'monotonic': time.monotonic()}
+    atomic(STATE / 'shutdown.json', json.dumps(record) + '\n')
+    log('shutdown-direction-ready', angle=angle, source=source, session=session)
+
+def prepare():
+    """ExecStartPre prepares data; systemd executes Plymouth directly afterward."""
+    ensure_state()
+    words = Path('/proc/cmdline').read_text().split()
+    angle = fallback()
+    source = 'boot-fallback'
+    if enabled():
+        try:
+            path = STATE / 'shutdown.json'
+            st = path.lstat()
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or st.st_size > 2048:
+                raise ValueError('unsafe cache')
+            data = json.loads(path.read_text())
+            if data.get('version') != 2 or data.get('boot_id') != boot_id():
+                raise ValueError('stale cache')
+            value = data.get('angle')
+            stamp = data.get('monotonic')
+            if type(value) is not int or value not in ANGLES:
+                raise ValueError('invalid cached direction')
+            if type(stamp) not in (int, float) or not 0 <= time.monotonic() - stamp <= 120:
+                raise ValueError('expired cache')
+            angle = value
+            source = data.get('source', 'cached-output')
+        except (OSError, ValueError, TypeError):
+            pass
+        value = command_line(angle, words)
+    else:
+        value = ' '.join(words)
+        source = 'original'
+    atomic(STATE / 'plymouth.env', 'LIUQIN_PLYMOUTH_CMDLINE=' + json.dumps(value, ensure_ascii=False) + '\n')
+    log('shutdown-theme', angle=angle, source=source)
+
+def watch():
+    import dbus
+    from dbus.mainloop.glib import DBusGMainLoop
+    from gi.repository import GLib, GLibUnix
+    DBusGMainLoop(set_as_default=True)
+    bus = dbus.SystemBus()
+    manager = dbus.Interface(bus.get_object('org.freedesktop.login1', '/org/freedesktop/login1'), 'org.freedesktop.login1.Manager')
+    loop = GLib.MainLoop()
+
+    class Monitor:
+
+        def __init__(self):
+            self.child = None
+            self.io = None
+            self.session = None
+            self.cache = DirectionCache()
+            self.pending = ''
+            self.retry = None
+            self.inhibit = None
+            self.shutting = False
+            self.stopping = False
+
+        def acquire(self):
+            if self.inhibit is None:
+                self.inhibit = manager.Inhibit('shutdown', 'Liuqin splash orientation', 'Save the last display direction', 'delay').take()
+
+        def release(self):
+            if self.inhibit is not None:
+                os.close(self.inhibit)
+                self.inhibit = None
+
+        def stop_child(self):
+            if self.io is not None:
+                GLib.source_remove(self.io)
+                self.io = None
+            if self.child:
+                p = self.child
+                self.child = None
+                if p.poll() is None:
+                    try:
+                        os.killpg(p.pid, signal.SIGTERM)
+                        p.wait(timeout=0.5)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(p.pid, signal.SIGKILL)
+                        p.wait()
+                    except ProcessLookupError:
+                        p.wait()
+                if p.stdout:
+                    p.stdout.close()
+            self.pending = ''
+            self.session = None
+
+        def schedule(self):
+            if not self.stopping and (not self.shutting) and (self.retry is None):
+                self.retry = GLib.timeout_add(1000, self.reconcile)
+
+        def reconcile(self):
+            self.retry = None
+            if self.stopping or self.shutting:
+                return False
+            try:
+                sid, uid, runtime, wayland = active_session()
+                key = (sid, uid, wayland)
+                if self.child and self.child.poll() is None and (key == self.session):
+                    return False
+                self.stop_child()
+                args = ['/usr/sbin/runuser', '-u', pwd.getpwuid(uid).pw_name, '--', '/usr/bin/env', 'XDG_RUNTIME_DIR=' + str(runtime), 'WAYLAND_DISPLAY=' + wayland, '/usr/bin/python3', OBSERVER]
+                self.child = subprocess.Popen(args, stdout=subprocess.PIPE, text=False, start_new_session=True)
+                os.set_blocking(self.child.stdout.fileno(), False)
+                self.session = key
+                self.io = GLib.io_add_watch(self.child.stdout.fileno(), GLib.IO_IN | GLib.IO_HUP | GLib.IO_ERR, self.on_data)
+                log('observer-connected', session=sid, uid=uid)
+            except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+                self.schedule()
+            return False
+
+        def on_data(self, fd, condition):
+            try:
+                chunk = os.read(fd, 4096)
+            except BlockingIOError:
+                return True
+            except OSError:
+                chunk = b''
+            if chunk:
+                self.pending += chunk.decode('utf-8', errors='strict')
+                if len(self.pending) > 8192:
+                    self.pending = ''
+                while '\n' in self.pending:
+                    line, self.pending = self.pending.split('\n', 1)
+                    try:
+                        if self.session and self.cache.observe(json.loads(line), self.session[0], self.session[1], time.monotonic()):
+                            log('output-direction', **self.cache.last)
+                    except (ValueError, TypeError):
+                        log('invalid-observer-message')
+            if not chunk or condition & (GLib.IO_HUP | GLib.IO_ERR):
+                self.io = None
+                self.stop_child()
+                self.schedule()
+                return False
+            return True
+
+        def changed(self, shutdown):
+            if shutdown:
+                self.shutting = True
+                try:
+                    write_selection(*self.cache.selection(fallback()))
+                finally:
+                    self.release()
+            else:
+                self.shutting = False
+                self.acquire()
+                self.schedule()
+
+        def props(self, interface, changed, invalidated, path=None):
+            if not self.shutting and interface == 'org.freedesktop.login1.Seat' and ('ActiveSession' in changed or 'ActiveSession' in invalidated):
+                GLib.idle_add(self.reconcile)
+
+        def stop(self):
+            self.stopping = True
+            loop.quit()
+            return False
+    m = Monitor()
+    bus.add_signal_receiver(m.changed, signal_name='PrepareForShutdown', dbus_interface='org.freedesktop.login1.Manager', bus_name='org.freedesktop.login1', path='/org/freedesktop/login1')
+    bus.add_signal_receiver(m.props, signal_name='PropertiesChanged', dbus_interface='org.freedesktop.DBus.Properties', bus_name='org.freedesktop.login1', path='/org/freedesktop/login1/seat/seat0', path_keyword='path')
+    try:
+        ensure_state()
+        m.acquire()
+        for sig in [signal.SIGTERM, signal.SIGINT]:
+            GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, sig, m.stop)
+        GLib.idle_add(m.reconcile)
+        log('watch-start')
+        loop.run()
+    finally:
+        m.stopping = True
+        m.stop_child()
+        m.release()
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=['watch', 'prepare'])
+    args = parser.parse_args()
+    if os.geteuid() != 0:
+        raise SystemExit('root required')
+    if args.action == 'prepare':
+        prepare()
+    elif enabled():
+        watch()
+if __name__ == '__main__':
+    main()

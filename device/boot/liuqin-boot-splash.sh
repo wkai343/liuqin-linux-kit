@@ -4,6 +4,8 @@
 BB=/bin/busybox
 state=/run/liuqin-boot-splash
 client=/usr/bin/plymouth
+module_dir=/usr/lib/liuqin-splash
+module_sysfs=/sys/module
 
 log() { echo "liuqin-splash: $*" >/dev/kmsg 2>/dev/null || :; }
 wait_writable() {
@@ -37,15 +39,44 @@ stop_udev() {
     "$BB" rm -f "$state/udev-started"
 }
 
+load_modules() {
+    [ -f "$1" ] || return 1
+    while IFS= read -r module; do
+        case "$module" in ''|*[!a-zA-Z0-9_]*) log 'invalid early module name'; return 1 ;; esac
+        if [ "$2" = backlight ]; then
+            case "$module" in ktz8866|regmap_i2c) ;; *) log 'invalid backlight dependency'; return 1 ;; esac
+        fi
+        [ ! -e "$module_sysfs/$module" ] || continue
+        "$BB" timeout 10 "$BB" insmod "$module_dir/$module.ko" >>"$state/modules.log" 2>&1 || {
+            log "could not load $module"; return 1;
+        }
+    done <"$1"
+}
+
 start() {
+    [ ! -e /etc/liuqin-installer ] || return 0
+    [ "$(cat /etc/liuqin-storage-mode 2>/dev/null)" = persistent ] || return 0
+    if [ -x /usr/libexec/liuqin-firmware-splash ]; then
+        "$BB" timeout -k 5 15 "$BB" sh /usr/libexec/liuqin-firmware-splash ||
+            log 'firmware renderer unavailable; continuing native display setup'
+    fi
+    # A modular backlight takes ownership here instead of during kernel init.
+    # This phase also runs for charging and animation opt-out, keeping their
+    # original blanking behavior without loading display clocks or Plymouth.
+    if [ -s /etc/liuqin-splash-backlight-modules.order ]; then
+        mkdir -p "$state"
+        (cd / && "$BB" sha256sum -c /etc/liuqin-splash-backlight-modules.sha256) >"$state/modules.log" 2>&1 || {
+            log 'backlight module identity mismatch'; return 0;
+        }
+        log 'starting backlight ownership before display clocks'
+        load_modules /etc/liuqin-splash-backlight-modules.order backlight || return 0
+    fi
     # Charging, RAM installation and an explicit opt-out keep their own paths.
     args=" $(cat /proc/cmdline 2>/dev/null) "
     case "$args" in
         *' androidboot.mode=charger '*|*' plymouth.enable=0 '*|*' rd.plymouth=0 '*) return 0 ;;
     esac
     case "$args" in *' rhgb '*|*' splash '*) ;; *) return 0 ;; esac
-    [ ! -e /etc/liuqin-installer ] || return 0
-    [ "$(cat /etc/liuqin-storage-mode 2>/dev/null)" = persistent ] || return 0
     [ -x /usr/bin/plymouthd ] && [ -f /etc/liuqin-splash-modules.sha256 ] || return 0
     mkdir -p "$state" /run/plymouth
     log 'starting graphics preparation'
@@ -60,13 +91,7 @@ start() {
     (cd / && "$BB" sha256sum -c /etc/liuqin-splash-modules.sha256) >"$state/modules.log" 2>&1 || {
         log 'early module identity mismatch; continuing normal boot'; return 0;
     }
-    while read -r module; do
-        case "$module" in ''|*[!a-zA-Z0-9_]*) log 'invalid early module name'; return 0 ;; esac
-        [ ! -e "/sys/module/$module" ] || continue
-        "$BB" timeout 10 "$BB" insmod "/usr/lib/liuqin-splash/$module.ko" >>"$state/modules.log" 2>&1 || {
-            log "could not load $module; continuing normal boot"; return 0;
-        }
-    done </etc/liuqin-splash-modules.order
+    load_modules /etc/liuqin-splash-modules.order display || return 0
     # With the kernel console renderer disabled, nobody has populated the
     # connector's modes yet. Plymouth drops DRM master before querying them,
     # so that query cannot perform the first probe itself. A normal sysfs

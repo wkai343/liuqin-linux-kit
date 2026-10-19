@@ -19,8 +19,10 @@ jobs:
           from pathlib import Path
           for path in [p for base in ('build','installer','shared','device/boot') for p in Path(base).rglob('*.py')]:
               ast.parse(path.read_text(), filename=str(path))
-          for path in sorted(Path('device/gnome-overlay/usr/local/libexec').iterdir()):
-              if path.is_file() and path.read_bytes().startswith(b'#!/usr/bin/env python3'):
+          paths = [p for name in ('usr/local/libexec', 'usr/libexec')
+                   for p in (Path('device/gnome-overlay')/name).iterdir()]
+          for path in sorted(paths):
+              if path.is_file() and path.read_bytes().split(b'\n', 1)[0] in (b'#!/usr/bin/env python3', b'#!/usr/bin/python3'):
                   ast.parse(path.read_text(), filename=str(path))
           for path in [p for base in ('build','device/installer','device/boot') for p in Path(base).rglob('*.sh')]:
               subprocess.run(['sh', '-n', str(path)], check=True)
@@ -52,6 +54,9 @@ jobs:
           python3 tests/display-clock.py
           python3 tests/backlight-default.py
           python3 tests/boot-splash.py
+          python3 tests/splash-handoff.py
+          python3 tests/splash-logo.py
+          python3 tests/splash-orientation.py
           python3 tests/display-recovery.py
           python3 tests/display-policy.py
           python3 tests/wlan-mac.py

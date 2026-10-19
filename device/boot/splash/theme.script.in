@@ -1,0 +1,184 @@
+# SPDX-License-Identifier: MIT
+rotation = @ROTATION@;
+Window.SetBackgroundTopColor(0, 0, 0);
+Window.SetBackgroundBottomColor(0, 0, 0);
+Plymouth.SetRefreshRate(30);
+
+unit = Math.Clamp(Window.GetWidth() / 900, 1, 2);
+mode = "normal";
+frame_index = 0;
+paused = 0;
+
+fun rotate_landscape(image)
+{
+    if (!image) return NULL;
+    if (rotation == 0) return image;
+    local.w = image.GetWidth();
+    local.h = image.GetHeight();
+    if (w < 1 || h < 1) return NULL;
+    local.n = Math.Max(w, h) + 4;
+    local.px = Math.Int((n - w) / 2);
+    local.py = Math.Int((n - h) / 2);
+    local.center = Math.Int(n / 2);
+    local.square = image.Crop(-px, -py, n, n);
+    if (rotation == 90)
+        return square.Rotate(Math.Pi / 2).Crop(2 * center - py - h + 1, px, h, w);
+    if (rotation == 180)
+        return square.Rotate(Math.Pi).Crop(2 * center - px - w + 1, 2 * center - py - h + 1, w, h);
+    return square.Rotate(-Math.Pi / 2).Crop(py, 2 * center - px - w + 1, h, w);
+}
+
+fun scaled_landscape(image)
+{
+    if (!image) return NULL;
+    return rotate_landscape(image.Scale(Math.Int(image.GetWidth() * unit),
+                                        Math.Int(image.GetHeight() * unit)));
+}
+
+fun make_item(image)
+{
+    local.item = [];
+    item.image = image;
+    item.sprite = Sprite(image);
+    return item;
+}
+
+fun place(item, cx, cy, depth)
+{
+    if (!item.image) return;
+    local.x = cx; local.y = cy;
+    if (rotation == 90) { x = Window.GetWidth() - cy; y = cx; }
+    if (rotation == 180) { x = Window.GetWidth() - cx; y = Window.GetHeight() - cy; }
+    if (rotation == 270) { x = cy; y = Window.GetHeight() - cx; }
+    item.sprite.SetPosition(Window.GetX() + x - item.image.GetWidth() / 2,
+                           Window.GetY() + y - item.image.GetHeight() / 2, depth);
+}
+
+logo = make_item(scaled_landscape(Image("watermark.png")));
+frames = [];
+frames[0] = scaled_landscape(Image("throbber-0001.png"));
+frames[1] = scaled_landscape(Image("throbber-0002.png"));
+frames[2] = scaled_landscape(Image("throbber-0003.png"));
+frames[3] = scaled_landscape(Image("throbber-0004.png"));
+frames[4] = scaled_landscape(Image("throbber-0005.png"));
+frames[5] = scaled_landscape(Image("throbber-0006.png"));
+frames[6] = scaled_landscape(Image("throbber-0007.png"));
+frames[7] = scaled_landscape(Image("throbber-0008.png"));
+frames[8] = scaled_landscape(Image("throbber-0009.png"));
+frames[9] = scaled_landscape(Image("throbber-0010.png"));
+frames[10] = scaled_landscape(Image("throbber-0011.png"));
+frames[11] = scaled_landscape(Image("throbber-0012.png"));
+frames[12] = scaled_landscape(Image("throbber-0013.png"));
+frames[13] = scaled_landscape(Image("throbber-0014.png"));
+frames[14] = scaled_landscape(Image("throbber-0015.png"));
+frames[15] = scaled_landscape(Image("throbber-0016.png"));
+frames[16] = scaled_landscape(Image("throbber-0017.png"));
+frames[17] = scaled_landscape(Image("throbber-0018.png"));
+frames[18] = scaled_landscape(Image("throbber-0019.png"));
+frames[19] = scaled_landscape(Image("throbber-0020.png"));
+frames[20] = scaled_landscape(Image("throbber-0021.png"));
+frames[21] = scaled_landscape(Image("throbber-0022.png"));
+frames[22] = scaled_landscape(Image("throbber-0023.png"));
+frames[23] = scaled_landscape(Image("throbber-0024.png"));
+frames[24] = scaled_landscape(Image("throbber-0025.png"));
+frames[25] = scaled_landscape(Image("throbber-0026.png"));
+frames[26] = scaled_landscape(Image("throbber-0027.png"));
+frames[27] = scaled_landscape(Image("throbber-0028.png"));
+frames[28] = scaled_landscape(Image("throbber-0029.png"));
+frames[29] = scaled_landscape(Image("throbber-0030.png"));
+spinner = make_item(frames[0]);
+message = make_item(NULL);
+prompt_item = make_item(NULL);
+entry_item = make_item(NULL);
+
+fun set_text(item, text, font)
+{
+    if (!text || text == "")
+    {
+        item.image = NULL;
+        item.sprite.SetOpacity(0);
+        return;
+    }
+    local.image = Image.Text(text, 1, 1, 1, 1, font, "center");
+    if (!image) return;
+    local.max_width = Math.Max(200, Window.GetWidth() * 0.86);
+    if (rotation == 90 || rotation == 270) max_width = Math.Max(200, Window.GetHeight() * 0.86);
+    local.factor = Math.Min(unit, max_width / Math.Max(1, image.GetWidth()));
+    item.image = rotate_landscape(image.Scale(Math.Max(1, Math.Int(image.GetWidth() * factor)),
+                                              Math.Max(1, Math.Int(image.GetHeight() * factor))));
+    item.sprite.SetImage(item.image);
+    item.sprite.SetOpacity(1);
+}
+
+fun refresh()
+{
+    if (Window.GetWidth() < 1 || Window.GetHeight() < 1) return;
+    local.w = Window.GetWidth();
+    local.h = Window.GetHeight();
+    if (rotation == 90 || rotation == 270) { w = Window.GetHeight(); h = Window.GetWidth(); }
+    place(logo, w / 2, (h - 43 * unit) * 0.96 + 43 * unit / 2, 1);
+    if (mode == "normal")
+    {
+        spinner.image = frames[frame_index];
+        spinner.sprite.SetImage(spinner.image);
+        spinner.sprite.SetOpacity(1);
+        place(spinner, w / 2, h * 0.7, 2);
+        if (!paused) global.frame_index = (frame_index + 1) % 30;
+    }
+    else spinner.sprite.SetOpacity(0);
+    place(message, w / 2, h * 0.8, 10);
+    place(prompt_item, w / 2, h * 0.44, 20);
+    place(entry_item, w / 2, h * 0.55, 20);
+}
+
+fun display_normal()
+{
+    global.mode = "normal";
+    set_text(prompt_item, "", "Sans 12");
+    set_text(entry_item, "", "Monospace 16");
+    refresh();
+}
+
+fun display_password(prompt, bullets)
+{
+    global.mode = "password";
+    set_text(message, "", "Sans 12");
+    set_text(prompt_item, prompt, "Sans 12");
+    local.mask = "";
+    for (local.i = 0; i < Math.Clamp(bullets, 0, 64); i++) mask += "*";
+    set_text(entry_item, mask, "Monospace 16");
+    refresh();
+}
+
+fun display_question(prompt, entry)
+{
+    global.mode = "question";
+    set_text(message, "", "Sans 12");
+    set_text(prompt_item, prompt, "Sans 12");
+    set_text(entry_item, entry, "Sans 14");
+    refresh();
+}
+
+fun display_message(text)
+{
+    set_text(message, text, "Sans 12");
+    refresh();
+}
+fun hide_message(text)
+{
+    set_text(message, "", "Sans 12");
+}
+fun quit()
+{
+    global.paused = 1;
+    refresh();
+}
+
+Plymouth.SetRefreshFunction(refresh);
+Plymouth.SetDisplayNormalFunction(display_normal);
+Plymouth.SetDisplayPasswordFunction(display_password);
+Plymouth.SetDisplayQuestionFunction(display_question);
+Plymouth.SetDisplayMessageFunction(display_message);
+Plymouth.SetHideMessageFunction(hide_message);
+Plymouth.SetQuitFunction(quit);
+refresh();
