@@ -1,0 +1,404 @@
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
+index 1f20695f81e..b64721a92dd 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
+@@ -540,6 +540,30 @@ int dpu_encoder_get_vsync_count(struct drm_encoder *drm_enc)
+ 	return phys ? atomic_read(&phys->vsync_cnt) : 0;
+ }
+ 
++/* Read both existing INTF mappings; never map physical addresses from DSI. */
++int dpu_encoder_get_cmd_linecounts(struct drm_encoder *encoder, u32 lines[2])
++{
++	struct dpu_encoder_virt *enc;
++	struct dpu_encoder_phys *phys;
++	int i;
++
++	if (!encoder || !lines)
++		return -EINVAL;
++	enc = to_dpu_encoder_virt(encoder);
++	if (enc->num_phys_encs != 2)
++		return -EOPNOTSUPP;
++	for (i = 0; i < 2; i++) {
++		phys = enc->phys_encs[i];
++		if (!phys || phys->intf_mode != INTF_MODE_VIDEO ||
++		    !phys->hw_intf || !phys->hw_intf->ops.get_line_count)
++			return -EOPNOTSUPP;
++		if (phys->enable_state != DPU_ENC_ENABLED)
++			return -EAGAIN;
++		lines[i] = phys->hw_intf->ops.get_line_count(phys->hw_intf);
++	}
++	return 0;
++}
++
+ /**
+  * dpu_encoder_get_linecount - get interface line count for the encoder.
+  * @drm_enc:    Pointer to previously created drm encoder structure
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.h b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.h
+index 4942097e761..79356894659 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.h
+@@ -67,6 +67,7 @@ struct drm_encoder *dpu_encoder_init(struct drm_device *dev,
+ 		struct msm_display_info *disp_info);
+ 
+ int dpu_encoder_get_linecount(struct drm_encoder *drm_enc);
++int dpu_encoder_get_cmd_linecounts(struct drm_encoder *encoder, u32 lines[2]);
+ 
+ int dpu_encoder_get_vsync_count(struct drm_encoder *drm_enc);
+ 
+diff --git a/drivers/gpu/drm/msm/dsi/dsi.h b/drivers/gpu/drm/msm/dsi/dsi.h
+index e9c11935ca2..7a9e4712cfb 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi.h
++++ b/drivers/gpu/drm/msm/dsi/dsi.h
+@@ -53,13 +53,24 @@ int msm_dsi_manager_connector_init(struct msm_dsi *msm_dsi,
+ int msm_dsi_manager_cmd_xfer(int id, const struct mipi_dsi_msg *msg);
+ int msm_dsi_manager_cmd_xfer_batch(int id, const struct mipi_dsi_msg *msgs,
+ 				   size_t count);
+-bool msm_dsi_manager_cmd_xfer_trigger(int id, u32 dma_base, u32 len);
++int msm_dsi_manager_cmd_xfer_trigger(int id, u32 dma_base, u32 len);
+ int msm_dsi_manager_register(struct msm_dsi *msm_dsi);
+ void msm_dsi_manager_unregister(struct msm_dsi *msm_dsi);
+ void msm_dsi_manager_tpg_enable(void);
+ 
+ int msm_dsi_manager_panel_stage(int id, enum mipi_dsi_panel_stage stage);
+ 
++/* Per-transfer snapshot; the manager owns it under dsi_cmd_lock. */
++struct msm_dsi_cmd_schedule {
++	u32 saved, line, guard, total;
++	bool active;
++};
++
++int msm_dsi_host_cmd_schedule_prepare(struct mipi_dsi_host *host,
++				      struct msm_dsi_cmd_schedule *state);
++int msm_dsi_host_cmd_schedule_finish(struct mipi_dsi_host *host,
++				     struct msm_dsi_cmd_schedule *state);
++
+ /* dsi host */
+ struct msm_dsi_host;
+ int msm_dsi_host_xfer_prepare(struct mipi_dsi_host *host,
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_cmd_schedule.h b/drivers/gpu/drm/msm/dsi/dsi_cmd_schedule.h
+new file mode 100644
+index 00000000000..3694c28e008
+--- /dev/null
++++ b/drivers/gpu/drm/msm/dsi/dsi_cmd_schedule.h
+@@ -0,0 +1,34 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef __DSI_CMD_SCHEDULE_H__
++#define __DSI_CMD_SCHEDULE_H__
++
++/* Pure policy shared by the paired-host driver and its boundary tests. */
++static inline int dsi_cmd_schedule_calculate(const struct drm_display_mode *m,
++					     u32 *line, u32 *guard)
++{
++	u32 front, back, sync;
++
++	if (!m || m->clock <= 0 || m->htotal <= 0 || m->vdisplay <= 0 ||
++	    m->vsync_start <= m->vdisplay || m->vsync_end <= m->vsync_start ||
++	    m->vtotal <= m->vsync_end || m->vtotal > 65535)
++		return -EINVAL;
++	front = m->vsync_start - m->vdisplay;
++	back = m->vtotal - m->vsync_end;
++	sync = m->vsync_end - m->vsync_start;
++	if (front < 2)
++		return -EINVAL;
++	*line = m->vdisplay + back + sync + 1;
++	/* Vendor allowance: 100 us of memory/trigger latency before the slot. */
++	*guard = DIV_ROUND_UP_ULL(100ULL * m->clock, 1000ULL * m->htotal);
++	if (!*guard || *guard >= *line)
++		return -EINVAL;
++	return 0;
++}
++
++static inline bool dsi_cmd_schedule_line_safe(u32 current_line, u32 line,
++					      u32 guard, u32 total)
++{
++	return current_line <= total &&
++	       (current_line < line - guard || current_line > line + 1);
++}
++#endif
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_host.c b/drivers/gpu/drm/msm/dsi/dsi_host.c
+index 47ce6f7d34a..5916fc5fa58 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -26,6 +26,7 @@
+ 
+ #include "dsi.h"
+ #include "dsi_cmd_batch.h"
++#include "dsi_cmd_schedule.h"
+ #include "dsi.xml.h"
+ #include "sfpb.xml.h"
+ #include "dsi_cfg.h"
+@@ -184,6 +185,7 @@ struct msm_dsi_host {
+ 	bool cphy_mode;
+ 
+ 	u32 dma_cmd_ctrl_restore;
++	bool cmd_dma_scheduled;
+ 
+ 	bool registered;
+ 	bool power_on;
+@@ -1459,7 +1461,7 @@ static int dsi_cmd_dma_tx(struct msm_dsi_host *msm_host, int len)
+ 	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
+ 	int ret;
+ 	uint64_t dma_base;
+-	bool triggered;
++	int triggered;
+ 
+ 	ret = cfg_hnd->ops->dma_base_get(msm_host, &dma_base);
+ 	if (ret) {
+@@ -1469,10 +1471,13 @@ static int dsi_cmd_dma_tx(struct msm_dsi_host *msm_host, int len)
+ 
+ 	reinit_completion(&msm_host->dma_comp);
+ 
+-	dsi_wait4video_eng_busy(msm_host);
++	if (!msm_host->cmd_dma_scheduled)
++		dsi_wait4video_eng_busy(msm_host);
+ 
+ 	triggered = msm_dsi_manager_cmd_xfer_trigger(
+ 						msm_host->id, dma_base, len);
++	if (triggered < 0)
++		return triggered;
+ 	if (triggered) {
+ 		ret = wait_for_completion_timeout(&msm_host->dma_comp,
+ 					msecs_to_jiffies(200));
+@@ -2259,6 +2264,69 @@ void msm_dsi_host_xfer_restore(struct mipi_dsi_host *host,
+ 	pm_runtime_put(&msm_host->pdev->dev);
+ }
+ 
++/* Raw 6G offset 0x100, after the host's +4-byte base adjustment. */
++#define LIUQIN_DMA_SCHEDULE_CTRL 0xfc
++#define LIUQIN_DMA_SCHEDULE_MASK (BIT(28) | GENMASK(15, 0))
++
++int msm_dsi_host_cmd_schedule_prepare(struct mipi_dsi_host *host,
++				      struct msm_dsi_cmd_schedule *state)
++{
++	struct msm_dsi_host *h = to_msm_dsi_host(host);
++	int ret;
++
++	if (!h->power_on || !h->enabled ||
++	    !(h->mode_flags & MIPI_DSI_MODE_VIDEO))
++		return 0;
++	ret = dsi_cmd_schedule_calculate(h->mode, &state->line, &state->guard);
++	if (ret)
++		return ret;
++	state->total = h->mode->vtotal;
++	state->saved = dsi_read(h, LIUQIN_DMA_SCHEDULE_CTRL);
++	state->active = true;
++	h->cmd_dma_scheduled = true;
++	dsi_write(h, LIUQIN_DMA_SCHEDULE_CTRL,
++		  (state->saved & ~LIUQIN_DMA_SCHEDULE_MASK) | BIT(28) |
++			  state->line);
++	/* Read back before either DMA can be armed. Preserve unrelated bits. */
++	if (dsi_read(h, LIUQIN_DMA_SCHEDULE_CTRL) !=
++	    ((state->saved & ~LIUQIN_DMA_SCHEDULE_MASK) | BIT(28) |
++	     state->line))
++		return -EIO;
++	dev_info_once(&h->pdev->dev,
++		      "Liuqin command schedule: line %u guard %u total %u\n",
++		      state->line, state->guard, state->total);
++	return 1;
++}
++
++int msm_dsi_host_cmd_schedule_finish(struct mipi_dsi_host *host,
++				     struct msm_dsi_cmd_schedule *state)
++{
++	struct msm_dsi_host *h = to_msm_dsi_host(host);
++	u32 status, ctrl;
++	int ret;
++
++	if (!state->active)
++		return 0;
++	/* Check the non-trigger link too; do not remove scheduling while busy. */
++	ret = readl_poll_timeout(h->ctrl_base + REG_DSI_STATUS0, status,
++				 !(status & DSI_STATUS0_CMD_MODE_DMA_BUSY), 50,
++				 20000);
++	if (ret) {
++		/* Abort only the command engine; keep video, PHY and rails intact. */
++		ctrl = dsi_read(h, REG_DSI_CTRL);
++		dsi_write(h, REG_DSI_CTRL, ctrl & ~DSI_CTRL_CMD_MODE_EN);
++		/* Complete command-engine abort before removing scheduling. */
++		wmb();
++		dev_err_ratelimited(
++			&h->pdev->dev,
++			"Liuqin command schedule DMA busy timeout\n");
++	}
++	dsi_write(h, LIUQIN_DMA_SCHEDULE_CTRL, state->saved);
++	h->cmd_dma_scheduled = false;
++	state->active = false;
++	return ret;
++}
++
+ int msm_dsi_host_cmd_tx(struct mipi_dsi_host *host,
+ 				const struct mipi_dsi_msg *msg)
+ {
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_manager.c b/drivers/gpu/drm/msm/dsi/dsi_manager.c
+index 206f0ba387f..df099d2cd4c 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi_manager.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_manager.c
+@@ -4,6 +4,9 @@
+  */
+ 
+ #include <linux/module.h>
++#include <linux/delay.h>
++#include <linux/ktime.h>
++#include <linux/irqflags.h>
+ #include <linux/of_address.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/regmap.h>
+@@ -12,6 +15,10 @@
+ 
+ #include "msm_kms.h"
+ #include "dsi.h"
++#include "dsi_cmd_schedule.h"
++#ifdef CONFIG_DRM_MSM_DPU
++#include "disp/dpu1/dpu_encoder.h"
++#endif
+ 
+ #define DSI_CLOCK_MASTER	DSI_0
+ #define DSI_CLOCK_SLAVE		DSI_1
+@@ -31,11 +38,18 @@ struct msm_dsi_manager {
+ 	bool is_bonded_dsi;
+ 	bool is_sync_needed;
+ 	int master_dsi_link_id;
++	struct drm_encoder *encoder;
+ };
+ 
+ static struct msm_dsi_manager msm_dsim_glb;
+ /* Serialize both hosts, so a read cannot disturb a bonded write group. */
+ static DEFINE_MUTEX(dsi_cmd_lock);
++static bool liuqin_cmd_dma_schedule;
++module_param(liuqin_cmd_dma_schedule, bool, 0400);
++MODULE_PARM_DESC(liuqin_cmd_dma_schedule,
++		 "Schedule running-video command DMA on the Liuqin bonded pair");
++/* Only set inside a synchronous write transfer, under dsi_cmd_lock. */
++static struct msm_dsi_cmd_schedule *liuqin_active_schedule;
+ 
+ #define IS_BONDED_DSI()		(msm_dsim_glb.is_bonded_dsi)
+ #define IS_SYNC_NEEDED()	(msm_dsim_glb.is_sync_needed)
+@@ -746,6 +760,9 @@ int msm_dsi_manager_connector_init(struct msm_dsi *msm_dsi,
+ 	if (ret)
+ 		return ret;
+ 
++	if (IS_MASTER_DSI_LINK(msm_dsi->id))
++		msm_dsim_glb.encoder = encoder;
++
+ 	connector = drm_bridge_connector_init(dev, encoder);
+ 	if (IS_ERR(connector)) {
+ 		DRM_ERROR("Unable to create bridge connector\n");
+@@ -763,7 +780,8 @@ static int dsi_mgr_cmd_xfer(int id, const struct mipi_dsi_msg *msg,
+ 	struct mipi_dsi_host *host = msm_dsi->host;
+ 	bool is_read = (msg->rx_buf && msg->rx_len);
+ 	bool need_sync = (IS_SYNC_NEEDED() && !is_read);
+-	int ret;
++	struct msm_dsi_cmd_schedule schedule[DSI_MAX] = {};
++	int ret, next, i;
+ 
+ 	if (!msg->tx_buf || !msg->tx_len)
+ 		return 0;
+@@ -798,12 +816,43 @@ static int dsi_mgr_cmd_xfer(int id, const struct mipi_dsi_msg *msg,
+ 		goto restore_host0;
+ 	}
+ 
++	if (liuqin_cmd_dma_schedule && need_sync && id == DSI_1 &&
++	    liuqin_dsi_requested() && liuqin_dsi.powered &&
++	    liuqin_dsi.video == (BIT(DSI_0) | BIT(DSI_1))) {
++		for (i = 0; i < DSI_MAX; i++) {
++			ret = msm_dsi_host_cmd_schedule_prepare(
++				dsi_mgr_get_dsi(i)->host, &schedule[i]);
++			if (ret < 0)
++				goto finish_schedule;
++		}
++		if (schedule[0].active != schedule[1].active ||
++		    (schedule[0].active &&
++		     (schedule[0].line != schedule[1].line ||
++		      schedule[0].guard != schedule[1].guard ||
++		      schedule[0].total != schedule[1].total))) {
++			ret = -EINVAL;
++			goto finish_schedule;
++		}
++		if (schedule[0].active)
++			liuqin_active_schedule = schedule;
++	}
++
+ 	if (batch)
+ 		ret = msm_dsi_host_cmd_tx_batch(host, batch, count);
+ 	else
+ 		ret = is_read ? msm_dsi_host_cmd_rx(host, msg) :
+ 				msm_dsi_host_cmd_tx(host, msg);
+ 
++finish_schedule:
++	liuqin_active_schedule = NULL;
++	for (i = DSI_MAX - 1; i >= 0; i--) {
++		if (!schedule[i].active)
++			continue;
++		next = msm_dsi_host_cmd_schedule_finish(
++			dsi_mgr_get_dsi(i)->host, &schedule[i]);
++		if (ret >= 0 && next < 0)
++			ret = next;
++	}
+ 	msm_dsi_host_xfer_restore(host, msg);
+ 
+ restore_host0:
+@@ -836,7 +885,7 @@ int msm_dsi_manager_cmd_xfer_batch(int id, const struct mipi_dsi_msg *msgs,
+ 	return ret;
+ }
+ 
+-bool msm_dsi_manager_cmd_xfer_trigger(int id, u32 dma_base, u32 len)
++int msm_dsi_manager_cmd_xfer_trigger(int id, u32 dma_base, u32 len)
+ {
+ 	struct msm_dsi *msm_dsi = dsi_mgr_get_dsi(id);
+ 	struct msm_dsi *msm_dsi0 = dsi_mgr_get_dsi(DSI_0);
+@@ -845,6 +894,46 @@ bool msm_dsi_manager_cmd_xfer_trigger(int id, u32 dma_base, u32 len)
+ 	if (IS_SYNC_NEEDED() && (id == DSI_0))
+ 		return false;
+ 
++	if (liuqin_active_schedule) {
++#ifdef CONFIG_DRM_MSM_DPU
++		struct msm_dsi_cmd_schedule *s = liuqin_active_schedule;
++		ktime_t deadline = ktime_add_ms(ktime_get(), 50);
++		unsigned long flags;
++		u32 lines[DSI_MAX];
++		int ret;
++
++		if (id != DSI_1 || !msm_dsi0 || !msm_dsim_glb.encoder)
++			return -EINVAL;
++		do {
++			/* Keep the final line check and both SW triggers together. */
++			local_irq_save(flags);
++			ret = dpu_encoder_get_cmd_linecounts(
++				msm_dsim_glb.encoder, lines);
++			if (!ret &&
++			    dsi_cmd_schedule_line_safe(lines[0], s[0].line,
++						       s[0].guard,
++						       s[0].total) &&
++			    dsi_cmd_schedule_line_safe(lines[1], s[1].line,
++						       s[1].guard,
++						       s[1].total)) {
++				msm_dsi_host_cmd_xfer_commit(msm_dsi0->host,
++							     dma_base, len);
++				msm_dsi_host_cmd_xfer_commit(host, dma_base,
++							     len);
++				local_irq_restore(flags);
++				return 1;
++			}
++			local_irq_restore(flags);
++			if (ret && ret != -EAGAIN)
++				return ret;
++			usleep_range(50, 100);
++		} while (ktime_before(ktime_get(), deadline));
++		return -ETIMEDOUT;
++#else
++		return -EOPNOTSUPP;
++#endif
++	}
++
+ 	if (IS_SYNC_NEEDED() && msm_dsi0)
+ 		msm_dsi_host_cmd_xfer_commit(msm_dsi0->host, dma_base, len);
+ 
+@@ -898,6 +987,8 @@ void msm_dsi_manager_unregister(struct msm_dsi *msm_dsi)
+ 	if (msm_dsi->host)
+ 		msm_dsi_host_unregister(msm_dsi->host);
+ 
++	if (IS_MASTER_DSI_LINK(msm_dsi->id))
++		msm_dsim->encoder = NULL;
+ 	if (msm_dsi->id >= 0)
+ 		msm_dsim->dsi[msm_dsi->id] = NULL;
+ }

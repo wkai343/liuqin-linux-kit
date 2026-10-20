@@ -13,7 +13,7 @@
 | 了解设备支持范围 | [硬件说明](HARDWARE.md) |
 | 调整亮度、CABC 或查看显示恢复日志 | [显示与画质](DISPLAY.md) |
 | 继续未完成的适配与验证 | [待改进与验证](DEVELOPMENT-STATUS.md) |
-| 排查具体功能 | [指纹](FINGERPRINT.md)、[相机](CAMERA.md)、[快充](FASTCHARGE.md)、[Waydroid](WAYDROID.md) |
+| 排查具体功能 | [指纹](FINGERPRINT.md)、[相机](CAMERA.md)、[快充](FASTCHARGE.md) |
 | 了解源码目录与工作流 | [项目结构](STRUCTURE.md)、[CI](CI.md) |
 | 适配其他发行版或内核路线 | [发行版适配](DISTRIBUTIONS.md)、[内核方案](KERNEL-STRATEGY.md) |
 | 开发与回归测试 | [参与贡献](../CONTRIBUTING.md)、[测试说明](../tests/README.md)、[安装器后端协议](../installer/README.md) |

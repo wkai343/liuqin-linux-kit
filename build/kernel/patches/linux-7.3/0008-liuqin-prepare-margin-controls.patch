@@ -1,0 +1,88 @@
+From 5de11942912ce0214266e9f900bf32b3438a3d0a Mon Sep 17 00:00:00 2001
+From: Liuqin Build <build@localhost>
+Date: Tue, 20 Oct 2026 18:07:44 +0800
+Subject: [PATCH] Add isolated opt-in removal of known Liuqin prepare margins
+
+Keep all margins enabled by default. Allow independent boot-time removal
+of the supply, reset and PPS margins only on a recognized Liuqin panel.
+Preserve OEM sleep-out/display-on command delays, reset waveform, other
+boards and unknown identities. Temporary boots, normal restart and an
+unplugged cold boot passed on Tianma hardware; screen-off/wake was not
+retested.
+
+---
+ drivers/gpu/drm/panel/panel-novatek-nt36532.c | 30 +++++++++++++++++--
+ 1 file changed, 27 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/gpu/drm/panel/panel-novatek-nt36532.c b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+index 579fe9c9095..18b844d433d 100644
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -36,6 +36,22 @@ module_param(liuqin_retained_power, bool, 0444);
+ MODULE_PARM_DESC(liuqin_retained_power,
+ 	"Keep Liuqin IOVDD/bias and gate the two digital rails while blanked");
+ 
++/* Experimental removal of legacy margins, not OEM command-table waits. */
++static bool liuqin_skip_power_on_wait;
++module_param(liuqin_skip_power_on_wait, bool, 0444);
++MODULE_PARM_DESC(liuqin_skip_power_on_wait,
++	"Omit the extra 120 ms after enabling a known Liuqin panel's supplies");
++
++static bool liuqin_skip_post_reset_wait;
++module_param(liuqin_skip_post_reset_wait, bool, 0444);
++MODULE_PARM_DESC(liuqin_skip_post_reset_wait,
++	"Omit the extra 120 ms after the known Liuqin panel's reset waveform");
++
++static bool liuqin_skip_post_pps_wait;
++module_param(liuqin_skip_post_pps_wait, bool, 0444);
++MODULE_PARM_DESC(liuqin_skip_post_pps_wait,
++	"Omit the extra 120 ms after the known Liuqin panel's PPS transfer");
++
+ struct nt36532 {
+ 	bool off_deferred;
+ 	int cabc_requested;
+@@ -1844,6 +1860,14 @@ static void liuqin_cancel_dimming(struct nt36532 *ctx, bool stopping)
+ 	cancel_delayed_work_sync(&ctx->dimming_work);
+ }
+ 
++static void nt36532_prepare_margin(struct nt36532 *ctx, bool skip)
++{
++	/* Unknown panel identities and other boards retain the legacy margin. */
++	if (skip && ctx->desc == &liuqin_desc && ctx->oem_panel)
++		return;
++	msleep(120);
++}
++
+ static int nt36532_prepare(struct drm_panel *panel)
+ {
+ 	struct nt36532 *ctx = to_nt36532(panel);
+@@ -1870,7 +1894,7 @@ static int nt36532_prepare(struct drm_panel *panel)
+ 
+ 	if (ctx->desc == &liuqin_desc)
+ 		liuqin_log_supplies(ctx, "prepare");
+-	msleep(120);
++	nt36532_prepare_margin(ctx, liuqin_skip_power_on_wait);
+ 
+ 	ctx->dsi[0]->mode_flags |= MIPI_DSI_MODE_LPM;
+ 	if (ctx->dsi[1])
+@@ -1878,7 +1902,7 @@ static int nt36532_prepare(struct drm_panel *panel)
+ 
+ 	ctx->desc->reset_sequence(ctx);
+ 
+-	msleep(120);
++	nt36532_prepare_margin(ctx, liuqin_skip_post_reset_wait);
+ 
+ 	ret = ctx->desc->init_sequence(ctx);
+ 	if (ret < 0) {
+@@ -1903,7 +1927,7 @@ static int nt36532_prepare(struct drm_panel *panel)
+ 		}
+ 	}
+ 
+-	msleep(120);
++	nt36532_prepare_margin(ctx, liuqin_skip_post_pps_wait);
+ 
+ 	ret = mipi_dsi_panel_stage(ctx->dsi[0], MIPI_DSI_PANEL_PREPARED);
+ 	if (ret)
+-- 
+2.55.0
+

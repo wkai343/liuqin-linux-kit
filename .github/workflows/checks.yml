@@ -57,6 +57,7 @@ jobs:
           python3 tests/splash-handoff.py
           python3 tests/splash-logo.py
           python3 tests/splash-orientation.py
+          python3 tests/plymouth-guard.py
           python3 tests/display-recovery.py
           python3 tests/display-policy.py
           python3 tests/wlan-mac.py

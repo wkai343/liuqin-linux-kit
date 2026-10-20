@@ -78,6 +78,9 @@ devbox run -- python3 tests/battery-readings.py \
 使用时的探测清理，以及 DP 上电失败后的状态；旧版反例需复现。
 `tests/nanosic-caps-led.py` 使用相同参数，执行键盘 LED 报文转换、合并状态、有限重试及
 接回、睡眠、复位、移除路径，检查原有描述符和只读请求接口保持一致。
+`tests/display-panel-margins.py --source /path/to/candidate --baseline-source /path/to/before`
+执行面板 prepare 与复位函数，覆盖三个等待开关、机型与身份限制及失败清理；
+同时检查原厂命令表和其他面板代码未变；默认引导通过三个独立参数省去额外等待。
 这些测试需要实际源码，不在普通离线入口中。
 
 真机测试分别记录临时启动、固定引导后的重启、拔线冷启动及睡眠唤醒；

@@ -279,12 +279,29 @@ def check_desktop_runtime(root, *, first_boot_setup=False):
 def boot_splash_files():
     files={
         'etc/plymouth/plymouthd.conf':'[Daemon]\nTheme=spinner\nShowDelay=0\nDeviceTimeout=5\n',
-        # The initramfs may already have a daemon owning the display.
+        'usr/libexec/liuqin-plymouth-guard':
+            (PROJECT/'device/boot/splash/plymouth-guard.py').read_text(),
+        # The initramfs may already own the display. Bound every root-stage
+        # client, including read-write, which otherwise blocks sysinit forever.
         'etc/systemd/system/plymouth-start.service.d/10-liuqin.conf':
-            '[Service]\nExecStart=\nExecStart=/bin/sh -c '\
-            "'/usr/bin/plymouth --ping || exec /usr/bin/plymouthd --mode=boot --pid-file=/run/plymouth/pid --attach-to-session'\n",
+            '[Service]\nExecStart=\n'
+            'ExecStart=/usr/bin/python3 /usr/libexec/liuqin-plymouth-guard start\n'
+            'ExecStartPost=\n'
+            'ExecStartPost=-/usr/bin/python3 /usr/libexec/liuqin-plymouth-guard show\n'
+            'TimeoutStartSec=20\n',
+        'etc/systemd/system/plymouth-read-write.service.d/10-liuqin.conf':
+            '[Unit]\nAfter=plymouth-start.service\n'
+            '[Service]\nExecStart=\n'
+            'ExecStart=-/usr/bin/python3 /usr/libexec/liuqin-plymouth-guard read-write\n'
+            'TimeoutStartSec=10\n',
         'etc/systemd/system/plymouth-quit.service.d/10-liuqin.conf':
-            '[Service]\nExecStart=\nExecStart=-/usr/bin/plymouth quit --retain-splash\n',
+            '[Service]\nExecStart=\n'
+            'ExecStart=-/usr/bin/python3 /usr/libexec/liuqin-plymouth-guard quit\n'
+            'TimeoutStartSec=8\n',
+        'etc/systemd/system/plymouth-quit-wait.service.d/10-liuqin.conf':
+            '[Service]\nExecStart=\n'
+            'ExecStart=-/usr/bin/python3 /usr/libexec/liuqin-plymouth-guard wait\n'
+            'TimeoutStartSec=8\n',
     }
     for name,mode in (('poweroff','shutdown'),('halt','shutdown'),('reboot','reboot')):
         files['etc/systemd/system/plymouth-'+name+'.service.d/30-liuqin-orientation.conf']=(

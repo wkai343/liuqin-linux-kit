@@ -36,7 +36,7 @@ DEFAULTS = {
     'image_work': 'out/build/devbox/images',
     'bundle_out': 'out/releases/devbox',
     'kernel_debs_out': 'out/releases/kernel-debs',
-    'package_version': '0.3.1',
+    'package_version': '0.3.3',
     # The installer keeps its own source/configuration and output defaults.
     'installer_kernel_source': 'sources/linux-sm8450-liuqin',
     'installer_kernel_out': 'out/build/devbox/installer-kernel',
@@ -282,7 +282,7 @@ def doctor():
 
 
 def test():
-    for name in ('project-identity.py', 'project-structure.py', 'devbox-build.py', 'source-build.py', 'stock-rom.py', 'fedora-build.py', 'selinux-packaging.py', 'first-boot-setup.py', 'backlight-default.py', 'boot-splash.py', 'splash-handoff.py', 'splash-logo.py', 'splash-orientation.py', 'display-clock.py', 'display-policy.py', 'display-recovery.py', 'wlan-mac.py', 'storage-seal.py', 'storage-ready.py', 'storage-paths.py', 'mkbootimg-fetch.py', 'initramfs-inputs.py', 'sensor-build-environment.py', 'gui-artifacts.py', 'filesystems.py', 'windows-installer.py', 'usb-installer-network.py', 'custom-kernel.py', 'kernel-updates.py', 'gui-engine.py', 'gui-worker.py', 'install-root-single.py'):
+    for name in ('project-identity.py', 'project-structure.py', 'devbox-build.py', 'source-build.py', 'stock-rom.py', 'fedora-build.py', 'selinux-packaging.py', 'first-boot-setup.py', 'backlight-default.py', 'boot-splash.py', 'splash-handoff.py', 'splash-logo.py', 'splash-orientation.py', 'plymouth-guard.py', 'display-clock.py', 'display-policy.py', 'display-recovery.py', 'wlan-mac.py', 'storage-seal.py', 'storage-ready.py', 'storage-paths.py', 'mkbootimg-fetch.py', 'initramfs-inputs.py', 'sensor-build-environment.py', 'gui-artifacts.py', 'filesystems.py', 'windows-installer.py', 'usb-installer-network.py', 'custom-kernel.py', 'kernel-updates.py', 'gui-engine.py', 'gui-worker.py', 'install-root-single.py'):
         run([shutil.which('python3'), 'tests/' + name])
 
 

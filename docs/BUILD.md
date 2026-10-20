@@ -40,7 +40,7 @@ Devbox 提供交叉编译器、QEMU、镜像和打包工具，三个文件共用
   "usb_manufacturer": "Xiaomi",
   "usb_product": "Pad 6 Pro",
   "rom_images": "inputs/roms/liuqin/OS2.0.6.0.VMYCNXM/images",
-  "package_version": "0.3.1"
+  "package_version": "0.3.3"
 }
 ```
 
