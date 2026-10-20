@@ -330,6 +330,7 @@ Fedora SELinux 标签由 ARM64 目标策略校验后写入归档，保留所有�
 | 现象 | 处理 |
 | --- | --- |
 | `init-build` 提示配置已存在 | 保留即可，继续 `plan` 和 `build` |
+| 模块构建后出现 `The read operation timed out` | 下一步会下载 Fedora 基础归档。默认使用清华镜像，官方地址保存在 `build/rootfs/fedora-source.json` 的 `upstream_url`；下载仍校验固定 SHA256。若当前网络无法连接，可将 `url` 改为可达的 HTTPS 镜像地址，保留 `sha256` 后重试原命令，无需清理 `out/` |
 | 输入或源码校验失败 | 核对固定来源与本地修改；保留缓存定位问题，不跳过校验 |
 | mkbootimg 缓存被改动 | 工具校验固定 AOSP 源码树；自动忽略并清理已验证模块的字节码，未知源码仍会拒绝 |
 | DNF 提示找不到包 | 核对 Fedora 包名，例如 `plasma-milou`、`elisa-player`、`kde-partitionmanager` |
