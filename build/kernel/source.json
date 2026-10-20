@@ -17,9 +17,11 @@
     "build/kernel/patches/linux-7.3/0005-fix-dp-detection-lifecycle.patch",
     "build/kernel/patches/linux-7.3/0006-nanosic-caps-lock-led.patch",
     "build/kernel/patches/linux-7.3/0007-liuqin-command-dma-schedule.patch",
-    "build/kernel/patches/linux-7.3/0008-liuqin-prepare-margin-controls.patch"
+    "build/kernel/patches/linux-7.3/0008-liuqin-prepare-margin-controls.patch",
+    "build/kernel/patches/0034-liuqin-minimum-brightness.patch"
   ],
-  "status": "Default target 7.3; extra prepare margins omitted for recognized Liuqin panels. Three temporary boot combinations, fixed boot, normal restart and unplugged cold boot passed; margin-change screen-off/wake testing deferred. Historical display/standby issues and persistent Caps Lock LED validation remain open.",
+  "status": "Default target 7.3; extra prepare margins omitted for recognized Liuqin panels. Three temporary boot combinations, fixed boot, normal restart and unplugged cold boot passed; margin-change screen-off/wake testing deferred. Historical display/standby issues and persistent Caps Lock LED validation remain open. Minimum-positive brightness fix passed offline regression; hardware validation pending.",
+  "expected_source_tree": "7b12c54cf4473a17e0a45f2e5d92758197b4d597",
   "tested_source_commit": "5de11942912ce0214266e9f900bf32b3438a3d0a",
   "tested_source_tree": "d8bf3733c932bafd9297710a22f04751d3364189",
   "reference_repository": "https://github.com/Seeker0472/liuqin-nixos",

@@ -48,6 +48,7 @@
     "build/kernel/patches/0028-liuqin-dsi-lifecycle.patch",
     "build/kernel/patches/0029-liuqin-off-after-dpu-disable.patch",
     "build/kernel/patches/0030-liuqin-oem-cabc-policy.patch",
-    "build/kernel/patches/0033-liuqin-battery-telemetry.patch"
+    "build/kernel/patches/0033-liuqin-battery-telemetry.patch",
+    "build/kernel/patches/0034-liuqin-minimum-brightness.patch"
   ]
 }

@@ -63,6 +63,53 @@ class SourceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'缓存文件校验失败'):helpers.download('https://example.invalid/base',target,expected)
             self.assertEqual(network.call_count,1)
 
+    def test_current_source_tree_lock_preserves_hardware_test_history_and_rejects_mismatches(self):
+        project=self.root/'kernel-tree-lock';source=project/'kernel';source.mkdir(parents=True)
+        def git(*args):
+            return subprocess.check_output(['git','-C',str(source),*args],text=True).strip()
+        git('init','-q')
+        (source/'driver.c').write_text('old\n')
+        git('add','driver.c')
+        git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid',
+            '-c','commit.gpgsign=false','commit','-qm','base')
+        base=git('rev-parse','HEAD');tested_tree=git('rev-parse','HEAD^{tree}')
+        patch_path=project/'build/kernel/patches/fix.patch';patch_path.parent.mkdir(parents=True)
+        patch_path.write_text('--- a/driver.c\n+++ b/driver.c\n@@ -1 +1 @@\n-old\n+fixed\n')
+        (project/'build/lib').mkdir()
+        shutil.copyfile(PROJECT/'build/lib/kernel_adaptation.py',project/'build/lib/kernel_adaptation.py')
+        git('apply','--cached',str(patch_path));expected_tree=git('write-tree');git('read-tree','HEAD')
+        record=dict(commit=base,target_patches=[str(patch_path.relative_to(project))],
+                    tested_source_commit=base,tested_source_tree=tested_tree,expected_source_tree=expected_tree)
+        lock=project/'source.json'
+        pipeline=object.__new__(flow.Flow)
+        pipeline.data={'kernel_source':str(source)};pipeline.code={};pipeline.memo={}
+        pipeline.cache=helpers.Cache(project/'cache',None)
+        cases=(
+            ({'expected_source_tree':expected_tree,'tested_source_tree':tested_tree},True),
+            ({'expected_source_tree':tested_tree,'tested_source_tree':expected_tree},False),
+            ({'tested_source_tree':expected_tree},True),
+            ({'tested_source_tree':tested_tree},False),
+            ({'expected_source_tree':'','tested_source_tree':tested_tree},False),
+        )
+        with patch.object(flow,'PROJECT',project),patch.object(pipeline,'kernel_source_lock',return_value=lock):
+            for fields,accepted in cases:
+                with self.subTest(fields=fields):
+                    current={k:v for k,v in record.items() if k not in ('expected_source_tree','tested_source_tree')}
+                    current.update(fields);lock.write_text(json.dumps(current))
+                    if accepted:
+                        result,commit=pipeline.kernel_source()
+                        self.assertEqual((result/'driver.c').read_text(),'fixed\n')
+                        tree=subprocess.check_output(['git','-C',str(result),'rev-parse','HEAD^{tree}'],text=True).strip()
+                        self.assertEqual(tree,expected_tree)
+                        self.assertNotEqual(commit,base)
+                        self.assertEqual(json.loads(lock.read_text()),current)
+                    else:
+                        with self.assertRaisesRegex(ValueError,'源码树与核验记录不同'):
+                            pipeline.kernel_source()
+        self.assertEqual(git('rev-parse','HEAD'),base)
+        self.assertEqual(git('status','--porcelain'),'')
+        self.assertEqual((source/'driver.c').read_text(),'old\n')
+
     def test_cache_changes_only_the_requested_stage_and_detects_tampering(self):
         cache=helpers.Cache(self.root/'cache',None);calls=[]
         def build(out):calls.append(out);(out/'image').write_bytes(b'complete')

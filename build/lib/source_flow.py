@@ -112,9 +112,10 @@ class Flow:
             path=cached/'source';commit=(cached/'source.commit').read_text().strip()
             if subprocess.check_output(['git','-C',str(path),'rev-parse','HEAD'],text=True).strip()!=commit:
                 raise ValueError('内核适配快照的 Git 身份与完成记录不同。')
-            if record.get('tested_source_tree'):
+            expected_tree=record.get('expected_source_tree') or record.get('tested_source_tree')
+            if expected_tree:
                 tree=subprocess.check_output(['git','-C',str(path),'rev-parse','HEAD^{tree}'],text=True).strip()
-                if tree!=record['tested_source_tree']:
+                if tree!=expected_tree:
                     raise ValueError('目标内核补丁生成的源码树与核验记录不同。')
         return path,commit
 

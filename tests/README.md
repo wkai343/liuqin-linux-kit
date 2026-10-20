@@ -19,6 +19,7 @@ CI 的实际测试列表以 `.github/workflows/` 为准，不能把本地入口�
 | 测试 | 检查范围 |
 | --- | --- |
 | `display-clock.py` | 补丁中的时钟取整、频率边界和 CCF 约束 |
+| `display-brightness-minimum.py` | 两个内核配方的最低非零亮度、原厂曲线其余档位、直接写零与关屏后的恢复 |
 | `display-policy.py`、`display-recovery.py` | CABC 配置、活动会话、恢复限流、失败与退出处理 |
 | `backlight-default.py`、`boot-splash.py` | 亮度量程、初始化等待、背光/显示时钟装载顺序，以及充电与动画退出路径 |
 | `splash-handoff.py`、`splash-logo.py`、`splash-orientation.py` | 帧缓冲边界、绘制进程隔离与回退、四向特征识别、关机方向缓存及 systemd 直接入口 |

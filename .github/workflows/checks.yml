@@ -52,6 +52,7 @@ jobs:
           sudo python3 tests/fingerprint-release.py
           python3 tests/shell-defaults.py
           python3 tests/display-clock.py
+          python3 tests/display-brightness-minimum.py
           python3 tests/backlight-default.py
           python3 tests/boot-splash.py
           python3 tests/splash-handoff.py

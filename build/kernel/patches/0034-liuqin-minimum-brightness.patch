@@ -1,0 +1,23 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] backlight: keep the minimum positive Liuqin level visible
+
+The desktop uses logical level 1 as the minimum visible brightness. The
+M81 integer index calculation rounds it down to the table's off entry,
+turning off the LEDs even though userspace requested a positive level.
+
+Use the first nonzero table entry for this boundary. Keep logical zero
+as backlight off, and preserve every other OEM level and the linear path.
+
+diff --git a/drivers/video/backlight/ktz8866.c b/drivers/video/backlight/ktz8866.c
+--- a/drivers/video/backlight/ktz8866.c
++++ b/drivers/video/backlight/ktz8866.c
+@@ -138,6 +138,9 @@ static int ktz8866_map_brightness(struct ktz8866 *ktz, unsigned int level)
+ 		index = 1700 * level / 2047;
+ 	else
+ 		index = 1700 + 347 * (level - 2048) / 2047;
++	/* Do not round a positive request down to the table's off entry. */
++	if (level && !index)
++		index = 1;
+ 	return liuqin_bl_curve[index];
+ }
+ 
