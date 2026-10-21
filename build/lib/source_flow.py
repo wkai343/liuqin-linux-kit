@@ -392,12 +392,15 @@ def execute(data,action,run,*,refresh=False,configure_only=False):
     if action=='plan':print(json.dumps(flow.plan(),ensure_ascii=False,indent=2));return
     if action=='check-inputs':
         flow.board_builder.verify_rom(flow.resolve(data.get('rom_images','inputs/roms/liuqin/OS2.0.6.0.VMYCNXM/images')))
+        if distribution=='fedora':flow.fingerprint_image()
         print('PASS：官方系统配置和原厂 ROM 镜像输入有效。');return
     root=PROJECT/'out/build/from-source';root.mkdir(parents=True,exist_ok=True)
     with (root/'lock').open('a') as owner:
         fcntl.flock(owner,fcntl.LOCK_EX|fcntl.LOCK_NB)
         if action in ('all','prepare','boot','kernel-debs','rootfs','images','installer','build-installer'):
             # Check model-specific input availability before downloads or compilation.
+            if distribution=='fedora' and action in ('all','prepare','rootfs','images'):
+                flow.fingerprint_image()
             flow.board()
         if action=='prepare':
             flow.base();flow.tools();flow.kernel_source()

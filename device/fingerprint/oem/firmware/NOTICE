@@ -1,15 +1,20 @@
-FPC1264 trusted application: local-device provisioning only
+FPC1264 trusted application: verified stock ROM provenance
 
 The ten hashes in SHA256.json identify fpcliu.mdt and fpcliu.b00 through
 fpcliu.b08 from Xiaomi Pad 6 Pro (liuqin) HyperOS OS2.0.6.0.VMYCNXM,
 Android 15, images/NON-HLOS.bin, FAT directory /image.
 
-These OEM binaries are not included in the public liuqin-fingerprint package;
-the project has not established permission to redistribute them. On the first
-normal boot, provision_firmware.py mounts this tablet's modem_a read-only and
-copies only these ten files, verifying every hash before use. Subsequent boots
-reuse the verified local cache. A missing/different stock image disables the
-fingerprint service without modifying modem_a or preventing password login.
+The standalone liuqin-fingerprint package contains the hashes and this notice,
+not the OEM binaries. The default Fedora image builder extracts these ten files
+from the user's SHA-pinned NON-HLOS.bin and seeds the rootfs firmware cache,
+verifying the complete image and every extracted file. Original firmware bytes
+and their rights remain unchanged; the project has not established a separate
+grant to redistribute them under its source license.
+
+Normal boots reuse the verified cache. If it is absent, provision_firmware.py
+can mount this tablet's modem_a read-only and extract the same ten pinned files.
+A missing/different stock image then disables fingerprint startup without
+modifying modem_a or preventing password login.
 
 The files are generic OEM trusted applications, not fingerprints, enrollment
 credentials, device calibration or Android user data. This package creates no

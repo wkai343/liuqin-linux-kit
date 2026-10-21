@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: MIT
 """Cache ten SHA-pinned FPC TA files from this tablet's read-only modem FAT.
 
-No firmware bytes are distributed by liuqin-fingerprint. This runs once before
-late module load, after the installer has repaired modem_a. Failure disables
-fingerprint startup; it never repairs a partition or touches biometric state.
+The standalone liuqin-fingerprint package contains no firmware bytes. Default
+Fedora images seed the verified cache offline; otherwise this extracts from
+modem_a before late module load. Failure disables fingerprint startup; it never
+repairs a partition or touches biometric state.
 """
 import hashlib
 import json

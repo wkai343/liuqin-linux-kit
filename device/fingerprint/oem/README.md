@@ -62,6 +62,8 @@ Keymaster `0x205`，不调用旧 PAM 凭据助手、旧 18 小时预备输入密
 
 以下入口固定匹配上游 6.17 模块，用于复现旧版发行材料，不是当前 Fedora 7.3 的构建入口。
 Fedora 的 Devbox 流程从源码构建 RPM，并在运行时核对当前内核的配套模块。
+默认 Fedora rootfs 在装配时从已校验的 `NON-HLOS.bin` 加入十个原厂固件文件，
+首次启动直接复用已验证缓存；独立 RPM 和旧版 Debian 包不携带固件本体。
 
 上游旧版发行镜像使用 `liuqin-fingerprint` Debian 包。从同一 v0.6.0 发行版取得
 `fingerprint-build-inputs.tar.gz`。该公共归档包含核验程序、对应源码/依赖和固定
@@ -86,7 +88,7 @@ Polkit 规则与 `UMask=0077`。构建时不需要现成用户，不创建凭据
 [固定哈希](firmware/SHA256.json)和[原厂来源声明](firmware/NOTICE)。正常启动时
 复用本机已验证缓存，或将本机 modem_a FAT 只读挂载并只提取锁定的十个文件。
 缺失或不匹配会停止指纹启动，不重试修复、裸写分区或阻塞密码登录。
-Debian/rootfs 安装时不提取固件，也不创建凭据。
+旧版 Debian 包安装时不提取固件，也不创建凭据。
 
 ## 内部源码构建与开发候选
 

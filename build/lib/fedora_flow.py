@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import shutil
 import sys
-from source_flow import Flow
+from source_flow import Flow, load_module
 from source_build import PROJECT, download, sha, tree_identity
 
 
@@ -94,6 +94,11 @@ class FedoraFlow(Flow):
                     lock[name]['source_url'].rsplit('/',1)[1],lock[name]['orig_sha256'])
                 for name in ('libfprint','fprintd')}
 
+    def fingerprint_image(self):
+        image=self.resolve(self.data.get('rom_images','inputs/roms/liuqin/OS2.0.6.0.VMYCNXM/images'))/'NON-HLOS.bin'
+        extractor=load_module('fpc_firmware_extractor',PROJECT/'build/scripts/extract-liuqin-fingerprint-firmware.py')
+        return extractor.verify_image(image)
+
     def fingerprint_rpm(self):
         base=self.target_runtime_root();sources=self.fingerprint_sources()
         name='liuqin-fingerprint-0.1.0-7.liuqin.aarch64.rpm'
@@ -156,13 +161,20 @@ class FedoraFlow(Flow):
             interfaces=tree_identity(PROJECT/'shared')),build,['rpms'])/'rpms'
 
     def rootfs(self):
+        firmware=self.fingerprint_image()
         apps=self.apps();rpms=self.kernel_debs();source,kernel=self.kernel();modules=self.modules()
         def build(out):
             self.target_action('kernel-files',apps/'root.tar.gz',out/'assembled',rpms=rpms)
+            self.run([sys.executable,'build/scripts/extract-liuqin-fingerprint-firmware.py',
+                '--image',str(firmware),'--root',str(out/'assembled/rootfs')],root=True)
             self.run([sys.executable,'build/scripts/build-liuqin-custom-root.py','--root',str(out/'assembled/rootfs'),
                 '--kernel-out',str(kernel),'--modules-dir',str(modules),'--out',str(out/'packed'),'--selinux-labels'],root=True)
         return self.stage('fedora-rootfs',dict(apps=sha(apps/'root.tar.gz'),rpms=tree_identity(rpms),
-            builder=sha(PROJECT/'build/scripts/build-liuqin-custom-root.py'),interfaces=tree_identity(PROJECT/'shared')),
+            builder=sha(PROJECT/'build/scripts/build-liuqin-custom-root.py'),interfaces=tree_identity(PROJECT/'shared'),
+            fingerprint_firmware=sha(firmware),
+            fingerprint_extractor=sha(PROJECT/'build/scripts/extract-liuqin-fingerprint-firmware.py'),
+            fingerprint_hashes=sha(PROJECT/'device/fingerprint/oem/firmware/SHA256.json'),
+            fingerprint_provisioner=sha(PROJECT/'device/fingerprint/oem/src/fingerprint/deployment/provision_firmware.py')),
             build,['packed/rootfs.tar.gz','packed/native-root.contract'])/'packed'
 
     def plan(self):

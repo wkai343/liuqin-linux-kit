@@ -37,6 +37,10 @@ CS35L41 扬声器保护程序和通用调音来自 Xiaomi 的 OS2.0.6.0.VMYCNXM 
 权利归 Cirrus Logic、Xiaomi 及其授权方。`build/lib/speaker_firmware.py` 记录提取路径、
 主线驱动文件名和 SHA256；文件名转换不改变其许可，亦不包含每台设备的工厂校准数据。
 
+默认 Fedora 镜像中的 FPC 指纹 trusted application 从同版原厂 ROM 的 `NON-HLOS.bin`
+提取，固定 SHA256 与来源声明见 `device/fingerprint/oem/firmware/`。构建保留原厂字节，
+不包含个人指纹状态；固件权利归原权利人，不由项目 MIT 许可替代。
+
 Ubuntu 登录前初始化使用 KDE 的 [Plasma Setup](https://invent.kde.org/plasma/plasma-setup)，
 包括 Kristen McWilliam、Carl Schwan、Devin Lin 等贡献者；固定来源见
 `build/rootfs/plasma-setup-source.json`。构建时保留上游文件的作者和 SPDX 声明，

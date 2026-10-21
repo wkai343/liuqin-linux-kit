@@ -35,8 +35,14 @@ RPM 装配及内核配套要求见 [构建指南](BUILD.md)。
 
 ## 固件来源
 
-指纹 trusted application 不进入公共 RPM 或 rootfs。正常启动从本机 `modem_a` 只读提取并核对固定哈希；
-原厂版本不符时，从自己的匹配 ROM 提取，不能跳过校验。在 Devbox 环境运行：
+默认 Fedora 构建从 `rom_images/NON-HLOS.bin` 提取十个指纹 trusted application 文件，
+先核对完整原厂镜像及每个文件的固定 SHA256，再写入最终 rootfs 的
+`/usr/local/lib/liuqin-fpc-oem/firmware/`，文件为 root 所有、0600。
+首次启动直接使用这份已验证缓存，不依赖平板 `modem_a` 中固件的签名版本。
+固件缺失或校验失败会停止构建；原厂程序不改写，也不包含个人指纹、凭据或校准。
+
+独立 `liuqin-fingerprint` RPM 仍只携带程序、固定哈希与来源说明；固件由最终镜像装配阶段加入。
+缓存缺失的旧镜像仍会尝试从本机 `modem_a` 只读提取。需要手动补齐时，在 Devbox 环境运行：
 
 ```sh
 python3 build/scripts/extract-liuqin-fingerprint-firmware.py \
