@@ -54,6 +54,7 @@ jobs:
           python3 tests/shell-defaults.py
           python3 tests/display-clock.py
           python3 tests/display-brightness-minimum.py
+          python3 tests/display-refresh-rates.py
           python3 tests/backlight-default.py
           python3 tests/boot-splash.py
           python3 tests/splash-handoff.py

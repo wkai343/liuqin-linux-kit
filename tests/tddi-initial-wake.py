@@ -311,7 +311,7 @@ struct liuqin_oem_cmd {uint8_t type,flags;unsigned int wait_ms,len;uint8_t data[
 static const struct liuqin_oem_cmd csot_on[5]={{0}};
 struct liuqin_oem_panel {const struct liuqin_oem_cmd *on;size_t on_count;};
 static const struct liuqin_oem_panel liuqin_oem_panels[]={{liuqin_tm_on,ARRAY_SIZE(liuqin_tm_on)},{csot_on,ARRAY_SIZE(csot_on)}};
-struct nt36532 {int late_wake_status;const struct liuqin_oem_panel *oem_panel;struct {bool backlight_after_first_frame,backlight_lock;void *backlight,*dev;}panel;};
+struct nt36532 {int late_wake_status,refresh_status;const struct liuqin_oem_panel *oem_panel;struct {bool backlight_after_first_frame,backlight_lock;void *backlight,*dev;}panel;};
 static struct nt36532 ctx;static bool liuqin_late_wake;static int calls,error_at,transport_error,pipa_calls;static const struct liuqin_oem_cmd *sent;static size_t count;
 static int pipa_init_sequence(struct nt36532 *c){assert(c==&ctx);pipa_calls++;return 0;}
 static int liuqin_send_oem_cmds(struct nt36532 *c,const struct liuqin_oem_cmd *cmd,size_t n){assert(c==&ctx);calls++;sent=cmd;count=n;if(calls==error_at)return transport_error;return 0;}

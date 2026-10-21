@@ -1,0 +1,321 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] drm/panel: align Liuqin refresh modes with the OEM M81 path
+
+Use the M81-specific HFP/VFP table in the shipped msm_drm.ko instead of
+Qualcomm's generic VFP formula. Derive logical pixel clocks for the same
+DSC-adjusted lane rate, retaining 120 Hz as the preferred mode. The real
+OEM table also permits 144 Hz by shortening horizontal blanking.
+
+Match the selected refresh rate with the OEM B3/B2 post-enable command
+group before declaring the display ready for touch firmware. Query both
+host rates, reject mismatches and unsupported rates, and do not retry a
+partially sent group. Reset that state only on a new panel initialization.
+Offer 90/120/144 Hz by default. Keep the unresolved long-VFP modes behind
+a separate boot-only diagnostic option; they are not qualified for use.
+
+Use the identical qualified link-clock request for every M81 profile, so
+integer-kHz DRM rounding cannot select a different PLL VCO/divider pair.
+
+Source: OS2.0.6.0.VMYCNXM dtbo.img entry 15 and msm_drm.ko.
+DTBO SHA256:
+  5e0377c7781e57f65c474f20edf3d7fb61f03f6030ca170e4edc29467a7993dd
+msm_drm.ko SHA256:
+  3079f8d315440d34d58a57de82d31e42b8bc4ff01b5cd64bf141a4c5dfb1d7ba
+The failed VFP-only candidate and the corrected validation are recorded
+in docs/DISPLAY.md. No seamless modesetting or VRR is introduced.
+
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_host.c b/drivers/gpu/drm/msm/dsi/dsi_host.c
+index 5916fc5fa..f72ccdccd 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -168,6 +168,7 @@ struct msm_dsi_host {
+ 	struct regmap *sfpb;
+ 
+ 	struct drm_display_mode *mode;
++	unsigned int refresh_rate;
+ 	struct drm_dsc_config *dsc;
+ 	unsigned int dsc_slice_per_pkt;
+ 
+@@ -654,13 +655,35 @@ static unsigned long dsi_get_pclk_rate(const struct drm_display_mode *mode,
+ 	return pclk_rate;
+ }
+ 
++/* The qualified M81 modes all use the existing 120 Hz link frequency.
++ * Integer-kHz DRM clocks introduce sub-kHz differences after DSC scaling.
++ * Do not retune the bonded PLL for these: a different VCO/post-divider pair
++ * has produced a doubled hardware scan rate despite the same CCF rate.
++ */
++static unsigned long dsi_host_pclk_rate(struct msm_dsi_host *host,
++					bool bonded,
++					const struct drm_display_mode *mode)
++{
++	unsigned long rate = dsi_get_pclk_rate(mode, host->dsc, bonded);
++
++	if (bonded && (host->mode_flags & MIPI_DSI_MODE_PANEL_STAGES) &&
++	    (host->mode_flags & MIPI_DSI_MODE_VIDEO_BURST) &&
++	    host->lanes == 4 && host->dsc &&
++	    host->dsc->bits_per_component == 8 &&
++	    host->dsc->bits_per_pixel == (8 << 4) &&
++	    mode->hdisplay == 1800 && mode->vdisplay == 2880 &&
++	    rate >= 167838200UL && rate <= 167839100UL)
++		return 167838626UL;
++	return rate;
++}
++
+ unsigned long dsi_byte_clk_get_rate(struct mipi_dsi_host *host, bool is_bonded_dsi,
+ 				    const struct drm_display_mode *mode)
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+ 	u8 lanes = msm_host->lanes;
+ 	u32 bpp = mipi_dsi_pixel_format_to_bpp(msm_host->format);
+-	unsigned long pclk_rate = dsi_get_pclk_rate(mode, msm_host->dsc, is_bonded_dsi);
++	unsigned long pclk_rate = dsi_host_pclk_rate(msm_host, is_bonded_dsi, mode);
+ 	unsigned long pclk_bpp;
+ 
+ 	if (lanes == 0) {
+@@ -679,7 +702,7 @@ unsigned long dsi_byte_clk_get_rate(struct mipi_dsi_host *host, bool is_bonded_d
+ 
+ static void dsi_calc_pclk(struct msm_dsi_host *msm_host, bool is_bonded_dsi)
+ {
+-	msm_host->pixel_clk_rate = dsi_get_pclk_rate(msm_host->mode, msm_host->dsc, is_bonded_dsi);
++	msm_host->pixel_clk_rate = dsi_host_pclk_rate(msm_host, is_bonded_dsi, msm_host->mode);
+ 	msm_host->byte_clk_rate = dsi_byte_clk_get_rate(&msm_host->base, is_bonded_dsi,
+ 							msm_host->mode);
+ 
+@@ -1834,7 +1857,13 @@ static int dsi_host_panel_stage(struct mipi_dsi_host *host,
+ 	return msm_dsi_manager_panel_stage(msm_host->id, stage);
+ }
+ 
++static int dsi_host_get_refresh_rate(struct mipi_dsi_host *host)
++{
++	return READ_ONCE(to_msm_dsi_host(host)->refresh_rate);
++}
++
+ static const struct mipi_dsi_host_ops dsi_host_ops = {
++	.get_refresh_rate = dsi_host_get_refresh_rate,
+ 	.attach = dsi_host_attach,
+ 	.detach = dsi_host_detach,
+ 	.transfer = dsi_host_transfer,
+@@ -2753,6 +2782,7 @@ int msm_dsi_host_set_display_mode(struct mipi_dsi_host *host,
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+ 
++	WRITE_ONCE(msm_host->refresh_rate, 0);
+ 	if (msm_host->mode) {
+ 		drm_mode_destroy(msm_host->dev, msm_host->mode);
+ 		msm_host->mode = NULL;
+@@ -2764,6 +2794,7 @@ int msm_dsi_host_set_display_mode(struct mipi_dsi_host *host,
+ 		return -ENOMEM;
+ 	}
+ 
++	WRITE_ONCE(msm_host->refresh_rate, drm_mode_vrefresh(mode));
+ 	return 0;
+ }
+ 
+diff --git a/drivers/gpu/drm/panel/panel-novatek-nt36532.c b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+index 073bcfd65..58fbd006d 100644
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -7,6 +7,7 @@
+ #include <linux/delay.h>
+ #include <linux/gpio/consumer.h>
+ #include <linux/module.h>
++#include <linux/math64.h>
+ #include <linux/interrupt.h>
+ #include <linux/jiffies.h>
+ #include <linux/mutex.h>
+@@ -26,6 +27,16 @@
+ #include <drm/display/drm_dsc.h>
+ #include <drm/display/drm_dsc_helper.h>
+ 
++static bool liuqin_multi_refresh = true;
++module_param(liuqin_multi_refresh, bool, 0444);
++MODULE_PARM_DESC(liuqin_multi_refresh,
++		 "Enable OEM 90/120/144 Hz modes on known Liuqin panels");
++
++static bool liuqin_low_refresh;
++module_param(liuqin_low_refresh, bool, 0444);
++MODULE_PARM_DESC(liuqin_low_refresh,
++		 "Expose unqualified 30/48/50/60 Hz modes for Liuqin diagnostics");
++
+ static bool first_frame_backlight = true;
+ module_param(first_frame_backlight, bool, 0444);
+ MODULE_PARM_DESC(first_frame_backlight,
+@@ -58,6 +69,7 @@ MODULE_PARM_DESC(liuqin_late_wake,
+ 	"Send initial Tianma Sleep Out/Display On once, after first frame");
+ 
+ struct nt36532 {
++	int refresh_status;
+ 	/* 0: original ON table; 1: pending; 2: sent; negative: transfer failed. */
+ 	int late_wake_status;
+ 	bool off_deferred;
+@@ -1100,6 +1112,7 @@ static int liuqin_init_sequence(struct nt36532 *ctx)
+ 	bool defer;
+ 	int ret;
+ 
++	ctx->refresh_status = 0;
+ 	ctx->late_wake_status = 0;
+ 	if (!ctx->oem_panel)
+ 		return pipa_init_sequence(ctx);
+@@ -2088,13 +2101,125 @@ static int nt36532_unprepare(struct drm_panel *panel)
+ 	return 0;
+ }
+ 
++/* M81-specific branch in OS2.0.6.0 msm_drm.ko, not generic VFP DFPS.
++ * Horizontal porches are for the complete bonded mode. DSC compresses only
++ * the 1800 active pixels to 600; blanking remains uncompressed. Keep the
++ * 1.007032320 GHz lane rate by deriving the DRM pixel clock from that line.
++ */
++struct liuqin_refresh_mode {
++	u16 rate, hfp, vfp;
++	u8 b3, b2;
++};
++
++static const struct liuqin_refresh_mode liuqin_refresh_modes[] = {
++	{ 120, 200,   26, 0x40, 0x91 },
++	{ 144,  52,   26, 0x00, 0x00 },
++	{  90, 500,   26, 0x80, 0x00 },
++	{  60, 200, 3148, 0x40, 0x91 },
++	{  50, 498, 2524, 0x80, 0x00 },
++	{  48, 498, 2758, 0x80, 0x00 },
++	{  30, 498, 6270, 0x80, 0x00 },
++};
++
++static bool liuqin_can_multi_refresh(struct nt36532 *ctx)
++{
++	unsigned int i;
++
++	if (!liuqin_multi_refresh || ctx->desc != &liuqin_desc || !ctx->oem_panel)
++		return false;
++	for (i = 0; i < ARRAY_SIZE(ctx->dsi); i++) {
++		if (!ctx->dsi[i] || !ctx->dsi[i]->host || !ctx->dsi[i]->host->ops ||
++		    !ctx->dsi[i]->host->ops->get_refresh_rate)
++			return false;
++	}
++	return true;
++}
++
++static int liuqin_get_modes(struct drm_connector *connector)
++{
++	const struct drm_display_mode *base = &liuqin_mode_120;
++	struct drm_display_mode *mode;
++	unsigned int i, compressed_total;
++
++	for (i = 0; i < ARRAY_SIZE(liuqin_refresh_modes); i++) {
++		/* Long-VFP modes still show flicker and panel faults on hardware. */
++		if (liuqin_refresh_modes[i].rate < 90 && !liuqin_low_refresh)
++			break;
++		mode = drm_mode_duplicate(connector->dev, base);
++		if (!mode)
++			break;
++		mode->hsync_start = mode->hdisplay + liuqin_refresh_modes[i].hfp;
++		mode->hsync_end = mode->hsync_start + 4;
++		mode->htotal = mode->hsync_end + 92;
++		mode->vsync_start = mode->vdisplay + liuqin_refresh_modes[i].vfp;
++		mode->vsync_end = mode->vsync_start + 2;
++		mode->vtotal = mode->vsync_end + 214;
++		compressed_total = mode->htotal - mode->hdisplay + 600;
++		mode->clock = DIV_ROUND_CLOSEST_ULL(1007032320ULL * mode->htotal,
++						    3000ULL * compressed_total);
++		if (!i)
++			mode->type |= DRM_MODE_TYPE_PREFERRED;
++		drm_mode_set_name(mode);
++		drm_mode_probed_add(connector, mode);
++	}
++	if (i) {
++		connector->display_info.width_mm = base->width_mm;
++		connector->display_info.height_mm = base->height_mm;
++	}
++	return i;
++}
++
+ static int nt36532_get_modes(struct drm_panel *panel,
+-					struct drm_connector *connector)
++			     struct drm_connector *connector)
+ {
+ 	struct nt36532 *ctx = to_nt36532(panel);
+-	const struct drm_display_mode *mode;
+-	mode = &(ctx->desc->drm_mode);
+-	return drm_connector_helper_get_modes_fixed(connector, mode);
++
++	if (liuqin_can_multi_refresh(ctx))
++		return liuqin_get_modes(connector);
++	return drm_connector_helper_get_modes_fixed(connector, &ctx->desc->drm_mode);
++}
++
++/* The ROM post-enable path matches these scan settings to the selected FPS.
++ * Preserve packet types, batch boundaries and both-link broadcast. Complete
++ * this before publishing display readiness to the touch firmware follower.
++ */
++static int liuqin_apply_refresh(struct nt36532 *ctx)
++{
++	struct liuqin_oem_cmd cmds[] = {
++		{ 0x39, 0x40, 0, 2, { 0xff, 0x10 } },
++		{ 0x39, 0x40, 0, 2, { 0xb3, 0x00 } },
++		{ 0x39, 0x00, 0, 2, { 0xb2, 0x00 } },
++	};
++	int rate, other, ret;
++	unsigned int i;
++
++	if (!liuqin_can_multi_refresh(ctx))
++		return 0;
++	if (ctx->refresh_status)
++		return ctx->refresh_status > 0 ? 0 : ctx->refresh_status;
++	rate = ctx->dsi[0]->host->ops->get_refresh_rate(ctx->dsi[0]->host);
++	other = ctx->dsi[1]->host->ops->get_refresh_rate(ctx->dsi[1]->host);
++	ctx->refresh_status = -EINVAL;
++	if (rate <= 0 || rate != other || (rate < 90 && !liuqin_low_refresh))
++		return ctx->refresh_status;
++	for (i = 0; i < ARRAY_SIZE(liuqin_refresh_modes); i++) {
++		if (liuqin_refresh_modes[i].rate == rate)
++			break;
++	}
++	if (i == ARRAY_SIZE(liuqin_refresh_modes))
++		return ctx->refresh_status;
++	cmds[1].data[1] = liuqin_refresh_modes[i].b3;
++	cmds[2].data[1] = liuqin_refresh_modes[i].b2;
++	/* Fail closed after a partial transfer; never replay this group. */
++	ctx->refresh_status = -EIO;
++	ret = liuqin_send_oem_cmds(ctx, cmds, ARRAY_SIZE(cmds));
++	if (ret) {
++		ctx->refresh_status = ret;
++		return ret;
++	}
++	ctx->refresh_status = 1;
++	dev_info(ctx->panel.dev, "Liuqin refresh scan configured: %d Hz\n", rate);
++	return 0;
+ }
+ 
+ /* Exact M81 ROM post-backlight sequence: select DCS page, exit black mode.
+@@ -2122,6 +2247,9 @@ static int nt36532_post_backlight_enable(struct drm_panel *panel)
+ 	if (!ctx->oem_panel)
+ 		return 0;
+ 	ret = liuqin_complete_late_wake(ctx);
++	if (ret)
++		return ret;
++	ret = liuqin_apply_refresh(ctx);
+ 	if (ret)
+ 		return ret;
+ 	dsi = nt36532_cmd_dsi(ctx);
+diff --git a/include/drm/drm_mipi_dsi.h b/include/drm/drm_mipi_dsi.h
+index 9bf163a0e..819657d50 100644
+--- a/include/drm/drm_mipi_dsi.h
++++ b/include/drm/drm_mipi_dsi.h
+@@ -87,6 +87,9 @@ enum mipi_dsi_panel_stage {
+  *     of payload lengths, or a negative error; a failed group must not be
+  *     replayed because a prefix may already have reached the peripheral.
+  *
++ * @get_refresh_rate: optional query of the host mode selected before panel
++ *     prepare; returns its rounded refresh rate in Hz, or zero if unset.
++ *
+  * DSI packets transmitted by .transfer() are passed in as mipi_dsi_msg
+  * structures. This structure contains information about the type of packet
+  * being transmitted as well as the transmit and receive buffers. When an
+@@ -105,6 +108,7 @@ enum mipi_dsi_panel_stage {
+  * properly enabled.
+  */
+ struct mipi_dsi_host_ops {
++	int (*get_refresh_rate)(struct mipi_dsi_host *host);
+ 	int (*attach)(struct mipi_dsi_host *host,
+ 		      struct mipi_dsi_device *dsi);
+ 	int (*detach)(struct mipi_dsi_host *host,

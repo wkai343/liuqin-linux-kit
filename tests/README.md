@@ -28,6 +28,7 @@ CI 的实际测试列表以 `.github/workflows/` 为准，不能把本地入口�
 | 测试 | 检查范围 |
 | --- | --- |
 | `display-clock.py` | 补丁中的时钟取整、频率边界和 CCF 约束 |
+| `display-refresh-rates.py` | 从默认 7.3 配方重建并执行面板模式枚举；默认 90/120/144 Hz、诊断开关后的七档时序、唯一首选、机型/单链路回退、分配失败、扫描命令失败不重放及命令扫描行边界；可追加主机时钟及固定 ROM 检查 |
 | `display-brightness-minimum.py` | 两个内核配方的最低非零亮度、原厂曲线其余档位、直接写零与关屏后的恢复 |
 | `display-policy.py`、`display-recovery.py` | CABC 配置、活动会话、恢复限流、失败与退出处理 |
 | `backlight-default.py`、`boot-splash.py` | 亮度量程、初始化等待、背光/显示时钟装载顺序，以及充电与动画退出路径 |
@@ -35,6 +36,26 @@ CI 的实际测试列表以 `.github/workflows/` 为准，不能把本地入口�
 | `storage-seal.py`、`storage-ready.py`、`storage-paths.py` | 批量只读设置、UFS/GPT 就绪证明、路径替换及回退 |
 | `wlan-mac.py` | 目标网卡 udev 初始化、命名竞态与设备身份 |
 | `rtc.py` | 真实 helper 的离线时间推算、计数器重置/停走、过期和损坏校准、chrony 同步判定、原子保存与 RPM 板级载荷；不改变主机时间，不代替关机/重启验收 |
+
+### 刷新率模式
+
+`display-refresh-rates.py` 已加入 `devbox run test` 和 CI，不依赖内核源码或 ROM。
+默认枚举 90/120/144 Hz；低频实验开关额外枚举 30/48/50/60 Hz，默认拒绝低频扫描命令。
+覆盖回退、双路档位不一致、内存分配失败和部分传输禁止重放；本测试不代替真机验收。
+它执行配方中实际的面板 C 函数及命令调度计算，使用 UBSan 检查边界。
+可追加准备好的完整源码与原厂 `dtbo.img`，执行实际双 DSI/DSC 时钟计算，
+并核对固定 ROM 中两个 M81 面板的模式列表、基准时序和 PHY 字节：
+
+```sh
+devbox run -- python3 tests/display-refresh-rates.py \
+  --source /path/to/kernel-with-0013 \
+  --rom-dtbo /path/to/OS2.0.6.0.VMYCNXM/images/dtbo.img \
+  --oem-module /path/to/msm_drm.ko
+```
+
+`--oem-module` 需要 pyelftools，核对固定模块内的 M81 专用时序跳转表和常量。
+ROM 校验限定 SHA256 `5e0377c7781e57f65c474f20edf3d7fb61f03f6030ca170e4edc29467a7993dd`。
+离线测试不代表新档位已在面板上显示，也不验证切换期间的触摸、手写笔或功耗。
 
 ### Plymouth 主题运行检查
 

@@ -21,12 +21,13 @@
     "build/kernel/patches/linux-7.3/0010-liuqin-tddi-calibration-recovery.patch",
     "build/kernel/patches/linux-7.3/0011-liuqin-initial-wake-after-first-frame.patch",
     "build/kernel/patches/0034-liuqin-minimum-brightness.patch",
-    "build/kernel/patches/linux-7.3/0012-nanosic-folio-posture.patch"
+    "build/kernel/patches/linux-7.3/0012-nanosic-folio-posture.patch",
+    "build/kernel/patches/linux-7.3/0013-liuqin-multiple-refresh-rates.patch"
   ],
-  "status": "Default Linux 7.3 with Tianma first-frame wake/calibration fixes and NanoSic folio posture handling. The recorded source passed a temporary boot on 2026-10-21: greeter/desktop lid blanking and open recovery, folded tablet mode/rotation and keyboard suppression, held-Shift release and unfolded input/landscape recovery. Boot partition unchanged. Persistent boot, touchpad gestures/held contacts, sleep-time posture changes and long-term testing remain open. See docs/HARDWARE.md for folio evidence and docs/DISPLAY.md for the independent display validation baseline.",
-  "expected_source_tree": "a24bdfeeea734fab2c103f33b8e753de0e2a5e97",
-  "tested_source_commit": "b98f45849b3d52b125156f35a4fdbf91df778a56",
-  "tested_source_tree": "a24bdfeeea734fab2c103f33b8e753de0e2a5e97",
+  "status": "Linux 7.3 offers corrected OEM 90/120/144 Hz profiles with a fixed DSI link-clock request. The Tianma candidate passed temporary-boot mode switching, three DPMS cycles per rate, and user-confirmed display/touch checks at 90/120/144 Hz; tested_source differs from expected_source_tree only by argument indentation. Long-VFP 30/48/50/60 Hz remain diagnostic-only: 60 Hz still visibly flickers and 60/50 Hz report panel IRQ faults. See docs/DISPLAY.md for scope and pending validation.",
+  "expected_source_tree": "9b50ee5d95d01c10a3fa1d8072a4a6ee94dcc412",
+  "tested_source_commit": "f6a2abb77b2005da10c201156cca41e32dff06c3",
+  "tested_source_tree": "ba45a3439dcc0d17175ea65b65ca6aed7538a2ad",
   "reference_repository": "https://github.com/Seeker0472/liuqin-nixos",
   "reference_commit": "73e8071e09880aeb47f0a427b9a65b8cc10927c4"
 }
