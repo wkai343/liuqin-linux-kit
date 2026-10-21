@@ -120,8 +120,18 @@ rootfs.tar.gz
 
 ### 分别构建
 
+用 `devbox run help` 查看常用入口及范围。已有独立 `installer.img`、只更新目标系统时，
+使用 `devbox run build-target`，它与当前官方系统工作流的 `rootfs` 命令等效，会补齐目标 boot 和
+根归档依赖，不构建 installer。完成后运行 `devbox run outputs`，按内核和模块标识查找配套的
+`boot-liuqin-native.img` 与 `rootfs.tar.gz` 绝对路径；boot 阶段文件复制为 `boot.img` 即可使用。
+`outputs` 只读取完成记录及小型内核标识，不联网、不构建，也不重新校验大型镜像；
+它列出已有缓存，不推断哪些产物对应当前 `build.json`。孤立的 boot 或 rootfs 也会显示在各自组中。
+
 | 命令 | 输出或范围 |
 | --- | --- |
+| `devbox run help` | 查看推荐命令、原有阶段入口与参数示例 |
+| `devbox run outputs` | 列出已完成的 boot/rootfs 配套组，以及独立 installer 路径 |
+| `devbox run build-target` | 构建目标 boot 与 rootfs，不构建 installer；不汇总三文件发布目录 |
 | `devbox run kernel -- --configure-only` | 生成最终 `.config` 预览，不编译 |
 | `devbox run kernel` | 目标内核 Image 与 DTB |
 | `devbox run modules` | 同版内核模块 |
@@ -129,6 +139,7 @@ rootfs.tar.gz
 | `devbox run kernel-packages` | 按配方生成版本化 RPM/DEB 内核升级包 |
 | `devbox run rootfs` | 装配用户态、设备包与目标内核，生成根归档 |
 | `devbox run build-installer` | 安装环境自身的运行内核与 RAM 安装镜像 |
+| `devbox run build` / `devbox run images` | 当前官方系统工作流中均构建并汇总 installer、boot、rootfs 三文件 |
 | `devbox run build -- --refresh` | 重新装配 APT/DNF 软件阶段，保留旧缓存 |
 
 各命令自动补齐依赖，结束时打印实际产物路径。

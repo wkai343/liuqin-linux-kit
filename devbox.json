@@ -14,6 +14,8 @@
       ". build/devbox/env.sh"
     ],
     "scripts": {
+      "help": "python3 build/devbox/build.py help \"$@\"",
+      "outputs": "python3 build/devbox/build.py outputs \"$@\"",
       "doctor": "python3 build/devbox/build.py doctor \"$@\"",
       "init-build": "python3 build/devbox/build.py init \"$@\"",
       "show-config": "python3 build/devbox/build.py show-config \"$@\"",
@@ -29,6 +31,7 @@
       "kernel-packages": "python3 build/devbox/build.py kernel-packages \"$@\"",
       "boot": "python3 build/devbox/build.py boot \"$@\"",
       "rootfs": "python3 build/devbox/build.py rootfs \"$@\"",
+      "build-target": "python3 build/devbox/build.py build-target \"$@\"",
       "runtime": "python3 build/devbox/build.py runtime \"$@\"",
       "images": "python3 build/devbox/build.py images \"$@\"",
       "build": "python3 build/devbox/build.py all \"$@\"",

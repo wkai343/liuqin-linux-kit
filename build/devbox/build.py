@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -58,6 +59,92 @@ DEFAULTS = {
     },
 }
 BOARD_ACTIONS = ('boot', 'all', 'check-inputs', 'installer', 'build-installer', 'show-config')
+
+
+def command_help():
+    print('''常用命令（在仓库根目录运行）：
+  devbox run build-target       构建目标 boot + rootfs，不构建 installer；需要官方系统配置
+  devbox run boot               仅构建目标 boot 及其依赖
+  devbox run kernel-packages    生成目标内核 RPM/DEB 升级包
+  devbox run build-installer    构建独立 installer
+  devbox run build              构建并汇总 installer、boot、rootfs 三文件
+  devbox run outputs            列出已完成的 boot、rootfs、installer 绝对路径
+
+准备与检查：
+  devbox run init-build         创建配置，保留已有 build.json
+  devbox run show-config        查看合并后的配置
+  devbox run plan               查看构建计划
+  devbox run doctor             检查构建环境
+  devbox run fetch-rom          下载并提取固定 ROM
+  devbox run prepare            准备基础素材
+  devbox run check-inputs       检查构建输入
+  devbox run test               执行离线回归
+
+原有阶段入口继续可用：kernel、modules、rootfs、runtime、installer-kernel。
+官方系统配置中，rootfs 与 build-target 等效，images 与 build 等效，installer 与 build-installer 等效。
+kernel-debs 是 kernel-packages 的兼容名称，Fedora 配置下仍生成 RPM。
+自定义参数示例：devbox run build-target -- --config build.custom.json
+刷新软件装配：devbox run build-target -- --refresh
+build-target 的 boot 阶段文件名为 boot-liuqin-native.img；用 outputs 查找配套产物。
+''')
+
+
+def show_outputs():
+    """Inventory completed image caches without builds, configuration or large-file hashing."""
+    sys.path.insert(0, str(PROJECT / 'shared'))
+    from liuqin_kernel import parse_contract
+
+    cache = PROJECT / 'out/build/from-source'
+    groups, installers = {}, []
+    specifications = (
+        ('boot', 'image/boot-liuqin-native.img', 'image/native-root.contract'),
+        ('rootfs', 'packed/rootfs.tar.gz', 'packed/native-root.contract'),
+        ('installer', 'image/installer.img', None),
+    )
+    for directory in sorted(cache.iterdir()) if cache.is_dir() else ():
+        if directory.name.startswith('.') or directory.is_symlink() or not directory.is_dir():
+            continue
+        receipt = directory / 'build-receipt.json'
+        if receipt.is_symlink() or not receipt.is_file():
+            continue
+        try:
+            artifacts = json.loads(receipt.read_text()).get('artifacts')
+            if not isinstance(artifacts, dict):
+                raise ValueError('无效产物列表')
+            timestamp = receipt.stat().st_mtime_ns
+            for label, filename, contract_name in specifications:
+                path = directory / filename
+                if filename not in artifacts or not path.is_file() or path.is_symlink():
+                    continue
+                if not path.resolve().is_relative_to(directory.resolve()):
+                    continue
+                if contract_name is None:
+                    installers.append((timestamp, path))
+                    continue
+                contract = directory / contract_name
+                if contract.is_symlink() or not contract.resolve().is_relative_to(directory.resolve()):
+                    raise ValueError('内核标识路径无效')
+                content = contract.read_bytes()
+                if artifacts.get(contract_name) != {'file': hashlib.sha256(content).hexdigest()}:
+                    raise ValueError('内核标识与完成记录不一致')
+                identity = parse_contract(content)
+                group = groups.setdefault(content, dict(release=identity['release'], timestamp=timestamp, files=[]))
+                group['timestamp'] = max(group['timestamp'], timestamp)
+                group['files'].append((label, path))
+        except (OSError, ValueError, AttributeError) as error:
+            print('跳过无法读取的缓存记录：' + str(receipt) + '：' + str(error), file=sys.stderr)
+    if not groups and not installers:
+        print('尚无已完成的镜像产物；先运行 devbox run build-target 或 devbox run build-installer。')
+        return
+    print('已完成的缓存产物（按内核/模块标识配对，不代表当前配置；未重新校验大型镜像）：')
+    for content, group in sorted(groups.items(), key=lambda item: item[1]['timestamp'], reverse=True):
+        print('\n配套组 ' + hashlib.sha256(content).hexdigest()[:12] + '，内核 ' + group['release'])
+        for label, path in sorted(group['files']):
+            print('  ' + label + ': ' + str(path))
+    if installers:
+        print('\n独立安装器：')
+        for _, path in sorted(installers, reverse=True):
+            print('  installer: ' + str(path))
 
 
 def run(argv, *, env=None, root=False):
@@ -288,7 +375,7 @@ def test():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('doctor', 'init', 'show-config', 'plan', 'prepare', 'check-inputs', 'kernel', 'modules', 'rootfs', 'runtime', 'images', 'all', 'test',
+    parser.add_argument('action', choices=('help', 'outputs', 'build-target', 'doctor', 'init', 'show-config', 'plan', 'prepare', 'check-inputs', 'kernel', 'modules', 'rootfs', 'runtime', 'images', 'all', 'test',
                                          'installer-kernel', 'installer', 'build-installer', 'kernel-debs', 'kernel-packages', 'boot'))
     parser.add_argument('--config', type=Path, default=PROJECT / 'build.json')
     parser.add_argument('--configure-only', action='store_true')
@@ -301,6 +388,10 @@ def main():
     if args.from_source and args.action!='init':parser.error('--from-source 只用于 init-build')
     if args.action == 'doctor':
         doctor()
+    elif args.action == 'help':
+        command_help()
+    elif args.action == 'outputs':
+        show_outputs()
     elif args.action == 'test':
         test()
     elif args.action == 'init':
@@ -322,6 +413,10 @@ def main():
         print('已创建 ' + str(args.config) + '，请填写实际输入路径。')
     else:
         data = config(args.config, read_inputs=args.action in BOARD_ACTIONS)
+        if args.action == 'build-target':
+            if not data.get('rootfs_config'):
+                raise ValueError('build-target 需要 rootfs_config 指定的官方系统配置；旧配置请使用原有阶段入口。')
+            args.action = 'rootfs'
         if args.action == 'show-config':
             print(json.dumps(data, ensure_ascii=False, indent=2))
         elif data.get('rootfs_config'):

@@ -4,6 +4,7 @@
 import importlib.util
 import contextlib
 import copy
+import hashlib
 import io
 import json
 import os
@@ -67,6 +68,83 @@ class BuildTests(unittest.TestCase):
                 subprocess.run(['sh', '-c', body, name, *arguments], env=env, check=True)
                 received = json.loads(capture.read_text())
                 self.assertEqual(received[-len(arguments):], arguments)
+
+    def test_help_and_outputs_need_no_config_and_never_build(self):
+        before = set(self.root.rglob('*'))
+        for action in ('help', 'outputs'):
+            with self.subTest(action=action), \
+                 patch.object(sys, 'argv', ['build.py', action]), \
+                 patch.object(builder, 'config', side_effect=AssertionError('configuration read')), \
+                 patch.object(builder, 'run') as run, contextlib.redirect_stdout(io.StringIO()) as output:
+                builder.main()
+                self.assertTrue(output.getvalue().strip())
+                run.assert_not_called()
+        self.assertEqual(set(self.root.rglob('*')), before)
+
+    def output_fixture(self, stage, filename, contract=None, *, completed=True):
+        directory = self.root / 'out/build/from-source' / stage
+        path = directory / filename; path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'synthetic image')
+        artifacts = {filename: {'file': hashlib.sha256(path.read_bytes()).hexdigest()}}
+        if contract is not None:
+            name = str(Path(filename).parent / 'native-root.contract')
+            (directory / name).write_bytes(contract)
+            artifacts[name] = {'file': hashlib.sha256(contract).hexdigest()}
+        if completed:
+            (directory / 'build-receipt.json').write_text(json.dumps(dict(inputs='0' * 64, artifacts=artifacts)))
+        return path
+
+    def test_outputs_group_by_full_kernel_identity_instead_of_release_or_recency(self):
+        contract = (b'LIUQIN_ROOT_INTERFACE_V2\nkernel_release=7.3.0-liuqin-test\nimage_sha256='
+                    + b'1' * 64 + b'\nmodules_sha256=' + b'2' * 64 + b'\n')
+        other = contract.replace(b'1' * 64, b'3' * 64)
+        boot = self.output_fixture('boot-first', 'image/boot-liuqin-native.img', contract)
+        root = self.output_fixture('fedora-rootfs-first', 'packed/rootfs.tar.gz', contract)
+        alternate = self.output_fixture('boot-second', 'image/boot-liuqin-native.img', other)
+        installer = self.output_fixture('installer-first', 'image/installer.img')
+        before = {path: path.read_bytes() for path in self.root.rglob('*') if path.is_file()}
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            builder.show_outputs()
+        text = output.getvalue()
+        first = text.split('配套组 ' + hashlib.sha256(contract).hexdigest()[:12], 1)[1].split('\n配套组 ', 1)[0]
+        self.assertIn(str(boot), first); self.assertIn(str(root), first)
+        self.assertNotIn(str(alternate), first)
+        self.assertIn(str(installer), text)
+        self.assertEqual(text.count('配套组 '), 2)
+        self.assertEqual({path: path.read_bytes() for path in self.root.rglob('*') if path.is_file()}, before)
+
+    def test_outputs_exclude_unpublished_missing_linked_and_changed_contracts(self):
+        contract = (b'LIUQIN_ROOT_INTERFACE_V2\nkernel_release=7.3.0-liuqin-test\nimage_sha256='
+                    + b'1' * 64 + b'\nmodules_sha256=' + b'2' * 64 + b'\n')
+        self.output_fixture('.attempt-boot-failed', 'image/boot-liuqin-native.img', contract)
+        self.output_fixture('boot-incomplete', 'image/boot-liuqin-native.img', contract, completed=False)
+        missing = self.output_fixture('boot-missing', 'image/boot-liuqin-native.img', contract); missing.unlink()
+        corrupt = self.output_fixture('boot-corrupt', 'image/boot-liuqin-native.img', contract)
+        (corrupt.parent / 'native-root.contract').write_bytes(contract.replace(b'1' * 64, b'3' * 64))
+        linked = self.output_fixture('installer-linked', 'image/installer.img')
+        linked.unlink(); linked.symlink_to(self.root / self.data['installer_image'])
+        with contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as errors:
+            builder.show_outputs()
+        self.assertIn('尚无已完成', output.getvalue())
+        self.assertIn('内核标识与完成记录不一致', errors.getvalue())
+        self.assertNotIn(str(corrupt), output.getvalue())
+
+    def test_build_target_routes_only_to_official_rootfs_and_preserves_options(self):
+        config = self.root / 'build.json'
+        config.write_text(json.dumps(dict(rootfs_config='build/rootfs/fedora-plasma.json')))
+        with patch.object(sys, 'argv', ['build.py', 'build-target', '--config', str(config), '--refresh']), \
+             patch('source_flow.execute') as execute, patch.object(builder, 'stage') as stage:
+            builder.main()
+        self.assertEqual(execute.call_count, 1)
+        self.assertEqual(execute.call_args.args[1], 'rootfs')
+        self.assertTrue(execute.call_args.kwargs['refresh'])
+        stage.assert_not_called()
+
+    def test_build_target_rejects_legacy_config_without_running_stages(self):
+        with patch.object(sys, 'argv', ['build.py', 'build-target', '--config', str(self.root / 'legacy.json')]), \
+             patch.object(builder, 'stage') as stage, self.assertRaisesRegex(ValueError, 'rootfs_config'):
+            builder.main()
+        stage.assert_not_called()
 
     def test_kernel_uses_custom_config_and_configure_only_never_builds_images(self):
         with patch.object(builder, 'run') as run:
