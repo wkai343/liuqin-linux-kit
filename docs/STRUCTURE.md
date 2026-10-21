@@ -16,6 +16,8 @@ installer/          GUI、CLI、备份管理和源码打包
   liuqin_gui/       QML 界面、Qt 桥接、独立后端
   pyproject.toml    uv 环境配置，配合 uv.lock 和 .python-version
 device/
+  board-overlay/    公共板级服务、硬件策略与兼容组件
+  gnome-overlay/    GNOME 的 dconf、按键策略、设置面板与 Snapshot 集成
   installer/        RAM 环境的安装、分区和校准导入脚本
   boot/             系统启动、initramfs、引导更新与恢复
   …                 固件及其他设备组件
@@ -39,6 +41,30 @@ out/                中间文件、成品和报告
 
 各阶段命令及三个文件的输入、输出见 [构建指南](BUILD.md#三个文件的输入)。
 内核升级包见 [内核更新](KERNEL-UPDATES.md)。
+
+### 板级与桌面 overlay
+
+`device/board-overlay` 保存睡眠、RTC、背光、CABC、显示恢复、启动方向、Wi-Fi MAC、
+蓝牙、充电认证、音频、存储保护和救援等板级文件。显示恢复当前使用 KScreen 后端，
+服务通过 `ConditionPathExists` 检查其是否可用。
+`device/gnome-overlay` 只保存 GNOME 会话集成，包括 dconf/GDM、GNOME 按键动作、
+电源设置 schema 和 Snapshot 启动入口。
+
+| 打包入口 | 读取的 overlay |
+| --- | --- |
+| Fedora RPM | `board-overlay`，通用配置 |
+| Ubuntu Plasma DEB（`DEVICE_DESKTOP=generic`） | `board-overlay`，通用配置 |
+| Ubuntu GNOME DEB（`DEVICE_DESKTOP=gnome`） | `board-overlay` 与 `gnome-overlay` |
+
+两种包格式通过 [device_overlay.py](../build/lib/device_overlay.py) 装配文件，
+同一安装路径出现在两层或出现文件/目录冲突时，会在复制前报错；已有目标文件和异常父路径也会被拒绝。
+历史 Ubuntu 的 Snap 权限检查、flash-kernel、
+旧根标记和 Android 镜像切换组件属于板级兼容内容，保留在板级目录；通用包继续排除这些组件。
+已有的 apt 更新屏蔽链接保持未打包状态，服务激活链接由相应打包入口处理。
+
+DEB 可分别用 `BOARD_OVERLAY` 和 `GNOME_OVERLAY` 指定两层来源；通用模式不要求 GNOME 层存在。
+Fedora 和 Ubuntu Plasma 的设备包缓存跟踪板级目录及装配代码，GNOME 配置变更不影响通用包缓存。
+迁移只调整源码位置，已安装路径和服务名保持兼容，例如 `liuqin-gnome-storage-guard` 沿用原名称。
 
 ## 输出与私有数据
 

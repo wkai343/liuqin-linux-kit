@@ -10,7 +10,7 @@ import tempfile
 from unittest import mock
 
 PROJECT = Path(__file__).resolve().parents[1]
-ns = runpy.run_path(str(PROJECT/'device/gnome-overlay/usr/local/sbin/liuqin-display-policy'))
+ns = runpy.run_path(str(PROJECT/'device/board-overlay/usr/local/sbin/liuqin-display-policy'))
 g = ns['main'].__globals__
 cases = 0
 

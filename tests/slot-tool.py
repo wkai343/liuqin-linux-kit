@@ -5,7 +5,7 @@ Two things are covered:
 
   * the cmdline slot parser, both copies of it -- the ``slot_from_cmdline``
     function in ``device/boot/initramfs/init`` and the one in
-    ``device/gnome-overlay/usr/local/sbin/liuqin-switch`` -- against a table
+    ``device/board-overlay/usr/local/sbin/liuqin-switch`` -- against a table
     of accepted and rejected command lines;
 
   * ``device/boot/liuqin-mark-slot-successful`` against a synthetic image the
@@ -228,7 +228,7 @@ def test_parser_copies_agree():
     # The switcher only uses its copy to refuse a switch on the fallback slot,
     # but the two must not drift apart silently.
     init = extract_function(PROJECT / "device/boot/initramfs/init", "slot_from_cmdline")
-    switch = extract_function(PROJECT / "device/gnome-overlay/usr/local/sbin/liuqin-switch",
+    switch = extract_function(PROJECT / "device/board-overlay/usr/local/sbin/liuqin-switch",
                               "slot_from_cmdline")
     check("the initramfs and switcher parsers are the same text", init == switch)
 
@@ -429,7 +429,7 @@ def main():
                         str(PROJECT / "device/boot/liuqin-mark-slot-successful.c"),
                         "-o", str(binary)], check=True)
         test_parser(shell, PROJECT / "device/boot/initramfs/init", "device/boot/initramfs/init")
-        test_parser(shell, PROJECT / "device/gnome-overlay/usr/local/sbin/liuqin-switch",
+        test_parser(shell, PROJECT / "device/board-overlay/usr/local/sbin/liuqin-switch",
                     "liuqin-switch")
         test_parser_copies_agree()
         test_mark_tool(str(binary), tmp)

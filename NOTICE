@@ -118,3 +118,10 @@ ownership, the existing MCU connector reports and explicit HID input releases.
 Original file-level authorship, SPDX identifiers and kernel licensing remain
 applicable. This source adaptation does not redistribute device firmware or
 private calibration data.
+
+Overlay source layout
+---------------------
+
+The historical charger-authentication path above is now
+device/board-overlay/usr/local/libexec/liuqin-mipps-auth. Moving the common
+board payload out of gnome-overlay does not change its license or authorship.

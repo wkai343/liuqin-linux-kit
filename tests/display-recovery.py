@@ -6,7 +6,7 @@ import importlib.machinery,importlib.util,json,subprocess,tempfile,unittest
 from unittest.mock import patch
 
 P=Path(__file__).resolve().parents[1]
-loader=importlib.machinery.SourceFileLoader('display_recovery',str(P/'device/gnome-overlay/usr/local/libexec/liuqin-display-recovery'))
+loader=importlib.machinery.SourceFileLoader('display_recovery',str(P/'device/board-overlay/usr/local/libexec/liuqin-display-recovery'))
 spec=importlib.util.spec_from_loader(loader.name,loader);m=importlib.util.module_from_spec(spec);loader.exec_module(m)
 
 

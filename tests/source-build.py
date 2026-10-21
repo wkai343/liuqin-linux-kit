@@ -580,6 +580,44 @@ class AndroidTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which('dpkg-deb'),'Debian tools required')
 class DevicePackageTests(unittest.TestCase):
+    def test_generic_device_cache_tracks_board_and_composer_but_not_gnome(self):
+        import fedora_flow
+        with tempfile.TemporaryDirectory() as temporary:
+            project=Path(temporary)
+            board=project/'device/board-overlay';board.mkdir(parents=True)
+            gnome=project/'device/gnome-overlay';gnome.mkdir()
+            (board/'policy').write_text('board-v1')
+            (gnome/'policy').write_text('gnome-v1')
+            composer=project/'build/lib/device_overlay.py';composer.parent.mkdir(parents=True)
+            composer.write_text('composer-v1')
+            for module,cls in ((flow,flow.Flow),(fedora_flow,fedora_flow.FedoraFlow)):
+                with self.subTest(pipeline=cls.__name__):
+                    pipeline=object.__new__(cls);pipeline.version='0.1'
+                    records=[]
+                    def capture(_name,dependency,_build,_artifacts):
+                        records.append(helpers.key(dependency));return project/'cache'
+                    def tree(path):
+                        return helpers.tree_identity(path) if path in (board,gnome) else str(path)
+                    def digest(path):
+                        return helpers.sha(path) if path==composer else str(path)
+                    with patch.object(module,'PROJECT',project), \
+                         patch.object(module,'tree_identity',side_effect=tree), \
+                         patch.object(module,'sha',side_effect=digest), \
+                         patch.object(pipeline,'sensors',return_value=project/'sensors.tar'), \
+                         patch.object(pipeline,'board',return_value=project/'rom'), \
+                         patch.object(pipeline,'tools',return_value={'BUSYBOX':str(project/'busybox')}), \
+                         patch.object(pipeline,'stage',side_effect=capture):
+                        pipeline.device_debs()
+                        (gnome/'policy').write_text((gnome/'policy').read_text()+' changed')
+                        pipeline.device_debs()
+                        (board/'policy').write_text((board/'policy').read_text()+' changed')
+                        pipeline.device_debs()
+                        composer.write_text(composer.read_text()+' changed')
+                        pipeline.device_debs()
+                    self.assertEqual(records[0],records[1])
+                    self.assertNotEqual(records[1],records[2])
+                    self.assertNotEqual(records[2],records[3])
+
     def test_sensor_deb_leaves_distribution_libraries_to_apt(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);layer=root/'layer';library=layer/'usr/lib/aarch64-linux-gnu'
@@ -614,7 +652,7 @@ class DevicePackageTests(unittest.TestCase):
             root=Path(temporary);busy=root/'busybox';busy.write_bytes(b'SYNTHETIC BUSYBOX FILE');busy.chmod(0o755)
             out=root/'debs'
             env=dict(os.environ,DEVICE_DESKTOP='generic',BUSYBOX=str(busy),BUSYBOX_SHA256=helpers.sha(busy),
-                     OUT_DIR=str(out),UBUNTU_DESKTOP_ROOT='/not/an/author/rootfs',POWER_SETTINGS_BINARY='/not/gnome',POWER_KEY_CC='/not/a/compiler')
+                     OUT_DIR=str(out),GNOME_OVERLAY='/not/a/gnome/overlay',UBUNTU_DESKTOP_ROOT='/not/an/author/rootfs',POWER_SETTINGS_BINARY='/not/gnome',POWER_KEY_CC='/not/a/compiler')
             subprocess.run(['sh',str(PROJECT/'build/scripts/build-liuqin-debs.sh'),'device-support'],env=env,check=True)
             subprocess.run(['sh',str(PROJECT/'build/scripts/build-liuqin-debs.sh'),'meta'],env=env,check=True)
             package=next(out.glob('liuqin-device-support_*.deb'));extracted=root/'extracted'
@@ -623,6 +661,8 @@ class DevicePackageTests(unittest.TestCase):
             self.assertNotIn('gnome-control-center',depends)
             self.assertTrue((extracted/'usr/local/sbin/liuqin-gnome-storage-guard').is_file())
             self.assertFalse((extracted/'usr/local/libexec/liuqin-power-key-action').exists())
+            self.assertFalse((extracted/'usr/local/bin/liuqin-camera').exists())
+            self.assertTrue((extracted/'usr/lib/systemd/sleep.conf.d/30-liuqin-suspend.conf').is_file())
             self.assertFalse((extracted/'usr/bin/gnome-control-center').exists())
             meta=next(out.glob('liuqin-device-base_*.deb'))
             self.assertNotIn('liuqin-kernel',subprocess.check_output(['dpkg-deb','-f',str(meta),'Depends'],text=True))

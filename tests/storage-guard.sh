@@ -19,9 +19,9 @@
 set -eu
 
 project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-guard_source=${LIUQIN_GUARD_SCRIPT:-$project_root/device/gnome-overlay/usr/local/sbin/liuqin-gnome-storage-guard}
-guard_unit=$project_root/device/gnome-overlay/etc/systemd/system/liuqin-gnome-storage-guard.service
-real_marker=$project_root/device/gnome-overlay/etc/liuqin-gnome-root
+guard_source=${LIUQIN_GUARD_SCRIPT:-$project_root/device/board-overlay/usr/local/sbin/liuqin-gnome-storage-guard}
+guard_unit=$project_root/device/board-overlay/etc/systemd/system/liuqin-gnome-storage-guard.service
+real_marker=$project_root/device/board-overlay/etc/liuqin-gnome-root
 for input in "$guard_source" "$guard_unit" "$real_marker"; do
 	[ -f "$input" ] ||
 		{ printf '%s\n' "test-liuqin-guard: missing: $input" >&2; exit 1; }

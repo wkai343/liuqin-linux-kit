@@ -26,7 +26,7 @@ set -eu
 
 here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 project=$(CDPATH='' cd -- "$here/.." && pwd)
-SWITCH=$project/device/gnome-overlay/usr/local/sbin/liuqin-switch
+SWITCH=$project/device/board-overlay/usr/local/sbin/liuqin-switch
 
 if [ "$(id -u)" != 0 ]; then
 	command -v unshare >/dev/null 2>&1 || { echo 'switch-selftest: unshare is required' >&2; exit 1; }

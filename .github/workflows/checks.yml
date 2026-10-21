@@ -19,8 +19,8 @@ jobs:
           from pathlib import Path
           for path in [p for base in ('build','installer','shared','device/boot') for p in Path(base).rglob('*.py')]:
               ast.parse(path.read_text(), filename=str(path))
-          paths = [p for name in ('usr/local/libexec', 'usr/libexec')
-                   for p in (Path('device/gnome-overlay')/name).iterdir()]
+          paths = [p for name in ('board-overlay', 'gnome-overlay')
+                   for p in (Path('device')/name).rglob('*')]
           for path in sorted(paths):
               if path.is_file() and path.read_bytes().split(b'\n', 1)[0] in (b'#!/usr/bin/env python3', b'#!/usr/bin/python3'):
                   ast.parse(path.read_text(), filename=str(path))
@@ -31,7 +31,7 @@ jobs:
       - name: 构建与安装器离线检查
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y python3-pyelftools gdisk busybox-static device-tree-compiler rpm rsync pigz acl libcap2-bin btrfs-progs
+          sudo apt-get install --no-install-recommends -y python3-pyelftools gdisk busybox-static device-tree-compiler rpm rsync pigz acl libcap2-bin btrfs-progs libglib2.0-bin
           python3 tests/installer.py
           python3 tests/storage-layouts.py
           python3 tests/gui-engine.py
@@ -43,6 +43,7 @@ jobs:
           python3 tests/kernel-updates.py
           python3 tests/devbox-build.py
           python3 tests/source-build.py
+          python3 tests/device-overlays.py
           python3 tests/stock-rom.py
           python3 tests/fedora-build.py
           python3 tests/nanosic-folio.py

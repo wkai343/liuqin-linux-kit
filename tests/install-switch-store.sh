@@ -14,7 +14,7 @@ set -eu
 
 project_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 script_source=$project_root/device/installer/install-switch-store.sh
-switch=$project_root/device/gnome-overlay/usr/local/sbin/liuqin-switch
+switch=$project_root/device/board-overlay/usr/local/sbin/liuqin-switch
 
 busybox=$(command -v busybox || true)
 [ -n "$busybox" ] || { echo 'install-switch-store: BusyBox is required' >&2; exit 1; }

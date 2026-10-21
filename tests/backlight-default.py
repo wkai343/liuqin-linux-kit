@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 PROJECT = Path(__file__).resolve().parents[1]
-SCRIPT = PROJECT / 'device/gnome-overlay/usr/local/libexec/liuqin-backlight-default'
+SCRIPT = PROJECT / 'device/board-overlay/usr/local/libexec/liuqin-backlight-default'
 
 
 class BacklightTests(unittest.TestCase):

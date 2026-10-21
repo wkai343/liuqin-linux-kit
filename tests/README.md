@@ -14,6 +14,11 @@ devbox run -- python3 tests/docs-links.py
 测试使用临时目录、合成镜像或模拟设备，不刷写平板；QML、源码阶段验证和真机验收另行执行。
 CI 的实际测试列表以 `.github/workflows/` 为准，不能把本地入口通过等同于全部 CI 作业通过。
 
+`device-overlays.py` 检查板级/GNOME 层的组合、缺失层、同名及文件/目录冲突、已有目标文件和父路径保护，
+并使用合成编译输入构建、解包 GNOME DEB，核对两层覆盖变量、schema、依赖和维护脚本。
+它不验证 GNOME 控制中心或 ARM64 辅助程序的编译；`source-build.py` 另覆盖通用 DEB
+无需 GNOME 输入，以及 Fedora/Ubuntu 通用包的板级内容和装配代码缓存失效。
+
 `nanosic-folio.py` 按默认构建配方重建驱动并执行实际 C 函数，以模拟 GPIO/HID 检查
 连接、背折与合盖组合、修饰键/鼠标/三触点释放、屏蔽期间的状态报告、恢复采样和异常帧。
 使用 ASan/UBSan；`--source /path/to/kernel` 可检查准备好的内核源码。

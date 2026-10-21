@@ -5,13 +5,13 @@
 # Deterministic: fixed member order, fixed timestamps, no host paths.
 #
 # The switcher is not kept twice in the tree: the Ubuntu side's
-# device/gnome-overlay/usr/local/sbin/liuqin-switch is packed as the module's
+# device/board-overlay/usr/local/sbin/liuqin-switch is packed as the module's
 # system/bin/liuqin-switch, so both systems always run the same script.
 set -eu
 
 project_root=$(CDPATH= cd -- "$(dirname -- "$(realpath -- "$0")")/../.." && pwd)
 module_dir=${KSU_MODULE_DIR:-"$project_root/device/android/ksu-boot-ubuntu"}
-switch_script=${LIUQIN_SWITCH:-"$project_root/device/gnome-overlay/usr/local/sbin/liuqin-switch"}
+switch_script=${LIUQIN_SWITCH:-"$project_root/device/board-overlay/usr/local/sbin/liuqin-switch"}
 out_dir=${OUT_DIR:-"$project_root/out/ksu-module"}
 
 die() { printf 'build-ksu-module: %s\n' "$*" >&2; exit 1; }

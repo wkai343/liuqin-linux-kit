@@ -11,7 +11,7 @@ import tempfile
 import unittest
 
 PROJECT = Path(__file__).resolve().parents[1]
-OVERLAY = PROJECT / 'device/gnome-overlay'
+OVERLAY = PROJECT / 'device/board-overlay'
 SCRIPT = OVERLAY / 'usr/local/sbin/liuqin-wlan-mac'
 MAC = '02:00:00:00:00:01'
 

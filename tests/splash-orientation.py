@@ -15,7 +15,7 @@ PROJECT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(PROJECT/'build/lib'), str(PROJECT/'shared')]
 from splash_assets import bootargs, install_themes, supports_firmware, theme_files
 
-D = runpy.run_path(str(PROJECT/'device/gnome-overlay/usr/libexec/liuqin-splash-orientation'))
+D = runpy.run_path(str(PROJECT/'device/board-overlay/usr/libexec/liuqin-splash-orientation'))
 G = D['prepare'].__globals__
 spec = importlib.util.spec_from_file_location('fedora_root', PROJECT/'build/scripts/build-fedora-root.py')
 root_builder = importlib.util.module_from_spec(spec)

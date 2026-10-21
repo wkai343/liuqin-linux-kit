@@ -14,6 +14,7 @@ PROJECT=Path(__file__).resolve().parents[2];sys.path.insert(0,str(PROJECT/'build
 from rpm_package import build as rpm
 from source_build import sha
 from speaker_firmware import install as install_speakers
+from device_overlay import stage_overlay
 
 
 def docs(root, name):
@@ -22,19 +23,7 @@ def docs(root, name):
 
 
 def board_overlay(root, busybox):
-    overlay=PROJECT/'device/gnome-overlay'
-    excluded=('etc/dconf','etc/gdm3','etc/flash-kernel','usr/lib/firmware','usr/share/liuqin/power',
-              'etc/systemd/logind.conf.d','usr/local/libexec/liuqin-power-',
-              'etc/systemd/system/liuqin-power-keyd','etc/systemd/system/liuqin-snap-root-admission',
-              'usr/local/sbin/liuqin-snap-root-admission','usr/local/sbin/liuqin-switch',
-              'usr/local/share/applications/liuqin-reboot-to-android','usr/share/polkit-1/actions/io.github.liuqin.switch')
-    for source in sorted(overlay.rglob('*')):
-        if not source.is_file() or source.is_symlink():continue
-        if '__pycache__' in source.parts or source.suffix in ('.pyc','.pyo'):continue
-        rel=source.relative_to(overlay).as_posix()
-        if rel=='etc/liuqin-gnome-root' or source.name=='README.md' or any(rel.startswith(p) for p in excluded) or 'org.gnome.Snapshot' in rel:continue
-        target=root/rel;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(source,target)
-        target.chmod(0o755 if source.stat().st_mode&0o111 else 0o644)
+    stage_overlay(root, board_overlay=PROJECT/'device/board-overlay')
     guard=root/'usr/local/sbin/liuqin-gnome-storage-guard';text=guard.read_text()
     recovery=root/'etc/systemd/user/default.target.wants/liuqin-display-recovery.service'
     recovery.parent.mkdir(parents=True,exist_ok=True)

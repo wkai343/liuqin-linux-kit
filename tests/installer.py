@@ -535,7 +535,7 @@ print('PASS: the host sends KEEP-HOME only with --keep-home, after ENABLE-USB-RE
 # digest to install-switch-store.sh), while liuqin-switch expects boot_a to
 # hash like that image zero-filled to the partition size -- which is what the
 # installer now flashes.  The bare image, as flashed before, fails `verify`.
-switch_script = project / 'device/gnome-overlay/usr/local/sbin/liuqin-switch'
+switch_script = project / 'device/board-overlay/usr/local/sbin/liuqin-switch'
 
 
 def switch_function(name):

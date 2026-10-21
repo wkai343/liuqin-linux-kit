@@ -75,10 +75,10 @@ class FedoraTests(unittest.TestCase):
         self.assertTrue(link.is_symlink())
         self.assertEqual(link.resolve(),unit)
         self.assertTrue(helper.stat().st_mode & 0o111)
-        self.assertEqual(helper.read_bytes(),(PROJECT/'device/gnome-overlay/usr/local/libexec/liuqin-display-recovery').read_bytes())
+        self.assertEqual(helper.read_bytes(),(PROJECT/'device/board-overlay/usr/local/libexec/liuqin-display-recovery').read_bytes())
         observer=root/'usr/libexec/liuqin-splash-output-observer'
         self.assertTrue(observer.stat().st_mode & 0o111)
-        self.assertEqual(observer.read_bytes(),(PROJECT/'device/gnome-overlay/usr/libexec/liuqin-splash-output-observer').read_bytes())
+        self.assertEqual(observer.read_bytes(),(PROJECT/'device/board-overlay/usr/libexec/liuqin-splash-output-observer').read_bytes())
         self.assertTrue((root/'etc/systemd/system/liuqin-splash-orientation.service').is_file())
         self.assertIn('ConditionUser=!root',unit.read_text())
         self.assertIn('NoNewPrivileges=yes',unit.read_text())

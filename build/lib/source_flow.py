@@ -275,7 +275,8 @@ class Flow:
             for name in ('firmware','device-support','sensors','meta'):
                 self.run(['sh','build/scripts/build-liuqin-debs.sh',name],env=env)
         return self.stage('device-debs',dict(sensors=sha(sensors),firmware=tree_identity(PROJECT/'device/firmware'),
-            overlay=tree_identity(PROJECT/'device/gnome-overlay'),busybox=sha(tools['BUSYBOX']),version=self.version,
+            board_overlay=tree_identity(PROJECT/'device/board-overlay'),
+            overlay_builder=sha(PROJECT/'build/lib/device_overlay.py'),busybox=sha(tools['BUSYBOX']),version=self.version,
             speaker_firmware=tree_identity(speaker_firmware),speaker_builder=sha(PROJECT/'build/lib/speaker_firmware.py'),
             builder=sha(PROJECT/'build/scripts/build-liuqin-debs.sh')),build,['debs'])/'debs'
 

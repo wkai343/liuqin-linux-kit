@@ -20,7 +20,8 @@ rootfs 需要 systemd、设备服务和 `fastrpc` 账号/组，并携带所选 b
 
 Fedora 使用 DNF/RPM、官方 Plasma Setup 和 Plasma Login；Ubuntu 使用 APT/DEB、项目打包的 Plasma Setup 和 SDDM。
 两个配方均支持裁剪和 overlay，默认不安装 Snap。Plasma 使用通用设备包，不需要原作者的 GNOME 根文件系统。
-历史路径中的 `gnome-overlay` 也包含通用设备服务，不表示 Fedora 必须安装 GNOME。
+通用设备包从 `device/board-overlay` 装配；Ubuntu GNOME 模式再叠加 `device/gnome-overlay`。
+GNOME 的 dconf、按键和 Snapshot 集成只进入 GNOME 包，两层边界与兼容组件见[项目结构](STRUCTURE.md#板级与桌面-overlay)。
 
 ## 引入其他发行版
 

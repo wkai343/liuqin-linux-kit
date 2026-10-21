@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import patch
 
 PROJECT = Path(__file__).resolve().parents[1]
-OVERLAY = PROJECT / 'device/gnome-overlay'
+OVERLAY = PROJECT / 'device/board-overlay'
 HELPER = OVERLAY / 'usr/libexec/liuqin-rtc'
 rtc = types.ModuleType('liuqin_rtc')
 exec(compile(HELPER.read_text(), str(HELPER), 'exec'), rtc.__dict__)

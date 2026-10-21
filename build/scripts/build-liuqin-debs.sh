@@ -5,7 +5,7 @@
 # kernel inputs. Each package owns its installed content.
 #
 #   firmware        /usr/lib/firmware closure from build-liuqin-firmware-prep.sh
-#   device-support  gnome-overlay + compiled helpers + rescue shell + power panel
+#   device-support  board-overlay + optional GNOME overlay and compiled helpers
 #   sensors         SSC userspace from build-liuqin-sensors-stack.sh
 #   kernel          modules tree + /boot payload (input-gated; boot write is C)
 #   meta            liuqin-device metapackage depending on all of the above
@@ -32,7 +32,8 @@ if [ "$desktop_profile" = generic ]; then maintainer='Liuqin Linux Kit contribut
 firmware_tree=${FIRMWARE_TREE:-"$project_root/device/firmware"}
 firmware_manifest_sha256=${FIRMWARE_MANIFEST_SHA256:-012c413e0a5d5c3c14631fbdfe50da5c51e95ffc1ae431b8d93f776538b65ba2}
 speaker_firmware=${SPEAKER_FIRMWARE_DIR:-}
-overlay=${GNOME_OVERLAY:-"$project_root/device/gnome-overlay"}
+board_overlay=${BOARD_OVERLAY:-"$project_root/device/board-overlay"}
+gnome_overlay=${GNOME_OVERLAY:-"$project_root/device/gnome-overlay"}
 ubuntu_desktop_root=${UBUNTU_DESKTOP_ROOT:-"$project_root/inputs/ubuntu-desktop-26.04-arm64/rootfs"}
 audio_probe_libasound=$ubuntu_desktop_root/usr/lib/aarch64-linux-gnu/libasound.so.2.0.0
 busybox=${BUSYBOX:-"$project_root/inputs/busybox-arm64/usr/bin/busybox"}
@@ -176,33 +177,19 @@ build_firmware() {
 	pack "$pkg" all '' 'Xiaomi Pad 6 Pro (liuqin) firmware closure, pinned vendor set'
 }
 
+stage_device_overlay() {
+	python3 "$project_root/build/lib/device_overlay.py" \
+		--board "$board_overlay" --gnome "$gnome_overlay" \
+		--desktop "$desktop_profile" --out "$root"
+}
+
 build_generic_device_support() {
 	pkg=liuqin-device-support
-	[ -d "$overlay" ] && [ -x "$busybox" ] || die 'device overlay or ARM64 BusyBox is missing'
+	[ -d "$board_overlay" ] && [ -x "$busybox" ] || die 'board overlay or ARM64 BusyBox is missing'
 	sha_ok "$busybox" "$busybox_sha256" 'pinned BusyBox hash mismatch'
 	root=$work/$pkg/root
 	mkdir -p "$root"
-	# Plasma uses PowerDevil and its own display manager. Keep board services,
-	# exclude GNOME settings, Snap admission, diagnostics and Android switching UI.
-	(cd "$overlay" && find . -mindepth 1 -type f \
-		! -name README.md ! -path '*/__pycache__/*' ! -path './usr/lib/firmware/*' \
-		! -path './etc/dconf/*' ! -path './etc/gdm3/*' ! -path './etc/flash-kernel/*' \
-		! -path './etc/liuqin-gnome-root' ! -path './etc/systemd/logind.conf.d/*' \
-		! -path './etc/systemd/system/liuqin-power-keyd*' \
-		! -path './etc/systemd/system/liuqin-snap-root-admission.service' \
-		! -path './usr/share/liuqin/power/*' ! -path '*org.gnome.Snapshot*' \
-		! -path './usr/local/libexec/liuqin-power-*' \
-		! -path './usr/local/sbin/liuqin-snap-root-admission' \
-		! -path './usr/local/sbin/liuqin-switch' \
-		! -path './usr/local/share/applications/liuqin-reboot-to-android.desktop' \
-		! -path './usr/share/polkit-1/actions/io.github.liuqin.switch.policy' \
-		-printf '%P\n' | LC_ALL=C sort) >"$work/$pkg.files"
-	while IFS= read -r rel; do
-		[ -n "$rel" ] || continue
-		mode=$(stat -c '%a' "$overlay/$rel")
-		case $mode in 6??) mode=644 ;; 7??) mode=755 ;; esac
-		install -D -m "$mode" "$overlay/$rel" "$root/$rel"
-	done <"$work/$pkg.files"
+	stage_device_overlay
 	guard=$root/usr/local/sbin/liuqin-gnome-storage-guard
 	grep -qx 'marker=${LIUQIN_GNOME_GUARD_TEST_MARKER:-/etc/liuqin-gnome-root}' "$guard" || die 'storage guard marker drifted'
 	sed -i \
@@ -220,7 +207,8 @@ build_generic_device_support() {
 build_device_support() {
 	if [ "$desktop_profile" = generic ]; then build_generic_device_support; return; fi
 	pkg=liuqin-device-support
-	[ -d "$overlay" ] || die "GNOME overlay is unavailable: $overlay"
+	[ -d "$board_overlay" ] || die "board overlay is unavailable: $board_overlay"
+	[ -d "$gnome_overlay" ] || die "GNOME overlay is unavailable: $gnome_overlay"
 	[ -x "$busybox" ] || die "pinned BusyBox is unavailable: $busybox"
 	sha_ok "$busybox" "$busybox_sha256" 'pinned BusyBox hash mismatch'
 	for src in "$power_keyd_source" "$uinput_automation_source" "$audio_probe_source"; do
@@ -229,11 +217,11 @@ build_device_support() {
 	[ -x "$power_key_cc" ] || die "aarch64 compiler is unavailable: $power_key_cc"
 	[ -f "$audio_probe_libasound" ] && [ ! -L "$audio_probe_libasound" ] ||
 		die "Canonical arm64 libasound is unavailable: $audio_probe_libasound"
-	[ -r "$overlay/$webkit_env" ] ||
+	[ -r "$board_overlay/$webkit_env" ] ||
 		die 'the overlay carries no reviewed WebKit fallback environment file'
-	sha_ok "$overlay/$webkit_env" "$webkit_env_sha256" \
+	sha_ok "$board_overlay/$webkit_env" "$webkit_env_sha256" \
 		'the overlay WebKit fallback is not the reviewed legacy-compositor revision'
-	if [ -f "$overlay/usr/share/liuqin/power/io.github.liuqin.power.gschema.xml" ]; then
+	if [ -f "$gnome_overlay/usr/share/liuqin/power/io.github.liuqin.power.gschema.xml" ]; then
 		[ -f "$power_settings_binary" ] && [ ! -L "$power_settings_binary" ] ||
 			die 'build the reviewed native power settings component or set POWER_SETTINGS_BINARY'
 		if [ -z "$power_settings_sha256" ]; then
@@ -254,21 +242,10 @@ PY
 	fi
 	root=$work/$pkg/root
 	mkdir -p "$root"
-	# Overlay content, excluding documentation, Python bytecode caches, the
-	# firmware path owned by liuqin-firmware, and the autologin gdm3 override
-	# (native install keeps the distro custom.conf so first boot runs
-	# gnome-initial-setup; see the header comment).
-	(cd "$overlay" && find . -mindepth 1 -type f \
-		! -name README.md ! -path '*/__pycache__/*' ! -path './usr/lib/firmware/*' \
-		! -path './etc/gdm3/custom.conf' \
-		-printf '%P\n' | LC_ALL=C sort) >"$work/$pkg.files"
-	while IFS= read -r rel; do
-		[ -n "$rel" ] || continue
-		mode=$(stat -c '%a' "$overlay/$rel")
-		case $mode in 6??) mode=644 ;; 7??) mode=755 ;; esac
-		install -D -m "$mode" "$overlay/$rel" "$root/$rel"
-	done <"$work/$pkg.files"
-	[ "$(wc -l <"$work/$pkg.files" | tr -d ' ')" -ge 30 ] ||
+	# Compose the common board layer and GNOME-specific integration. The
+	# compositor rejects overlapping paths before any payload is copied.
+	stage_device_overlay
+	[ "$(find "$root" -type f | wc -l | tr -d ' ')" -ge 30 ] ||
 		die 'device-support overlay copy is implausibly small'
 	# Adapt the shared storage guard to the native root marker.
 	guard=$root/usr/local/sbin/liuqin-gnome-storage-guard
@@ -338,7 +315,7 @@ PY
 		sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')" = AArch64 ] ||
 		die 'power-key daemon is not an AArch64 executable'
 	install -D -m 0755 "$busybox" "$root/usr/local/bin/busybox"
-	if [ -f "$overlay/usr/share/liuqin/power/io.github.liuqin.power.gschema.xml" ]; then
+	if [ -f "$gnome_overlay/usr/share/liuqin/power/io.github.liuqin.power.gschema.xml" ]; then
 		install -D -m 0755 "$power_settings_binary" "$root/usr/bin/gnome-control-center"
 		command -v glib-compile-schemas >/dev/null || die 'glib-compile-schemas is required'
 		glib-compile-schemas --strict "$root/usr/share/liuqin/power"

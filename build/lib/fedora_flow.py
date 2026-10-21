@@ -67,7 +67,8 @@ class FedoraFlow(Flow):
             '--sensors',str(sensors),'--busybox',tools['BUSYBOX'],'--out',str(out/'rpms'),'--version',self.version])
         return self.stage('fedora-device-rpms',dict(sensors=sha(sensors),
             firmware=tree_identity(PROJECT/'device/firmware'),speakers=tree_identity(board/'speaker-firmware'),
-            overlay=tree_identity(PROJECT/'device/gnome-overlay'),busybox=sha(tools['BUSYBOX']),version=self.version,
+            board_overlay=tree_identity(PROJECT/'device/board-overlay'),
+            overlay_builder=sha(PROJECT/'build/lib/device_overlay.py'),busybox=sha(tools['BUSYBOX']),version=self.version,
             builder=sha(PROJECT/'build/scripts/build-liuqin-rpms.py'),packager=sha(PROJECT/'build/lib/rpm_package.py')),
             build,['rpms'])/'rpms'
 
