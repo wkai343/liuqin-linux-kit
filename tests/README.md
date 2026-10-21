@@ -84,5 +84,27 @@ devbox run -- python3 tests/battery-readings.py \
 同时检查原厂命令表和其他面板代码未变；默认引导通过三个独立参数省去额外等待。
 这些测试需要实际源码，不在普通离线入口中。
 
+### 显示与触摸初始化
+
+两项测试对应不同的源码阶段，均提取实际驱动 C 函数，在带 UBSan 的宿主编译器中执行：
+
+| 测试 | 输入源码阶段 | 覆盖 |
+| --- | --- | --- |
+| `tddi-calibration-recovery.py` | 应用到 `0010` 的快照，不包含 `0011` | 54 项：稳定校准门限、一次恢复、传输错误、关屏取消、锁顺序和已有告警保留 |
+| `tddi-initial-wake.py` | 包含 `0011` 的最终配方 | 70 项：上述恢复保护、首次显示就绪依赖、原厂唤醒报文与等待、部分失败禁止重发、周期内参数切换和恢复开关独立性 |
+
+最终配方的运行示例：
+
+```sh
+mkdir -p out/test-reports
+devbox run -- python3 tests/tddi-initial-wake.py \
+  --source /path/to/kernel-with-0011 \
+  --report out/test-reports/initial-wake.json
+```
+
+脚本自带桩代码，不依赖私有日志、固件或旧诊断脚本，也不修改输入源码。
+这些源码阶段检查不属于普通 `devbox run test` 的自动构建入口；真机结果见
+[显示验证](../docs/DISPLAY.md#首次唤醒顺序与预防验证)。
+
 真机测试分别记录临时启动、固定引导后的重启、拔线冷启动及睡眠唤醒；
 故障后自动恢复必须单独记录，不能写成“首次显示正常”。

@@ -1,0 +1,185 @@
+From 2988c45f949bd123249102f3ded06b1f3f1d97ef Mon Sep 17 00:00:00 2001
+From: wk <58632380+wkai343@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 18:41:34 +0800
+Subject: [PATCH] drm/panel: finish Tianma initial wake after the first frame
+
+Tianma M81 can enter a repeated touch-calibration loop after screen-only
+resume. One bounded display sleep cycle followed by fresh touch firmware
+recovers it, but does not prevent the initial failure.
+
+Keep the original vendor register programming and PPS, then send the
+original final Sleep Out and Display On packets once after the first
+frame. Wait for that display activation before loading touch firmware.
+Preserve packet formats and delays, refuse replay after a partial
+transfer, and latch the selected sequence across runtime parameter
+changes.
+
+Scope the display sequence to the exact Liuqin Tianma table with
+deferred backlight support. The touch dependency is independent of the
+existing recovery toggle; disabling fallback must not start firmware
+before display activation. Preserve the existing bounded calibration
+recovery as a guard.
+
+An enabled temporary boot passed 100 actual off/on cycles without
+retries; switching only the wake parameter off on the same kernel
+reproduced A1 calibration timeout at cycle 30. Re-enabling passed
+another 100 cycles without retries. This establishes a useful sequencing
+dependency on the tested device, not the DDIC internal failure
+mechanism.
+---
+ drivers/gpu/drm/panel/panel-novatek-nt36532.c | 52 ++++++++++++++++++-
+ drivers/input/touchscreen/nt36523/nt36xxx.c   | 40 ++++++++++++--
+ 2 files changed, 87 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/gpu/drm/panel/panel-novatek-nt36532.c b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+index 753227268..073bcfd65 100644
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -52,7 +52,14 @@ module_param(liuqin_skip_post_pps_wait, bool, 0444);
+ MODULE_PARM_DESC(liuqin_skip_post_pps_wait,
+ 	"Omit the extra 120 ms after the known Liuqin panel's PPS transfer");
+ 
++static bool liuqin_late_wake = true;
++module_param(liuqin_late_wake, bool, 0644);
++MODULE_PARM_DESC(liuqin_late_wake,
++	"Send initial Tianma Sleep Out/Display On once, after first frame");
++
+ struct nt36532 {
++	/* 0: original ON table; 1: pending; 2: sent; negative: transfer failed. */
++	int late_wake_status;
+ 	bool off_deferred;
+ 	bool tddi_recovering;
+ 	unsigned int tddi_recovery_cookie;
+@@ -1089,10 +1096,47 @@ static int liuqin_send_oem_cmds(struct nt36532 *ctx,
+ 
+ static int liuqin_init_sequence(struct nt36532 *ctx)
+ {
++	size_t count;
++	bool defer;
++	int ret;
++
++	ctx->late_wake_status = 0;
+ 	if (!ctx->oem_panel)
+ 		return pipa_init_sequence(ctx);
+-	return liuqin_send_oem_cmds(ctx, ctx->oem_panel->on,
+-				  ctx->oem_panel->on_count);
++	count = ctx->oem_panel->on_count;
++	defer = READ_ONCE(liuqin_late_wake) &&
++		ctx->oem_panel == &liuqin_oem_panels[0] &&
++		ctx->panel.backlight_after_first_frame && ctx->panel.backlight;
++	/* The exact TM table ends in separate long 11/29 packets with waits. */
++	if (defer)
++		count -= 2;
++	ret = liuqin_send_oem_cmds(ctx, ctx->oem_panel->on, count);
++	if (!ret && defer) {
++		ctx->late_wake_status = 1;
++		dev_info(ctx->panel.dev, "initial DDIC wake deferred until first frame\n");
++	}
++	return ret;
++}
++
++static int liuqin_complete_late_wake(struct nt36532 *ctx)
++{
++	int ret;
++
++	lockdep_assert_held(&ctx->panel.backlight_lock);
++	if (ctx->late_wake_status < 0)
++		return ctx->late_wake_status;
++	if (ctx->late_wake_status != 1)
++		return 0;
++	/* Never resend a wake group after a partial transfer failure. */
++	ctx->late_wake_status = -EIO;
++	ret = liuqin_send_oem_cmds(ctx, &liuqin_tm_on[ARRAY_SIZE(liuqin_tm_on) - 2], 2);
++	if (ret) {
++		ctx->late_wake_status = ret;
++		return ret;
++	}
++	ctx->late_wake_status = 2;
++	dev_info(ctx->panel.dev, "initial DDIC wake sent once after first frame\n");
++	return 0;
+ }
+ 
+ static const struct drm_display_mode pipa_mode_120 = {
+@@ -2073,9 +2117,13 @@ static int nt36532_post_backlight_enable(struct drm_panel *panel)
+ 	struct mipi_dsi_device *dsi;
+ 	const struct mipi_dsi_host_ops *ops;
+ 	size_t i;
++	int ret;
+ 
+ 	if (!ctx->oem_panel)
+ 		return 0;
++	ret = liuqin_complete_late_wake(ctx);
++	if (ret)
++		return ret;
+ 	dsi = nt36532_cmd_dsi(ctx);
+ 	ops = dsi->host->ops;
+ 	if (!oem_normal_display)
+diff --git a/drivers/input/touchscreen/nt36523/nt36xxx.c b/drivers/input/touchscreen/nt36523/nt36xxx.c
+index 6be9c4d3d..1c9032b92 100644
+--- a/drivers/input/touchscreen/nt36523/nt36xxx.c
++++ b/drivers/input/touchscreen/nt36523/nt36xxx.c
+@@ -2091,17 +2091,43 @@ static int32_t nvt_ts_suspend(struct device *dev)
+ return:
+ 	Executive outcomes. 0---succeed.
+ *******************************************************/
+-static bool nvt_tddi_recovery_enabled(struct nvt_ts_data *data)
++static bool nvt_tddi_panel_supported(struct nvt_ts_data *data)
+ {
+ 	struct drm_panel *panel = data->panel_follower.panel;
+ 
+-	return READ_ONCE(liuqin_tddi_recovery) && data->is_panel_follower &&
+-	       !data->db_wakeup && data->fw_name &&
++	return data->is_panel_follower && data->fw_name &&
+ 	       !strcmp(data->fw_name, LIUQIN_TOUCH_FW_TM) && panel &&
+ 	       of_device_is_compatible(panel->dev->of_node,
+ 				       "xiaomi,liuqin-nt36532");
+ }
+ 
++static bool nvt_tddi_recovery_enabled(struct nvt_ts_data *data)
++{
++	return READ_ONCE(liuqin_tddi_recovery) && !data->db_wakeup &&
++	       nvt_tddi_panel_supported(data);
++}
++
++static int nvt_wait_initial_display(struct nvt_ts_data *data)
++{
++	struct drm_panel *panel = data->panel_follower.panel;
++	unsigned int i;
++	bool ready;
++
++	for (i = 0; i < 150; i++) {
++		if (!nvt_panel_is_on(data))
++			return -EHOSTDOWN;
++		mutex_lock(&panel->backlight_lock);
++		ready = panel->prepared && panel->enabled && !panel->backlight_pending;
++		mutex_unlock(&panel->backlight_lock);
++		if (ready) {
++			NVT_LOG("first frame complete before touch firmware\n");
++			return 0;
++		}
++		usleep_range(10000, 11000);
++	}
++	return -ETIMEDOUT;
++}
++
+ /* Caller holds the input mutex; a transient A3 inside the ReK loop is not ready. */
+ static int nvt_wait_tddi_normal(struct nvt_ts_data *data)
+ {
+@@ -2210,6 +2236,14 @@ static int32_t nvt_ts_resume(struct device *dev)
+ 		goto resume_fail;
+ 	}
+ 
++	/* The initial display dependency also applies with recovery disabled. */
++	if (nvt_tddi_panel_supported(ts)) {
++		mutex_unlock(&ts->lock);
++		ret = nvt_wait_initial_display(ts);
++		mutex_lock(&ts->lock);
++		if (ret)
++			goto resume_fail;
++	}
+ 	ts->resume_count++;
+ 	NVT_LOG("follower resume #%u start\n", ts->resume_count);
+ 	ts->ic_state = NVT_IC_RESUME_IN;
+-- 
+2.55.0
+

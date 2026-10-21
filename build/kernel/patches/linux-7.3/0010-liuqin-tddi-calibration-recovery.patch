@@ -1,0 +1,418 @@
+From bf1ea9fe79179be8eef95231c5e0fbd2fb9c63a7 Mon Sep 17 00:00:00 2001
+From: wk <58632380+wkai343@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 17:56:11 +0800
+Subject: [PATCH] drm/panel: recover Liuqin TDDI calibration after screen wake
+
+On Tianma M81, screen-only resume can leave touch firmware repeatedly in
+ReK while the display flickers and touch produces no events. Accepting ReK
+or a transient normal-run byte exposes uncalibrated firmware as ready.
+
+Require stable normal run before enabling touch input. On calibration
+timeout, perform one coordinated display sleep cycle before a fresh touch
+firmware download, without restarting the DPU, DSI hosts, PHY, panel reset,
+or supplies. Keep the input mutex outside panel operations, preserve old
+ESD faults, and quiesce the MCU if initialization fails or is cancelled.
+
+Enable this only for the qualified Liuqin Tianma firmware/panel pair and
+retain a runtime disable switch. Other panels and gesture wake preserve
+their existing resume path.
+
+Validation: 54 extracted-C cases, complete arm64 build, and a temporary
+boot with recovery enabled. All 100 actual screen off/on cycles reached
+stable normal run; seven required the bounded recovery. The user confirmed
+normal display and touch after automatic recovery, with raw input events.
+The initial DDIC/touch calibration failure mechanism remains unresolved.
+---
+ drivers/gpu/drm/drm_panel.c                   |  46 ++++++++
+ drivers/gpu/drm/panel/panel-novatek-nt36532.c |  92 +++++++++++++++
+ drivers/input/touchscreen/nt36523/nt36xxx.c   | 105 +++++++++++++++++-
+ include/drm/drm_panel.h                       |  30 +++++
+ 4 files changed, 271 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/drm_panel.c b/drivers/gpu/drm/drm_panel.c
+index 50f35b969..a0df8d43a 100644
+--- a/drivers/gpu/drm/drm_panel.c
++++ b/drivers/gpu/drm/drm_panel.c
+@@ -371,6 +371,52 @@ void drm_panel_complete_first_frame(struct drm_panel *panel, unsigned int cookie
+ }
+ EXPORT_SYMBOL(drm_panel_complete_first_frame);
+ 
++/**
++ * drm_panel_recover_touch - recover an active shared TDDI display
++ * @panel: panel followed by the caller
++ *
++ * The caller must not hold its SPI/input mutex. Do not take follower_lock:
++ * blank/remove holds it while cancelling the caller's resume work. The
++ * backlight lock excludes display commands and the start of panel disable.
++ *
++ * Return: zero, or a negative error. Always pair with finish_touch_recovery.
++ */
++int drm_panel_recover_touch(struct drm_panel *panel)
++{
++	int ret;
++
++	if (!panel || !panel->funcs || !panel->funcs->recover_touch ||
++	    !panel->funcs->finish_touch_recovery)
++		return -EOPNOTSUPP;
++
++	mutex_lock(&panel->backlight_lock);
++	if (!panel->enabled || !panel->prepared || panel->backlight_pending)
++		ret = -EHOSTDOWN;
++	else
++		ret = panel->funcs->recover_touch(panel);
++	mutex_unlock(&panel->backlight_lock);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(drm_panel_recover_touch);
++
++/**
++ * drm_panel_finish_touch_recovery - finish shared TDDI recovery
++ * @panel: panel followed by the caller
++ * @ready: touch firmware has reached stable normal run
++ *
++ * May run after cancellation/disable. No follower or input mutex is held.
++ */
++void drm_panel_finish_touch_recovery(struct drm_panel *panel, bool ready)
++{
++	if (!panel || !panel->funcs || !panel->funcs->finish_touch_recovery)
++		return;
++
++	mutex_lock(&panel->backlight_lock);
++	panel->funcs->finish_touch_recovery(panel, ready);
++	mutex_unlock(&panel->backlight_lock);
++}
++EXPORT_SYMBOL_GPL(drm_panel_finish_touch_recovery);
++
+ /**
+  * drm_panel_disable - disable a panel
+  * @panel: DRM panel
+diff --git a/drivers/gpu/drm/panel/panel-novatek-nt36532.c b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+index 18b844d43..753227268 100644
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -54,6 +54,8 @@ MODULE_PARM_DESC(liuqin_skip_post_pps_wait,
+ 
+ struct nt36532 {
+ 	bool off_deferred;
++	bool tddi_recovering;
++	unsigned int tddi_recovery_cookie;
+ 	int cabc_requested;
+ 	int cabc_applied;
+ 	int cabc_error;
+@@ -1876,6 +1878,7 @@ static int nt36532_prepare(struct drm_panel *panel)
+ 	struct drm_dsc_picture_parameter_set pps;
+ 	int ret;
+ 
++	ctx->tddi_recovering = false;
+ 	liuqin_esd_stop(ctx, false);
+ 
+ 	liuqin_cancel_dimming(ctx, false);
+@@ -2103,6 +2106,93 @@ static int nt36532_post_backlight_enable(struct drm_panel *panel)
+ 	return 0;
+ }
+ 
++static int nt36532_recover_touch(struct drm_panel *panel)
++{
++	struct nt36532 *ctx = to_nt36532(panel);
++	struct mipi_dsi_device *dsi = nt36532_cmd_dsi(ctx);
++	static const u8 packets[][2] = {
++		{ 0xff, 0x10 }, { 0x28, 0x00 }, { 0x10, 0x00 },
++		{ 0x11, 0x00 }, { 0x29, 0x00 },
++	};
++	static const unsigned int waits[] = { 0, 20, 120, 120, 20 };
++	unsigned int i;
++	int ret;
++
++	lockdep_assert_held(&panel->backlight_lock);
++	/* Only the Tianma M81 sequence has a qualified touch-recovery trace. */
++	if (ctx->desc != &liuqin_desc ||
++	    ctx->oem_panel != &liuqin_oem_panels[0])
++		return -EOPNOTSUPP;
++	if (!ctx->dsi[1])
++		return -ENODEV;
++	if (ctx->dimming_stopping || ctx->off_deferred ||
++	    (ctx->supply_votes & LIUQIN_ALL_VOTES) != LIUQIN_ALL_VOTES)
++		return -EHOSTDOWN;
++	if (!dsi->host->ops || !dsi->host->ops->transfer)
++		return -EOPNOTSUPP;
++
++	/* Refuse an old fault and pause IRQ reporting in the same critical
++	 * section. Otherwise a fault could be latched just before stopping the
++	 * monitor, leaving pending=1/enable=0 invisible to the session policy.
++	 */
++	mutex_lock(&ctx->esd_lock);
++	if (ctx->esd_pending || ctx->tddi_recovering) {
++		mutex_unlock(&ctx->esd_lock);
++		return -EBUSY;
++	}
++	ctx->esd_enabled = false;
++	liuqin_esd_mask_locked(ctx);
++	mutex_unlock(&ctx->esd_lock);
++	/* A queued worker also needs backlight_lock; do not join it here. */
++	cancel_delayed_work(&ctx->esd_arm_work);
++	ctx->dimming_pending = false;
++	ctx->tddi_recovering = true;
++	ctx->cabc_ready = false;
++	ctx->tddi_recovery_cookie = panel->backlight_cookie;
++	for (i = 0; i < ARRAY_SIZE(packets); i++) {
++		struct mipi_dsi_msg msg = {
++			.channel = dsi->channel,
++			.type = i ? MIPI_DSI_DCS_LONG_WRITE :
++				MIPI_DSI_DCS_SHORT_WRITE_PARAM,
++			.flags = MIPI_DSI_MSG_USE_LPM,
++			.tx_len = sizeof(packets[i]),
++			.tx_buf = packets[i],
++		};
++
++		ret = dsi->host->ops->transfer(dsi->host, &msg);
++		if (ret < 0 || ret < (int)sizeof(packets[i]))
++			return ret < 0 ? ret : -EIO;
++		if (waits[i])
++			msleep(waits[i]);
++	}
++	dev_info(panel->dev, "TDDI recovery: display sleep cycle complete, cycle=%u\n",
++		 panel->backlight_cookie);
++	return 0;
++}
++
++static void nt36532_finish_touch_recovery(struct drm_panel *panel, bool ready)
++{
++	struct nt36532 *ctx = to_nt36532(panel);
++
++	lockdep_assert_held(&panel->backlight_lock);
++	if (!ctx->tddi_recovering)
++		return;
++	ctx->tddi_recovering = false;
++	if (!panel->enabled || panel->backlight_pending || ctx->dimming_stopping ||
++	    ctx->tddi_recovery_cookie != panel->backlight_cookie)
++		return;
++
++	liuqin_esd_start(ctx);
++	if (ready) {
++		liuqin_cabc_first_frame(ctx);
++		liuqin_schedule_dimming(ctx);
++	} else {
++		liuqin_esd_fault(ctx, ARRAY_SIZE(ctx->esd_gpio), true);
++	}
++	dev_info(panel->dev, "TDDI recovery: touch ready=%u cycle=%u\n",
++		 ready, panel->backlight_cookie);
++}
++
+ static const struct drm_panel_funcs nt36532_panel_funcs = {
+ 	.prepare = nt36532_prepare,
+ 	.enable = nt36532_enable,
+@@ -2110,6 +2200,8 @@ static const struct drm_panel_funcs nt36532_panel_funcs = {
+ 	.unprepare = nt36532_unprepare,
+ 	.get_modes = nt36532_get_modes,
+ 	.post_backlight_enable = nt36532_post_backlight_enable,
++	.recover_touch = nt36532_recover_touch,
++	.finish_touch_recovery = nt36532_finish_touch_recovery,
+ };
+ 
+ static int nt36532_probe(struct mipi_dsi_device *dsi)
+diff --git a/drivers/input/touchscreen/nt36523/nt36xxx.c b/drivers/input/touchscreen/nt36523/nt36xxx.c
+index 54f1fc709..6be9c4d3d 100644
+--- a/drivers/input/touchscreen/nt36523/nt36xxx.c
++++ b/drivers/input/touchscreen/nt36523/nt36xxx.c
+@@ -45,6 +45,11 @@ uint8_t esd_retry = 0;
+ struct nvt_ts_data *ts;
+ static struct drm_panel_follower_funcs nt36xxx_panel_follower_funcs;
+ 
++static bool liuqin_tddi_recovery = true;
++module_param(liuqin_tddi_recovery, bool, 0644);
++MODULE_PARM_DESC(liuqin_tddi_recovery,
++	"Diagnostic: stable normal-run gate and one M81 TM display/touch recovery on next resume");
++
+ #if BOOT_UPDATE_FIRMWARE
+ static struct workqueue_struct *nvt_fwu_wq;
+ extern void Boot_Update_Firmware(struct work_struct *work);
+@@ -2086,9 +2091,95 @@ static int32_t nvt_ts_suspend(struct device *dev)
+ return:
+ 	Executive outcomes. 0---succeed.
+ *******************************************************/
++static bool nvt_tddi_recovery_enabled(struct nvt_ts_data *data)
++{
++	struct drm_panel *panel = data->panel_follower.panel;
++
++	return READ_ONCE(liuqin_tddi_recovery) && data->is_panel_follower &&
++	       !data->db_wakeup && data->fw_name &&
++	       !strcmp(data->fw_name, LIUQIN_TOUCH_FW_TM) && panel &&
++	       of_device_is_compatible(panel->dev->of_node,
++				       "xiaomi,liuqin-nt36532");
++}
++
++/* Caller holds the input mutex; a transient A3 inside the ReK loop is not ready. */
++static int nvt_wait_tddi_normal(struct nvt_ts_data *data)
++{
++	u8 buf[6];
++	unsigned int retry, stable = 0;
++	int ret;
++
++	for (retry = 0; retry < 150; retry++) {
++		if (!nvt_panel_is_on(data))
++			return -EHOSTDOWN;
++		ret = nvt_read_event_bytes(data, EVENT_MAP_RESET_COMPLETE,
++					   buf, sizeof(buf));
++		if (ret)
++			return ret;
++		if (buf[1] >= RESET_STATE_NORMAL_RUN && buf[1] <= RESET_STATE_MAX)
++			stable++;
++		else
++			stable = 0;
++		if (stable == 20) {
++			NVT_LOG("TDDI stable normal run: state=%02x polls=%u\n",
++				buf[1], retry + 1);
++			return 0;
++		}
++		if (retry + 1 < 150)
++			usleep_range(10000, 11000);
++	}
++	NVT_ERR("TDDI calibration timeout: state=%*ph\n", 5, buf + 1);
++	return -ETIMEDOUT;
++}
++
++/* Drop the SPI lock before the panel lock. Blank/remove can cancel this work
++ * with follower_lock held, so neither recovery helper takes follower_lock.
++ */
++static int nvt_recover_tddi(struct nvt_ts_data *data)
++{
++	struct drm_panel *panel = data->panel_follower.panel;
++	int ret;
++
++	NVT_LOG("TDDI recovery attempt: resume=%u firmware=%u\n",
++		data->resume_count, data->firmware_update_count);
++	mutex_unlock(&data->lock);
++	ret = drm_panel_recover_touch(panel);
++	if (ret)
++		drm_panel_finish_touch_recovery(panel, false);
++	mutex_lock(&data->lock);
++	if (ret)
++		return ret;
++	if (!nvt_panel_is_on(data))
++		ret = -EHOSTDOWN;
++	else
++		ret = nvt_update_firmware_no_eng_reset(data->fw_name);
++	if (!ret)
++		ret = nvt_wait_tddi_normal(data);
++	mutex_unlock(&data->lock);
++	drm_panel_finish_touch_recovery(panel, !ret);
++	mutex_lock(&data->lock);
++	return ret;
++}
++
++static void nvt_quiesce_failed_tddi(struct nvt_ts_data *data)
++{
++	u8 cmd[] = { EVENT_MAP_HOST_CMD, 0x11 };
++	int ret;
++
++	/* Cancellation joins this work before the panel's reset/power removal.
++	 * Firmware can still be running even though touch_awake was never set.
++	 */
++	ret = nvt_set_page(data->mmap->EVENT_BUF_ADDR);
++	if (!ret)
++		ret = CTP_SPI_WRITE(data->client, cmd, sizeof(cmd));
++	NVT_LOG("TDDI failed init quiesced: ret=%d\n", ret);
++}
++
+ static int32_t nvt_ts_resume(struct device *dev)
+ {
+ 	bool hold_wake = ts->dev_pm_suspend;
++	bool tddi_recovery = nvt_tddi_recovery_enabled(ts);
++	bool firmware_started = false;
+ 	int ret;
+ 
+ 	if (READ_ONCE(ts->touch_awake)) {
+@@ -2128,6 +2219,7 @@ static int32_t nvt_ts_resume(struct device *dev)
+ 	 * follower may only use the HW-CRC download path, which is explicitly
+ 	 * guaranteed not to issue a standalone engineering reset.
+ 	 */
++	firmware_started = true;
+ 	if (ts->is_panel_follower)
+ 		ret = nvt_update_firmware_no_eng_reset(ts->fw_name);
+ 	else
+@@ -2137,9 +2229,16 @@ static int32_t nvt_ts_resume(struct device *dev)
+ 		goto resume_fail;
+ 	}
+ 
+-	ret = nvt_check_fw_reset_state(RESET_STATE_REK);
++	if (tddi_recovery) {
++		ret = nvt_wait_tddi_normal(ts);
++		if (ret == -ETIMEDOUT)
++			ret = nvt_recover_tddi(ts);
++	} else {
++		ret = nvt_check_fw_reset_state(RESET_STATE_REK);
++	}
+ 	if (ret) {
+-		NVT_ERR("firmware did not reach ReK: %d\n", ret);
++		NVT_ERR("firmware did not reach %s: %d\n",
++			tddi_recovery ? "stable normal run" : "ReK", ret);
+ 		goto resume_fail;
+ 	}
+ 
+@@ -2189,6 +2288,8 @@ static int32_t nvt_ts_resume(struct device *dev)
+ 	return 0;
+ 
+ resume_fail:
++	if (tddi_recovery && firmware_started)
++		nvt_quiesce_failed_tddi(ts);
+ 	nvt_set_touch_awake_state(ts, false);
+ 	ts->ic_state = NVT_IC_SUSPEND_OUT;
+ 	mutex_unlock(&ts->lock);
+diff --git a/include/drm/drm_panel.h b/include/drm/drm_panel.h
+index 7c8faa830..03bc149fc 100644
+--- a/include/drm/drm_panel.h
++++ b/include/drm/drm_panel.h
+@@ -156,6 +156,26 @@ struct drm_panel_funcs {
+ 	 * This does not intercept userspace brightness adjustments.
+ 	 */
+ 	int (*post_backlight_enable)(struct drm_panel *panel);
++
++	/**
++	 * @recover_touch:
++	 *
++	 * Optional shared-TDDI display recovery after touch calibration fails.
++	 * Called with backlight_lock held, after a completed first frame. It must
++	 * not change DRM power state or call a follower. The caller keeps touch
++	 * IRQs disabled, reloads its firmware afterwards, and always calls
++	 * finish_touch_recovery, including after a partial command error.
++	 */
++	int (*recover_touch)(struct drm_panel *panel);
++
++	/**
++	 * @finish_touch_recovery:
++	 *
++	 * Finish recover_touch with backlight_lock held. @ready reports whether
++	 * touch firmware reached stable normal run. May be called after disable;
++	 * in that case only discard recovery bookkeeping, without hardware I/O.
++	 */
++	void (*finish_touch_recovery)(struct drm_panel *panel, bool ready);
+ };
+ 
+ struct drm_panel_follower_funcs {
+@@ -375,6 +395,8 @@ static inline struct drm_panel *of_drm_find_panel(const struct device_node *np)
+ #endif
+ 
+ #if defined(CONFIG_DRM_PANEL)
++int drm_panel_recover_touch(struct drm_panel *panel);
++void drm_panel_finish_touch_recovery(struct drm_panel *panel, bool ready);
+ bool drm_is_panel_follower(struct device *dev);
+ int drm_panel_add_follower(struct device *follower_dev,
+ 			   struct drm_panel_follower *follower);
+@@ -382,6 +404,14 @@ void drm_panel_remove_follower(struct drm_panel_follower *follower);
+ int devm_drm_panel_add_follower(struct device *follower_dev,
+ 				struct drm_panel_follower *follower);
+ #else
++static inline int drm_panel_recover_touch(struct drm_panel *panel)
++{
++	return -EOPNOTSUPP;
++}
++
++static inline void drm_panel_finish_touch_recovery(struct drm_panel *panel,
++						 bool ready) { }
++
+ static inline bool drm_is_panel_follower(struct device *dev)
+ {
+ 	return false;
+-- 
+2.55.0
+
