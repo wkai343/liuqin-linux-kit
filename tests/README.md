@@ -34,6 +34,7 @@ CI 的实际测试列表以 `.github/workflows/` 为准，不能把本地入口�
 | `splash-handoff.py`、`splash-logo.py`、`splash-orientation.py` | 帧缓冲边界、绘制进程隔离与回退、四向特征识别、关机方向缓存及 systemd 直接入口 |
 | `storage-seal.py`、`storage-ready.py`、`storage-paths.py` | 批量只读设置、UFS/GPT 就绪证明、路径替换及回退 |
 | `wlan-mac.py` | 目标网卡 udev 初始化、命名竞态与设备身份 |
+| `rtc.py` | 真实 helper 的离线时间推算、计数器重置/停走、过期和损坏校准、chrony 同步判定、原子保存与 RPM 板级载荷；不改变主机时间，不代替关机/重启验收 |
 
 ### Plymouth 主题运行检查
 

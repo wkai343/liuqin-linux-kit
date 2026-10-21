@@ -63,6 +63,7 @@ jobs:
           python3 tests/display-recovery.py
           python3 tests/display-policy.py
           python3 tests/wlan-mac.py
+          python3 tests/rtc.py
           python3 tests/memory-reclaim.py
           python3 tests/mkbootimg-fetch.py
           python3 tests/initramfs-inputs.py

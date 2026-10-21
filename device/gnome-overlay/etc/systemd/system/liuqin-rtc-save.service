@@ -1,0 +1,19 @@
+[Unit]
+Description=Save Liuqin RTC calibration after network time synchronisation
+After=liuqin-rtc-restore.service chronyd.service chrony.service
+ConditionPathExists=/sys/firmware/devicetree/base/compatible
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/liuqin-rtc save
+TimeoutStartSec=15
+StateDirectory=liuqin-rtc
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes

@@ -213,7 +213,7 @@ build_generic_device_support() {
 		usr/local/sbin/liuqin-wlan-mac usr/local/sbin/liuqin-bt-public-addr usr/local/libexec/liuqin-backlight-default; do
 		[ -x "$root/$required" ] || die "generic device package misses $required"
 	done
-	pack "$pkg" arm64 'systemd, udev, python3, network-manager, bluez, libglib2.0-bin' \
+	pack "$pkg" arm64 'systemd, udev, python3, chrony, network-manager, bluez, libglib2.0-bin' \
 		'Xiaomi Pad 6 Pro (liuqin) desktop-neutral board services and storage protection'
 }
 
@@ -355,7 +355,7 @@ PY
 	} >"$root/DEBIAN/postinst"
 	cp "$work/$pkg.preinst" "$root/DEBIAN/preinst"
 	cp "$work/$pkg.postrm" "$root/DEBIAN/postrm"
-	pack "$pkg" arm64 'libasound2t64 (>= 1.2), gnome-control-center (>= 1:50.0)' \
+	pack "$pkg" arm64 'python3, chrony, libasound2t64 (>= 1.2), gnome-control-center (>= 1:50.0)' \
 		'Xiaomi Pad 6 Pro (liuqin) device support: units, helpers, rescue shell, power panel'
 }
 

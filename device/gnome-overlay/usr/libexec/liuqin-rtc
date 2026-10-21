@@ -1,0 +1,237 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: MIT
+"""Restore wall time from the read-only Liuqin PMIC counter and a private anchor.
+
+Never writes the RTC, its alarm, PMIC NVMEM or Android persist. Calibration is
+accepted only from a recently synchronised chronyd, or an explicit manual save.
+"""
+import argparse
+import csv
+import fcntl
+import json
+import math
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+STATE = Path('/var/lib/liuqin-rtc')
+RTC_CLASS = Path('/sys/class/rtc')
+MACHINE_ID = Path('/etc/machine-id')
+COMPATIBLE = Path('/sys/firmware/devicetree/base/compatible')
+MIN_TIME = 1577836800  # 2020-01-01 UTC
+MAX_TIME = 4102444800  # 2100-01-01 UTC, exclusive
+MAX_AGE = 366 * 86400
+
+
+class InvalidState(ValueError):
+    pass
+
+
+def number(value, low, high):
+    return (type(value) in (int, float) and math.isfinite(value)
+            and low <= value < high)
+
+
+def identity():
+    if b'xiaomi,liuqin' not in COMPATIBLE.read_bytes().split(b'\0'):
+        # Stock ABL replaces the mainline root compatible and model. Match its
+        # exact Liuqin model AND Xiaomi project ID; cape-mtp alone is generic.
+        model = COMPATIBLE.with_name('model')
+        board = COMPATIBLE.with_name('xiaomi,miboard-id')
+        if (not model.exists() or not board.exists()
+                or model.read_bytes().rstrip(b'\0') != b'Liuqin based on Qualcomm Technologies, Inc SM8475'
+                or board.read_bytes() != b'\x00\x00\x00\x10\x00\x00\x00\x00'):
+            raise InvalidState('not a Xiaomi liuqin board')
+    machine = MACHINE_ID.read_text().strip()
+    if not re.fullmatch('[0-9a-f]{32}', machine) or machine == '0' * 32:
+        raise InvalidState('machine-id is not initialised')
+    devices = []
+    for rtc in sorted(RTC_CLASS.glob('rtc*')):
+        node = rtc / 'device/of_node/compatible'
+        if node.exists() and b'qcom,pmk8350-rtc' in node.read_bytes().split(b'\0'):
+            devices.append(rtc)
+    if len(devices) != 1:
+        raise InvalidState('expected exactly one PMK8350 RTC')
+    rtc = devices[0]
+    return rtc, {'machine_id': machine, 'rtc_name': (rtc / 'name').read_text().strip()}
+
+
+def sample(rtc):
+    """Bound the read latency and reject a simultaneous wall-clock step."""
+    before, mono = time.time(), time.monotonic()
+    raw = int((rtc / 'since_epoch').read_text())
+    after, elapsed = time.time(), time.monotonic() - mono
+    if not 0 <= raw <= 0xffffffff:
+        raise InvalidState('RTC counter outside its 32-bit range')
+    if elapsed > .25 or abs(after - before - elapsed) > .05:
+        raise InvalidState('clock changed or RTC read was delayed; retry later')
+    return raw, (before + after) / 2
+
+
+def ticking_sample(rtc):
+    raw, wall = sample(rtc)
+    start = time.monotonic()
+    time.sleep(1.1)
+    new_raw, new_wall = sample(rtc)
+    elapsed = time.monotonic() - start
+    if (elapsed > 2 or new_raw <= raw or abs(new_raw - raw - elapsed) > 1
+            or abs(new_wall - wall - elapsed) > .1):
+        raise InvalidState('RTC stopped/reset or clock changed while sampling')
+    return new_raw, new_wall
+
+
+def load_state(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd) as stream:
+        info = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != 0
+                or info.st_mode & 0o077 or info.st_size > 4096):
+            raise InvalidState('anchor must be a small private root-owned file')
+        return json.load(stream)
+
+
+def estimate(anchor, device, raw):
+    if (not isinstance(anchor, dict) or anchor.get('schema') != 1
+            or anchor.get('device') != device
+            or type(anchor.get('rtc_seconds')) is not int
+            or not number(anchor['rtc_seconds'], 0, 0x100000000)
+            or not number(anchor.get('unix_seconds'), MIN_TIME, MAX_TIME)):
+        raise InvalidState('invalid anchor or device identity changed')
+    delta = raw - anchor['rtc_seconds']
+    if not 0 <= delta <= MAX_AGE:
+        raise InvalidState('RTC reset/wrapped or anchor is older than 366 days; recalibrate')
+    result = anchor['unix_seconds'] + delta
+    if not number(result, MIN_TIME, MAX_TIME):
+        raise InvalidState('restored time outside supported range')
+    return result
+
+
+def synchronised(tracking, now):
+    """Check chronyc CSV, including actual system correction, not just NTP time."""
+    try:
+        row, = list(csv.reader(tracking.strip().splitlines()))
+        if len(row) != 14:
+            return False
+        refid, _address, stratum, reference, correction = row[:5]
+        delay, dispersion = float(row[10]), float(row[11])
+        return (refid.upper() not in ('00000000', '7F7F0101')
+                and 1 <= int(stratum) <= 15 and row[13] in ('Normal', 'Insert second', 'Delete second')
+                and number(float(reference), now - 3600, now + 1)
+                and number(abs(float(correction)), 0, 1)
+                and number(delay, 0, 10) and number(dispersion, 0, 5)
+                and abs(float(correction)) + delay / 2 + dispersion < 5)
+    except (ValueError, TypeError):
+        return False
+
+
+def tracking():
+    # Use chrony's read-only loopback monitor interface. Fedora's SELinux policy
+    # forbids chronyd replying to a generic service's Unix-domain client socket.
+    try:
+        result = subprocess.run(['/usr/bin/chronyc', '-h', '127.0.0.1',
+                                 '-c', 'tracking'], capture_output=True, text=True, timeout=5,
+                                env={**os.environ, 'LC_ALL': 'C'})
+    except subprocess.TimeoutExpired:
+        return ''
+    return result.stdout if result.returncode == 0 else ''
+
+
+def write_state(path, anchor):
+    name = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', prefix='.anchor-', dir=path.parent,
+                                         delete=False) as stream:
+            name = stream.name
+            json.dump(anchor, stream, sort_keys=True)
+            stream.write('\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(name, path)
+        fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    finally:
+        if name is not None:
+            Path(name).unlink(missing_ok=True)
+
+
+def operate(action, manual=False, dry_run=False):
+    rtc, device = identity()
+    path = STATE / 'anchor.json'
+    if action == 'save':
+        if not manual and not synchronised(tracking(), time.time()):
+            print('liuqin-rtc: no recent NTP synchronisation; keeping existing anchor')
+            return
+        raw, wall = ticking_sample(rtc)
+        if not number(wall, MIN_TIME, MAX_TIME):
+            raise InvalidState('system time outside supported range')
+        # Recheck after sampling: do not persist a step or loss of synchronisation.
+        if not manual and not synchronised(tracking(), wall):
+            raise InvalidState('NTP synchronisation changed while sampling')
+        anchor = {'schema': 1, 'device': device, 'rtc_seconds': raw,
+                  'unix_seconds': wall, 'source': 'manual' if manual else 'chrony'}
+        if not dry_run:
+            write_state(path, anchor)
+        print('liuqin-rtc: calibration ' + ('checked' if dry_run else 'saved'))
+        return
+
+    try:
+        anchor = load_state(path)
+    except FileNotFoundError:
+        print('liuqin-rtc: no calibration yet; waiting for NTP or manual calibration')
+        return
+    raw, wall = ticking_sample(rtc)
+    restored = estimate(anchor, device, raw)
+    if action == 'status':
+        print(json.dumps({'rtc': rtc.name, 'rtc_seconds': raw, 'system_unix_seconds': wall,
+                          'estimated_unix_seconds': restored, 'difference_seconds': restored - wall,
+                          'calibration_age_seconds': raw - anchor['rtc_seconds']}, indent=2))
+        return
+    # Restoration is a boot operation. Never step a running desktop backwards,
+    # or overwrite a time already newer than the offline estimate.
+    if not dry_run and time.clock_gettime(time.CLOCK_BOOTTIME) > 300:
+        raise InvalidState('restore is only allowed in the first five minutes after boot')
+    if restored <= wall + 1:
+        print('liuqin-rtc: system clock is already at or ahead of the RTC estimate')
+        return
+    if not dry_run:
+        time.clock_settime(time.CLOCK_REALTIME, restored)
+    print('liuqin-rtc: ' + ('would restore ' if dry_run else 'restored ')
+          + time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(restored)))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', choices=('restore', 'save', 'status'))
+    parser.add_argument('--trust-system-time', action='store_true',
+                        help='save an explicitly checked manual system time without NTP')
+    parser.add_argument('--dry-run', action='store_true')
+    args = parser.parse_args()
+    if args.trust_system_time and args.action != 'save':
+        parser.error('--trust-system-time is only valid with save')
+    if os.geteuid() != 0:
+        parser.error('run as root')
+    try:
+        STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
+        info = STATE.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077:
+            raise InvalidState('state directory must be private and root-owned')
+        fd = os.open(STATE / 'lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            operate(args.action, args.trust_system_time, args.dry_run)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print('liuqin-rtc: ' + str(error), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

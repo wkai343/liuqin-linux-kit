@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh the Liuqin RTC calibration while awake
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=5min
+AccuracySec=15s
+WakeSystem=no
+
+[Install]
+WantedBy=timers.target

@@ -30,6 +30,7 @@ def board_overlay(root, busybox):
               'usr/local/share/applications/liuqin-reboot-to-android','usr/share/polkit-1/actions/io.github.liuqin.switch')
     for source in sorted(overlay.rglob('*')):
         if not source.is_file() or source.is_symlink():continue
+        if '__pycache__' in source.parts or source.suffix in ('.pyc','.pyo'):continue
         rel=source.relative_to(overlay).as_posix()
         if rel=='etc/liuqin-gnome-root' or source.name=='README.md' or any(rel.startswith(p) for p in excluded) or 'org.gnome.Snapshot' in rel:continue
         target=root/rel;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(source,target)
@@ -113,7 +114,7 @@ def build(firmware, speakers, sensors, busybox, output, version):
             requires=['wireless-regdb'],summary='Liuqin stock firmware and protected speaker tuning')
         root=work/'board';board_overlay(root,busybox);docs(root,'liuqin-device-support')
         rpm(root,'liuqin-device-support',version,packages,requires=['systemd','systemd-udev','python3',
-            'NetworkManager','bluez','glib2','iproute'],summary='Liuqin board services independent of the desktop')
+            'NetworkManager','bluez','glib2','iproute','chrony'],summary='Liuqin board services independent of the desktop')
         root=work/'sensors';root.mkdir();sensor_payload(sensors,root);docs(root,'liuqin-sensors')
         rpm(root,'liuqin-sensors',version,packages,requires=['glib2','libgudev','polkit-libs','libqmi',
             'libqrtr-glib','qrtr-libs','protobuf-c','iio-sensor-proxy','systemd'],
