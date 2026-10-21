@@ -128,8 +128,9 @@ sudo journalctl -k -b -g 'initial DDIC wake|TDDI|resume failed closed'
 每轮确认两路数字电源实际关闭，再等待 0.5 秒；亮屏后连续观察 2 秒。
 轮测期间会话恢复服务暂停，核对显示周期、触摸恢复和固件加载计数，排除额外重载或后台重置。
 用户目视抽查及轮测后的触摸检查正常，原始输入采集确认有实际事件；这不等于逐帧人工观察了全部轮次。
-最终验证内核为 `7.3.0-liuqin-tddi-test-g2988c45f949b`，源码提交和源码树见
-[source.json](../build/kernel/source.json)；临时启动镜像 SHA256 为
+最终验证内核为 `7.3.0-liuqin-tddi-test-g2988c45f949b`，源码提交为
+`2988c45f949bd123249102f3ded06b1f3f1d97ef`，源码树为
+`8168f05d7346776d7e0d4aeb65f8514498dffaa7`；临时启动镜像 SHA256 为
 `6d6d199be45b23ca808de00413a6098021ff2616d3585d40fbbae21929c01c24`。
 该临时镜像使用 `plymouth.enable=0`，首次启动结果不替代带动画镜像的启动验收。
 

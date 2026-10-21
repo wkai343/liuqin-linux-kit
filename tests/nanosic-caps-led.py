@@ -132,6 +132,16 @@ static void kfree(void *p){assert(allocations>0);allocations--;free(p);}
                  'NANOSIC_I2C_RETRY_US', 'NANOSIC_RESET_ASSERT_MS', 'NANOSIC_RESET_READY_MS',
                  'NANOSIC_LED_COMMAND_LEN', 'NANOSIC_LED_RETRIES', 'NANOSIC_LED_RETRY_MS'):
         program += re.search(r'^#define\s+' + name + r'\s+[^\n]+', code, re.M)[0] + '\n'
+    if 'nanosic_report_posture' in code:
+        # Posture/report behavior is executed by nanosic-folio.py. Keep this
+        # harness focused on the existing LED transport and suspend paths.
+        program += r'''
+static void nanosic_release_inputs(struct nanosic *n){(void)n;}
+static void nanosic_report_posture(struct nanosic *n){input_report_switch(n->tablet_mode_input,SW_TABLET_MODE,!n->keyboard_connected);input_sync(n->tablet_mode_input);}
+static void nanosic_refresh_posture(struct nanosic *n){nanosic_report_posture(n);}
+static void nanosic_posture_stop(void *n){(void)n;}
+static void devm_release_action(struct device *d,void (*fn)(void *),void *p){(void)d;fn(p);}
+'''
     program += array + '\n'
     for name in ('nanosic_wake', 'nanosic_i2c_transfer', 'nanosic_queue_led', 'nanosic_mark_led_ready',
                  'nanosic_send_led_command', 'nanosic_led_work', 'nanosic_reset_bridge',

@@ -112,6 +112,9 @@ https://github.com/Seeker0472/liuqin-nixos
 The NanoSic Caps Lock management command also references that commit's
 pkgs/kernel/patches/0002-liuqin-input-hid-touchscreen.patch and
 docs/PORTING-NOTES.md, adapted to the local connection and suspend lifecycle.
+The folio posture adaptation references the same project's GPIO23 active-low
+back-fold measurements and host-side input suppression, with separate GPIO
+ownership, the existing MCU connector reports and explicit HID input releases.
 Original file-level authorship, SPDX identifiers and kernel licensing remain
 applicable. This source adaptation does not redistribute device firmware or
 private calibration data.

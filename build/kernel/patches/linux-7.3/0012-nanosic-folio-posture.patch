@@ -1,0 +1,505 @@
+Subject: [PATCH] hid: nanosic: derive folio posture and release covered inputs
+
+Combine the existing connector reports with the active-low GPIO23 folded
+hall. Observe GPIO10 through gpio-keys without claiming it twice. Release
+HID keys, buttons and contacts before suppressing folded/covered input,
+and resample posture before delivering pending input after resume.
+
+GPIO23 polarity and the need for host-side gating were measured by
+Seeker0472/liuqin-nixos at 73e8071e09880aeb47f0a427b9a65b8cc10927c4;
+see docs/PORTING-NOTES.md and pkgs/kernel/patches/0002-liuqin-input-hid-touchscreen.patch.
+This adaptation retains the local event-driven connection detection.
+
+diff --git a/Documentation/devicetree/bindings/input/nanosic,wn8030.yaml b/Documentation/devicetree/bindings/input/nanosic,wn8030.yaml
+index 04c023193..50fff3b07 100644
+--- a/Documentation/devicetree/bindings/input/nanosic,wn8030.yaml
++++ b/Documentation/devicetree/bindings/input/nanosic,wn8030.yaml
+@@ -54,6 +54,13 @@ properties:
+   vdd-supply:
+     description: Supply feeding the connector's pogo pins.
+ 
++  tablet-mode-gpios:
++    maxItems: 1
++    description: >
++      Optional hall switch asserted when the folio is folded onto the back.
++      It does not detect a detached keyboard. The driver combines this state
++      with connector reports from the MCU and uses both GPIO edges as IRQs.
++
+   wakeup-source: true
+ 
+ required:
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+index 6e4c19bd4..020d3757a 100644
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+@@ -183,12 +183,9 @@ gpio-keys {
+ 		pinctrl-names = "default";
+ 
+ 		/*
+-		 * Two hall switches, plain TLMM GPIOs (vendor hall_key/hall_key1,
+-		 * abl-final-fdt.dts gpio_keys): gpio10 closes with the folio lid,
+-		 * gpio23 is the second cover magnet.  SW_LID lets logind blank on close;
+-		 * Connector presence is reported by the NanoSic MCU.  The
+-		 * nanosic keyboard MCU reads the same magnets separately; these
+-		 * switches do not depend on it.
++		 * GPIO10 detects the closed lid. GPIO23 detects a folio folded
++		 * onto the back and belongs to the keyboard driver, which combines
++		 * it with the MCU's connector status for SW_TABLET_MODE.
+ 		 */
+ 		event-hall-lid {
+ 			label = "Hall Lid";
+@@ -199,10 +196,6 @@ event-hall-lid {
+ 			wakeup-source;
+ 		};
+ 
+-		/* GPIO23 is a cover magnet, not pogo-pin keyboard presence.
+-		 * The NanoSic MCU reports SW_TABLET_MODE on its own input device.
+-		 */
+-
+ 		key-volume-up {
+ 			label = "Volume Up";
+ 			linux,code = <KEY_VOLUMEUP>;
+@@ -806,22 +799,16 @@ keyboard@4c {
+ 		 * Nanosic_GPIO_sleep(true) means wake up, not sleep.
+ 		 */
+ 		wake-gpios = <&tlmm 42 GPIO_ACTIVE_HIGH>;
++		/* Low when folded onto the back; high when deployed or detached. */
++		tablet-mode-gpios = <&tlmm 23 GPIO_ACTIVE_LOW>;
+ 
+ 		pinctrl-0 = <&kb_data_irq_default>, <&kb_wakeup_irq_default>,
+-			    <&kb_reset_default>, <&kb_wake_default>;
++			    <&kb_reset_default>, <&kb_wake_default>, <&kb_folded_default>;
+ 		pinctrl-names = "default";
+ 
+ 		wakeup-source;
+ 
+-		/*
+-		 * Deliberately no hall-*-gpios. The vendor node lists
+-		 * hall_n_pin gpio10 and hall_s_pin gpio23, but those two are
+-		 * already claimed above as gpio-keys SW_LID / SW_TABLET_MODE,
+-		 * which is what logind and GNOME consume. A second consumer
+-		 * would take this node's probe down with -EBUSY, and would gain
+-		 * nothing: the vendor driver only forwarded those levels to a
+-		 * Xiaomi userspace daemon that does not exist here.
+-		 */
++		/* The driver observes SW_LID without requesting GPIO10 again. */
+ 	};
+ };
+ 
+@@ -1459,7 +1446,15 @@ bt_en_state: bt-en-state {
+ 
+ 	/* Vendor xiaomi_hall_default: input, pull-up, drive 2. */
+ 	hall_default: hall-default-state {
+-		pins = "gpio10", "gpio23";
++		pins = "gpio10";
++		function = "gpio";
++		drive-strength = <2>;
++		input-enable;
++		bias-pull-up;
++	};
++
++	kb_folded_default: kb-folded-default-state {
++		pins = "gpio23";
+ 		function = "gpio";
+ 		drive-strength = <2>;
+ 		input-enable;
+@@ -1475,9 +1470,7 @@ hall_default: hall-default-state {
+ 	 * together at drive 2 with bias disabled, xiaomi_keyboard_sleep_default
+ 	 * gives gpio42 a pull-down.
+ 	 *
+-	 * gpio10 and gpio23 came out of that same vendor group and are
+-	 * described above as hall_default, owned by gpio-keys. They are not
+-	 * part of this set.
++	 * The two hall pins have separate owners and pinctrl states above.
+ 	 */
+ 	kb_vdd_default: kb-vdd-default-state {
+ 		pins = "gpio62";
+diff --git a/drivers/hid/hid-nanosic.c b/drivers/hid/hid-nanosic.c
+index ec41bbd34..6de3b684e 100644
+--- a/drivers/hid/hid-nanosic.c
++++ b/drivers/hid/hid-nanosic.c
+@@ -22,12 +22,9 @@
+  *
+  * Deliberately absent, all of it present in the vendor driver:
+  *
+- *  - The hall GPIOs. tlmm 10 and 23 are already described as gpio-keys
+- *    cover-switch inputs in the device tree; the connector state is instead
+- *    reported by the keyboard MCU. A second GPIO consumer would fail
+- *    with -EBUSY and take the whole probe down with it. The vendor driver only
+- *    ever forwarded those levels to a Xiaomi userspace daemon. Do not "restore"
+- *    them here.
++ *  - A second owner for the lid GPIO. gpio-keys owns GPIO10 and reports
++ *    SW_LID; an input handler observes it without grabbing the device.
++ *    GPIO23 belongs here: it detects a folded folio, not connector presence.
+  *  - The /dev/nanodev0 character device. It exists to give that same daemon a
+  *    raw I2C write channel for keyboard-MCU firmware updates; an unauthenticated
+  *    path to write arbitrary bytes onto an I2C bus is not something to recreate.
+@@ -513,6 +510,17 @@ struct nanosic {
+ 	u64 connection_reports;
+ 	u64 status_query_report;
+ 
++	struct gpio_desc *tablet_mode_gpio;
++	struct delayed_work posture_work;
++	struct input_handler lid_handler;
++	struct input_handle lid_handle;
++	bool lid_closed;
++	bool folio_folded;
++	bool input_muted;
++	bool tablet_mode;
++	bool posture_stopping;
++	u8 last_touchpad[21];
++
+ 	/* Desired LED state survives detach, bridge reset and system sleep. */
+ 	struct delayed_work led_work;
+ 	bool led_ready;
+@@ -538,6 +546,192 @@ static const struct nanosic_packet *nanosic_packet_by_id(u8 id)
+ 	return NULL;
+ }
+ 
++/* Reset HID's report state as well as evdev, so an identical key after
++ * unfolding is a fresh press. Keep touch IDs to release the actual slots.
++ */
++static void nanosic_release_inputs(struct nanosic *nano)
++{
++	u8 report[21];
++	unsigned int i, finger;
++
++	lockdep_assert_held(&nano->lock);
++	for (i = 0; i < ARRAY_SIZE(nanosic_packets); i++) {
++		const struct nanosic_packet *pkt = &nanosic_packets[i];
++
++		if (pkt->dest < 0)
++			continue;
++		memset(report, 0, sizeof(report));
++		if (pkt->dest == NANOSIC_HID_TOUCHPAD) {
++			memcpy(report, nano->last_touchpad, sizeof(report));
++			report[1] = 0;
++			for (finger = 0; finger < NANOSIC_TP_CONTACTS; finger++)
++				report[2 + finger * 6] = BIT(2); /* confident, tip/range off */
++			report[20] = NANOSIC_TP_CONTACTS;
++		}
++		report[0] = pkt->id;
++		hid_input_report(nano->hid[pkt->dest], HID_INPUT_REPORT,
++				 report, pkt->report_len, 1);
++	}
++}
++
++static void nanosic_report_posture(struct nanosic *nano)
++{
++	bool muted = nano->folio_folded || READ_ONCE(nano->lid_closed);
++	bool tablet = nano->folio_folded || !nano->keyboard_connected;
++
++	lockdep_assert_held(&nano->lock);
++	if (muted && !nano->input_muted)
++		nanosic_release_inputs(nano);
++	nano->input_muted = muted;
++	if (tablet != nano->tablet_mode) {
++		nano->tablet_mode = tablet;
++		input_report_switch(nano->tablet_mode_input, SW_TABLET_MODE, tablet);
++		input_sync(nano->tablet_mode_input);
++		kobject_uevent(&nano->client->dev.kobj, KOBJ_CHANGE);
++	}
++}
++
++static void nanosic_refresh_posture(struct nanosic *nano)
++{
++	int folded;
++
++	lockdep_assert_held(&nano->lock);
++	if (nano->tablet_mode_gpio) {
++		folded = gpiod_get_value_cansleep(nano->tablet_mode_gpio);
++		if (folded >= 0)
++			nano->folio_folded = folded;
++	}
++	nanosic_report_posture(nano);
++}
++
++static void nanosic_posture_work(struct work_struct *work)
++{
++	struct nanosic *nano = container_of(to_delayed_work(work),
++					  struct nanosic, posture_work);
++
++	guard(mutex)(&nano->lock);
++	if (!nano->suspended && !nano->posture_stopping)
++		nanosic_refresh_posture(nano);
++}
++
++static irqreturn_t nanosic_fold_irq(int irq, void *data)
++{
++	struct nanosic *nano = data;
++
++	guard(mutex)(&nano->lock);
++	if (!nano->posture_stopping && !nano->suspended)
++		mod_delayed_work(system_wq, &nano->posture_work, msecs_to_jiffies(40));
++	return IRQ_HANDLED;
++}
++
++static void nanosic_lid_event(struct input_handle *handle, unsigned int type,
++			      unsigned int code, int value)
++{
++	struct nanosic *nano = handle->private;
++
++	/* Called with the input event spinlock held: no sleeping or HID injection. */
++	if (type == EV_SW && code == SW_LID) {
++		WRITE_ONCE(nano->lid_closed, !!value);
++		if (!READ_ONCE(nano->posture_stopping))
++			mod_delayed_work(system_wq, &nano->posture_work, 0);
++	}
++}
++
++static int nanosic_lid_connect(struct input_handler *handler,
++			       struct input_dev *dev, const struct input_device_id *id)
++{
++	struct nanosic *nano = handler->private;
++	struct input_handle *handle = &nano->lid_handle;
++	int ret;
++
++	if (!dev->name || strcmp(dev->name, "gpio-keys") || handle->dev)
++		return -ENODEV;
++	handle->dev = dev;
++	handle->handler = handler;
++	handle->name = "nanosic-lid";
++	handle->private = nano;
++	ret = input_register_handle(handle);
++	if (ret)
++		goto clear;
++	ret = input_open_device(handle);
++	if (ret) {
++		input_unregister_handle(handle);
++		goto clear;
++	}
++	/* Snapshot under the same lock as callbacks, including an already closed lid. */
++	scoped_guard(spinlock_irqsave, &dev->event_lock)
++		WRITE_ONCE(nano->lid_closed, test_bit(SW_LID, dev->sw));
++	mod_delayed_work(system_wq, &nano->posture_work, 0);
++	return 0;
++clear:
++	handle->dev = NULL;
++	return ret;
++}
++
++static void nanosic_lid_disconnect(struct input_handle *handle)
++{
++	struct nanosic *nano = handle->private;
++
++	input_close_device(handle);
++	input_unregister_handle(handle);
++	handle->dev = NULL;
++	WRITE_ONCE(nano->lid_closed, false);
++	if (!READ_ONCE(nano->posture_stopping))
++		mod_delayed_work(system_wq, &nano->posture_work, 0);
++}
++
++static const struct input_device_id nanosic_lid_ids[] = {
++	{
++		.flags = INPUT_DEVICE_ID_MATCH_EVBIT | INPUT_DEVICE_ID_MATCH_SWBIT,
++		.evbit = { BIT_MASK(EV_SW) },
++		.swbit = { BIT_MASK(SW_LID) },
++	},
++	{ },
++};
++
++static void nanosic_posture_stop(void *data)
++{
++	struct nanosic *nano = data;
++
++	scoped_guard(mutex, &nano->lock)
++		nano->posture_stopping = true;
++	/* Unregister waits for input callbacks before the final work cancellation. */
++	input_unregister_handler(&nano->lid_handler);
++	cancel_delayed_work_sync(&nano->posture_work);
++}
++
++static int nanosic_posture_start(struct nanosic *nano)
++{
++	struct device *dev = &nano->client->dev;
++	int irq, ret;
++
++	nano->lid_handler.private = nano;
++	nano->lid_handler.name = "nanosic-lid";
++	nano->lid_handler.id_table = nanosic_lid_ids;
++	nano->lid_handler.event = nanosic_lid_event;
++	nano->lid_handler.connect = nanosic_lid_connect;
++	nano->lid_handler.disconnect = nanosic_lid_disconnect;
++	ret = input_register_handler(&nano->lid_handler);
++	if (ret)
++		return ret;
++	ret = devm_add_action_or_reset(dev, nanosic_posture_stop, nano);
++	if (ret)
++		return ret;
++	if (nano->tablet_mode_gpio) {
++		irq = gpiod_to_irq(nano->tablet_mode_gpio);
++		if (irq < 0)
++			return irq;
++		ret = devm_request_threaded_irq(dev, irq, NULL, nanosic_fold_irq,
++				IRQF_ONESHOT | IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING,
++				"nanosic-fold", nano);
++		if (ret)
++			return ret;
++	}
++	guard(mutex)(&nano->lock);
++	nanosic_refresh_posture(nano);
++	return 0;
++}
++
+ static void nanosic_idle_work(struct work_struct *work)
+ {
+ 	struct nanosic *nano = container_of(to_delayed_work(work),
+@@ -839,9 +1033,9 @@ static bool nanosic_parse_connection_status(struct nanosic *nano, const u8 *p,
+ 	nano->keyboard_connected = !!(p[9] & BIT(0));
+ 	nano->connection_known = true;
+ 	nano->connection_reports++;
+-	input_report_switch(nano->tablet_mode_input, SW_TABLET_MODE,
+-			    !nano->keyboard_connected);
+-	input_sync(nano->tablet_mode_input);
++	if (changed && !nano->keyboard_connected)
++		nanosic_release_inputs(nano);
++	nanosic_report_posture(nano);
+ 	if (changed)
+ 		kobject_uevent(&nano->client->dev.kobj, KOBJ_CHANGE);
+ 	if (changed || power_changed)
+@@ -908,6 +1102,12 @@ static void nanosic_parse_frame(struct nanosic *nano, u8 *frame, size_t len)
+ 			nanosic_parse_connection_status(nano, p, pkt->wire_len);
+ 
+ 		if (pkt->dest >= 0) {
++			/* Do not let covered or folded keys wake the compositor. */
++			nanosic_report_posture(nano);
++			if (nano->input_muted)
++				goto next_packet;
++			if (pkt->dest == NANOSIC_HID_TOUCHPAD)
++				memcpy(nano->last_touchpad, p, pkt->report_len);
+ 			ret = hid_input_report(nano->hid[pkt->dest],
+ 					       HID_INPUT_REPORT, p,
+ 					       pkt->report_len, 1);
+@@ -916,6 +1116,7 @@ static void nanosic_parse_frame(struct nanosic *nano, u8 *frame, size_t len)
+ 					p[0], ret);
+ 		}
+ 
++next_packet:
+ 		p += pkt->wire_len;
+ 		left -= pkt->wire_len;
+ 	}
+@@ -1057,7 +1258,6 @@ static DEVICE_ATTR_RO(keyboard_status);
+ static irqreturn_t nanosic_data_irq(int irq, void *data)
+ {
+ 	struct nanosic *nano = data;
+-	u64 reports, errors;
+ 
+ 	guard(mutex)(&nano->lock);
+ 	nano->irq_count++;
+@@ -1130,11 +1330,35 @@ static ssize_t bridge_health_show(struct device *dev,
+ }
+ static DEVICE_ATTR_RO(bridge_health);
+ 
++static ssize_t folio_posture_show(struct device *dev,
++				  struct device_attribute *attr, char *buf)
++{
++	struct nanosic *nano = dev_get_drvdata(dev);
++
++	guard(mutex)(&nano->lock);
++	return sysfs_emit(buf, "folded=%d lid_closed=%d input_muted=%d tablet_mode=%d\n",
++			  nano->folio_folded, READ_ONCE(nano->lid_closed),
++			  nano->input_muted, nano->tablet_mode);
++}
++static DEVICE_ATTR_RO(folio_posture);
++
++static ssize_t tablet_mode_show(struct device *dev,
++				struct device_attribute *attr, char *buf)
++{
++	struct nanosic *nano = dev_get_drvdata(dev);
++
++	guard(mutex)(&nano->lock);
++	return sysfs_emit(buf, "%d\n", nano->tablet_mode);
++}
++static DEVICE_ATTR_RO(tablet_mode);
++
+ static struct attribute *nanosic_attrs[] = {
+ 	&dev_attr_firmware_version.attr,
+ 	&dev_attr_bridge_health.attr,
+ 	&dev_attr_keyboard_connected.attr,
+ 	&dev_attr_keyboard_status.attr,
++	&dev_attr_folio_posture.attr,
++	&dev_attr_tablet_mode.attr,
+ 	NULL
+ };
+ 
+@@ -1393,13 +1617,15 @@ static int nanosic_probe(struct i2c_client *client)
+ 	INIT_DELAYED_WORK(&nano->idle_work, nanosic_idle_work);
+ 	INIT_DELAYED_WORK(&nano->status_work, nanosic_status_work);
+ 	INIT_DELAYED_WORK(&nano->led_work, nanosic_led_work);
++	INIT_DELAYED_WORK(&nano->posture_work, nanosic_posture_work);
+ 	/* New input devices start with LEDs clear; later HID requests win. */
+ 	nano->caps_lock_known = true;
+ 
+-	/*
+-	 * Only these two lines and the rail. The hall GPIOs stay with
+-	 * gpio-keys; see the file header before adding any.
+-	 */
++	/* GPIO10 stays with gpio-keys; only the folded hall belongs here. */
++	nano->tablet_mode_gpio = devm_gpiod_get_optional(dev, "tablet-mode", GPIOD_IN);
++	if (IS_ERR(nano->tablet_mode_gpio))
++		return dev_err_probe(dev, PTR_ERR(nano->tablet_mode_gpio),
++				     "failed to get folded hall gpio\n");
+ 	nano->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
+ 	if (IS_ERR(nano->reset_gpio))
+ 		return dev_err_probe(dev, PTR_ERR(nano->reset_gpio),
+@@ -1443,10 +1669,14 @@ static int nanosic_probe(struct i2c_client *client)
+ 		return -ENOMEM;
+ 	input_set_capability(nano->tablet_mode_input, EV_SW, SW_TABLET_MODE);
+ 	/* A tablet with no confirmed keyboard starts in touch mode. */
++	nano->tablet_mode = true;
+ 	input_report_switch(nano->tablet_mode_input, SW_TABLET_MODE, 1);
+ 	ret = input_register_device(nano->tablet_mode_input);
+ 	if (ret)
+ 		return ret;
++	ret = nanosic_posture_start(nano);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to observe folio posture\n");
+ 
+ 	/*
+ 	 * The vendor device tree hands request_threaded_irq() a flag word of
+@@ -1483,6 +1713,7 @@ static void nanosic_remove(struct i2c_client *client)
+ 	/* Stop new callbacks while all devm-managed driver state is still live. */
+ 	struct nanosic *nano = i2c_get_clientdata(client);
+ 
++	devm_release_action(&client->dev, nanosic_posture_stop, nano);
+ 	scoped_guard(mutex, &nano->lock)
+ 		nano->led_stopping = true;
+ 	sysfs_remove_group(&client->dev.kobj, &nanosic_attr_group);
+@@ -1503,6 +1734,7 @@ static int nanosic_suspend(struct device *dev)
+ 	 */
+ 	scoped_guard(mutex, &nano->lock) {
+ 		WRITE_ONCE(nano->suspended, true);
++		nanosic_release_inputs(nano);
+ 		nano->caps_lock_valid = false;
+ 		nano->led_transport_ready = false;
+ 		gpiod_set_value_cansleep(nano->wake_gpio, 0);
+@@ -1525,6 +1757,7 @@ static int nanosic_suspend(struct device *dev)
+ restore_runtime:
+ 	scoped_guard(mutex, &nano->lock) {
+ 		WRITE_ONCE(nano->suspended, false);
++		nanosic_refresh_posture(nano);
+ 		nano->status_attempts = 0;
+ 		mod_delayed_work(system_wq, &nano->status_work, msecs_to_jiffies(200));
+ 		nanosic_wake(nano);
+@@ -1552,6 +1785,7 @@ static int nanosic_resume(struct device *dev)
+ 
+ 	scoped_guard(mutex, &nano->lock) {
+ 		WRITE_ONCE(nano->suspended, false);
++		nanosic_refresh_posture(nano);
+ 		nano->status_attempts = 0;
+ 		mod_delayed_work(system_wq, &nano->status_work, msecs_to_jiffies(200));
+ 		nanosic_wake(nano);
+diff --git a/tools/testing/selftests/hid/nanosic-static.py b/tools/testing/selftests/hid/nanosic-static.py
+index 3b8fa7a1d..a02b80a7e 100644
+--- a/tools/testing/selftests/hid/nanosic-static.py
++++ b/tools/testing/selftests/hid/nanosic-static.py
+@@ -372,7 +372,7 @@ class NanosicSourceContracts(unittest.TestCase):
+         remove = function_body("nanosic_remove")
+         self.assertEqual(set(re.findall(r"DEVICE_ATTR_RO\((\w+)\)", DRIVER)),
+                          {"firmware_version", "bridge_health", "keyboard_connected",
+-                          "keyboard_status"})
++                      "keyboard_status", "tablet_mode", "folio_posture"})
+         self.assertNotRegex(DRIVER, r"DEVICE_ATTR_(?:RW|WO)\(")
+         self.assertIn("sysfs_remove_group", remove)
+         self.assertIn(".remove = nanosic_remove", DRIVER)

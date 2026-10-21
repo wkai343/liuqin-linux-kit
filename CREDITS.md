@@ -21,6 +21,8 @@ Iris SM8450 平台适配参考 [Seeker0472/liuqin-nixos](https://github.com/Seek
 的 `0006-liuqin-media-iris.patch`，按新版固件描述接口调整；原文件中的 Qualcomm、Linaro 等作者与许可保留。
 Caps Lock 指示灯的原厂管理命令参考同一提交的 `0002-liuqin-input-hid-touchscreen.patch`
 和 `docs/PORTING-NOTES.md`，结合本项目的连接状态与睡眠生命周期接入。
+背折检测也参考该提交实测的 GPIO23 低电平语义和驱动侧输入屏蔽，结合本项目的
+MCU 连接事件、独立 GPIO 所有权及按键/触点释放处理实现。
 其余设备适配由本项目现有内核迁移，未直接替换为该项目的整套补丁。
 
 显示时钟的上游修正保留补丁作者、评审与来源链接；面板命令、PHY、背光和电池接口的

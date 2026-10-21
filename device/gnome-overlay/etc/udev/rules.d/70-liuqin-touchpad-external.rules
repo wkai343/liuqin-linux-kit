@@ -1,18 +1,5 @@
-# The magnetic keyboard's touchpad sits on the tablet's pogo-pin i2c bus, so
-# libinput falls back to its bus-type heuristic and classifies it as an
-# internal touchpad.  Internal touchpads are suspended whenever the tablet-mode
-# switch is on (libinput, evdev-mt-touchpad.c: tp_pair_tablet_mode_switch).
-#
-# That used to be worked around by inverting the hall polarity in the device
-# tree, which made the touchpad work but also stopped GNOME's automatic
-# rotation: Mutter only manages the built-in panel orientation while the seat
-# is in tablet mode (mutter, meta-seat-impl.c: update_touch_mode), so a hall
-# reporting "not tablet" in laptop position disables rotation and hides the
-# rotation lock.
-#
-# Tagging the touchpad external keeps libinput from suspending it while the
-# tablet-mode hall keeps its upstream polarity, so both the touchpad and
-# automatic rotation work.  The rule matches the input device name; the pogo
-# keyboard enumerates as "Xiaomi Touch" (touchpad), "Xiaomi Mouse",
-# "Xiaomi Keyboard" and "Xiaomi Consumer".
-ACTION=="add|change", SUBSYSTEM=="input", ATTRS{name}=="Xiaomi Touch", ENV{ID_INPUT_TOUCHPAD_INTEGRATION}="external"
+# Keep the historical filename for upgrades. The old external classification
+# bypassed tablet-mode suppression to work around an inverted hall mapping.
+# SW_TABLET_MODE now describes detach/fold correctly; the folio touchpad is
+# internal and should also follow libinput's lid and tablet-mode handling.
+ACTION=="add|change", SUBSYSTEM=="input", ATTRS{name}=="Xiaomi Touch", ENV{ID_INPUT_TOUCHPAD_INTEGRATION}="internal"

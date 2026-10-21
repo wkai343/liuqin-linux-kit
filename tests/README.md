@@ -14,6 +14,11 @@ devbox run -- python3 tests/docs-links.py
 测试使用临时目录、合成镜像或模拟设备，不刷写平板；QML、源码阶段验证和真机验收另行执行。
 CI 的实际测试列表以 `.github/workflows/` 为准，不能把本地入口通过等同于全部 CI 作业通过。
 
+`nanosic-folio.py` 按默认构建配方重建驱动并执行实际 C 函数，以模拟 GPIO/HID 检查
+连接、背折与合盖组合、修饰键/鼠标/三触点释放、屏蔽期间的状态报告、恢复采样和异常帧。
+使用 ASan/UBSan；`--source /path/to/kernel` 可检查准备好的内核源码。
+这不替代真实 HID/libinput、霍尔电平和 Plasma 合盖动作的设备验收。
+
 `fingerprint-release.py` 以合成 ROM 和模拟 `mcopy` 检查默认 Fedora rootfs 的指纹固件装配：
 十个文件进入归档、root/0600 权限、首次启动复用缓存，以及原厂镜像或分段损坏时停止。
 测试不需要原厂固件或平板；与其余 root 文件所有权测试一样，在 root 或映射为 root 的隔离环境执行。

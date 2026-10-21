@@ -45,6 +45,7 @@ jobs:
           python3 tests/source-build.py
           python3 tests/stock-rom.py
           python3 tests/fedora-build.py
+          python3 tests/nanosic-folio.py
           python3 tests/selinux-packaging.py
           python3 tests/fedora-fingerprint.py
           python3 tests/fingerprint-irq.py

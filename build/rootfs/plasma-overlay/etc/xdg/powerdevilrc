@@ -1,0 +1,19 @@
+# PowerDevil PowerButtonAction::TurnOffScreen = 64. Keep these as defaults:
+# a user's power settings continue to take precedence over /etc/xdg.
+[AC][SuspendAndShutdown]
+LidAction=64
+
+[AC][Display]
+LockBeforeTurnOffDisplay=true
+
+[Battery][SuspendAndShutdown]
+LidAction=64
+
+[Battery][Display]
+LockBeforeTurnOffDisplay=true
+
+[LowBattery][SuspendAndShutdown]
+LidAction=64
+
+[LowBattery][Display]
+LockBeforeTurnOffDisplay=true

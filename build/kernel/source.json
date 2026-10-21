@@ -20,12 +20,13 @@
     "build/kernel/patches/linux-7.3/0008-liuqin-prepare-margin-controls.patch",
     "build/kernel/patches/linux-7.3/0010-liuqin-tddi-calibration-recovery.patch",
     "build/kernel/patches/linux-7.3/0011-liuqin-initial-wake-after-first-frame.patch",
-    "build/kernel/patches/0034-liuqin-minimum-brightness.patch"
+    "build/kernel/patches/0034-liuqin-minimum-brightness.patch",
+    "build/kernel/patches/linux-7.3/0012-nanosic-folio-posture.patch"
   ],
-  "status": "Default 7.3 with Tianma initial wake after PPS/first frame, display-gated touch firmware and bounded calibration recovery. Temporary validation with Plymouth disabled: enabled 100 cycles, disabled fault at cycle 30, re-enabled 100 cycles; final build first boot and 20 cycles passed without recovery, with confirmed touch input. Persistent-boot, cold-boot, long-term, other-panel, gesture and minimum-brightness validation remain open. See docs/DISPLAY.md; pre-migration 6.17 with project adaptation also reproduced, not proof of an upstream regression.",
-  "expected_source_tree": "8168f05d7346776d7e0d4aeb65f8514498dffaa7",
-  "tested_source_commit": "2988c45f949bd123249102f3ded06b1f3f1d97ef",
-  "tested_source_tree": "8168f05d7346776d7e0d4aeb65f8514498dffaa7",
+  "status": "Default Linux 7.3 with Tianma first-frame wake/calibration fixes and NanoSic folio posture handling. The recorded source passed a temporary boot on 2026-10-21: greeter/desktop lid blanking and open recovery, folded tablet mode/rotation and keyboard suppression, held-Shift release and unfolded input/landscape recovery. Boot partition unchanged. Persistent boot, touchpad gestures/held contacts, sleep-time posture changes and long-term testing remain open. See docs/HARDWARE.md for folio evidence and docs/DISPLAY.md for the independent display validation baseline.",
+  "expected_source_tree": "a24bdfeeea734fab2c103f33b8e753de0e2a5e97",
+  "tested_source_commit": "b98f45849b3d52b125156f35a4fdbf91df778a56",
+  "tested_source_tree": "a24bdfeeea734fab2c103f33b8e753de0e2a5e97",
   "reference_repository": "https://github.com/Seeker0472/liuqin-nixos",
   "reference_commit": "73e8071e09880aeb47f0a427b9a65b8cc10927c4"
 }
