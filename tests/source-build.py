@@ -3,6 +3,7 @@
 """Exercise the official-root workflow on files and synthetic ROM structures."""
 import contextlib
 import codecs
+import errno
 import hashlib
 import importlib.util
 import io
@@ -365,30 +366,93 @@ class SourceTests(unittest.TestCase):
 
     def test_native_execution_needs_no_binfmt_mutation(self):
         with patch.object(helpers.os,'uname',return_value=type('Host',(),{'machine':'aarch64'})()), \
-             patch.object(helpers.subprocess,'run',side_effect=AssertionError('unexpected host mutation')):
+             patch.object(helpers.subprocess,'run',side_effect=AssertionError('unexpected host mutation')), \
+             patch.object(helpers.tempfile,'mkdtemp',side_effect=AssertionError('unexpected registry')):
             with helpers.arm64_execution():pass
 
-    @unittest.skipUnless(shutil.which('qemu-aarch64'),'Devbox static QEMU required')
-    def test_foreign_execution_removes_only_its_own_temporary_registration(self):
-        registry=self.root/'binfmt';registry.mkdir();(registry/'register').touch()
-        existing=registry/'unrelated';existing.write_text('original registration')
-        original_write=Path.write_bytes;registrations=[]
+    @contextlib.contextmanager
+    def fake_binfmt(self, *, truncated=False, failure=None):
+        """Model kernel files disappearing on unmount and an unusable host autofs."""
+        registry=self.root/'binfmt';registry.mkdir()
+        state={'commands':[],'registrations':[],'unmounted':{}}
+        original_write=Path.write_bytes;original_stat=Path.stat
+        def stat(path,*args,**kwargs):
+            if str(path).startswith('/proc/sys/fs/binfmt_misc'):
+                raise PermissionError(errno.EPERM,'host automount unavailable',str(path))
+            return original_stat(path,*args,**kwargs)
+        def run(command,**kwargs):
+            state['commands'].append(command)
+            self.assertEqual(command[-1],str(registry))
+            self.assertTrue(kwargs.get('check'))
+            if command[0]==failure:raise subprocess.CalledProcessError(1,command)
+            if command[0]=='mount':
+                self.assertEqual(command[:-1],['mount','-t','binfmt_misc','binfmt_misc'])
+                (registry/'register').touch()
+                (registry/'status').write_text('enabled\n')
+                (registry/'unrelated').write_text('original registration')
+            elif command[0]=='umount':
+                state['unmounted']={path.name:path.read_text() for path in registry.iterdir()}
+                for path in registry.iterdir():path.unlink()
+            else:self.fail('unexpected command: '+repr(command))
+            return subprocess.CompletedProcess(command,0)
         def write(path,data):
-            result=original_write(path,data)
             if path==registry/'register':
+                if failure=='register':raise PermissionError(errno.EPERM,'registration denied')
                 fields=data.split(b':');name=fields[1].decode()
                 magic=codecs.escape_decode(fields[4])[0];mask=codecs.escape_decode(fields[5])[0]
-                (registry/name).write_text('enabled\ninterpreter '+fields[6].decode()+'\nflags: '+fields[7].decode()+'\noffset 0\nmagic '+magic.hex()+'\nmask '+mask.hex()+'\n')
-                registrations.append(name)
-            return result
-        def directory(value):return registry if str(value)=='/proc/sys/fs/binfmt_misc' else Path(value)
-        with patch.object(helpers,'Path',side_effect=directory),patch.object(Path,'write_bytes',write), \
+                record='enabled\ninterpreter '+fields[6].decode()+'\nflags: '+fields[7].decode()+'\noffset 0\nmagic '+magic.hex()+'\nmask '+mask.hex()+'\n'
+                (registry/name).write_text('enabled\nmagic 7f454c46020101\n' if truncated else record)
+                state['registrations'].append(name)
+            return original_write(path,data)
+        with patch.object(helpers.tempfile,'mkdtemp',return_value=str(registry)), \
+             patch.object(helpers.subprocess,'run',side_effect=run), \
+             patch.object(Path,'stat',stat),patch.object(Path,'write_bytes',write), \
              patch.object(helpers.os,'uname',return_value=type('Host',(),{'machine':'x86_64'})()):
-            with self.assertRaisesRegex(RuntimeError,'simulated'):
-                with helpers.arm64_execution():raise RuntimeError('simulated failure')
-        self.assertEqual(len(registrations),1)
-        self.assertEqual((registry/registrations[0]).read_text(),'-1')
-        self.assertEqual(existing.read_text(),'original registration')
+            yield registry,state
+
+    @unittest.skipUnless(shutil.which('qemu-aarch64'),'Devbox static QEMU required')
+    def test_foreign_execution_bypasses_denied_host_automount_and_cleans_up(self):
+        for fails in (False,True):
+            with self.subTest(command_fails=fails),self.fake_binfmt() as (registry,state):
+                with self.assertRaisesRegex(RuntimeError,'simulated') if fails else contextlib.nullcontext():
+                    with helpers.arm64_execution():
+                        self.assertTrue(registry.is_dir())
+                        self.assertEqual(len(state['registrations']),1)
+                        self.assertTrue((registry/state['registrations'][0]).read_text().startswith('enabled\n'))
+                        if fails:raise RuntimeError('simulated failure')
+                self.assertEqual(state['unmounted'][state['registrations'][0]],'-1')
+                self.assertEqual(state['unmounted']['unrelated'],'original registration')
+                self.assertEqual(state['unmounted']['status'],'enabled\n')
+                self.assertEqual([cmd[0] for cmd in state['commands']],['mount','umount'])
+                self.assertFalse(registry.exists())
+
+    @unittest.skipUnless(shutil.which('qemu-aarch64'),'Devbox static QEMU required')
+    def test_failed_binfmt_mount_removes_directory_without_unmounting(self):
+        with self.fake_binfmt(failure='mount') as (registry,state):
+            with self.assertRaises(subprocess.CalledProcessError):
+                with helpers.arm64_execution():self.fail('mount failure must stop execution')
+            self.assertEqual([cmd[0] for cmd in state['commands']],['mount'])
+            self.assertFalse(registry.exists())
+
+    @unittest.skipUnless(shutil.which('qemu-aarch64'),'Devbox static QEMU required')
+    def test_failed_binfmt_registration_unmounts_without_changing_existing_rules(self):
+        with self.fake_binfmt(failure='register') as (registry,state):
+            with self.assertRaises(PermissionError):
+                with helpers.arm64_execution():self.fail('registration failure must stop execution')
+            self.assertEqual(state['registrations'],[])
+            self.assertEqual(state['unmounted']['unrelated'],'original registration')
+            self.assertEqual(state['unmounted']['status'],'enabled\n')
+            self.assertFalse(registry.exists())
+
+    @unittest.skipUnless(shutil.which('qemu-aarch64'),'Devbox static QEMU required')
+    def test_failed_binfmt_unmount_preserves_live_registry(self):
+        with self.fake_binfmt(failure='umount') as (registry,state):
+            with self.assertRaises(subprocess.CalledProcessError):
+                with helpers.arm64_execution():pass
+            self.assertTrue(registry.is_dir())
+            self.assertEqual((registry/'unrelated').read_text(),'original registration')
+            self.assertEqual((registry/'status').read_text(),'enabled\n')
+            self.assertEqual((registry/state['registrations'][0]).read_text(),'-1')
 
     def test_binfmt_record_keeps_complete_arm64_identity_and_rejects_host_elf(self):
         registration=helpers.arm64_registration('liuqin-test','/usr/bin/qemu-aarch64')
@@ -409,22 +473,12 @@ class SourceTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('qemu-aarch64'),'Devbox static QEMU required')
     def test_truncated_binfmt_readback_stops_before_execution_and_removes_owned_rule(self):
-        registry=self.root/'binfmt';registry.mkdir();(registry/'register').touch()
-        existing=registry/'unrelated';existing.write_text('original registration')
-        original_write=Path.write_bytes;registered=[]
-        def write(path,data):
-            result=original_write(path,data)
-            if path==registry/'register':
-                name=data.split(b':',2)[1].decode();registered.append(name)
-                (registry/name).write_text('enabled\nmagic 7f454c46020101\nmask fffffffffffefe\n')
-            return result
-        def directory(value):return registry if str(value)=='/proc/sys/fs/binfmt_misc' else Path(value)
-        with patch.object(helpers,'Path',side_effect=directory),patch.object(Path,'write_bytes',write), \
-             patch.object(helpers.os,'uname',return_value=type('Host',(),{'machine':'x86_64'})()):
+        with self.fake_binfmt(truncated=True) as (registry,state):
             with self.assertRaisesRegex(ValueError,'规则回读不完整'):
                 with helpers.arm64_execution():self.fail('invalid handler must not reach command execution')
-        self.assertEqual((registry/registered[0]).read_text(),'-1')
-        self.assertEqual(existing.read_text(),'original registration')
+            self.assertEqual(state['unmounted'][state['registrations'][0]],'-1')
+            self.assertEqual(state['unmounted']['unrelated'],'original registration')
+            self.assertFalse(registry.exists())
 
     def test_chroot_uses_host_executable_before_setting_target_path(self):
         with patch.object(root_builder.shutil,'which',return_value='/host/tools/chroot'), \
