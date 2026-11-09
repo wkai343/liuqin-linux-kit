@@ -55,10 +55,12 @@ Fedora 基础系统来自 Fedora Project 的官方 ARM64 Container Base，固定
 本项目不再分发 Fedora 向导的自编译版本或账号创建补丁。
 
 Fedora 的 GPU 使用率监测使用 KDE 的 [KSystemStats](https://invent.kde.org/plasma/ksystemstats)，
-包括 Arjen Hiemstra、David Edmundson、David Redondo 等贡献者。固定源码见
+包括 Arjen Hiemstra、David Edmundson、David Redondo 等贡献者。守护进程与其他统计插件使用 Fedora 官方包，
+本项目仅编译并独立分发带 Adreno 适配的 GPU 插件。固定源码见
 `build/rootfs/fedora-stats-source.json`；本项目的 Adreno 平台传感器与补丁位于
 `device/ksystemstats/`。原有 AMD、Intel、NVIDIA 后端及作者声明保留，软件包携带
-上游许可证、本项目适配源码和对应来源记录；这些组件按各自文件的 GPL 等声明分发。
+上游许可证、带补丁的对应源码归档、本项目适配源码、构建脚本和对应来源记录；
+这些组件按各自文件的 GPL 等声明分发。
 
 NanoSic 键盘连接状态适配保留主线驱动作者与 GPL 声明；协议参考 Xiaomi 开源内核
 `pipa-t-oss` 的 `drivers/input/keyboard/nanosic_driver_v2/nano_i2c.c`，

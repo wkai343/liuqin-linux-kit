@@ -82,10 +82,10 @@ class FedoraFlow(Flow):
     def stats_rpm(self):
         archive=self.target_runtime_root();source=self.stats_archive()
         record=json.loads((PROJECT/'build/rootfs/fedora-stats-source.json').read_text())
-        name='ksystemstats-'+record['version']+'-'+record['package_release']+'.aarch64.rpm'
+        name=record['package_name']+'-'+record['version']+'-'+record['package_release']+'.aarch64.rpm'
         def build(out):
             self.target_action('stats',archive,out/'assembled',stats_source=source,jobs=self.data.get('jobs',12))
-        return self.stage('fedora-adreno-stats',dict(base=sha(archive),source=sha(source),
+        return self.stage('fedora-adreno-gpu',dict(base=sha(archive),source=sha(source),
             source_lock=sha(PROJECT/'build/rootfs/fedora-stats-source.json'),
             builder=sha(PROJECT/'build/lib/fedora_stats.py'),
             packager=sha(PROJECT/'build/lib/rpm_package.py'),

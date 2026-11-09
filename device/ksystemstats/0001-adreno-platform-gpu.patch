@@ -8,7 +8,7 @@
  #include "LinuxAmdGpu.h"
  #include "LinuxIntelGpu.h"
  #include "LinuxNvidiaGpu.h"
-@@ -78,6 +79,19 @@
+@@ -97,6 +98,19 @@
      }
  
      udev_enumerate_unref(enumerate);
@@ -30,15 +30,15 @@
  void LinuxBackend::stop()
 --- a/plugins/gpu/CMakeLists.txt
 +++ b/plugins/gpu/CMakeLists.txt
-@@ -9,7 +9,7 @@
- endif()
+@@ -12,7 +12,7 @@
+     include(CheckIncludeFile)
+     check_include_file("drm/xe_drm.h" HAVE_XE_DRM_H)
  
- if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 -    target_sources(ksystemstats_plugin_gpu PRIVATE LinuxAmdGpu.cpp LinuxIntelGpu.cpp LinuxNvidiaGpu.cpp LinuxBackend.cpp NvidiaGpu.cpp NvidiaSmiProcess.cpp)
 +    target_sources(ksystemstats_plugin_gpu PRIVATE LinuxAdrenoGpu.cpp LinuxAmdGpu.cpp LinuxIntelGpu.cpp LinuxNvidiaGpu.cpp LinuxBackend.cpp NvidiaGpu.cpp NvidiaSmiProcess.cpp)
  
-     add_executable(ksystemstats_intel_helper IntelHelper.cpp)
-     configure_file(IntelHelperLocation.h.cmake IntelHelperLocation.h)
+     if(HAVE_XE_DRM_H)
+         target_sources(ksystemstats_plugin_gpu PRIVATE LinuxXeGpu.cpp)
 --- a/plugins/gpu/AllGpus.cpp
 +++ b/plugins/gpu/AllGpus.cpp
 @@ -9,6 +9,7 @@

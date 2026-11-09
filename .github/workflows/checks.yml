@@ -95,6 +95,7 @@ jobs:
           python3 tests/device-overlays.py
           python3 tests/stock-rom.py
           python3 tests/fedora-build.py
+          python3 tests/fedora-stats.py
           python3 tests/fedora-startup.py
           python3 tests/nanosic-folio.py
           python3 tests/selinux-packaging.py
@@ -147,6 +148,14 @@ jobs:
       - name: Adreno 传感器读取
         run: |
           sudo apt-get install --no-install-recommends -y g++ pkg-config qt6-base-dev
+          python3 - <<'PY'
+          import json, sys
+          from pathlib import Path
+          sys.path.insert(0, 'build/lib')
+          from source_build import download
+          record = json.loads(Path('build/rootfs/fedora-stats-source.json').read_text())
+          download(record['url'], Path('inputs/ksystemstats') / record['archive'], record['sha256'])
+          PY
           python3 tests/adreno-stats.py
       - name: KWin 平板模式回归
         run: |

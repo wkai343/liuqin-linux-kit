@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 """Compile the real read-only Adreno reader and apply the pinned upstream patch."""
 import argparse
+import json
 from pathlib import Path
 import shlex
 import shutil
@@ -24,7 +25,8 @@ with tempfile.TemporaryDirectory() as directory:
     subprocess.run(['c++','-std=c++17','-fPIC','-I'+str(PROJECT/'device/ksystemstats'),
         str(PROJECT/'tests/adreno-sysfs.cpp'),'-o',str(work/'reader'),*shlex.split(flags)],check=True)
     subprocess.run([str(work/'reader')],check=True)
-    archive=args.source_archive or PROJECT/'inputs/ksystemstats/ksystemstats-6.7.5.tar.xz'
+    record=json.loads((PROJECT/'build/rootfs/fedora-stats-source.json').read_text())
+    archive=args.source_archive or PROJECT/'inputs/ksystemstats'/record['archive']
     if archive.is_file():
         source(work,archive)
         print('PASS: pinned KSystemStats source and exact upstream Adreno patch')

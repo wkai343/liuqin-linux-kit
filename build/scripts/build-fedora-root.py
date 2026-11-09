@@ -33,7 +33,7 @@ DEVICE_PACKAGES=['btrfs-progs','NetworkManager','NetworkManager-wifi','wpa_suppl
 # Fedora keeps KWin's upstream licenses in -doc; retain it explicitly.
 PLASMA_PACKAGES=['plasma-desktop','plasma-workspace','kwin','kwin-doc','plasma-login-manager','plasma-nm',
                  'plasma-pa','polkit-kde','powerdevil','kscreen','bluedevil','xdg-desktop-portal-kde',
-                 'plasma-keyboard','qt6-qtvirtualkeyboard','qt6-qtwayland','mesa-dri-drivers',
+                 'ksystemstats','plasma-keyboard','qt6-qtvirtualkeyboard','qt6-qtwayland','mesa-dri-drivers',
                  'mesa-vulkan-drivers','konsole','dolphin','qt6-qtlocation','qt6-qtpositioning',
                  'kf6-kirigami','kf6-kirigami-addons','kf6-kitemmodels','kf6-kcmutils','kf6-ksvg',
                  'zram-generator','zram-generator-defaults','ocean-sound-theme','sound-theme-freedesktop']
@@ -273,6 +273,9 @@ def check_desktop_runtime(root, *, first_boot_setup=False):
     # alone do not guarantee that battery reporting is available.
     required=['usr/bin/dbus-run-session','usr/lib64/security/pam_systemd.so',
                  'usr/sbin/ip','usr/bin/startplasma-wayland','usr/bin/startplasma-login-wayland',
+                 'usr/bin/ksystemstats',
+                 'usr/lib64/liuqin/qt6/plugins/ksystemstats/ksystemstats_plugin_gpu.so',
+                 'usr/lib/systemd/user/plasma-ksystemstats.service.d/50-liuqin-gpu.conf',
                  'usr/bin/upower','usr/libexec/upowerd','usr/lib/systemd/system/upower.service',
                  'usr/share/dbus-1/system-services/org.freedesktop.UPower.service']
     if first_boot_setup:
@@ -285,6 +288,8 @@ def check_desktop_runtime(root, *, first_boot_setup=False):
     chroot(root,['/usr/bin/dbus-run-session','--','/usr/bin/true'],timeout=30)
     chroot(root,['/usr/bin/python3','-c',
         'import ctypes; ctypes.CDLL("/usr/lib64/security/pam_systemd.so")'],timeout=30)
+    chroot(root,['/usr/bin/python3','-c',
+        'import ctypes; ctypes.CDLL("/usr/lib64/liuqin/qt6/plugins/ksystemstats/ksystemstats_plugin_gpu.so")'],timeout=30)
     chroot(root,['/usr/sbin/ip','-Version'],timeout=30)
     # --version prints both client and daemon versions, requiring a live
     # system bus. The image assembly namespace deliberately has none.

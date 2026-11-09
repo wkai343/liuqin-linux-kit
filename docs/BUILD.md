@@ -302,11 +302,15 @@ Fedora 登录管理器默认接键盘横屏、平板模式自动旋转，其保�
 | 组件 | 构建方式与说明 |
 | --- | --- |
 | 传感器 | 固定上游源码与补丁，在目标发行版 ARM64 根中编译，使用该发行版运行库 |
-| Adreno 监测 | 按 `fedora-stats-source.json` 构建带平台适配的 KSystemStats RPM；官方更高版本可能替换它 |
+| Adreno 监测 | 使用 Fedora 官方 `ksystemstats`；按 `fedora-stats-source.json`（当前源码 6.8.2）只编译 GPU 插件，独立打包为 `liuqin-ksystemstats-gpu`，由统计服务专用插件目录加载；见[GPU 统计](../device/ksystemstats/README.md) |
 | 指纹 | 按 `device/fingerprint/oem/SOURCE_LOCK.json` 构建专用 RPM；默认 Fedora rootfs 从已校验的 `NON-HLOS.bin` 加入十个原厂指纹固件文件，私有库不替换系统 libfprint；见[指纹说明](FINGERPRINT.md) |
 | Ubuntu 初始化向导 | 按 `plasma-setup-source.json` 编译，保留完成状态与失败账号回退补丁；Fedora 直接用官方包 |
 
 默认 Fedora 使用官方 KWin、欢迎中心及其余桌面软件。`device/kwin/` 为研究与回归材料，不参与镜像构建。
+GPU 插件包不拥有官方守护进程或标准插件目录中的文件，普通 `ksystemstats` 更新不会覆盖该插件。
+Qt/libksysguard ABI 更新仍需验证；装配时会检查独立插件文件、服务 drop-in 和动态库加载，
+依赖缺失时停止构建。插件的带补丁源码归档、构建脚本和 ABI 需求随包保留，
+构建依赖版本记录在 GPU 构建阶段的 `stats-packages.tsv`，桌面包版本记录在镜像的 `packages.tsv`。
 设备包提供稳定的传感器服务、HiFi 音频配置和本机校准导入；固件来源与许可见 [CREDITS](../CREDITS.md)。
 
 ## 6. 缓存与排障

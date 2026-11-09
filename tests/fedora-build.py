@@ -234,13 +234,10 @@ class FedoraTests(unittest.TestCase):
         terminate.assert_not_called()
 
     def test_missing_battery_service_prevents_desktop_publication(self):
-        root=self.work/'root'
+        root=self.desktop_fixture()
         # A working Plasma session and a CLI alone are insufficient: the
         # on-demand system service must be present even without weak deps.
-        for name in ('usr/bin/dbus-run-session','usr/lib64/security/pam_systemd.so',
-                     'usr/sbin/ip','usr/bin/startplasma-wayland','usr/bin/startplasma-login-wayland',
-                     'usr/bin/upower','usr/libexec/upowerd'):
-            path=root/name;path.parent.mkdir(parents=True,exist_ok=True);path.touch()
+        (root/'usr/lib/systemd/system/upower.service').unlink()
         with patch.object(root_builder,'chroot',side_effect=AssertionError('must not run')):
             with self.assertRaisesRegex(ValueError,'upower.service'):
                 root_builder.check_desktop_runtime(root)
@@ -257,6 +254,9 @@ class FedoraTests(unittest.TestCase):
         root=self.work/'root'
         for name in ('usr/bin/dbus-run-session','usr/lib64/security/pam_systemd.so',
                      'usr/sbin/ip','usr/bin/startplasma-wayland','usr/bin/startplasma-login-wayland',
+                     'usr/bin/ksystemstats',
+                     'usr/lib64/liuqin/qt6/plugins/ksystemstats/ksystemstats_plugin_gpu.so',
+                     'usr/lib/systemd/user/plasma-ksystemstats.service.d/50-liuqin-gpu.conf',
                      'usr/bin/upower','usr/libexec/upowerd','usr/lib/systemd/system/upower.service',
                      'usr/share/dbus-1/system-services/org.freedesktop.UPower.service'):
             path=root/name;path.parent.mkdir(parents=True,exist_ok=True);path.touch()
@@ -281,6 +281,14 @@ class FedoraTests(unittest.TestCase):
         with patch.object(root_builder,'chroot',side_effect=chroot),self.assertRaises(subprocess.CalledProcessError):
             root_builder.check_desktop_runtime(root)
 
+    def test_gpu_plugin_loader_failure_stops_image_publication(self):
+        root=self.desktop_fixture()
+        def chroot(_root,command,**_kwargs):
+            if command[0]=='/usr/bin/python3' and 'ksystemstats_plugin_gpu.so' in command[-1]:
+                raise subprocess.CalledProcessError(1,command,stderr='missing GPU plugin ABI')
+        with patch.object(root_builder,'chroot',side_effect=chroot),self.assertRaises(subprocess.CalledProcessError):
+            root_builder.check_desktop_runtime(root)
+
     def test_preconfigured_account_also_repairs_incomplete_skeleton_copy(self):
         root=self.work/'root';skel=root/'etc/skel';skel.mkdir(parents=True)
         for name in ('.bashrc','.bash_profile'):(skel/name).write_text('# official default '+name+'\n')
@@ -299,7 +307,7 @@ class FedoraTests(unittest.TestCase):
         flow=FedoraFlow(data,lambda *_a,**_k:self.fail('unexpected build'))
         archive=self.work/'base.tar';archive.write_bytes(b'base')
         devices=self.work/'device-rpms';devices.mkdir();(devices/'liuqin-device.rpm').write_bytes(b'device')
-        stats=self.work/'ksystemstats.rpm';stats.write_bytes(b'stats')
+        stats=self.work/'liuqin-ksystemstats-gpu.rpm';stats.write_bytes(b'stats')
         fingerprint=self.work/'liuqin-fingerprint.rpm';fingerprint.write_bytes(b'fingerprint')
         def stage(_name,_inputs,build,_artifacts):
             output=self.work/'stage';output.mkdir();build(output);return output
@@ -313,7 +321,7 @@ class FedoraTests(unittest.TestCase):
             flow.apps()
         self.assertEqual(action.call_args.args[0],'apps')
         rpms=action.call_args.kwargs['rpms']
-        self.assertEqual(sorted(p.name for p in rpms.iterdir()),['ksystemstats.rpm','liuqin-device.rpm','liuqin-fingerprint.rpm'])
+        self.assertEqual(sorted(p.name for p in rpms.iterdir()),['liuqin-device.rpm','liuqin-fingerprint.rpm','liuqin-ksystemstats-gpu.rpm'])
         self.assertIn('Fedora 官方 plasma-setup 软件包',flow.plan()['steps'])
 
     def test_official_setup_installation_follows_first_boot_recipe(self):
@@ -323,6 +331,7 @@ class FedoraTests(unittest.TestCase):
                 requested=dnf.call_args_list[0].args
                 self.assertEqual('plasma-setup' in requested,enabled)
                 self.assertIn('plasma-keyboard',requested)
+                self.assertIn('ksystemstats',requested)
                 self.assertIn('kate',requested)
 
     def test_kernel_install_with_satisfied_dependencies_stays_offline(self):

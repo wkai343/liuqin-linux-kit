@@ -14,6 +14,13 @@ devbox run -- python3 tests/docs-links.py
 测试使用临时目录、合成镜像或模拟设备，不刷写平板；QML、源码阶段验证和真机验收另行执行。
 CI 的实际测试列表以 `.github/workflows/` 为准，不能把本地入口通过等同于全部 CI 作业通过。
 
+`fedora-stats.py` 用真实 ARM64 共享库生成 GPU 独立 RPM，检查文件清单只包含私有插件、
+服务 drop-in 和许可/源码记录，不占用官方守护进程或标准插件路径；同时检查共享库与 Qt/KDE
+版本依赖、错误架构和符号链接拒绝，以及构建流程的独立包产物路由。需要 ARM64 C 编译器、
+RPM 工具和 pyelftools，已接入 Devbox 测试与 CI。
+`adreno-stats.py` 另用 Qt6Core 编译真实 sysfs 读取函数，并在固定源码归档存在时验证补丁。
+这两项离线检查不代替设备上的插件加载、实际 GPU 负载和睡眠恢复测试。
+
 `device-overlays.py` 检查板级/GNOME 层的组合、缺失层、同名及文件/目录冲突、已有目标文件和父路径保护，
 并使用合成编译输入构建、解包 GNOME DEB，核对两层覆盖变量、schema、依赖和维护脚本。
 它不验证 GNOME 控制中心或 ARM64 辅助程序的编译；`source-build.py` 另覆盖通用 DEB
