@@ -126,20 +126,29 @@ def arm64_execution():
     with open(interpreter, 'rb') as stream:
         if any(segment['p_type'] == 'PT_INTERP' for segment in ELFFile(stream).iter_segments()):
             raise ValueError('跨架构构建要求静态 QEMU。')
-    registry = Path('/proc/sys/fs/binfmt_misc')
-    if not (registry / 'register').exists():
-        subprocess.run(['mount', '-t', 'binfmt_misc', 'binfmt_misc', str(registry)], check=True)
-    name = 'liuqin-' + uuid.uuid4().hex[:16]
-    registration = arm64_registration(name, interpreter)
-    entry = registry / name
+    # The conventional /proc path may be an untriggered systemd automount.
+    # In a private mount namespace even stat(register) can fail with EPERM.
+    # Mount directly on an owned directory without touching that automount.
+    registry = Path(tempfile.mkdtemp(prefix='liuqin-binfmt-'))
+    mounted = False
     try:
-        (registry / 'register').write_bytes(registration)
-        fields = dict(line.split(' ', 1) for line in entry.read_text().splitlines() if ' ' in line)
-        if fields.get('magic') != ARM64_MAGIC.hex() or fields.get('mask') != ARM64_MASK.hex() or fields.get('interpreter') != interpreter or fields.get('offset') != '0' or fields.get('flags:') != 'F':
-            raise ValueError('ARM64 执行规则回读不完整，已停止并清理临时规则。')
-        yield
+        subprocess.run(['mount', '-t', 'binfmt_misc', 'binfmt_misc', str(registry)], check=True)
+        mounted = True
+        name = 'liuqin-' + uuid.uuid4().hex[:16]
+        registration = arm64_registration(name, interpreter)
+        entry = registry / name
+        try:
+            (registry / 'register').write_bytes(registration)
+            fields = dict(line.split(' ', 1) for line in entry.read_text().splitlines() if ' ' in line)
+            if fields.get('magic') != ARM64_MAGIC.hex() or fields.get('mask') != ARM64_MASK.hex() or fields.get('interpreter') != interpreter or fields.get('offset') != '0' or fields.get('flags:') != 'F':
+                raise ValueError('ARM64 执行规则回读不完整，已停止并清理临时规则。')
+            yield
+        finally:
+            if entry.exists(): entry.write_text('-1')
     finally:
-        if entry.exists(): entry.write_text('-1')
+        if mounted: subprocess.run(['umount', str(registry)], check=True)
+        # Do not recursively clean a live registry if unmounting failed.
+        registry.rmdir()
 
 
 @contextlib.contextmanager
