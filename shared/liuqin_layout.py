@@ -1,32 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Partition layout engine for the liuqin installer.
+"""Read and validate the factory GPT for the userdata single-root installer.
 
-One engine serves all installation modes.  Slot assignment is not a layout
-decision and is not made here: the installer (``installer/install-liuqin.py``,
-``boot_slots``) boots both systems from slot A in the dual layout, with the
-Android boot image rotated through ``boot_a`` by ``liuqin-switch``, and keeps
-Ubuntu in slot B in the Linux-only layout.  The modes differ here only in the
-size given to the Android ``userdata`` partition and in whether the Android
-system is provisioned at all.
-
-The tail of ``sda`` is laid out as::
-
-    userdata (Android, shrunk in place)  ->  linux_root  ->  linux_home
-
-``userdata`` is the last partition on the disk and nothing follows it, so no
-existing partition ever moves.  ``userdata`` keeps its original type GUID,
-unique GUID, name and attribute bits; only its end sector changes.  With an
-Android size of zero the partition is deleted outright and Ubuntu receives the
-whole tail.
-
-``linux-single`` leaves the factory partition table unchanged and formats the
-whole userdata as LIUQIN_ROOT. /home stays inside native-root on that volume.
-
-Every function here is pure: it parses ``sgdisk`` output, computes a plan and
-renders the ``sgdisk`` arguments that realize it.  Nothing in this module opens
-a device, so the same code runs against the tablet and against the synthetic
-disk image used by ``tests/installer-layout.py``.
+The installation formats userdata as LIUQIN_ROOT without changing its GPT
+boundaries. /home stays inside native-root on the same ext4/Btrfs volume.
+All planning is pure; device access belongs to the installer transport.
 """
 from __future__ import annotations
 
@@ -35,46 +13,22 @@ import re
 GIB = 1024 ** 3
 MIB = 1024 ** 2
 
-# The only logical sector size this device port supports.  The test image uses
-# 512-byte sectors with identical byte geometry, so the engine itself works in
-# bytes and converts at the sgdisk boundary; the 4096-byte requirement is a
-# device-identity check, enforced separately by check_stock_device().
+# Only the validated 4096-byte logical-sector geometry is supported.
 DEVICE_SECTOR_SIZE = 4096
 STOCK_PARTITION_COUNT = 35
 ALIGNMENT = 4 * MIB
 
 USERDATA_NAME = 'userdata'
-ROOT_NAME = 'linux_root'
-HOME_NAME = 'linux_home'
 ROOT_LABEL = 'LIUQIN_ROOT'
-HOME_LABEL = 'LIUQIN_HOME'
-METADATA_NAME = 'metadata'
-LINUX_TYPECODE = '8300'
-
-# Preferred numbers on the reference table. Capacity variants may use other
-# numbers: choose genuinely free entries without replacing a stock partition.
-ROOT_NUMBER = 36
-HOME_NUMBER = 37
-
-MIN_ANDROID = 16 * GIB
 MIN_ROOT = 16 * GIB
-MIN_HOME = 8 * GIB
-
-MODES = ('linux-only', 'dual', 'linux-single')
-DEFAULT_SIZES = {'dual': ('96G', '32G'), 'linux-only': ('0', '32G'),
-                 'linux-single': ('0', '100%')}
-
-# Bytes zeroed at the head of userdata and metadata so that Android reformats
-# them on first boot instead of finding stale FBE keys, and so that no stale
-# LIUQIN_ROOT ext4 superblock survives where the old whole-userdata root was.
-WIPE_BYTES = 16 * MIB
+MODES = ('linux-single',)
 
 
 # The factory partition table of the 256 GB liuqin, taken from a read-only
 # inventory of a real tablet: partition numbers, sector bounds and names only.
 # No per-device identifier -- disk GUID, partition GUIDs, serial -- is recorded
 # here.  It serves the offline layout preview that the confirmation prompt
-# prints and the synthetic disk that tests/installer-layout.py builds.
+# prints and the synthetic geometry used by offline tests.
 STOCK_TOTAL_SECTORS = 61731840
 STOCK_FIRST_USABLE = 6
 STOCK_LAST_USABLE = 61731834
@@ -126,7 +80,7 @@ def reference_stock_disk(sector_size=DEVICE_SECTOR_SIZE, scale=1):
                  for number, first, last, name in STOCK_TABLE])
 
 
-class LayoutError(Exception):
+class LayoutError(ValueError):
     """A layout request that must stop the installation before any write."""
 
 
@@ -136,26 +90,6 @@ def human(size):
         if size >= scale:
             return f'{size / scale:.1f} {unit}'
     return f'{size} B'
-
-
-def parse_size(text, region):
-    """Parse NNG / NNM / NN% / 0 against the total size of the tail region."""
-    value = str(text).strip().upper()
-    match = re.fullmatch(r'(\d+(?:\.\d+)?)\s*([%KMGT]?)I?B?', value)
-    if not match:
-        raise LayoutError('size must be given as NNG, NNM or NN%: ' + value)
-    number = float(match[1])
-    unit = match[2]
-    if unit == '%':
-        if not 0 <= number <= 100:
-            raise LayoutError('a percentage must be between 0 and 100: ' + value)
-        return int(region * number / 100)
-    scale = {'': 1, 'K': 1024, 'M': MIB, 'G': GIB, 'T': 1024 ** 4}[unit]
-    return int(number * scale)
-
-
-def align_up(offset, alignment=ALIGNMENT):
-    return -(-offset // alignment) * alignment
 
 
 class Partition:
@@ -234,41 +168,13 @@ def parse_print(text):
     return Disk(sector_size, total, first, last, entries, partitions)
 
 
-def parse_info(text):
-    """Parse the output of ``sgdisk -i N DEVICE`` into the fields we preserve."""
-
-    def one(pattern, label):
-        match = re.search(pattern, text, re.MULTILINE)
-        if not match:
-            raise LayoutError('cannot read ' + label + ' from the partition report')
-        return match[1]
-
-    return {'typecode': one(r'^Partition GUID code:\s*([0-9A-Fa-f-]+)', 'the partition type'),
-            'guid': one(r'^Partition unique GUID:\s*([0-9A-Fa-f-]+)', 'the partition GUID'),
-            'first_sector': int(one(r'^First sector:\s*(\d+)', 'the first sector')),
-            'last_sector': int(one(r'^Last sector:\s*(\d+)', 'the last sector')),
-            'attributes': one(r'^Attribute flags:\s*([0-9A-Fa-f]+)', 'the attribute flags'),
-            'name': one(r"^Partition name:\s*'(.*)'", 'the partition name')}
-
-
 def classify(disk):
-    """Return 'stock', 'split' or 'unknown' for the table we are about to edit.
-
-    'unknown' is a refusal, not a mode: this installer only understands a table
-    it laid out itself and the untouched factory table.
-    """
+    """Only an unchanged factory table is supported; all other layouts refuse."""
     userdata = disk.by_name(USERDATA_NAME)
-    root = disk.by_name(ROOT_NAME)
-    home = disk.by_name(HOME_NAME)
     last = disk.partitions[-1] if disk.partitions else None
-    if root is not None:
-        if last is not None and last.name in (ROOT_NAME, HOME_NAME):
-            return 'split'
-        return 'unknown'
-    if home is not None:
-        return 'unknown'
     if (userdata is not None and last is userdata
             and len(disk.partitions) == STOCK_PARTITION_COUNT
+            and {part.name for part in disk.partitions} == {row[3] for row in STOCK_TABLE}
             and userdata.last_sector == disk.last_usable):
         return 'stock'
     return 'unknown'
@@ -295,7 +201,7 @@ def check_geometry(disk):
         previous_end = part.last_sector
 
 
-def check_stock_device(disk, new_partitions=2):
+def check_stock_device(disk):
     """Hard device-identity checks on top of the Fastboot product check."""
     check_geometry(disk)
     if disk.sector_size != DEVICE_SECTOR_SIZE:
@@ -306,6 +212,9 @@ def check_stock_device(disk, new_partitions=2):
         raise LayoutError(
             f'the stock table has {STOCK_PARTITION_COUNT} partitions, this disk has '
             f'{len(disk.partitions)} —— 分区布局已被修改，拒绝继续')
+    if {part.name for part in disk.partitions} != {row[3] for row in STOCK_TABLE}:
+        raise LayoutError('partition names differ from the factory layout'
+                          ' —— 分区布局已被修改，拒绝继续')
     userdata = disk.by_name(USERDATA_NAME)
     if userdata is None or disk.partitions[-1] is not userdata:
         raise LayoutError('userdata is not the last partition on the disk'
@@ -313,40 +222,6 @@ def check_stock_device(disk, new_partitions=2):
     if userdata.last_sector != disk.last_usable:
         raise LayoutError('userdata does not run to the last usable sector'
                           ' —— 分区布局已被修改，拒绝继续')
-    free = disk.entry_count - len(disk.partitions)
-    if free < new_partitions:
-        raise LayoutError(f'the partition table has only {free} free entries; '
-                          f'{new_partitions} are needed')
-
-
-def check_split_device(disk):
-    """A keep-home reinstall must use a complete, contiguous split layout."""
-    check_geometry(disk)
-    if disk.sector_size != DEVICE_SECTOR_SIZE:
-        raise LayoutError('the disk does not report 4096-byte logical sectors')
-    root, home = disk.by_name(ROOT_NAME), disk.by_name(HOME_NAME)
-    if (root is None or home is None or root.size < MIN_ROOT or home.size < MIN_HOME
-            or root.end != home.start or home.end != disk.usable_end
-            or root.start % ALIGNMENT or home.start % ALIGNMENT):
-        raise LayoutError('the existing root/home layout is incomplete or inconsistent')
-
-
-def root_partition_name(mode):
-    return USERDATA_NAME if mode == 'linux-single' else ROOT_NAME
-
-
-def home_partition_name(mode):
-    return None if mode == 'linux-single' else HOME_NAME
-
-
-def free_partition_numbers(disk, count):
-    occupied = {part.number for part in disk.partitions}
-    candidates = list(range(ROOT_NUMBER, disk.entry_count + 1)) + list(range(1, ROOT_NUMBER))
-    free = [number for number in candidates
-            if number <= disk.entry_count and number not in occupied]
-    if len(free) < count:
-        raise LayoutError('not enough free partition entries')
-    return free[:count]
 
 
 class Entry:
@@ -370,13 +245,12 @@ class Entry:
 
 
 class Plan:
-    def __init__(self, mode, disk, entries, region_start, region_end, keep_home=False):
+    def __init__(self, mode, disk, entries, region_start, region_end):
         self.mode = mode
         self.disk = disk
         self.entries = entries
         self.region_start = region_start
         self.region_end = region_end
-        self.keep_home = keep_home
 
     def entry(self, name):
         return next((item for item in self.entries if item.name == name), None)
@@ -387,162 +261,22 @@ class Plan:
         lines = [f'{"Partition":<12} {"Start (sector)":>15} {"Size":>12}  Action',
                  f'{"-" * 12} {"-" * 15} {"-" * 12}  {"-" * 40}']
         for item in self.entries:
-            start = '-' if item.action == 'delete' else str(item.first_sector(sector))
-            size = '-' if item.action == 'delete' else human(item.size)
+            start = str(item.first_sector(sector))
+            size = human(item.size)
             lines.append(f'{item.name:<12} {start:>15} {size:>12}  {item.detail}')
         return '\n'.join(lines)
 
 
-def _feasible(region, label, minimum, others):
-    largest = region - others
-    return (f'{label} must be between {human(minimum)} and {human(largest)} '
-            f'on this {human(region)} region')
-
-
-def plan_layout(disk, mode, android, root, keep_home=False, filesystem='ext4'):
-    """Compute the tail layout.  ``android`` and ``root`` are byte counts."""
+def plan_layout(disk, mode, filesystem='ext4'):
+    """Format the whole userdata partition, without changing its boundaries."""
     if mode not in MODES:
         raise LayoutError('unknown layout mode: ' + str(mode))
-    if filesystem not in ('ext4', 'btrfs') or (filesystem != 'ext4' and mode != 'linux-single'):
-        raise LayoutError('Btrfs requires the single-root layout')
-    check_geometry(disk)
+    if filesystem not in ('ext4', 'btrfs'):
+        raise LayoutError('unsupported root filesystem: ' + str(filesystem))
+    check_stock_device(disk)
     userdata = disk.by_name(USERDATA_NAME)
-    if userdata is None:
-        raise LayoutError('the partition table has no userdata partition')
-    region_start = userdata.start
-    region_end = disk.usable_end
-    region = region_end - region_start
-    if mode == 'linux-single':
-        if android != 0 or root != region or keep_home:
-            raise LayoutError('linux-single uses the entire userdata, with no Android or '
-                              'separate home; omit size options and --keep-home')
-        if region < MIN_ROOT:
-            raise LayoutError('the single root is smaller than 16 GiB')
-        entry = Entry(userdata.number, USERDATA_NAME, region_start, region_end, 'format',
-                      f'format {filesystem} LABEL={ROOT_LABEL} (system and /home; GPT unchanged)')
-        return Plan(mode, disk, [entry], region_start, region_end)
-    if mode == 'dual' and android == 0:
-        raise LayoutError('dual layout needs a non-zero --android-size; use'
-                          ' --layout linux-only to remove Android entirely')
-    if android and android < MIN_ANDROID:
-        raise LayoutError('--android-size ' + human(android) + ' is too small: '
-                          + _feasible(region, 'the Android userdata partition', MIN_ANDROID,
-                                      MIN_ROOT + MIN_HOME))
-    if root < MIN_ROOT:
-        raise LayoutError('--root-size ' + human(root) + ' is too small: '
-                          + _feasible(region, 'linux_root', MIN_ROOT, MIN_HOME + android))
-    entries = []
-    cursor = region_start
-    if android:
-        end = align_up(cursor + android)
-        entries.append(Entry(userdata.number, USERDATA_NAME, cursor, end, 'shrink',
-                             f'shrink from {human(userdata.size)} '
-                             '(keep type GUID, unique GUID and attributes)'))
-        cursor = end
-    else:
-        entries.append(Entry(userdata.number, USERDATA_NAME, region_start, region_end, 'delete',
-                             'delete (Ubuntu takes the whole tail; no Android data partition)'))
-        cursor = align_up(cursor)
-    root_end = align_up(cursor + root)
-    if root_end + MIN_HOME > region_end:
-        raise LayoutError(
-            'the requested sizes leave less than ' + human(MIN_HOME) + ' for linux_home: '
-            + _feasible(region, 'linux_root', MIN_ROOT, MIN_HOME + align_up(android)))
-    root_number, home_number = free_partition_numbers(disk, 2)
-    entries.append(Entry(root_number, ROOT_NAME, cursor, root_end, 'create',
-                         f'create ext4 LABEL={ROOT_LABEL} (Ubuntu system)'))
-    entries.append(Entry(home_number, HOME_NAME, root_end, region_end, 'create',
-                         f'create ext4 LABEL={HOME_LABEL} (mounted at /home)'))
-    if entries[-1].size < MIN_HOME:
-        raise LayoutError('linux_home would be ' + human(entries[-1].size) + ', below the '
-                          + human(MIN_HOME) + ' minimum')
-    for item in entries:
-        if item.action == 'delete':
-            continue
-        if item.end > region_end or item.start < region_start:
-            raise LayoutError('the computed layout leaves the usable area of the disk')
-        if item.start % disk.sector_size or item.end % disk.sector_size:
-            raise LayoutError('the computed layout is not a whole number of sectors')
-    return Plan(mode, disk, entries, region_start, region_end, keep_home)
-
-
-def reinstall_plan(disk, mode):
-    check_split_device(disk)
-    if mode == 'linux-single':
-        raise LayoutError('linux-single cannot keep a separate home')
-    root, home = disk.by_name(ROOT_NAME), disk.by_name(HOME_NAME)
-    entries = [Entry(root.number, root.name, root.start, root.end, 'format',
-                     f'reformat ext4 LABEL={ROOT_LABEL} (Ubuntu system)'),
-               Entry(home.number, home.name, home.start, home.end, 'keep',
-                     'keep the existing /home filesystem and files')]
-    return Plan(mode, disk, entries, root.start, home.end, keep_home=True)
-
-
-def sgdisk_arguments(plan, device, userdata_info):
-    """Render one sgdisk invocation that realizes the whole plan at once.
-
-    A single invocation means a single partition-table write, so the table is
-    never left half-edited by a command that dies between two writes.
-    """
-    sector = plan.disk.sector_size
-    if plan.mode == 'linux-single' or plan.keep_home:
-        raise LayoutError('this plan does not modify the partition table')
-    # Explicit absolute sectors only: the engine has already aligned every
-    # boundary, and sgdisk must not nudge them to its own idea of alignment.
-    arguments = ['--set-alignment=1']
-    userdata = plan.entry(USERDATA_NAME)
-    arguments.append(f'--delete={userdata.number}')
-    if userdata.action != 'delete':
-        if userdata.first_sector(sector) != userdata_info['first_sector']:
-            raise LayoutError('userdata would move; only shrinking in place is supported')
-        arguments += [
-            f'--new={userdata.number}:{userdata.first_sector(sector)}:{userdata.last_sector(sector)}',
-            f'--typecode={userdata.number}:' + userdata_info['typecode'],
-            f'--partition-guid={userdata.number}:' + userdata_info['guid'],
-            f'--change-name={userdata.number}:' + USERDATA_NAME,
-            f'--attributes={userdata.number}:=:' + userdata_info['attributes'],
-        ]
-    for item in plan.entries:
-        if item.name == USERDATA_NAME:
-            continue
-        arguments += [
-            f'--new={item.number}:{item.first_sector(sector)}:{item.last_sector(sector)}',
-            f'--typecode={item.number}:' + LINUX_TYPECODE,
-            f'--change-name={item.number}:' + item.name,
-        ]
-    return arguments + [device]
-
-
-def verify_applied(disk, plan):
-    """Compare a freshly re-read table with the plan; raise on any difference."""
-    sector = disk.sector_size
-    for item in plan.entries:
-        found = disk.by_name(item.name)
-        if item.action == 'delete':
-            if found is not None:
-                raise LayoutError(item.name + ' still exists after the partition-table edit')
-            continue
-        if found is None:
-            raise LayoutError(item.name + ' is missing after the partition-table edit')
-        if (found.first_sector != item.first_sector(sector)
-                or found.last_sector != item.last_sector(sector)):
-            raise LayoutError(
-                f'{item.name} landed at {found.first_sector}-{found.last_sector}, '
-                f'not {item.first_sector(sector)}-{item.last_sector(sector)}')
-    return True
-
-
-def verify_preserved(before, after):
-    """userdata keeps its identity across the edit; only its end sector moves."""
-    for field in ('typecode', 'guid', 'attributes', 'name', 'first_sector'):
-        if str(before[field]).lower() != str(after[field]).lower():
-            raise LayoutError('userdata ' + field.replace('_', ' ') + ' changed across the edit: '
-                              f'{before[field]} -> {after[field]}')
-    return True
-
-
-def resolve_sizes(mode, android, root, region):
-    """Apply the per-mode defaults, then parse both sizes against the region."""
-    default_android, default_root = DEFAULT_SIZES[mode]
-    return (parse_size(default_android if android is None else android, region),
-            parse_size(default_root if root is None else root, region))
+    if userdata.size < MIN_ROOT:
+        raise LayoutError('the single root is smaller than 16 GiB')
+    entry = Entry(userdata.number, USERDATA_NAME, userdata.start, userdata.end, 'format',
+                  f'format {filesystem} LABEL={ROOT_LABEL} (system and /home; GPT unchanged)')
+    return Plan(mode, disk, [entry], userdata.start, userdata.end)

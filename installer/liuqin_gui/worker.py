@@ -49,13 +49,41 @@ def main(args):
         nonlocal busy
         operation = request['action']
         engine.request_id = request.get('id', '')
+        previous_session=engine.session_id
         try:
             if operation == 'devices':
                 engine.list_devices()
+            elif operation == 'inspect_environment':
+                from .compatibility import inspect
+                inspect(engine,request)
+            elif operation == 'native_export_logs':
+                from .native_logs import export
+                export(engine,request)
+            elif operation == 'rom_preview':
+                from .rom_preview import preview
+                preview(engine,request)
             elif operation == 'validate':
-                engine.validate_bundle(request.get('bundle', ''))
+                if request.get('layout') in ('android-manage', 'partition-only', 'partition-reset'):
+                    engine.validate_installer(request.get('bundle', ''))
+                else:
+                    engine.validate_bundle(request.get('bundle', ''))
             elif operation == 'prepare':
                 engine.prepare(request)
+            elif operation in ('wizard_scan','wizard_prepare','wizard_resume_prepare','wizard_install'):
+                from . import workflow
+                {'wizard_scan':workflow.scan,'wizard_prepare':workflow.prepare,'wizard_resume_prepare':workflow.prepare_resume,'wizard_install':workflow.install}[operation](engine,request)
+            elif operation == 'wizard_switch_prepare':
+                from .boot_switch import prepare as prepare_switch
+                prepare_switch(engine,request)
+            elif operation in ('boot_store_inspect','boot_store_prepare'):
+                from . import boot_store
+                (boot_store.inspect if operation=='boot_store_inspect' else boot_store.prepare)(engine,request)
+            elif operation == 'scan_partitions':
+                from .partitioning import scan
+                scan(engine, request)
+            elif operation == 'scan_layout':
+                from .managed_linux import scan_layout
+                scan_layout(engine, request)
             elif operation == 'backup':
                 engine.create_backup(request)
             elif operation == 'find_backup':
@@ -71,8 +99,12 @@ def main(args):
             else:
                 raise InstallerError('未知操作：' + operation)
         except Exception as exc:
+            if operation in ('wizard_scan','wizard_prepare','wizard_resume_prepare','wizard_switch_prepare','boot_store_inspect','boot_store_prepare') and engine.session_id!=previous_session and not engine.receipt.get('write_dispatched') and engine.transport:
+                try:engine.transport.cancel_cleanup()
+                except Exception as cleanup_error:
+                    engine.emit('notice',message='只读准备未能返回 Fastboot：'+str(cleanup_error))
             # An invalid confirmation must not destroy a still valid plan.
-            if operation == 'install' and engine.state == 'prepared':
+            if operation in ('inspect_environment','native_export_logs','rom_preview') or (operation in ('install','wizard_install') and engine.state == 'prepared'):
                 engine.emit('request_rejected', message=str(exc))
             else:
                 engine.fail(exc)
@@ -107,14 +139,15 @@ def main(args):
                         raise InstallerError('请先结束当前操作。')
                     break
                 if action == 'cancel' and busy:
-                    if engine.state not in ('preparing', 'backing_up'):
+                    if getattr(engine,'workflow_committing',False):raise InstallerError('已开始执行完整方案，不能中断写入。')
+                    if engine.state not in ('preparing', 'backing_up','rom_analyzing'):
                         raise InstallerError('当前阶段不能取消。')
                     engine.request_cancel()
                     emit(dict(type='cancel_requested', message='正在有序结束准备。'))
                     continue
                 if busy:
                     raise InstallerError('后端正在执行其他操作。')
-                if engine.state == 'prepared' and action not in ('install', 'cancel'):
+                if engine.state == 'prepared' and action not in ('install', 'wizard_install', 'cancel'):
                     raise InstallerError('请确认当前方案或先取消准备。')
                 busy = True
                 emit(dict(type='activity', busy=True, request_id=request.get('id', '')))

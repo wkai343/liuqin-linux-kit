@@ -22,12 +22,13 @@ from unittest.mock import patch
 
 PROJECT = Path(__file__).resolve().parents[1]
 OEM = PROJECT / "device/fingerprint/oem/src/fingerprint/oem"
+sys.path.insert(0,str(OEM))
 spec = importlib.util.spec_from_file_location("native_enrol", OEM / "native_enrol.py")
 provider = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(provider)
 
 FAKE = r'''
-import hashlib,json,os,pathlib,signal,sys,time
+import hashlib,json,os,pathlib,signal,struct,sys,time
 base=pathlib.Path(__file__).parent
 state=pathlib.Path(sys.argv[2]); operation=sys.argv[3]; uid=sys.argv[-2]
 secret=os.read(int(sys.argv[-1]),33)
@@ -44,7 +45,7 @@ if operation=='--create':
   print(cleanup,flush=True);sys.exit(1)
  p=state/uid/'gatekeeper.handle';fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
  os.write(fd,b'opaque-test-handle');os.close(fd);print(cleanup,flush=True);sys.exit(0)
-assert operation=='--enrol'
+assert operation=='--enrol-gallery'
 print('READY enrol attempt=1: press same finger and hold',flush=True)
 print('enrol_progress_status=1 remaining=8',flush=True)
 if mode=='cancel':
@@ -62,10 +63,12 @@ if mode=='enrol-fail':
  print('oem_runtime_cancelled=1',flush=True)
  print('private-value-must-not-appear-in-logs',flush=True)
  print(cleanup,flush=True);sys.exit(1)
-fd=os.open(sys.argv[4],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
-os.write(fd,b'opaque-single-finger-test-database');os.close(fd)
+fd=os.open(sys.argv[5],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+os.write(fd,b'opaque-test-database');os.close(fd)
+meta=b'FPCMETA2'+struct.pack('<I5II5III',0,0,0,0,0,0,1,1,0,0,0,0,1,0)
+fd=os.open(sys.argv[7],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600);os.write(fd,meta);os.close(fd)
 if mode=='output-race':pathlib.Path((base/'race-target').read_text()).write_text('keep existing output')
-if mode=='unsafe-output':os.chmod(sys.argv[4],0o644)
+if mode=='unsafe-output':os.chmod(sys.argv[5],0o644)
 print('do-not-forward-raw-runtime-output',flush=True)
 if mode!='missing-cleanup':print(cleanup,flush=True)
 '''
@@ -82,13 +85,18 @@ class ProviderTests(unittest.TestCase):
         (self.bundle / "native_credentials.py").write_text(FAKE)
         (self.bundle / "native_credentials.py").chmod(0o600)
         (self.bundle / "mode").write_text("ok")
+        (self.bundle / "gallery_state.py").write_bytes((OEM / "gallery_state.py").read_bytes())
+        decoder=self.bundle/'fpc-oem-print'
+        decoder.write_text('#!/usr/bin/python3\nimport os,struct,sys\nos.write(int(sys.argv[4]),struct.pack("<II",1,10)+b"old database")\n')
+        decoder.chmod(0o700)
         self.user = SimpleNamespace(pw_name="alice", pw_uid=1000)
         self.configure_user()
         self.state = self.base / "native-enrollment"
         self.patches = [patch.object(provider, "__file__", str(self.bundle / "native_enrol.py")),
                         patch.object(provider, "STATE_ROOT", self.state),
                         patch.object(provider, "FPRINT_ROOT", self.base / "fprint"),
-                        patch.object(provider.pwd, "getpwnam", side_effect=lambda name: self.user)]
+                        patch.object(provider.pwd, "getpwnam", side_effect=lambda name: self.user),
+                        patch.object(provider.pwd, "getpwuid", side_effect=lambda uid: self.user)]
         for p in self.patches:
             p.start()
 
@@ -99,7 +107,7 @@ class ProviderTests(unittest.TestCase):
 
     def configure_user(self):
         (self.bundle / "CANDIDATE.json").write_text(json.dumps({
-            "linux_username": self.user.pw_name, "linux_uid": self.user.pw_uid}))
+            "account_profile":"fprintd-user", "enrollment_interface":"fprintd", "multi_finger_version":1}))
         (self.bundle / "CANDIDATE.json").chmod(0o600)
 
     def calls(self):
@@ -109,7 +117,7 @@ class ProviderTests(unittest.TestCase):
     def invoke(self, filename="new-print", username=None):
         output = io.StringIO()
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
-            status = provider.main(["--enrol", username or self.user.pw_name, str(self.output_dir / filename)])
+            status = provider.main(["--enrol", username or self.user.pw_name, "2", str(self.output_dir / filename)])
         return status, output.getvalue()
 
     def test_creates_once_reuses_and_preserves_legacy_identity(self):
@@ -120,7 +128,7 @@ class ProviderTests(unittest.TestCase):
         rc, log = self.invoke()
         self.assertEqual(rc, 0, log)
         self.assertIn("enrol_progress_status=1 remaining=8", log)
-        self.assertTrue(log.endswith("native_enrol_cleanup=OK\nnative_enrol=OK single_finger_database=1\n"))
+        self.assertTrue(log.endswith("native_enrol_cleanup=OK\nnative_enrol=OK finger_reference=2\n"))
         self.assertNotIn("do-not-forward", log)
         account = self.state / str(0x60000000 | 1000)
         record = json.loads((account / "credential.json").read_text())
@@ -132,7 +140,7 @@ class ProviderTests(unittest.TestCase):
             self.assertEqual((path.stat().st_uid, path.stat().st_gid, path.stat().st_mode & 0o777), (0, 0, 0o600))
         self.assertEqual(self.invoke("second-print")[0], 0)
         calls = self.calls()
-        self.assertEqual([x["operation"] for x in calls], ["--create", "--enrol", "--enrol"])
+        self.assertEqual([x["operation"] for x in calls], ["--create", "--enrol-gallery", "--enrol-gallery"])
         self.assertEqual(len({x["input_sha"] for x in calls}), 1)
         self.assertEqual((legacy / "gatekeeper.handle").read_bytes(), b'untouched old password credential')
 
@@ -146,9 +154,9 @@ class ProviderTests(unittest.TestCase):
 
     def set_release_profile(self):
         (self.bundle / "CANDIDATE.json").write_text(json.dumps({
-            "account_profile": "primary-uid-1000", "linux_uid": 1000}))
+            "account_profile": "fprintd-user", "enrollment_interface": "fprintd", "multi_finger_version":1}))
 
-    def test_release_profile_resolves_primary_and_preserves_existing_binding(self):
+    def test_release_profile_preserves_existing_binding(self):
         # A bound development install can be upgraded without creating another
         # machine identity or changing its account-binding metadata.
         self.assertEqual(self.invoke()[0], 0)
@@ -157,12 +165,13 @@ class ProviderTests(unittest.TestCase):
         self.set_release_profile()
         with patch.object(provider.pwd, "getpwuid", return_value=self.user) as lookup:
             self.assertEqual(self.invoke("release-print")[0], 0)
-            lookup.assert_called_once_with(1000)
+            self.assertTrue(lookup.call_args_list)
+            self.assertTrue(all(call.args == (1000,) for call in lookup.call_args_list))
         self.assertEqual(record.read_bytes(), before)
         self.assertEqual([call["operation"] for call in self.calls()],
-                         ["--create", "--enrol", "--enrol"])
+                         ["--create", "--enrol-gallery", "--enrol-gallery"])
 
-    def test_release_profile_fresh_arbitrary_name_and_missing_primary(self):
+    def test_release_profile_resolves_claimed_uid_and_rejects_missing_account(self):
         self.user = SimpleNamespace(pw_name="new-local-user", pw_uid=1000)
         self.set_release_profile()
         with patch.object(provider.pwd, "getpwuid", side_effect=KeyError):
@@ -172,13 +181,39 @@ class ProviderTests(unittest.TestCase):
         with patch.object(provider.pwd, "getpwuid", return_value=self.user):
             self.assertEqual(self.invoke()[0], 0)
 
-    def test_release_profile_rejects_other_uid_and_reassigned_account(self):
+    def test_release_profile_supports_distinct_accounts_and_preserves_both_credentials(self):
+        self.set_release_profile()
+        with patch.object(provider.pwd, "getpwuid", side_effect=lambda uid: self.user):
+            self.assertEqual(self.invoke()[0], 0)
+            first = self.state / str(0x60000000 | 1000)
+            original = {p.name: p.read_bytes() for p in first.iterdir() if p.name != "user-operation.lock"}
+            self.user = SimpleNamespace(pw_name="bob", pw_uid=1001)
+            self.assertEqual(self.invoke("bob-print")[0], 0)
+            self.user = SimpleNamespace(pw_name="carol", pw_uid=2345)
+            self.assertEqual(self.invoke("carol-print")[0], 0)
+        created = [c for c in self.calls() if c["operation"] == "--create"]
+        self.assertEqual({int(c["uid"]) for c in created}, {0x60000000 | u for u in (1000, 1001, 2345)})
+        self.assertEqual(len({c["input_sha"] for c in created}), 3)
+        self.assertEqual({p.name: p.read_bytes() for p in first.iterdir() if p.name != "user-operation.lock"}, original)
+
+    def test_release_profile_rejects_ambiguous_and_reassigned_uids(self):
         self.set_release_profile()
         with patch.object(provider.pwd, "getpwuid", return_value=SimpleNamespace(pw_name="other", pw_uid=1000)):
             self.assertNotEqual(self.invoke()[0], 0)
-        self.user.pw_uid = 1001
-        with patch.object(provider.pwd, "getpwuid", return_value=self.user):
-            self.assertNotEqual(self.invoke()[0], 0)
+        self.assertFalse(self.state.exists())
+        with patch.object(provider.pwd, "getpwuid", side_effect=lambda uid: self.user):
+            self.assertEqual(self.invoke()[0], 0)
+            account = self.state / str(0x60000000 | 1000)
+            original = (account / "credential.json").read_bytes()
+            calls = len(self.calls())
+            self.user = SimpleNamespace(pw_name="new-owner", pw_uid=1000)
+            self.assertNotEqual(self.invoke("must-not-create")[0], 0)
+            self.assertEqual((account / "credential.json").read_bytes(), original)
+            self.assertEqual(len(self.calls()), calls)
+
+    def test_general_profile_requires_authorized_fprintd_interface(self):
+        (self.bundle / "CANDIDATE.json").write_text(json.dumps({"account_profile": "fprintd-user"}))
+        self.assertNotEqual(self.invoke()[0], 0)
         self.assertFalse(self.state.exists())
         self.assertEqual(self.calls(), [])
 
@@ -210,7 +245,7 @@ class ProviderTests(unittest.TestCase):
                         "end_enrol_not_submitted=1 fresh_authorization_failed=1",
                         "pipeline_incomplete=finger_down_wait", "native_credential_provider=BUSY",
                         "oem_runtime_timed_out=1", "oem_runtime_cancelled=1",
-                        "native_enrol_runtime=FAILED operation=enrol status=1"):
+                        "native_enrol_runtime=FAILED operation=enrol-gallery"):
             self.assertIn(message, log)
         self.assertNotIn("private-value-must-not-appear", log)
         self.assertNotIn("native_enrol=OK", log)
@@ -234,7 +269,7 @@ class ProviderTests(unittest.TestCase):
         template.write_bytes(b"legacy fingerprint is retained")
         rc, log = self.invoke()
         self.assertNotEqual(rc, 0)
-        self.assertIn("native_enrol=REFUSED existing_template=1", log)
+        self.assertIn("native_enrol=FAILED", log)
         self.assertEqual(template.read_bytes(), b"legacy fingerprint is retained")
         self.assertEqual(self.calls(), [])
         self.assertFalse(self.state.exists())
@@ -262,7 +297,7 @@ class ProviderTests(unittest.TestCase):
         self.assertFalse((self.output_dir / "new-print").exists())
         (self.bundle / "mode").write_text("ok")
         self.assertEqual(self.invoke()[0], 0)
-        self.assertEqual([c["operation"] for c in self.calls()], ["--create", "--enrol"])
+        self.assertEqual([c["operation"] for c in self.calls()], ["--create", "--enrol-gallery"])
 
     def test_missing_final_cleanup_cannot_reuse_create_cleanup(self):
         (self.bundle / "mode").write_text("missing-cleanup")

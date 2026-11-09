@@ -3,10 +3,8 @@
 
 Two things are covered:
 
-  * the cmdline slot parser, both copies of it -- the ``slot_from_cmdline``
-    function in ``device/boot/initramfs/init`` and the one in
-    ``device/board-overlay/usr/local/sbin/liuqin-switch`` -- against a table
-    of accepted and rejected command lines;
+  * the initramfs ``slot_from_cmdline`` parser against accepted and rejected
+    command lines;
 
   * ``device/boot/liuqin-mark-slot-successful`` against a synthetic image the
     size of the device's ``sde`` LUN, whose GPT carries ``boot_a``/``boot_b``
@@ -224,15 +222,6 @@ def test_parser(shell, path, label):
         check(f"{cmdline!r} -> {want}", out == want, f"got {out!r}")
 
 
-def test_parser_copies_agree():
-    # The switcher only uses its copy to refuse a switch on the fallback slot,
-    # but the two must not drift apart silently.
-    init = extract_function(PROJECT / "device/boot/initramfs/init", "slot_from_cmdline")
-    switch = extract_function(PROJECT / "device/board-overlay/usr/local/sbin/liuqin-switch",
-                              "slot_from_cmdline")
-    check("the initramfs and switcher parsers are the same text", init == switch)
-
-
 # --------------------------------------------------------------------------
 # the mark tool
 # --------------------------------------------------------------------------
@@ -429,9 +418,6 @@ def main():
                         str(PROJECT / "device/boot/liuqin-mark-slot-successful.c"),
                         "-o", str(binary)], check=True)
         test_parser(shell, PROJECT / "device/boot/initramfs/init", "device/boot/initramfs/init")
-        test_parser(shell, PROJECT / "device/board-overlay/usr/local/sbin/liuqin-switch",
-                    "liuqin-switch")
-        test_parser_copies_agree()
         test_mark_tool(str(binary), tmp)
         test_entry_locations(str(binary), tmp)
     if FAILURES:

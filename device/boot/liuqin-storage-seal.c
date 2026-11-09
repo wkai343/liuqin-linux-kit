@@ -17,13 +17,19 @@
 #include <sys/sysmacros.h>
 #include <sys/vfs.h>
 #include <unistd.h>
+#include "liuqin-storage-scope.h"
+#ifndef LIUQIN_STORAGE_DEVROOT
+#define LIUQIN_STORAGE_DEVROOT "/dev"
+#define LIUQIN_STORAGE_SYSROOT "/sys"
+#endif
 
 struct node {
     int fd;
     struct stat identity;
+    char sysfs[PATH_MAX];
 };
 
-int liuqin_storage_ready(void);
+int liuqin_storage_ready(int recovery);
 
 static int reject(const char *path, const char *reason)
 {
@@ -48,7 +54,7 @@ static int ram_init_only(void)
     return 0;
 }
 
-static int sysfs_matches(const char *path, dev_t device)
+static int sysfs_matches(const char *path, dev_t device, const char *sysroot)
 {
     char sysfs[256], value[64], newline, extra;
     unsigned int maj, min;
@@ -56,7 +62,7 @@ static int sysfs_matches(const char *path, dev_t device)
     const char *name = strrchr(path, '/');
     int fd;
 
-    if (!name || snprintf(sysfs, sizeof(sysfs), "/sys/class/block/%s/dev", name + 1) >= (int)sizeof(sysfs))
+    if (!name || snprintf(sysfs, sizeof(sysfs), "%s/class/block/%s/dev", sysroot, name + 1) >= (int)sizeof(sysfs))
         return reject(path, "invalid sysfs path");
     fd = open(sysfs, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0)
@@ -78,7 +84,7 @@ static int same_node(const struct stat *a, const struct stat *b)
            a->st_ino == b->st_ino && a->st_rdev == b->st_rdev;
 }
 
-static int open_node(const char *path, struct node *node)
+static int open_node(const char *path, struct node *node, const char *sysroot)
 {
     struct stat opened;
 
@@ -88,7 +94,7 @@ static int open_node(const char *path, struct node *node)
     if (node->fd < 0)
         return reject(path, "cannot open block node");
     if (fstat(node->fd, &opened) != 0 || !same_node(&node->identity, &opened) ||
-        sysfs_matches(path, opened.st_rdev) != 0) {
+        sysfs_matches(path, opened.st_rdev, sysroot) != 0) {
         close(node->fd);
         node->fd = -1;
         return reject(path, "block identity changed or is unproven");
@@ -96,35 +102,62 @@ static int open_node(const char *path, struct node *node)
     return 0;
 }
 
+
 int main(int argc, char **argv)
 {
     glob_t before = {0}, after = {0};
     struct node *nodes;
-    int seal, failed = 0;
+    int seal, list, ufs_only, failed = 0;
+    const char *devroot = LIUQIN_STORAGE_DEVROOT, *sysroot = LIUQIN_STORAGE_SYSROOT;
+    char pattern[PATH_MAX];
 
     if (argc == 2 && strcmp(argv[1], "--ready") == 0)
-        return liuqin_storage_ready();
-    if (argc != 2 || (strcmp(argv[1], "--seal") != 0 && strcmp(argv[1], "--check") != 0)) {
-        fprintf(stderr, "usage: liuqin-storage-seal --seal|--check|--ready\n");
+        return liuqin_storage_ready(0);
+    if (argc == 2 && strcmp(argv[1], "--ready-recovery") == 0)
+        return liuqin_storage_ready(1);
+    if (argc == 2 && strcmp(argv[1], "--ready-ufs") == 0)
+        return liuqin_storage_ready(2);
+    if (argc == 2 && strcmp(argv[1], "--version") == 0) {
+        puts("liuqin-storage-scope-v1"); return 0;
+    }
+    list = argc >= 2 && strcmp(argv[1], "--list-ufs") == 0;
+    if (!((argc == 2 && (!strcmp(argv[1], "--seal") || !strcmp(argv[1], "--seal-ufs") ||
+                        !strcmp(argv[1], "--check") || list)) || (argc == 4 && list))) {
+        fprintf(stderr, "usage: liuqin-storage-seal --seal|--seal-ufs|--check|--list-ufs [devroot sysroot]|--ready|--ready-ufs|--ready-recovery|--version\n");
         return 2;
     }
-    seal = strcmp(argv[1], "--seal") == 0;
+    if (argc == 4) { devroot = argv[2]; sysroot = argv[3]; }
+    ufs_only = list || strcmp(argv[1], "--seal-ufs") == 0;
+    seal = !list && strcmp(argv[1], "--check") != 0;
     if (seal && ram_init_only() != 0)
         return 1;
-    if (glob("/dev/sd*", GLOB_ERR, NULL, &before) != 0 || before.gl_pathc == 0) {
-        globfree(&before);
+    if (snprintf(pattern, sizeof(pattern), "%s/sd*", devroot) >= (int)sizeof(pattern) ||
+        liuqin_storage_glob(pattern, &before, sysroot, ufs_only) != 0) {
+        liuqin_storage_globfree(&before, ufs_only);
         reject("/dev/sd*", "cannot enumerate a nonempty block namespace");
         return 1;
     }
     nodes = calloc(before.gl_pathc, sizeof(*nodes));
     if (!nodes) {
-        globfree(&before);
+        liuqin_storage_globfree(&before, ufs_only);
         reject("/dev/sd*", "out of memory");
         return 1;
     }
     for (size_t i = 0; i < before.gl_pathc; ++i) {
         nodes[i].fd = -1;
-        if (open_node(before.gl_pathv[i], &nodes[i]) != 0) {
+        if (list) {
+            char real[PATH_MAX], sysfs[PATH_MAX];
+            const char *path = before.gl_pathv[i], *name = strrchr(path, '/') + 1;
+            if (lstat(path, &nodes[i].identity) || !S_ISBLK(nodes[i].identity.st_mode) ||
+                !realpath(path, real) || strcmp(path, real) ||
+                sysfs_matches(path, nodes[i].identity.st_rdev, sysroot) ||
+                snprintf(sysfs, sizeof(sysfs), "%s/class/block/%s", sysroot, name) >= (int)sizeof(sysfs) ||
+                !realpath(sysfs, nodes[i].sysfs)) {
+                reject(path, "unproven UFS block identity"); failed = 1;
+            }
+            continue;
+        }
+        if (open_node(before.gl_pathv[i], &nodes[i], sysroot) != 0) {
             failed = 1;
             continue;
         }
@@ -143,20 +176,28 @@ int main(int argc, char **argv)
     for (size_t i = 0; i < before.gl_pathc; ++i) {
         int readonly = 0;
         struct stat current;
-        if (nodes[i].fd < 0)
+        if (!list && nodes[i].fd < 0)
             continue;
-        if (ioctl(nodes[i].fd, BLKROGET, &readonly) != 0 || readonly != 1) {
+        if (!list && (ioctl(nodes[i].fd, BLKROGET, &readonly) != 0 || readonly != 1)) {
             reject(before.gl_pathv[i], "read-only flag is unproven");
             failed = 1;
         }
         if (lstat(before.gl_pathv[i], &current) != 0 || !same_node(&nodes[i].identity, &current) ||
-            sysfs_matches(before.gl_pathv[i], current.st_rdev) != 0) {
+            sysfs_matches(before.gl_pathv[i], current.st_rdev, sysroot) != 0) {
             reject(before.gl_pathv[i], "block identity changed during verification");
             failed = 1;
         }
-        close(nodes[i].fd);
+        if (list) {
+            struct liuqin_ufs_scope scope;
+            char real[PATH_MAX];
+            const char *name = strrchr(before.gl_pathv[i], '/') + 1;
+            if (liuqin_ufs_scope_init(&scope, sysroot) ||
+                liuqin_ufs_node(&scope, sysroot, name, real) != 1 || strcmp(real, nodes[i].sysfs)) {
+                reject(before.gl_pathv[i], "UFS controller identity changed"); failed = 1;
+            }
+        } else close(nodes[i].fd);
     }
-    if (glob("/dev/sd*", GLOB_ERR, NULL, &after) != 0 || before.gl_pathc != after.gl_pathc) {
+    if (liuqin_storage_glob(pattern, &after, sysroot, ufs_only) != 0 || before.gl_pathc != after.gl_pathc) {
         reject("/dev/sd*", "block namespace changed");
         failed = 1;
     } else {
@@ -168,10 +209,14 @@ int main(int argc, char **argv)
             }
         }
     }
-    if (!failed)
-        printf("%zu\n", before.gl_pathc);
+    if (!failed) {
+        if (list) {
+            for (size_t i = 0; i < before.gl_pathc; ++i)
+                puts(strrchr(before.gl_pathv[i], '/') + 1);
+        } else printf("%zu\n", before.gl_pathc);
+    }
     free(nodes);
-    globfree(&after);
-    globfree(&before);
+    liuqin_storage_globfree(&after, ufs_only);
+    liuqin_storage_globfree(&before, ufs_only);
     return failed ? 1 : 0;
 }

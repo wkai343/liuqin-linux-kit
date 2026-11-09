@@ -1,6 +1,6 @@
 # 测试说明
 
-[参与贡献](../CONTRIBUTING.md) ｜ [构建指南](../docs/BUILD.md) ｜ [待改进与验证](../docs/DEVELOPMENT-STATUS.md)
+[参与贡献](../CONTRIBUTING.md) ｜ [构建指南](../docs/BUILD.md) ｜ [硬件支持与限制](../docs/HARDWARE.md)
 
 在仓库根目录使用 Devbox，避免宿主编译器、BusyBox 或 Python 依赖不一致：
 
@@ -40,7 +40,10 @@ CI 的实际测试列表以 `.github/workflows/` 为准，不能把本地入口�
 | `splash-handoff.py`、`splash-logo.py`、`splash-orientation.py` | 帧缓冲边界、绘制进程隔离与回退、四向特征识别、关机方向缓存及 systemd 直接入口 |
 | `storage-seal.py`、`storage-ready.py`、`storage-paths.py` | 批量只读设置、UFS/GPT 就绪证明、路径替换及回退 |
 | `wlan-mac.py` | 目标网卡 udev 初始化、命名竞态与设备身份 |
-| `rtc.py` | 真实 helper 的离线时间推算、计数器重置/停走、过期和损坏校准、chrony 同步判定、原子保存与 RPM 板级载荷；不改变主机时间，不代替关机/重启验收 |
+| `rtc.py` | 真实 helper 的离线时间推算、计数器重置/停走、过期和损坏校准、chrony 只读协议的响应身份/长度/时间和同步判定、原子保存与 RPM 板级载荷；不改变主机时间，不代替关机/重启验收 |
+| `fedora-startup.py` | 登录界面 Powerdevil 仅在合成器和 Wayland 套接字就绪时启动、退出后拒绝再激活；普通桌面不受该条件限制。检查音频 PCM 探测前以静音状态准备保护 DSP |
+| `mipps-startup.py` | 普通 PD 跳过适配器认证前仍校验电芯；校验失败不会继续 VDM 或 PD 门控 |
+| `storage-scope.py` | 运行真实 C 选择/封存逻辑与 init 交接检查；验证内部控制器及驱动、USB 原权限与晚分区保持、救援时全盘封存、移动 `/dev`/`/sys` 后核验；ARM64 musl/QEMU 覆盖 glob 内存归属，升级清理保留修改文件和符号链接 |
 
 ### 刷新率模式
 
@@ -140,7 +143,130 @@ devbox run -- python3 tests/tddi-initial-wake.py \
 
 脚本自带桩代码，不依赖私有日志、固件或旧诊断脚本，也不修改输入源码。
 这些源码阶段检查不属于普通 `devbox run test` 的自动构建入口；真机结果见
-[显示验证](../docs/DISPLAY.md#首次唤醒顺序与预防验证)。
+[显示验证](../docs/DISPLAY.md#首次唤醒顺序)。
 
 真机测试分别记录临时启动、固定引导后的重启、拔线冷启动及睡眠唤醒；
 故障后自动恢复必须单独记录，不能写成“首次显示正常”。
+
+## 多系统安装与引导
+
+`multiboot.py` 检查容量/UUID、真实 boot 重打包、准备与提交边界、文件/方案变更拦截和默认引导失败恢复；`multiboot-device.py` 在稀疏普通文件上运行真实 sgdisk，执行设备端分区脚本并验证保留原厂前缀、userdata 身份及错误输入拒绝；`multiboot-store.py` 验证实际 ext4 镜像格式化、引导存储校验及默认项提交。它们均不访问真实块设备。
+
+`boot-store.py` 对普通文件注入引导切换写入前、半写入、登记前后断电，检查恢复旧引导、补交目标登记、重复快照回收及再次中断后的重试。`transaction-recovery.py` 使用真实暂存算法与文件系统格式化，检查 Android/Linux 安装回读后的登记续接、损坏材料拒绝及不重复写入系统分区。`gui-boot-store.py` 在实际 QML 中检查维护入口、事务选择和独立确认。维护范围、失败会话接管和载荷哈希分别由 `native-installer.py`、`native-recovery.py` 覆盖；均不访问真实设备。
+
+`install-root-single.py` 另覆盖绑定 ext4/Btrfs 的安装与错 UUID 拒绝；`persistent-root.sh` 覆盖绑定定位、文件系统 UUID、系统 ID、重复分区和错误绑定拒绝。QML 验证单独执行：
+
+```sh
+uv run --project installer python tests/gui-combined-install.py
+```
+
+这些检查不替代真实分区重建、冷启动与断电恢复验收。
+
+## Android 管理
+
+`android-installer.py` 检查保留/重装、独立清除确认、受保护分区、源文件变更与失败阻断；`android-device.py` 对普通文件执行真实设备端算法和 F2FS/ext4 格式化，比较所有受保护 Linux 文件与引导存储，并注入错误目标、身份变化和中断。`android-rom.py` 覆盖完整 ROM 选择性导入、错误成员与 sparse/零填充；`android-runtime.py` 用 ARM64 ELF 样本核对 Python/标准库/扩展动态依赖打包，不执行目标程序。
+
+```sh
+uv run --project installer python tests/gui-full-rom.py
+```
+
+完整系统构建的 rootfs 阶段默认使用用户命名空间；Android 首次启动和加密初始化仍须真机验收。
+
+## 分区与系统分步安装
+
+`staged-install.py` 验证同一设备先分区、只装 Android、没有 userdata 时分次装 Linux，以及 Android 后再装 Linux；检查旧备份拒绝、已安装目标拒绝、方案篡改和安装失败不登记。
+`managed-linux-device.py` 用普通文件执行实际设备端引导事务，检查旧 Android/其他 Linux/镜像保护、未完成根安装拒绝提交和默认项回退。
+`multiboot-device.py` 也覆盖只有 userdata 与只有 rootfs 的真实 GPT 生成；`install-root-single.py` 检查根分区起始位置变化在格式化前停止。
+
+```sh
+python3 tests/staged-install.py
+python3 tests/managed-linux-device.py
+uv run --project installer python tests/gui-device-first.py
+```
+
+最后一项使用当前 QML、controller 和 worker 检查分区方案、选定 rootfs 安装、重装取消及默认引导切换确认，不访问硬件。以上不替代完整安装环境构建及真机启动验收。
+
+## 读取实际分区与保留追加
+
+`partition-discovery.py` 检查实际 GPT 的空闲区、原厂满盘拒绝、userdata 锁定、未知布局只读、已有布局追加、晚于 rootfs 创建 userdata 和方案变更拒绝。
+`partition-device.py` 在普通稀疏文件上执行真实 sgdisk 追加，并在已有 userdata 的首部、中间和尾部放置数据哨兵，验证连续两次追加后内容、所有旧 GPT 属性、旧引导文件和默认引导保留；也覆盖写入中断后拒绝自动接管。
+`gui-device-first.py` 使用当前 QML/controller/worker 检查先读分区、容量边界、使用全部未分配空间、统一确认与再次读取。
+
+```sh
+devbox run -- python3 tests/partition-discovery.py
+devbox run -- python3 tests/partition-device.py
+uv run --project installer python tests/gui-device-first.py
+```
+
+## 设备优先向导与 Recovery
+
+`workflow.py` 覆盖先读设备、删除/新建后安装 Linux、重装已安装 rootfs、单 Android 无引导存储安装、受保护目标拒绝、材料与计划变化拒绝，以及移除所有 rootfs 后删除引导存储。
+`partition-editor-device.py` 使用真实 sgdisk/mkfs 普通文件夹具验证删除与格式化事务、UUID 更新和保留数据；不访问块设备。
+`recovery-installer.py` 验证 v3/v4 结构、机型拒绝、gzip/LZ4、临时启动零 flash、仅固定 Recovery 两槽写入和部分写入回退。Recovery 镜像为合成夹具，不证明第三方镜像实际可启动。
+
+```sh
+uv run --project installer python tests/gui-device-first.py
+uv run --project installer python tests/recovery-installer.py
+devbox run -- python3 tests/partition-editor-device.py
+```
+
+所有 GUI 回归均加载产品正在使用的 `installer/liuqin_gui/qml/Main.qml`。`gui-qml.py` 覆盖确认按钮、已准备方案冻结、真实模拟任务期间的 Ctrl+C/关闭保护、报告脱敏和准备状态下取消后退出。`gui-device-first.py` 覆盖无需 OS 材料的扫描、分区选择路由、统一确认执行和重装取消；组合、完整 ROM、ROM 预览及引导维护分别由对应的当前 GUI 测试覆盖。兼容 worker 协议由引擎与设备端测试验证。
+
+`paired-recovery.py` 覆盖配套 Recovery 的身份/完整性检查、ADB 通道与一体打包；不代替真机启动及分区写入验收。
+
+`recovery-compatibility.py` 覆盖系统识别、vendor 指纹与内核精确匹配、多镜像选择、未知固件/镜像不重启、短期运行依据绑定与过期、Android 目标固件拦截、返回 Android 的诊断。`gui-device-first.py` 还验证连接只识别、点击后才读分区。适配测试中的验收项均为合成夹具，不会写入生产适配目录，也不代表真机支持。
+
+`native-recovery.py` 检查原生镜像的内核/DTB/启动与状态程序身份、篡改拒绝、只读传输限制、串号/槽位/解锁/存储保护核验、状态屏幕的数据生成，以及独立原生测试包。使用合成文件和模拟传输，不操作平板；真实屏幕和 RNDIS 仍需真机验收。
+
+`native-ui-service.py` 覆盖固定操作集合、一次性电源确认、过期/会话变化/忙碌拒绝、亮度边界和 RAM 日志导出范围。`native-ui-events.c` 使用真实 LVGL 的离线显示检查页面导航、确认窗口焦点隔离及默认取消，可在 UI 的 CMake 构建中启用 `UI_EVENT_TESTS`，并配合 ASan/UBSan。测试的电源调用使用替身，不会重启测试电脑或平板。
+
+`native-bcb.py` 使用普通文件验证启动快照、仅消费无参数请求、OTA/清除数据与阶段请求保留、未完成安装拒绝清理，
+以及部分写入、回读损坏和中断后的原扇区恢复及只读复位。
+
+`recovery-bootstrap.py` 执行实际网关的 RAM 检查；设置 `LIUQIN_TEST_RECOVERY_IMAGE` 并在含 qemu-aarch64 的 Devbox 中运行，会验证镜像内 BusyBox 的真实路径、applet 和运行时解包。`block-identity.py` 验证 GPT 信息与内核边界匹配、每次读取的缓存和带连字符固件分区的保护。
+
+`partition-reread.py` 验证磁盘忙时在 GPT 写入前停止、清理错误不覆盖原始错误，以及动态设备号变化后的受限节点刷新。`recovery-session.py` 覆盖 qseecomd 精确服务识别、仅卸载内部 UFS 的日志映射、未知占用拒绝；不访问真实磁盘。`partition-editor-device.py` 还验证从精确匹配且全部未格式化的新 Linux 布局继续初始化，并拒绝重复执行。`staged-install.py` 验证默认引导失败只恢复仍保留且镜像匹配的旧系统。
+
+`miku-rom.py` 覆盖完整 OTA 导入与动态分区镜像生成，`miku-workflow.py` 覆盖单 Android / 多系统安装路径的 Miku 适配选择与确认绑定。
+
+`partition-names.py` 检查 16/17 ASCII 字节边界、旧 20 字符标签拒绝、设备写入前拦截、旧布局只读且不自动重启，以及已知旧 boot 解析器的定点更新。`workflow.py` 还覆盖中断记录续接、篡改拒绝和重复初始化拒绝；这些都是离线测试，不操作真实设备。
+
+`native-touch-service.py` 检查触控衔接的只读环境、simplefb、模块/固件哈希门槛及模块失败处理。`native-touch-input.c` 覆盖快速点击、非零触点槽、多指隔离、事件丢失、启动时已按住及手写笔悬停；可独立编译或通过 UI 的 `UI_EVENT_TESTS` 运行，不接触真实输入设备。
+
+`recovery-kernel-components.py` 用主机 C 夹具执行内核 GPT 兼容谓词，拒绝其他磁盘和不一致的镜像表；有本地基线镜像及 DTC 时检查电池传输、USB 角色、触控面板及原版显示时钟/电源依赖的保留。有 Unicorn 和 ARM64 工具链时，在四种装载地址执行对齐入口，验证重叠复制及 FDT 参数。缺少可选构建输入时只跳过对应项目，不代替真机启动验收。
+
+`kernel-common-fixes.py` 检查正式内核 Image 对齐封装的完整性、重复发布与无效布局，并模拟执行四种装载地址。传入 `--source <已适配的 7.3 源码>` 时，另外编译执行真实 CPU/GPT/OF/触控/键盘函数，验证板型和元数据边界、活跃设备依赖、有限重试及超时日志；音频夹具覆盖 APM 回调未注册、probe 失败、错误/短回包、保留其他板型耳机检测等情况。时钟夹具在注册过程中同步准备和释放新父时钟，覆盖速率与投票两类回调及注册失败；恢复旧的数据发布顺序会实际触发空指针检查。
+
+`rootless-build.py` 检查完整 UID/GID 映射要求、映射中间缺口、普通阶段不提权、rootfs 阶段默认选择用户命名空间，以及仅显式选择 sudo 时才进入原有 rootful 路径。测试不挂载文件系统；真实 rootless 的 DNF、ARM64、ACL/capability 和数值所有权另作集成验收。
+
+`fixed-recovery.py` 用临时 RSA2048 密钥构造离线镜像，核验 v0 / gzip-DTB 边界、AVB 自签名与载荷哈希、禁用验证标志拒绝、候选角色，以及现有 GUI 仍不接受固定候选镜像。不会连接设备；需要 OpenSSL。实际 ABL 的设备树和 AVB 链模拟证据见固定 Recovery 调查文档。
+
+`native-firmware.py` 检查 A/B 固件只读采集、节点替换/启动会话变化拒绝、DTBO 边界、未知/部分匹配、精确镜像选择、槽位验收范围、固定候选拒绝及主机记录权限。测试不连接设备。
+
+`universal-recovery.py` 检查 v2 内嵌 DTBO、AVB 自签名、偏移与载荷篡改、MIUI/HyperOS/Miku 条件矩阵、缺失校验元数据、未知 ABL 及候选镜像与自动启动/安装入口的隔离。`native-firmware.py` 另检查 AVB 元数据读取上限、会话帧长度和分区摘要变化。两者均不连接设备；镜像测试需要 OpenSSL。原始 ABL 的离线验证范围见 [固定启动条件](../docs/RECOVERY-FIRMWARE-PROFILES.md#固定启动条件)。
+
+`rom-preview.py` 检查 ROM 目录/TAR/完整 OTA 的身份和完整性、AVB 元数据冲突、修改 flags 的观测、材料变化、未知 ABL、安装后固件组合、只读后端和取消。预览不创建可执行 plan_id；`gui-worker.py` 验证预览结果不能提交给刷写入口。使用 `uv run --project installer python tests/gui-rom-preview.py` 验证 GUI 的三个 ROM、两种固件策略、禁止执行及旧结果失效，可加 `--screenshots /path/to/output` 保存界面。
+
+`native-installer.py` 检查安装候选与只读版的隔离、作用范围与启动会话绑定、GPT/分区 UUID 核对、防回滚观测缺失、失败后封存、旧/新引导存储的编辑范围、boot 全量传输后再写入和回读，以及模拟设备上的分区、Android、Linux/default-boot 完整流程。真实写入上下文用模拟 ioctl 检查异常时恢复只读；boot 写入测试只使用临时普通文件。测试禁止安装流程调用 Fastboot/网络，不接触真实平板。范围见 [原生安装候选](../docs/NATIVE-RECOVERY-INSTALLER.md)。
+
+`fixed-recovery-preserve.py` 检查设备绑定的冷启动资格与签名镜像、底层固件基线、安装后的 ABL/AVB 条件、同一固定镜像对新 ROM 元数据的适配、旧运行时拒绝、仅 recovery_a 的确认范围、RAM 传输损坏、恢复回读及失败回退。普通文件替代块设备，另验证 Android 写入器跳过 ROM Recovery、完成记录保存实际固定 Rec 摘要、恢复后不丢失 write_started 记录，以及读取 ROM 时不额外要求安装令牌。全部不访问 USB 或真实分区。
+
+`native-adb.py` 检查 FunctionFS 启动前的存储/设备门槛、USB-only 环境、ADB 镜像身份、boot ID 绑定及禁止回退 USB 网络。真实 ARM64 adbd 的主机环回测试使用独立 ADB server，隐藏 USB 节点与用户密钥；与平板 USB 枚举分开验收。实现与回归见 [原生 ADB Rec](../docs/NATIVE-RECOVERY-INSTALLER.md#adb-连接与传输)。
+
+`tests/generic-ota.py` 验证通用 OTA 的分区边界、固件/DTBO/回滚索引拒绝、super 空白区域与会话材料绑定；不连接设备。
+
+`gui-combined-install.py` 使用当前 QML/controller/worker，验证一个 Android + 两个 Linux 的多选、每个 rootfs 独立材料、统一确认与执行、最后切换默认引导，以及无 ROM 的多个 Linux 计划。`workflow.py` 与 `native-installer.py` 还验证全部材料在编辑前检查、失败保留已完成子任务、新旧 Rec 能力隔离、每个归档摘要和目标绑定；`full-rom.py` 验证完整 ROM + Linux 默认引导的范围及越界拒绝。全部使用临时文件和模拟设备，不访问平板。
+
+`boot-retention.py` 用普通文件验证三个现用系统保护、连续 12 次替换后版本数量有界、删除系统的孤立引导回收、仅保留一个可核验的旧 Linux 内核、未完成事务阻止清理，以及移动/删除/完成记录阶段断电后的续接。清理失败不把已提交系统标为失败；中断清理阻止新安装。`workflow.py` 还检查仅删除当前默认系统时先要求切换默认。
+
+带 `--source`、`--baseline` 或 ROM 证明参数的显示测试是手工运行的内核回归入口，不因未列入默认 CI 就视为废弃。供电顺序、部分使能失败、投票释放及其他面板隔离使用 `display-retained-power.py` 的状态机夹具。
+
+构建路由回归检查 `build --target` 的统一流程、旧命令/隐藏参数/旧配置拒绝，以及 `outputs` 配套选择。配置检查不自动迁移旧路径或加载素材清单。`project-structure.py` 检查 Rec RAM 装配独立性和安装器源码包边界。
+
+`--export-dir` 回归覆盖本次构建配套选择、文件缺失/损坏、同名内核的不同载荷、导出失败不发布目录，以及不附带登录信息或其他缓存。
+
+指纹录入提供者使用假 TA 和临时私有目录检查多账号隔离、同账号凭据复用、UID 重分配拒绝及取消清理。`devbox run test` 在用户命名空间中运行该检查；CI 另用 Node 执行 Polkit 授权规则。测试不访问传感器、TEE 或真实指纹数据。
+
+`fingerprint-gallery.py` 用假 TA 与真实私有文件检查多指追加、旧单指格式拒绝、删除/未发布引用失效、ID 复用隔离及取消/提交恢复；`fingerprint-gallery-client.py` 执行实际 C 协议和匹配代码，检查精确删除、单次采集、HAT 和返回 ID 验证。两者均不访问硬件。
+
+`fingerprint-abi.py` 从锁定的公开源码构建 libfprint/TOD SDK，在真实 Enroll/Verify/Identify/序列化 API 上运行合成进程测试，并编译修改后的 fprintd。CI 安装开发依赖后运行；它只启动测试设备类和假助手，不运行系统守护进程或访问传感器、TEE。源码构建依赖与测试输入见脚本 `--help`。

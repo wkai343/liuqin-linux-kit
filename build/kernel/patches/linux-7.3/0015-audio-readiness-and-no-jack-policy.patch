@@ -1,0 +1,265 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] Wait for the APM callback and keep codec capture on jackless boards
+
+APR installs the service callback after probe returns: querying synchronously
+inside apm_probe cannot receive its response. Publish only a successfully probed
+APM, check that its callback is installed, and query on demand. Serialize its
+lifetime with readiness calls, propagate transport errors, handle BASIC replies
+without inventing readiness, and validate the four-byte SPF response.
+
+GET_SPF_STATE has no APM payload header. Ready/not-ready are 1/0, per AudioReach:
+https://github.com/AudioReach/audioreach-engine/blob/5773bf8e627c9857481dd338a9ec4aea4a49afd3/fwk/api/apm/apm_api.h
+
+The existing liuqin DTS documents analog onboard microphones and no headset
+jack. Opt this board out of analog jack/impedance detection while retaining
+codec controls, SoundWire DAIs, microphone and speaker paths. Other boards keep
+the existing jack behavior. A missing optional DMIC rate retains divider 2.
+No firmware, calibration, clock/voltage tables, DRM or USB role policy changes.
+
+diff --git a/Documentation/devicetree/bindings/sound/qcom,wcd938x.yaml b/Documentation/devicetree/bindings/sound/qcom,wcd938x.yaml
+index ab1c6285d..b4f6a8fa1 100644
+--- a/Documentation/devicetree/bindings/sound/qcom,wcd938x.yaml
++++ b/Documentation/devicetree/bindings/sound/qcom,wcd938x.yaml
+@@ -23,6 +23,12 @@ properties:
+       - qcom,wcd9380-codec
+       - qcom,wcd9385-codec
+ 
++  qcom,mbhc-disabled:
++    type: boolean
++    description:
++      Disable analog headset jack detection on boards with no such connector.
++      Codec playback and microphone capture interfaces remain available.
++
+   mux-controls:
+     description: A reference to the audio mux switch for
+       switching CTIA/OMTP Headset types
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+index 020d3757a..1d882db1d 100644
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+@@ -157,6 +157,7 @@ display_panel_dvdd_ldo: display-panel-dvdd-ldo {
+ 	 */
+ 	wcd938x: audio-codec {
+ 		compatible = "qcom,wcd9380-codec";
++		qcom,mbhc-disabled;
+ 
+ 		reset-gpios = <&tlmm 43 GPIO_ACTIVE_LOW>;
+ 
+diff --git a/sound/soc/codecs/lpass-va-macro.c b/sound/soc/codecs/lpass-va-macro.c
+index dbc5795b9..025c21496 100644
+--- a/sound/soc/codecs/lpass-va-macro.c
++++ b/sound/soc/codecs/lpass-va-macro.c
+@@ -1576,7 +1576,7 @@ static int va_macro_probe(struct platform_device *pdev)
+ 	ret = of_property_read_u32(dev->of_node, "qcom,dmic-sample-rate",
+ 				   &sample_rate);
+ 	if (ret) {
+-		dev_err(dev, "qcom,dmic-sample-rate dt entry missing\n");
++		dev_dbg(dev, "optional DMIC rate absent, using default divider 2\n");
+ 		va->dmic_clk_div = VA_MACRO_CLK_DIV_2;
+ 	} else {
+ 		ret = va_macro_validate_dmic_sample_rate(sample_rate, va);
+diff --git a/sound/soc/codecs/wcd938x.c b/sound/soc/codecs/wcd938x.c
+index 9a9ea37ec..d61c36f55 100644
+--- a/sound/soc/codecs/wcd938x.c
++++ b/sound/soc/codecs/wcd938x.c
+@@ -154,6 +154,7 @@ struct wcd938x_priv {
+ 	struct mutex micb_lock;
+ 	/* mbhc module */
+ 	struct wcd_mbhc *wcd_mbhc;
++	bool mbhc_disabled;
+ 	struct wcd_mbhc_config mbhc_cfg;
+ 	struct wcd_mbhc_intr intr_ids;
+ 	struct wcd_clsh_ctrl *clsh_info;
+@@ -3145,6 +3146,12 @@ static int wcd938x_codec_set_jack(struct snd_soc_component *comp,
+ {
+ 	struct wcd938x_priv *wcd = dev_get_drvdata(comp->dev);
+ 
++	/* Keep the codec DAIs and MBHC control object, but do not start
++	 * impedance/jack detection on boards without an analog jack.
++	 */
++	if (wcd->mbhc_disabled)
++		return 0;
++
+ 	if (jack)
+ 		return wcd_mbhc_start(wcd->wcd_mbhc, &wcd->mbhc_cfg, jack);
+ 	else
+@@ -3244,7 +3251,10 @@ static int wcd938x_populate_dt_data(struct wcd938x_priv *wcd938x, struct device
+ 	cfg->hs_thr = 1700;
+ 	cfg->hph_thr = 50;
+ 
+-	wcd_dt_parse_mbhc_data(dev, cfg);
++	wcd938x->mbhc_disabled = of_property_read_bool(dev->of_node,
++						      "qcom,mbhc-disabled");
++	if (!wcd938x->mbhc_disabled)
++		wcd_dt_parse_mbhc_data(dev, cfg);
+ 
+ 	return 0;
+ }
+diff --git a/sound/soc/qcom/qdsp6/audioreach.h b/sound/soc/qcom/qdsp6/audioreach.h
+index be2b31d97..7debe79bc 100644
+--- a/sound/soc/qcom/qdsp6/audioreach.h
++++ b/sound/soc/qcom/qdsp6/audioreach.h
+@@ -42,6 +42,8 @@ struct q6apm_graph;
+ 
+ #define APM_CMD_GET_SPF_STATE		0x01001021
+ #define APM_CMD_RSP_GET_SPF_STATE	0x02001007
++#define APM_SPF_STATE_NOT_READY		0
++#define APM_SPF_STATE_READY		1
+ 
+ #define APM_MODULE_INSTANCE_ID		0x00000001
+ #define PRM_MODULE_INSTANCE_ID		0x00000002
+diff --git a/sound/soc/qcom/qdsp6/q6apm.c b/sound/soc/qcom/qdsp6/q6apm.c
+index f9896f846..312ee69c5 100644
+--- a/sound/soc/qcom/qdsp6/q6apm.c
++++ b/sound/soc/qcom/qdsp6/q6apm.c
+@@ -12,6 +12,7 @@
+ #include <linux/slab.h>
+ #include <linux/soc/qcom/apr.h>
+ #include <linux/wait.h>
++#include <linux/unaligned.h>
+ #include <sound/soc.h>
+ #include <sound/soc-dapm.h>
+ #include <sound/pcm.h>
+@@ -28,6 +29,7 @@ struct apm_graph_mgmt_cmd {
+ #define APM_GRAPH_MGMT_PSIZE(p, n) ALIGN(struct_size(p, sub_graph_id_list, n), 8)
+ 
+ static struct q6apm *g_apm;
++static DEFINE_MUTEX(apm_ready_lock);
+ 
+ int q6apm_send_cmd_sync(struct q6apm *apm, const struct gpr_pkt *pkt,
+ 			uint32_t rsp_opcode)
+@@ -150,22 +152,31 @@ static void q6apm_put_audioreach_graph(struct kref *ref)
+ 
+ static int q6apm_get_apm_state(struct q6apm *apm)
+ {
+-	struct gpr_pkt *pkt __free(kfree) = audioreach_alloc_apm_cmd_pkt(0,
+-								APM_CMD_GET_SPF_STATE, 0);
++	int ret;
++	/* GET_SPF_STATE has no APM command payload header. */
++	struct gpr_pkt *pkt __free(kfree) = audioreach_alloc_apm_pkt(0,
++			APM_CMD_GET_SPF_STATE, 0, GPR_APM_MODULE_IID);
+ 	if (IS_ERR(pkt))
+ 		return PTR_ERR(pkt);
+ 
+-	q6apm_send_cmd_sync(apm, pkt, APM_CMD_RSP_GET_SPF_STATE);
++	WRITE_ONCE(apm->state, APM_SPF_STATE_NOT_READY);
++	ret = q6apm_send_cmd_sync(apm, pkt, APM_CMD_RSP_GET_SPF_STATE);
++	if (ret)
++		return ret;
+ 
+-	return apm->state;
++	return READ_ONCE(apm->state);
+ }
+ 
+ bool q6apm_is_adsp_ready(void)
+ {
+-	if (g_apm)
+-		return q6apm_get_apm_state(g_apm);
+-
+-	return false;
++	bool ready = false;
++
++	mutex_lock(&apm_ready_lock);
++	/* apr_device_probe installs this callback only after probe returns. */
++	if (g_apm && READ_ONCE(g_apm->gdev->svc.callback))
++		ready = q6apm_get_apm_state(g_apm) == APM_SPF_STATE_READY;
++	mutex_unlock(&apm_ready_lock);
++	return ready;
+ }
+ EXPORT_SYMBOL_GPL(q6apm_is_adsp_ready);
+ 
+@@ -889,9 +900,7 @@ static int apm_probe(gpr_device_t *gdev)
+ 
+ 	idr_init(&apm->modules_idr);
+ 
+-	g_apm = apm;
+-
+-	q6apm_get_apm_state(apm);
++	/* A synchronous query here cannot receive a GPR callback yet. */
+ 
+ 	ret = snd_soc_register_component(dev, &q6apm_audio_component, NULL, 0);
+ 	if (ret < 0) {
+@@ -900,14 +909,23 @@ static int apm_probe(gpr_device_t *gdev)
+ 	}
+ 
+ 	ret = of_platform_populate(dev->of_node, NULL, NULL, dev);
+-	if (ret)
++	if (ret) {
+ 		snd_soc_unregister_component(dev);
++		return ret;
++	}
+ 
+-	return ret;
++	mutex_lock(&apm_ready_lock);
++	g_apm = apm;
++	mutex_unlock(&apm_ready_lock);
++	return 0;
+ }
+ 
+ static void apm_remove(gpr_device_t *gdev)
+ {
++	mutex_lock(&apm_ready_lock);
++	if (g_apm == dev_get_drvdata(&gdev->dev))
++		g_apm = NULL;
++	mutex_unlock(&apm_ready_lock);
+ 	of_platform_depopulate(&gdev->dev);
+ 	snd_soc_unregister_component(&gdev->dev);
+ }
+@@ -921,6 +939,38 @@ struct audioreach_module *q6apm_find_module_by_mid(struct q6apm_graph *graph, ui
+ 
+ }
+ 
++/* State replies carry one word, unlike BASIC_RSP_RESULT's two words. */
++static bool q6apm_state_response(struct q6apm *apm,
++			       const struct gpr_resp_pkt *data)
++{
++	if (data->hdr.opcode == APM_CMD_RSP_GET_SPF_STATE) {
++		if (data->payload_size < (int)sizeof(u32)) {
++			dev_warn_ratelimited(apm->dev, "short SPF state response\n");
++			return true;
++		}
++		WRITE_ONCE(apm->state, get_unaligned_le32(data->payload));
++		apm->result.opcode = data->hdr.opcode;
++		apm->result.status = 0;
++	} else if (data->hdr.opcode == GPR_BASIC_RSP_RESULT &&
++		   data->payload_size >= (int)sizeof(struct gpr_ibasic_rsp_result_t) &&
++		   get_unaligned_le32(data->payload) == APM_CMD_GET_SPF_STATE) {
++		u32 status = get_unaligned_le32(data->payload + sizeof(u32));
++
++		/* Preserve the old ACK behavior: only the state reply completes
++		 * a successful query. An explicit DSP error can complete it early.
++		 */
++		if (!status)
++			return true;
++		WRITE_ONCE(apm->state, APM_SPF_STATE_NOT_READY);
++		apm->result.opcode = APM_CMD_GET_SPF_STATE;
++		apm->result.status = status;
++	} else {
++		return false;
++	}
++	wake_up(&apm->wait);
++	return true;
++}
++
+ static int apm_callback(const struct gpr_resp_pkt *data, void *priv, int op)
+ {
+ 	gpr_device_t *gdev = priv;
+@@ -932,16 +982,11 @@ static int apm_callback(const struct gpr_resp_pkt *data, void *priv, int op)
+ 	const struct gpr_hdr *hdr = &data->hdr;
+ 	int graph_id, is_pos_buf;
+ 
++	if (q6apm_state_response(apm, data))
++		return 0;
+ 	result = data->payload;
+ 
+ 	switch (hdr->opcode) {
+-	case APM_CMD_RSP_GET_SPF_STATE:
+-		apm->result.opcode = hdr->opcode;
+-		apm->result.status = 0;
+-		/* First word of result it state */
+-		apm->state = result->opcode;
+-		wake_up(&apm->wait);
+-		break;
+ 	case GPR_BASIC_RSP_RESULT:
+ 		switch (result->opcode) {
+ 		case APM_CMD_SHARED_MEM_MAP_REGIONS:

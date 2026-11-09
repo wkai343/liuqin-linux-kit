@@ -46,6 +46,28 @@ def prepare(vendor: Path, destination: Path, patch_output: Path = None):
     }
   report_verify_status (rdev, matched, storage_error ? storage_error : error);''', 1)
             revised = revised[:start] + body + revised[end:]
+            # The OEM DB and authorization belong to one account. Duplicate
+            # checks must not combine templates from different user galleries.
+            start = revised.index("static void\nenroll_identify_cb (")
+            end = revised.index("static gboolean\nfprint_device_enroll_stop (", start)
+            body = revised[start:end].replace("load_all_prints (rdev)", "load_enroll_prints (rdev)")
+            helper = """static GPtrArray *
+load_enroll_prints (FprintDevice *rdev)
+{
+  FprintDevicePrivate *priv = fprint_device_get_instance_private (rdev);
+  if (g_strcmp0 (fp_device_get_driver (priv->dev), "fpc1264_oem") == 0)
+    {
+      g_autoptr(SessionData) session = session_data_get (priv);
+      if (!session || !session->username)
+        return g_ptr_array_new_with_free_func (g_object_unref);
+      return load_user_prints (rdev, session->username);
+    }
+  return load_all_prints (rdev);
+}
+
+"""
+            revised = revised[:start] + helper + body + revised[end:]
+
         if revised == original:
             raise SystemExit("Upstream patch anchor missing: " + name)
         path.write_text(revised)

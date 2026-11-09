@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 """Behavioral tests; never open USB, a device socket or a block device."""
+import contextlib
 import hashlib
 import json
 from pathlib import Path
@@ -128,6 +129,10 @@ class EngineTests(unittest.TestCase):
         transport = Transport(self.engine, 'DEMO-LIUQIN')
         responses = {'cat /etc/liuqin-installer-interface': b'liuqin-installer-v2\n',
                      'uname -r': b'6.17-installer-demo\n'}
+        from liuqin_boot_target import current_helper
+        responses['/bin/busybox sha256sum /usr/lib/liuqin/boot-target-v1.sh /usr/lib/liuqin/liuqin_partition_names.py'] = (
+            hashlib.sha256(current_helper()).hexdigest()+'  /usr/lib/liuqin/boot-target-v1.sh\n'+
+            hashlib.sha256((Path(__file__).resolve().parents[1]/'shared/liuqin_partition_names.py').read_bytes()).hexdigest()+'  /usr/lib/liuqin/liuqin_partition_names.py\n').encode()
         transport.remote = lambda command: responses[command]
         transport.verify_ram_interface()
         responses['uname -r'] = b'6.17-demo\n'
@@ -142,11 +147,7 @@ class EngineTests(unittest.TestCase):
         transport.boot_id = self.engine.transport.boot_id
         calls = []
         transport.remote = lambda text, *args, **kwargs: calls.append(text) or b'liuqin-install: ROOT_INSTALLED'
-        route = unittest.mock.MagicMock()
-        route.__enter__.return_value.getsockname.return_value = ('192.168.7.1', 0)
-        server = SimpleNamespace(server_port=8000, serve_forever=lambda: None,
-                                 shutdown=lambda: None, server_close=lambda: None)
-        with patch.object(socket, 'socket', return_value=route), patch.object(cli.http.server, 'ThreadingHTTPServer', return_value=server):
+        with patch.object(transport, 'http_server', return_value=contextlib.nullcontext('http://127.0.0.1:8000')):
             transport.install_root(self.engine.padded)
         self.assertTrue(any('wget' in command and '/target-root.contract' in command for command in calls))
         dispatch = calls[-1]

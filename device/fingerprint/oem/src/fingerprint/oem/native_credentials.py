@@ -32,17 +32,18 @@ def main():
     create = len(arguments) == 3 and arguments[0] == "--create"
     change = len(arguments) == 4 and arguments[0] == "--change-input"
     authorize = len(arguments) == 3 and arguments[0] in ("--auth-preflight", "--auth-preflight-renew")
+    enrol_gallery = len(arguments) == 7 and arguments[0] == "--enrol-gallery"
     enrol_existing = len(arguments) == 5 and arguments[0] == "--enrol-existing"
-    enrol = enrol_existing or len(arguments) == 4 and arguments[0] == "--enrol"
+    enrol = enrol_gallery or enrol_existing or len(arguments) == 4 and arguments[0] == "--enrol"
     if os.geteuid() != 0 or not (create or change or authorize or enrol) or not state.is_absolute():
         print("usage (root): native_credentials.py [--state-dir ABSOLUTE_PRIVATE_DIRECTORY] "
               "--create NATIVE_UID DERIVED_INPUT_FD | --auth-preflight NATIVE_UID DERIVED_INPUT_FD | "
               "--change-input NATIVE_UID CURRENT_INPUT_FD DESIRED_INPUT_FD | "
               "--enrol DATABASE NATIVE_UID DERIVED_INPUT_FD | "
-              "--enrol-existing INPUT_DATABASE OUTPUT_DATABASE NATIVE_UID DERIVED_INPUT_FD", file=sys.stderr)
+              "--enrol-existing INPUT_DATABASE OUTPUT_DATABASE NATIVE_UID DERIVED_INPUT_FD | --enrol-gallery INPUT|- OUTPUT ACTIVE META NATIVE_UID DERIVED_INPUT_FD", file=sys.stderr)
         return 2
     try:
-        uid = int(arguments[3 if enrol_existing else 2 if enrol else 1], 10)
+        uid = int(arguments[5 if enrol_gallery else 3 if enrol_existing else 2 if enrol else 1], 10)
         input_fd = int(arguments[-1], 10)
         if not 0x40000000 <= uid <= 0x7fffffff or input_fd < 3 or os.isatty(input_fd):
             raise ValueError("native UID or binary input FD invalid")
@@ -182,7 +183,9 @@ def main():
             print("native_credential_update=OK opaque_handle_replaced=1 "
                   "new_credential_not_requested=1 sid_validation=TA_owned_and_client_checked")
             return 0
-        if enrol_existing:
+        if enrol_gallery:
+            operation = ["--enrol-gallery", *arguments[1:5], str(uid), str(handle_fd), str(input_fd)]
+        elif enrol_existing:
             operation = ["--enrol-existing", *arguments[1:3], str(uid), str(handle_fd), str(input_fd)]
         elif enrol:
             operation = ["--enrol", arguments[1], str(uid), str(handle_fd), str(input_fd)]

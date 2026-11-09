@@ -94,6 +94,11 @@ exit 0
 EOF
 	cat >"$test_root/bin/chroot" <<'EOF'
 #!/bin/sh
+if [ "${2:-}" = /usr/libexec/liuqin-storage-seal ] && [ "${3:-}" = --version ]; then
+ [ -f "$1/usr/libexec/liuqin-storage-seal" ] || exit 1
+ grep -qx scope-fixture "$1/usr/libexec/liuqin-storage-seal" || exit 1
+ printf 'liuqin-storage-scope-v1\n'; exit 0
+fi
 count=0
 [ ! -r "$TEST_CHROOT_COUNT" ] || count=$(cat "$TEST_CHROOT_COUNT")
 count=$((count + 1)); printf '%s\n' "$count" >"$TEST_CHROOT_COUNT"
@@ -194,6 +199,7 @@ EOF
 
 reset_base_fixture() {
     TEST_ROOT_FS=ext4
+    TEST_UFS_ONLY=false
     export TEST_ROOT_FS
     unset LIUQIN_STORAGE_FS_SUPPORT
 	rm -rf "$test_root/case"
@@ -256,7 +262,6 @@ reset_base_fixture() {
 	: >"$init_log"
 	: >"$command_log"
 	# The nodes every abort path must have put back into the sealed baseline.
-	# A split-layout fixture adds its linux_home node to this list.
 	ro_nodes='sda sda1 sda35 sdb'
 	TEST_HOME_LABEL_PATH=
 	TEST_LABEL_PATH=$dev/sda35
@@ -276,6 +281,9 @@ reset_base_fixture() {
 	TEST_NATIVE_MARKER_STAT='644 0 0 22'
 	TEST_MUTATE_NATIVE_ON_CHROOT=0 TEST_MUTATE_NATIVE=none
 	LIUQIN_STORAGE_PROFILE_FILE= LIUQIN_STORAGE_GNOME_CONTRACT= LIUQIN_STORAGE_NATIVE_CONTRACT=
+    LIUQIN_STORAGE_BOOT_TARGET=$case_root/boot-target
+    LIUQIN_STORAGE_BOOT_TARGET_HELPER=$project_root/device/boot/boot-target-v1.sh
+    export LIUQIN_STORAGE_BOOT_TARGET LIUQIN_STORAGE_BOOT_TARGET_HELPER
 	LIUQIN_STORAGE_SPLASH_STATE=$case_root/splash-state
 	LIUQIN_STORAGE_SPLASH_HELPER=$case_root/splash-helper
 	export case_root dev sys probe newroot state command_log mount_count umount_count
@@ -302,6 +310,8 @@ reset_base_fixture() {
 run_init() {
 	env \
 		LIUQIN_INIT_STORAGE_TEST_ONLY=1 \
+        LIUQIN_INIT_TEST_UFS_ONLY="${TEST_UFS_ONLY:-false}" \
+        LIUQIN_STORAGE_SEAL_HELPER="$case_root/scoped-selector" \
 		LIUQIN_INIT_STORAGE_TEST_PHASE="$TEST_STORAGE_PHASE" \
 		LIUQIN_INIT_TEST_PATH="$test_root/bin:/usr/bin:/bin" \
 		LIUQIN_INIT_TEST_BUSYBOX="$test_root/bin/busybox" \
@@ -432,9 +442,10 @@ make_native_tree() {
 	printf 'hexagonrpcd\n' >"$tree/usr/bin/hexagonrpcd"
 	printf 'gdm3\n' >"$tree/usr/sbin/gdm3"
 	printf 'busybox\n' >"$tree/usr/local/bin/busybox"
-	printf 'liuqin-shell\n' >"$tree/usr/local/bin/liuqin-shell"
-	printf 'storage-guard\n' >"$tree/usr/local/sbin/liuqin-gnome-storage-guard"
-	printf 'usb-rescue\n' >"$tree/usr/local/sbin/liuqin-gnome-usb-rescue"
+	printf 'policy_version=LIUQIN_DESKTOP_UFS_ONLY_V1\n' >"$tree/usr/local/sbin/liuqin-gnome-storage-guard"
+	printf 'LIUQIN_DESKTOP_UFS_ONLY_V1\n' >"$tree/etc/liuqin-storage-policy"
+	printf 'scope-fixture\n' >"$tree/usr/libexec/liuqin-storage-seal"
+	chmod 0755 "$tree/usr/libexec/liuqin-storage-seal"
 	printf 'power-keyd\n' >"$tree/usr/local/libexec/liuqin-power-keyd"
 	printf 'power-key-action\n' >"$tree/usr/local/libexec/liuqin-power-key-action"
 	printf 'power-menu\n' >"$tree/usr/local/libexec/liuqin-power-menu"
@@ -458,8 +469,6 @@ make_native_tree() {
 		>"$tree/etc/dconf/db/local.d/locks/00-liuqin-power"
 	printf '[Service]\nExecStart=/usr/local/sbin/liuqin-gnome-storage-guard\n' \
 		>"$tree/etc/systemd/system/liuqin-gnome-storage-guard.service"
-	printf '[Service]\nExecStart=/usr/local/sbin/liuqin-gnome-usb-rescue\n' \
-		>"$tree/etc/systemd/system/liuqin-gnome-usb-rescue.service"
 	printf '[Service]\nExecStart=/usr/local/libexec/liuqin-backlight-default\n' \
 		>"$tree/etc/systemd/system/liuqin-backlight-default.service"
 	printf '[Unit]\nRequires=liuqin-bt-preconfigure.service\nAfter=liuqin-bt-preconfigure.service\n' \
@@ -483,9 +492,7 @@ make_native_tree() {
 	chmod 0755 "$tree/usr/lib/systemd/systemd" "$tree/usr/bin/gnome-shell" \
 		"$tree/usr/bin/hexagonrpcd" \
 		"$tree/usr/sbin/gdm3" "$tree/usr/local/bin/busybox" \
-		"$tree/usr/local/bin/liuqin-shell" \
 		"$tree/usr/local/sbin/liuqin-gnome-storage-guard" \
-		"$tree/usr/local/sbin/liuqin-gnome-usb-rescue" \
 		"$tree/usr/local/libexec/liuqin-power-keyd" \
 		"$tree/usr/local/libexec/liuqin-power-key-action" \
 		"$tree/usr/local/libexec/liuqin-power-menu" \
@@ -497,7 +504,6 @@ make_native_tree() {
 	chmod 0644 "$tree/etc/liuqin-native-root" \
 		"$tree/etc/dconf/db/local.d/locks/00-liuqin-power" \
 		"$tree/etc/systemd/system/liuqin-gnome-storage-guard.service" \
-		"$tree/etc/systemd/system/liuqin-gnome-usb-rescue.service" \
 		"$tree/etc/systemd/system/liuqin-backlight-default.service" \
 		"$tree/etc/systemd/system/liuqin-power-keyd.service" \
 		"$tree/etc/systemd/system/liuqin-power-keyd.service.d/20-liuqin-session-runtime.conf" \
@@ -522,8 +528,6 @@ make_native_tree() {
 		"$tree/usr/share/liuqin/power/gschemas.compiled"
 	ln -s ../liuqin-gnome-storage-guard.service \
 		"$tree/etc/systemd/system/basic.target.requires/liuqin-gnome-storage-guard.service"
-	ln -s ../liuqin-gnome-usb-rescue.service \
-		"$tree/etc/systemd/system/multi-user.target.wants/liuqin-gnome-usb-rescue.service"
 	ln -s ../liuqin-power-keyd.service \
 		"$tree/etc/systemd/system/multi-user.target.wants/liuqin-power-keyd.service"
 	ln -s ../liuqin-backlight-default.service \
@@ -615,6 +619,9 @@ for old_profile in native native-custom gnome unsupported; do
 reset_fixture; TEST_PROFILE_STAT='600 0 0'; export TEST_PROFILE_STAT; expect_rejected_before_open profile-mode
 reset_fixture; TEST_PROFILE_STAT='644 1000 0'; export TEST_PROFILE_STAT; expect_rejected_before_open profile-owner
 reset_fixture; mv "$profile_file" "$profile_file.real"; ln -s "$profile_file.real" "$profile_file"; expect_rejected_before_open profile-symlink
+reset_fixture; rm "$probe/native-root/etc/liuqin-storage-policy"; expect_rejected_before_open storage-policy-missing
+reset_fixture; printf 'old-policy\n' >"$probe/native-root/etc/liuqin-storage-policy"; expect_rejected_before_open storage-policy-old
+reset_fixture; rm "$probe/native-root/usr/libexec/liuqin-storage-seal"; expect_rejected_before_open ufs-helper-missing
 reset_fixture; rm "$probe/native-root/etc/liuqin-native-root"; expect_rejected_before_open marker-missing
 reset_fixture; printf 'wrong\n' >"$probe/native-root/etc/liuqin-native-root"; expect_rejected_before_open marker-content
 reset_fixture; printf 'LIUQIN_NATIVE_ROOT_CONTRACT_V1\n' >"$native_contract"; expect_rejected_before_open unsupported-contract
@@ -683,8 +690,7 @@ reset_fixture; native_expect_success final-valid
 
 
 # The slot marked successful is the slot this boot came from, never a constant:
-# the dual layout boots Ubuntu from slot A (slot B only on the bootloader's
-# fallback copy), the Linux-only layout from slot B.
+# temporary diagnostic boots must also use their actual cmdline slot.
 slot_check_lines=$(grep -n '/bin/liuqin-mark-slot-successful --check "\$slot_suffix"' "$init" | cut -d: -f1)
 slot_check_first=$(printf '%s\n' "$slot_check_lines" | sed -n '1p')
 slot_check_second=$(printf '%s\n' "$slot_check_lines" | sed -n '2p')
@@ -706,62 +712,15 @@ esac
 	[ "$slot_b_refuse_line" -lt "$switch_line" ] ||
 	fail "persistent root can switch before the slot-success gate"
 
-# The split dual-boot layout puts the root in linux_root; a single-system
-# install still hands over userdata.  linux_root has to win when both exist.
-grep -q '^	for storage_partname in linux_root userdata; do$' "$init" ||
-	fail "root resolution no longer prefers PARTNAME=linux_root over userdata"
-grep -q '^	storage_partlabel_link=\$storage_dev_root/disk/by-partlabel/linux_root$' "$init" ||
-	fail "root resolution no longer cross-checks by-partlabel"
+# The root remains userdata, cross-checked by both partition name and label.
+grep -q '^	storage_partlabel_link=\$storage_dev_root/disk/by-partlabel/userdata$' "$init" ||
+    fail "root resolution no longer cross-checks by-partlabel"
 grep -q 'findfs LABEL=LIUQIN_ROOT' "$init" ||
-	fail "root resolution no longer confirms LABEL=LIUQIN_ROOT"
-
-# The split layout also has to clear the read-only flag on linux_home, and it
-# has to do so in exactly one window: after the root has proven its own
-# identity (a partition named by a root we have not admitted is not authority
-# enough to unseal anything) and before the handoff (after switch_root the
-# initramfs is gone and the flag is whatever it was left as).
-home_resolve_def_line=$(grep -cn '^storage_resolve_home() {$' "$init")
-[ "$home_resolve_def_line" = 1 ] ||
-	fail "init does not define exactly one storage_resolve_home"
-grep -q '^	\[ "\$storage_resolved_partname" = linux_root \] || return 1$' "$init" ||
-	fail "home resolution is not restricted to the split linux_root layout"
-grep -q '^		sda\[0-9\]\*) ;;$' "$init" ||
-	fail "home resolution no longer pins the first UFS LUN"
-grep -q 'findfs LABEL=LIUQIN_HOME' "$init" ||
-	fail "home resolution no longer cross-checks LABEL=LIUQIN_HOME"
-root_label_line=$(grep -n 'findfs LABEL=LIUQIN_ROOT' "$init" | cut -d: -f1)
-home_call_line=$(grep -n '^		if storage_resolve_home; then$' "$init" | cut -d: -f1)
-identity_gate_line=$(grep -n '^	storage_identity_ok || {$' "$init" | cut -d: -f1)
-root_setrw_line=$(grep -n 'blockdev --setrw "\$storage_target"' "$init" | cut -d: -f1)
-home_setrw_line=$(grep -n 'blockdev --setrw "\$storage_home"' "$init" | cut -d: -f1)
-switch_exec_line=$(grep -n '^	exec "\$BB" switch_root ' "$init" | cut -d: -f1)
-case $root_label_line:$home_call_line:$identity_gate_line:$root_setrw_line:$home_setrw_line:$switch_exec_line in
-	*[!0-9:]*|*::*|:*|*:) fail "the linux_home read-only clear is not where it must be" ;;
-esac
-[ "$root_label_line" -lt "$home_call_line" ] ||
-	fail "home resolution runs before the root confirms LABEL=LIUQIN_ROOT"
-[ "$home_call_line" -lt "$identity_gate_line" ] ||
-	fail "home resolution is not part of the root identity check"
-[ "$identity_gate_line" -lt "$root_setrw_line" ] ||
-	fail "the root identity gate no longer precedes the BLKROSET clears"
-[ "$root_setrw_line" -lt "$home_setrw_line" ] ||
-	fail "linux_home is unsealed before the root partition is"
-[ "$home_setrw_line" -lt "$switch_exec_line" ] ||
-	fail "linux_home is unsealed after switch_root, where it can no longer help"
-
-# Whatever rejects the boot must put linux_home back with the rest of the LUN.
-sed -n '/^storage_abort() {$/,/^}$/p' "$init" >"$test_root/abort-body"
-[ -s "$test_root/abort-body" ] || fail "could not extract storage_abort from init"
-grep -q '^	storage_home_name=$' "$test_root/abort-body" ||
-	fail "storage_abort no longer drops linux_home from the writable set"
-grep -q '^	storage_lock_all || storage_lock_ok=false$' "$test_root/abort-body" ||
-	fail "storage_abort no longer re-seals every UFS node"
+    fail "root resolution no longer confirms LABEL=LIUQIN_ROOT"
 
 # --------------------------------------------------------------------------
 # Installer-mode /dev/disk/by-partlabel: boot_a/boot_b/persist are required,
-# userdata/linux_root/linux_home are optional.  A Linux-only install deletes
-# userdata and a fresh device has no linux_root, and either case must still get
-# a telnet channel -- that is the channel --restore-partition-table runs from.
+# userdata is optional so a damaged layout still has a recovery channel.
 # --------------------------------------------------------------------------
 installer_root=$test_root/installer
 sed -n '/^storage_path_is_block() {$/,/^}$/p' "$init" >"$installer_root.fn1"
@@ -770,7 +729,7 @@ sed -n '/^storage_installer_required=/,/^}$/p' "$init" >"$installer_root.fn2"
 	fail "could not extract the installer by-partlabel helpers from init"
 grep -q '^storage_installer_required=.boot_a boot_b persist.$' "$init" ||
 	fail "installer required partition set changed"
-grep -q '^storage_installer_optional=.userdata linux_root linux_home.$' "$init" ||
+grep -q '^storage_installer_optional=.userdata.$' "$init" ||
 	fail "installer optional partition set changed"
 
 # $1 case name, $2 writable node suffix or empty, rest: PARTNAME values
@@ -846,13 +805,13 @@ installer_linked() {
 	[ -L "$installer_root/$1/dev/disk/by-partlabel/$2" ]
 }
 
-# Every optional partition present: all six get a symlink.
-installer_expect_ok full boot_a boot_b persist userdata linux_root linux_home
-for installer_label in boot_a boot_b persist userdata linux_root linux_home; do
+# All required partitions and userdata get a symlink.
+installer_expect_ok full boot_a boot_b persist userdata
+for installer_label in boot_a boot_b persist userdata; do
 	installer_linked full "$installer_label" ||
 		fail "installer/full: $installer_label was not linked"
 done
-grep -q '^log: installer data partitions linked: userdata linux_root linux_home$' \
+grep -q '^log: installer data partitions linked: userdata$' \
 	"$installer_root/full/out" || fail "installer/full: optional link log is wrong"
 
 # Bare device, nothing but the required three: still a telnet channel.
@@ -861,42 +820,24 @@ for installer_label in boot_a boot_b persist; do
 	installer_linked bare "$installer_label" ||
 		fail "installer/bare: $installer_label was not linked"
 done
-for installer_label in userdata linux_root linux_home; do
+for installer_label in userdata; do
 	! installer_linked bare "$installer_label" ||
 		fail "installer/bare: $installer_label was linked but does not exist"
 done
 grep -q '^log: installer data partitions linked: none$' "$installer_root/bare/out" ||
 	fail "installer/bare: optional link log is wrong"
 
-# A Linux-only install (--android-size 0) has no userdata at all.
-installer_expect_ok linux-only boot_a boot_b persist linux_root linux_home
-! installer_linked linux-only userdata ||
-	fail "installer/linux-only: userdata was linked but does not exist"
-installer_linked linux-only linux_root ||
-	fail "installer/linux-only: linux_root was not linked"
-grep -q '^log: installer data partitions linked: linux_root linux_home$' \
-	"$installer_root/linux-only/out" || fail "installer/linux-only: optional link log is wrong"
-
-# The linux_root symlink has to agree with the uevent resolution, because
-# storage_resolve_target cross-checks exactly that node.
-installer_linked linux-only linux_root &&
-	[ "$(readlink "$installer_root/linux-only/dev/disk/by-partlabel/linux_root")" \
-		= "$installer_root/linux-only/dev/sda14" ] ||
-	fail "installer/linux-only: linux_root points at the wrong node"
-
 # Each required partition is fatal when missing; no optional one ever is.
 installer_expect_refused no-boot-a '' boot_b persist userdata
 installer_expect_refused no-boot-b '' boot_a persist userdata
 installer_expect_refused no-persist '' boot_a boot_b userdata
-installer_expect_ok no-userdata boot_a boot_b persist linux_root
-installer_expect_ok no-linux-root boot_a boot_b persist userdata
-installer_expect_ok no-linux-home boot_a boot_b persist userdata linux_root
+installer_expect_ok no-userdata boot_a boot_b persist
 
 # Duplicates and writable nodes are refused whether the label is required or not.
 installer_expect_refused dup-required '' boot_a boot_a boot_b persist
-installer_expect_refused dup-optional '' boot_a boot_b persist linux_root linux_root
+installer_expect_refused dup-optional '' boot_a boot_b persist userdata userdata
 installer_expect_refused rw-required persist boot_a boot_b persist
-installer_expect_refused rw-optional linux_root boot_a boot_b persist linux_root
+installer_expect_refused rw-optional userdata boot_a boot_b persist userdata
 
 # Btrfs must skip tree-log replay during the read-only admission probe.
 btrfs_fixture() {
@@ -923,5 +864,95 @@ expect_rejected_before_open btrfs-unsupported-boot
 btrfs_fixture
 printf 'ext4\n' >"$probe/native-root/etc/liuqin-root-filesystem"
 expect_rejected_before_open btrfs-format-marker-mismatch
+
+# Bound roots select a precise PARTUUID and never consult the legacy label.
+bound_fixture() {
+    reset_fixture
+    printf 'PARTNAME=lqr_111111111111\nPARTUUID=22222222-2222-4222-8222-222222222222\n' >"$sys/sda35/uevent"
+    cat >"$LIUQIN_STORAGE_BOOT_TARGET" <<'TARGET'
+LIUQIN_BOOT_TARGET_V1
+os_id=11111111-1111-4111-8111-111111111111
+root_partuuid=22222222-2222-4222-8222-222222222222
+root_fsuuid=33333333-3333-4333-8333-333333333333
+root_fstype=ext4
+root_path=native-root
+boot_generation=44444444-4444-4444-8444-444444444444
+TARGET
+    for target_root in "$probe/native-root" "$newroot"; do
+        printf '11111111-1111-4111-8111-111111111111\n' >"$target_root/etc/liuqin-system-id"
+        cp "$LIUQIN_STORAGE_BOOT_TARGET" "$target_root/etc/liuqin-boot-target"
+    done
+    python3 - "$dev/sda35" <<'UUID'
+import sys, uuid
+with open(sys.argv[1], 'r+b') as f:
+    f.seek(1128); f.write(uuid.UUID('33333333-3333-4333-8333-333333333333').bytes)
+UUID
+    TEST_FINDFS_FAIL=1
+}
+bound_fixture
+native_expect_success bound-ext4
+bound_fixture
+TEST_ROOT_FS=btrfs; export TEST_ROOT_FS
+sed -i 's/root_fstype=ext4/root_fstype=btrfs/' "$LIUQIN_STORAGE_BOOT_TARGET"
+printf '_BHRfS_M' | dd of="$dev/sda35" bs=1 seek=65600 conv=notrunc 2>/dev/null
+printf '\001\000\000\000\000\000\000\000' | dd of="$dev/sda35" bs=1 seek=65672 conv=notrunc 2>/dev/null
+python3 - "$dev/sda35" <<'UUID'
+import sys, uuid
+with open(sys.argv[1], 'r+b') as f:
+    f.seek(65568); f.write(uuid.UUID('33333333-3333-4333-8333-333333333333').bytes)
+UUID
+LIUQIN_STORAGE_FS_SUPPORT=$case_root/filesystems
+printf 'ext4\nbtrfs\n' >"$LIUQIN_STORAGE_FS_SUPPORT"
+export LIUQIN_STORAGE_FS_SUPPORT
+for target_root in "$probe/native-root" "$newroot"; do
+    cp "$LIUQIN_STORAGE_BOOT_TARGET" "$target_root/etc/liuqin-boot-target"
+    printf 'btrfs\n' >"$target_root/etc/liuqin-root-filesystem"
+done
+native_expect_success bound-btrfs
+bound_fixture
+for target_root in "$probe/native-root" "$newroot"; do
+    sed -i 's/boot_generation=44444444/boot_generation=55555555/' "$target_root/etc/liuqin-boot-target"
+done
+native_expect_success bound-retained-generation
+bound_fixture
+sed -i 's/PARTUUID=22222222/PARTUUID=99999999/' "$sys/sda35/uevent"
+expect_rejected_before_open bound-missing-partition
+bound_fixture
+printf '\000' | dd of="$dev/sda35" bs=1 seek=1128 conv=notrunc 2>/dev/null
+expect_rejected_before_open bound-wrong-filesystem-uuid
+bound_fixture
+printf 'different-system\n' >"$probe/native-root/etc/liuqin-system-id"
+expect_rejected_before_open bound-wrong-system-id
+bound_fixture
+printf 'invalid\n' >"$LIUQIN_STORAGE_BOOT_TARGET"
+expect_rejected_before_open bound-invalid-contract
+bound_fixture
+mkdir -p "$sys/sda36"
+cp "$sys/sda35/uevent" "$sys/sda36/uevent"
+: >"$dev/sda36"; printf '1\n' >"$state/sda36"
+ro_nodes="$ro_nodes sda36"
+expect_rejected_before_open bound-duplicate-partition
+
+# Execute the complete persistent-root admission, including the sibling seal
+# after the selected parent/root pair is opened. External nodes never belong
+# to that verified UFS snapshot, regardless of their original RO state.
+for usb_ro in 0 1; do
+ reset_fixture
+ TEST_UFS_ONLY=true
+ cat >"$case_root/scoped-selector" <<'SCOPE'
+#!/bin/sh
+[ "$1" = --list-ufs ] || exit 2
+printf 'sda\nsda1\nsda35\nsdb\n'
+SCOPE
+ chmod 0755 "$case_root/scoped-selector"
+ for node in sdg sdg1; do
+  : >"$dev/$node"; : >"$newroot/dev/$node"
+  printf '%s\n' "$usb_ro" >"$state/$node"
+ done
+ native_expect_success scoped-complete-admission
+ [ "$(cat "$state/sdg")" = "$usb_ro" ] || fail 'complete admission changed external disk RO'
+ [ "$(cat "$state/sdg1")" = "$usb_ro" ] || fail 'complete admission changed external partition RO'
+ if grep -E -- '--(setro|setrw|getro) .*sdg' "$command_log"; then fail 'complete admission touched external block flags'; fi
+done
 
 printf '%s\n' 'liuqin persistent-root fail-closed tests: PASS'

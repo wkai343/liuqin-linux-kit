@@ -1,12 +1,12 @@
 {
   "distribution": "fedora",
-  "release": "44",
+  "release": "45",
   "architecture": "aarch64",
   "format": "oci",
-  "archive": "Fedora-Container-Base-Generic-44-1.7.aarch64.oci.tar.xz",
-  "url": "https://mirrors.tuna.tsinghua.edu.cn/fedora/releases/44/Container/aarch64/images/Fedora-Container-Base-Generic-44-1.7.aarch64.oci.tar.xz",
-  "upstream_url": "https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Container/aarch64/images/Fedora-Container-Base-Generic-44-1.7.aarch64.oci.tar.xz",
-  "sha256": "eca19542a48a8e39b84e869713a1fa2408cbcc578de26c25ae72e3334ef968c1",
-  "checksum_source": "https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Container/aarch64/images/Fedora-Container-44-1.7-aarch64-CHECKSUM",
-  "signing_key": "36F612DCF27F7D1A48A835E4DBFCF71C6D9F90A6"
+  "archive": "Fedora-Container-Base-Generic-45-1.4.aarch64.oci.tar.xz",
+  "url": "https://mirrors.tuna.tsinghua.edu.cn/fedora/releases/45/Container/aarch64/images/Fedora-Container-Base-Generic-45-1.4.aarch64.oci.tar.xz",
+  "upstream_url": "https://dl.fedoraproject.org/pub/fedora/linux/releases/45/Container/aarch64/images/Fedora-Container-Base-Generic-45-1.4.aarch64.oci.tar.xz",
+  "sha256": "bc6c3b3e132e3ed5eff398112d16fcdca13dc8abd63550f8aad40e882b9617b6",
+  "checksum_source": "https://dl.fedoraproject.org/pub/fedora/linux/releases/45/Container/aarch64/images/Fedora-Container-45-1.4-aarch64-CHECKSUM",
+  "signing_key": "4F50A6114CD5C6976A7F1179655A4B02F577861E"
 }

@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "profiles": [
+    {
+      "id": "liuqin-miui-14.0.3-android13-abl-20230422",
+      "label": "MIUI 14.0.3 / Android 13 固件基线",
+      "device": "liuqin",
+      "match": {
+        "abl": {
+          "partition_bytes": 8388608,
+          "hash_bytes": 8388608,
+          "sha256": "2fbe028f35389df5a9489dc9d436fe7973fd14a257313e7cd731a46d37f7bbb7"
+        },
+        "dtbo": {
+          "partition_bytes": 25165824,
+          "hash_bytes": 20633856,
+          "sha256": "8160577305786116453926787053fe3db4cdb9481133cff12fecbb7851a7c050"
+        },
+        "vbmeta": {
+          "partition_bytes": 131072,
+          "hash_bytes": 131072,
+          "sha256": "8e278786c7c3f140ba0b3fced5196b0de8911f0cfbf17b39b17554461b5b1591"
+        },
+        "vbmeta_system": {
+          "partition_bytes": 131072,
+          "hash_bytes": 131072,
+          "sha256": "d9b6c69aab4c8756a5e7e996f1eaf05c979d172ce6fd683fa83cddbe46bda1b5"
+        },
+        "layout": {
+          "boot": 201326592,
+          "vendor_boot": 100663296,
+          "recovery": 104857600
+        }
+      },
+      "artifacts": {
+        "temporary": {
+          "image_sha256": "dcc287f5a8273260613fdcf26447e35e28fd40cec36358615d32c0e9c7abe569",
+          "build_id": "608b7fc430aac4f9574dcb69f866843b0e3b6add8ddc4949760d58c4c195f98f",
+          "validation": "TEMPORARY_BOOT_VERIFIED",
+          "slots": [
+            "a"
+          ],
+          "evidence": "2026-11-03 actual liuqin: full LVGL touch image temporary boot, visible display/touch, 132 partitions and logs; out/validation/lvgl-touch-final-20261103/result.json"
+        },
+        "fixed_candidate": {
+          "image_sha256": "d8a6649f5c680c63534da71f6bac65c921ebe9f48ba5170df97cf04c693a7259",
+          "build_id": "1328ff573458d30117e5d10c502724064f6ee40c8ca2dd8e0050691bf3eeee18",
+          "validation": "OFFLINE_VALIDATED_HARDWARE_BOOT_UNTESTED",
+          "slots": [
+            "a"
+          ],
+          "evidence": "out/validation/recovery-fixed-final-20261103/result.json; no physical fixed boot or flash performed"
+        }
+      }
+    }
+  ],
+  "notes": [
+    "Match hardware firmware hashes and required boot partition sizes; OS brand/version does not qualify a native image.",
+    "This catalog grants no write, fixed-install or slot-switch capability.",
+    "Only one device and A-slot temporary startup have been physically validated."
+  ]
+}

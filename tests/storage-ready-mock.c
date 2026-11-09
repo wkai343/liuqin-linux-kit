@@ -59,7 +59,8 @@ static int fixture_ioctl(int fd, unsigned long request, void *value)
 
 int main(int argc, char **argv)
 {
-    assert(argc == 5);
+    assert(argc == 5 || (argc == 6 && (!strcmp(argv[5], "recovery") || !strcmp(argv[5], "ufs-only"))));
     fixture_dev = argv[1]; fixture_sector = atoi(argv[4]);
-    return ready_at(argv[1], argv[2], argv[3]);
+    return ready_at(argv[1], argv[2], argv[3], argc == 6 && !strcmp(argv[5], "recovery"),
+                    argc == 6 && !strcmp(argv[5], "ufs-only"));
 }

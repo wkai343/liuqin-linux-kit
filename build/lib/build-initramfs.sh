@@ -343,6 +343,10 @@ cp "$source_dir/init" "$staging/init"
 mkdir -p "$staging/usr/lib/liuqin"
 cp "$project_root/device/boot/root-interface-v2.sh" "$staging/usr/lib/liuqin/root-interface-v2.sh"
 chmod 0644 "$staging/usr/lib/liuqin/root-interface-v2.sh"
+cp "$project_root/device/boot/boot-target-v1.sh" "$staging/usr/lib/liuqin/boot-target-v1.sh"
+chmod 0644 "$staging/usr/lib/liuqin/boot-target-v1.sh"
+printf '1\n' >"$staging/etc/liuqin-multiboot"
+chmod 0644 "$staging/etc/liuqin-multiboot"
 cp "$source_dir/etc/issue" "$staging/etc/issue"
 cp "$source_dir/etc/mdev.conf" "$staging/etc/mdev.conf"
 chmod 0644 "$staging/etc/mdev.conf"
@@ -360,6 +364,10 @@ chmod 0644 "$staging/etc/liuqin-storage-mode"
 if [ "$root_profile" = native-updatable ]; then
     printf '%s\n' "$root_profile" >"$staging/etc/liuqin-root-profile"
     chmod 0644 "$staging/etc/liuqin-root-profile"
+    if [ "$storage_mode" = persistent ]; then
+        printf 'LIUQIN_DESKTOP_UFS_ONLY_V1\n' >"$staging/etc/liuqin-storage-policy"
+        chmod 0644 "$staging/etc/liuqin-storage-policy"
+    fi
 fi
 if [ "$storage_mode" = persistent ]; then
     cp "$native_root_contract" "$staging/etc/liuqin-native-root.contract"
@@ -408,6 +416,11 @@ printf '%s\n' "$bt_firmware_names" | while read -r firmware_name; do
 	cp "$bt_firmware_dir/$firmware_name" "$staging/lib/firmware/qca/$firmware_name"
 	chmod 0644 "$staging/lib/firmware/qca/$firmware_name"
 done
+
+# Linux 7.3 requests the WCN-prefixed WCN6855 names before legacy fallback.
+# These bytes are the same pinned stock 2.1 firmware; no new blob is fetched.
+cp "$staging/lib/firmware/qca"/hpbtfw21.tlv "$staging/lib/firmware/qca"/wcnhpbtfw21.tlv
+cp "$staging/lib/firmware/qca"/hpnv21g.bin "$staging/lib/firmware/qca"/wcnhpnv21g.bin
 
 # ath11k probes and boots MHI before /init can switch_root, so WLAN firmware is
 # just as stage-1-critical as the BT blobs above. Keep one physical compressed
@@ -480,7 +493,21 @@ if [ -n "${INSTALLER_RUNTIME:-}" ]; then
 	mkdir -p "$staging/usr/lib/liuqin"
 	cp "$project_root/device/installer/install-root.sh" "$staging/usr/lib/liuqin/install-root.sh"
 	cp "$project_root/device/installer/install-layout.sh" "$staging/usr/lib/liuqin/install-layout.sh"
-	cp "$project_root/device/installer/install-switch-store.sh" "$staging/usr/lib/liuqin/install-switch-store.sh"
+	cp "$project_root/device/installer/multiboot-layout.sh" "$staging/usr/lib/liuqin/multiboot-layout.sh"
+	cp "$project_root/device/installer/multiboot-store.sh" "$staging/usr/lib/liuqin/multiboot-store.sh"
+    if [ -x "$staging/usr/bin/python3" ] && [ -x "$staging/usr/sbin/mkfs.f2fs" ]; then
+        cp "$project_root/device/installer/android-device.py" "$staging/usr/lib/liuqin/android-device.py"
+        for name in liuqin_android.py liuqin_android_images.py liuqin_layout.py liuqin_multiboot.py liuqin_managed.py liuqin_boot_target.py liuqin_partitions.py liuqin_partition_names.py liuqin_partition_editor.py liuqin_block_identity.py liuqin_native_install.py liuqin_rom_admission.py liuqin_ota.py liuqin_super.py liuqin_ota_v1.py; do
+            cp "$project_root/shared/$name" "$staging/usr/lib/liuqin/$name"
+        done
+        cp "$project_root/shared/liuqin-android-profile.json" "$staging/usr/lib/liuqin/liuqin-android-profile.json"
+        for name in liuqin-miku-profile.json liuqin-android-roms.json liuqin-lineage-profile.json; do
+            cp "$project_root/shared/$name" "$staging/usr/lib/liuqin/$name"
+        done
+        cp "$project_root/shared/liuqin-rom-images.json" "$staging/usr/lib/liuqin/liuqin-rom-images.json"
+        printf '1\n' >"$staging/etc/liuqin-android-installer"
+        chmod 0644 "$staging/etc/liuqin-android-installer"
+    fi
 	cp "$project_root/device/installer/provision-liuqin-from-persist.sh" "$staging/usr/lib/liuqin/provision.sh"
 	printf 'readonly\n' >"$staging/etc/liuqin-storage-mode"
 	printf 'liuqin\n' >"$staging/etc/liuqin-installer"
@@ -495,7 +522,8 @@ if [ -n "${INSTALLER_RUNTIME:-}" ]; then
 		cp "$INSTALLER_KERNEL_RELEASE" "$staging/etc/liuqin-installer-kernel.release"
 		chmod 0644 "$staging/etc/liuqin-installer-interface" "$staging/etc/liuqin-installer-kernel.release"
 		# A copied runtime must never inject a stale target-specific boot contract.
-		rm -f "$staging/etc/liuqin-native-root.contract" "$staging/etc/liuqin-root-profile"
+		rm -f "$staging/etc/liuqin-native-root.contract" "$staging/etc/liuqin-root-profile" \
+			"$staging/etc/liuqin-storage-policy"
 	fi
 	# GNU tar invokes gzip externally; do not depend on ash's applet dispatch.
 	ln -s busybox "$staging/bin/gzip"

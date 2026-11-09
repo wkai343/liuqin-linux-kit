@@ -102,6 +102,9 @@ slot_from_cmdline() {
 
 storage_dev_root=${LIUQIN_STORAGE_DEV_ROOT:-/dev}
 storage_seal_helper=/bin/liuqin-storage-seal
+if [ "${LIUQIN_INIT_STORAGE_TEST_ONLY:-0}" = 1 ]; then
+	storage_seal_helper=${LIUQIN_STORAGE_SEAL_HELPER:-$storage_seal_helper}
+fi
 storage_ready_state=/run/liuqin-storage-ready
 storage_sys_block=${LIUQIN_STORAGE_SYS_BLOCK:-/sys/class/block}
 storage_mounts=${LIUQIN_STORAGE_MOUNTS:-/proc/mounts}
@@ -116,8 +119,6 @@ storage_probe_root=${LIUQIN_STORAGE_PROBE_ROOT:-/mnt/persistent-root}
 storage_newroot=${LIUQIN_STORAGE_NEWROOT:-/newroot}
 storage_target_name=
 storage_target=
-storage_home_name=
-storage_home=
 storage_parent=$storage_dev_root/sda
 storage_marker=etc/liuqin-native-root
 storage_marker_sha256=4fdae4f7a27af8b0d4a2bbc168c7f01c3c5c6b5e245fcc521389d662f8212c5b
@@ -128,15 +129,34 @@ storage_fstype=ext4
 storage_ro_options=ro,noload
 storage_rw_options=rw,noatime
 storage_fs_support=/etc/liuqin-filesystems
+storage_binding=false
+storage_boot_target=/etc/liuqin-boot-target
+storage_boot_target_helper=/usr/lib/liuqin/boot-target-v1.sh
 if [ "${LIUQIN_INIT_STORAGE_TEST_ONLY:-0}" = 1 ]; then
     storage_native_contract=${LIUQIN_STORAGE_NATIVE_CONTRACT:-$storage_native_contract}
     storage_fs_support=${LIUQIN_STORAGE_FS_SUPPORT:-$storage_fs_support}
+    storage_boot_target=${LIUQIN_STORAGE_BOOT_TARGET:-$storage_boot_target}
+    storage_boot_target_helper=${LIUQIN_STORAGE_BOOT_TARGET_HELPER:-$storage_boot_target_helper}
 fi
 storage_probe_mounted=false
 storage_root_mounted=false
 storage_fallback_safe=true
 storage_sd_nodes_snapshot=
 storage_sd_nodes_snapshot_taken=false
+storage_snapshot_ufs_only=false
+# Only the verified native persistent profile may leave external media alone.
+# Every RAM/installer/recovery path retains the all-SCSI baseline.
+storage_ufs_only=false
+if [ "$storage_mode" = persistent ] && [ "$storage_profile" = native-updatable ]; then
+	if [ -f /etc/liuqin-storage-policy ] && [ ! -L /etc/liuqin-storage-policy ] &&
+	   [ "$("$BB" stat -c '%a %u %g' /etc/liuqin-storage-policy)" = '644 0 0' ] &&
+	   [ "$("$BB" cat /etc/liuqin-storage-policy)" = LIUQIN_DESKTOP_UFS_ONLY_V1 ]; then
+		storage_ufs_only=true
+	else
+		log 'desktop storage policy missing or incompatible; retaining the RAM-only baseline'
+		storage_mode=readonly
+	fi
+fi
 
 storage_path_is_block() {
 	[ -b "$1" ] && return 0
@@ -175,83 +195,41 @@ storage_source_is_mounted() {
 	return 1
 }
 
-# The writable persistent root is a whole partition on the first UFS LUN.  In
-# the dual-boot split layout it is `linux_root`; a single-system install still
-# hands over `userdata`.  Resolve it by PARTNAME rather than a pinned partition
-# number -- liuqin capacity variants share the LUN but not the exact GPT
-# offsets -- and prefer `linux_root` so a split layout never picks the Android
-# /data partition.  `/dev/disk/by-partlabel/linux_root` is the same information
-# by another name and only exists in installer mode, so it is used as a
-# cross-check, not as the source of truth.  Anything ambiguous (missing,
-# duplicated, on another LUN, or disagreeing with by-partlabel) fails closed.
+# The supported root is userdata on the first UFS LUN. Partition numbers
+# vary with capacity; reject ambiguous names and cross-check any by-partlabel link.
 storage_resolve_target() {
+    storage_binding=false
+    storage_match_key=PARTNAME
+    storage_match_value=userdata
+    if [ -e "$storage_boot_target" ] || [ -L "$storage_boot_target" ]; then
+        [ -f "$storage_boot_target_helper" ] || return 1
+        . "$storage_boot_target_helper"
+        liuqin_target_parse "$storage_boot_target" || return 1
+        storage_binding=true
+        storage_match_key=PARTUUID
+        storage_match_value=$bt_partuuid
+    fi
 	storage_resolved_name=
-	storage_resolved_partname=
-	for storage_partname in linux_root userdata; do
-		for storage_uevent in "$storage_sys_block"/sd*/uevent; do
-			[ -r "$storage_uevent" ] || continue
-			[ "$(storage_uevent_value PARTNAME "$storage_uevent" 2>/dev/null || true)" = "$storage_partname" ] || continue
-			storage_candidate=${storage_uevent%/uevent}
-			storage_candidate=${storage_candidate##*/}
-			case $storage_candidate in
-			sda[0-9]*) ;;
-			*) return 1 ;;
-			esac
-			[ -z "$storage_resolved_name" ] || return 1
-			storage_resolved_name=$storage_candidate
-		done
-		[ -z "$storage_resolved_name" ] || { storage_resolved_partname=$storage_partname; break; }
+	for storage_uevent in "$storage_sys_block"/sd*/uevent; do
+		[ -r "$storage_uevent" ] || continue
+		[ "$(storage_uevent_value "$storage_match_key" "$storage_uevent" 2>/dev/null || true)" = "$storage_match_value" ] || continue
+		storage_candidate=${storage_uevent%/uevent}
+		storage_candidate=${storage_candidate##*/}
+		case $storage_candidate in sda[0-9]*) ;; *) return 1 ;; esac
+		[ -z "$storage_resolved_name" ] || return 1
+		storage_resolved_name=$storage_candidate
 	done
 	[ -n "$storage_resolved_name" ] || return 1
 	storage_target_name=$storage_resolved_name
 	storage_target=$storage_dev_root/$storage_target_name
-	storage_partlabel_link=$storage_dev_root/disk/by-partlabel/linux_root
+	storage_partlabel_link=$storage_dev_root/disk/by-partlabel/userdata
+    if [ "$storage_binding" = true ]; then
+        [ "$(storage_uevent_value PARTNAME "$storage_sys_block/$storage_target_name/uevent")" = "$bt_name" ] || return 1
+        storage_partlabel_link=$storage_dev_root/disk/by-partuuid/$bt_partuuid
+    fi
 	if [ -e "$storage_partlabel_link" ]; then
 		[ "$("$BB" readlink -f "$storage_partlabel_link" 2>/dev/null || true)" = "$storage_target" ] || return 1
 	fi
-	return 0
-}
-
-# In the split layout /home is its own `linux_home` partition, mounted by
-# systemd from the real root's fstab (LABEL=LIUQIN_HOME, nofail).  The
-# initramfs never mounts it, but the fail-closed baseline sealed every UFS node
-# with BLKROSET and that kernel-level read-only flag survives switch_root:
-# without clearing it systemd mounts /home read-only ("source write-protected,
-# mounted read-only") and nothing can create a user home directory.  Resolution
-# mirrors the root's -- PARTNAME on the first LUN, exactly one node, no alias,
-# cross-checked against the filesystem label -- and anything ambiguous leaves
-# the partition sealed.  Ambiguity here is not a boot failure: the fstab entry
-# is `nofail` by design, so a missing, duplicated or unlabelled home partition
-# must reach a desktop with /home on the root filesystem instead of no boot.
-storage_resolve_home() {
-	storage_home_name=
-	storage_home=
-	[ "$storage_resolved_partname" = linux_root ] || return 1
-	storage_home_resolved_name=
-	for storage_uevent in "$storage_sys_block"/sd*/uevent; do
-		[ -r "$storage_uevent" ] || continue
-		[ "$(storage_uevent_value PARTNAME "$storage_uevent" 2>/dev/null || true)" = linux_home ] || continue
-		storage_home_candidate=${storage_uevent%/uevent}
-		storage_home_candidate=${storage_home_candidate##*/}
-		case $storage_home_candidate in
-		sda[0-9]*) ;;
-		*) return 1 ;;
-		esac
-		[ -z "$storage_home_resolved_name" ] || return 1
-		storage_home_resolved_name=$storage_home_candidate
-	done
-	[ -n "$storage_home_resolved_name" ] || return 1
-	storage_home_path=$storage_dev_root/$storage_home_resolved_name
-	[ "$storage_home_path" != "$storage_target" ] || return 1
-	[ "$storage_home_path" != "$storage_parent" ] || return 1
-	storage_path_is_block "$storage_home_path" || return 1
-	[ "$("$BB" readlink -f "$storage_home_path" 2>/dev/null || true)" = "$storage_home_path" ] || return 1
-	storage_home_label_path=$("$BB" findfs LABEL=LIUQIN_HOME 2>/dev/null || true)
-	[ -n "$storage_home_label_path" ] || return 1
-	[ "$("$BB" readlink -f "$storage_home_label_path" 2>/dev/null || true)" = "$storage_home_path" ] || return 1
-	! storage_source_is_mounted "$storage_home_path" || return 1
-	storage_home_name=$storage_home_resolved_name
-	storage_home=$storage_home_path
 	return 0
 }
 
@@ -267,13 +245,13 @@ storage_identity_ok() {
 	case $storage_target_size in ''|*[!0-9]*) return 1 ;; esac
 	[ "$storage_target_size" -ge 33554432 ] || return 1
 
-	# The filesystem label is still the authority on "this is our root".
-	# PARTNAME only says which partition to look at; say which of the two
-	# routes named it, because a split-layout install that silently fell
-	# back to userdata is a misinstall, not a working boot.
-	storage_label_path=$("$BB" findfs LABEL=LIUQIN_ROOT 2>/dev/null || true)
-	[ -n "$storage_label_path" ] || return 1
-	[ "$("$BB" readlink -f "$storage_label_path" 2>/dev/null || true)" = "$storage_target" ] || return 1
+    if [ "$storage_binding" = true ]; then
+        liuqin_target_fs_check "$storage_target" || return 1
+    else
+        storage_label_path=$("$BB" findfs LABEL=LIUQIN_ROOT 2>/dev/null || true)
+        [ -n "$storage_label_path" ] || return 1
+        [ "$("$BB" readlink -f "$storage_label_path" 2>/dev/null || true)" = "$storage_target" ] || return 1
+    fi
     storage_fstype=ext4
     storage_ro_options=ro,noload
     storage_rw_options=rw,noatime
@@ -289,22 +267,14 @@ storage_identity_ok() {
         storage_ro_options=ro,rescue=nologreplay,subvolid=5
         storage_rw_options=rw,noatime,subvolid=5,compress=zstd:3
     fi
-	if [ "$storage_resolved_partname" = linux_root ]; then
-		log "persistent root resolved via PARTNAME=linux_root ($storage_target), LABEL=LIUQIN_ROOT confirmed"
-	else
-		log "persistent root resolved via PARTNAME=userdata ($storage_target), LABEL=LIUQIN_ROOT confirmed"
-	fi
+    if [ "$storage_binding" = true ]; then
+        [ "$storage_fstype" = "$bt_fstype" ] || return 1
+        log "persistent root bound to system $bt_id, PARTUUID=$bt_partuuid ($storage_target)"
+    else
+        log "persistent root resolved via PARTNAME=userdata ($storage_target), LABEL=LIUQIN_ROOT confirmed"
+    fi
 	! storage_source_is_mounted "$storage_parent" || return 1
 	! storage_source_is_mounted "$storage_target" || return 1
-	storage_home_name=
-	storage_home=
-	if [ "$storage_resolved_partname" = linux_root ]; then
-		if storage_resolve_home; then
-			log "persistent home resolved via PARTNAME=linux_home ($storage_home), LABEL=LIUQIN_HOME confirmed"
-		else
-			log "persistent home not resolved via PARTNAME=linux_home/LABEL=LIUQIN_HOME; leaving it sealed read-only, /home stays on the root filesystem"
-		fi
-	fi
 	return 0
 }
 
@@ -320,6 +290,12 @@ storage_native_reject() {
 # appear in no gate here: they must not decide whether the system boots.
 storage_native_root_ok() {
 	storage_checked_root=$1
+    if [ "$storage_binding" = true ]; then
+        [ -f "$1/etc/liuqin-system-id" ] && [ ! -L "$1/etc/liuqin-system-id" ] || return 1
+        [ "$("$BB" cat "$1/etc/liuqin-system-id")" = "$bt_id" ] || return 1
+        [ -f "$1/etc/liuqin-boot-target" ] && [ ! -L "$1/etc/liuqin-boot-target" ] || return 1
+        liuqin_target_matches "$1/etc/liuqin-boot-target" || return 1
+    fi
     storage_fs_marker=$storage_checked_root/etc/liuqin-root-filesystem
     if [ -e "$storage_fs_marker" ] || [ -L "$storage_fs_marker" ]; then
         [ -f "$storage_fs_marker" ] && [ ! -L "$storage_fs_marker" ] || return 1
@@ -350,10 +326,9 @@ storage_native_root_ok() {
 	for storage_native_executable in \
 		/usr/lib/systemd/systemd \
 		/usr/bin/hexagonrpcd \
-		/usr/local/bin/busybox /usr/local/bin/liuqin-shell \
+		/usr/local/bin/busybox \
 		/usr/libexec/iio-sensor-proxy \
 		/usr/local/sbin/liuqin-gnome-storage-guard \
-		/usr/local/sbin/liuqin-gnome-usb-rescue \
 		/usr/local/libexec/liuqin-power-keyd \
 		/usr/local/libexec/liuqin-power-key-action \
 		/usr/local/sbin/liuqin-bt-public-addr \
@@ -363,10 +338,19 @@ storage_native_root_ok() {
 		[ "$("$BB" stat -c '%a' "$storage_checked_root$storage_native_executable" 2>/dev/null || true)" = 755 ] ||
 			storage_native_reject "not executable: $storage_native_executable" || return 1
 	done
+	storage_policy=$storage_checked_root/etc/liuqin-storage-policy
+	[ -f "$storage_policy" ] && [ ! -L "$storage_policy" ] &&
+		[ "$("$BB" stat -c '%a %u %g' "$storage_policy")" = '644 0 0' ] &&
+		[ "$("$BB" cat "$storage_policy")" = LIUQIN_DESKTOP_UFS_ONLY_V1 ] ||
+		storage_native_reject 'root requires the UFS-only storage policy update' || return 1
+	"$BB" grep -qx 'policy_version=LIUQIN_DESKTOP_UFS_ONLY_V1' \
+		"$storage_checked_root/usr/local/sbin/liuqin-gnome-storage-guard" || return 1
+	[ "$("$BB" stat -c '%a' "$storage_checked_root/usr/libexec/liuqin-storage-seal")" = 755 ] &&
+		[ "$("$BB" chroot "$storage_checked_root" /usr/libexec/liuqin-storage-seal --version)" = liuqin-storage-scope-v1 ] ||
+		storage_native_reject 'UFS scope helper missing or incompatible' || return 1
 	for storage_native_regular in \
 		/etc/dconf/db/local.d/locks/00-liuqin-power \
 		/etc/systemd/system/liuqin-gnome-storage-guard.service \
-		/etc/systemd/system/liuqin-gnome-usb-rescue.service \
 		/etc/systemd/system/liuqin-power-keyd.service \
 		/etc/systemd/system/liuqin-backlight-default.service \
 		/etc/systemd/system/bluetooth.service.d/20-liuqin-public-address.conf \
@@ -390,9 +374,6 @@ storage_native_root_ok() {
 	[ ! -e "$storage_checked_root/etc/systemd/system/basic.target.requires/liuqin-snap-root-admission.service" ] &&
 		[ ! -L "$storage_checked_root/etc/systemd/system/basic.target.requires/liuqin-snap-root-admission.service" ] ||
 		storage_native_reject "snap admission still gates basic.target" || return 1
-	[ -L "$storage_checked_root/etc/systemd/system/multi-user.target.wants/liuqin-gnome-usb-rescue.service" ] ||
-		storage_native_reject "USB rescue service is not enabled" || return 1
-	[ "$("$BB" readlink "$storage_checked_root/etc/systemd/system/multi-user.target.wants/liuqin-gnome-usb-rescue.service")" = ../liuqin-gnome-usb-rescue.service ] || return 1
 
 	[ -L "$storage_checked_root/etc/systemd/system/graphical.target.wants/liuqin-backlight-default.service" ] ||
 		storage_native_reject "backlight default is not enabled" || return 1
@@ -425,6 +406,14 @@ storage_root_ok() {
 
 storage_collect_sd_nodes() {
 	storage_nodes_root=${1:-$storage_dev_root}
+	if [ "${2:-${storage_ufs_only:-false}}" = true ]; then
+		storage_scope_sysroot=${storage_sys_block%/class/block}
+		if [ "$storage_nodes_root" = "$storage_newroot/dev" ]; then
+			storage_scope_sysroot=$storage_newroot/sys
+		fi
+		"$storage_seal_helper" --list-ufs "$storage_nodes_root" "$storage_scope_sysroot"
+		return $?
+	fi
 	storage_collected_nodes=
 	storage_expected_paths=
 	set -- "$storage_nodes_root"/sd*
@@ -465,20 +454,13 @@ storage_snapshot_sd_nodes() {
 	storage_sd_nodes_snapshot=$(storage_collect_sd_nodes) || return 1
 	storage_snapshot_has_parent=false
 	storage_snapshot_has_target=false
-	storage_snapshot_has_home=false
 	for storage_block in $storage_sd_nodes_snapshot; do
 		[ "$storage_block" != sda ] || storage_snapshot_has_parent=true
 		[ "$storage_block" != "$storage_target_name" ] || storage_snapshot_has_target=true
-		[ -z "$storage_home_name" ] || [ "$storage_block" != "$storage_home_name" ] ||
-			storage_snapshot_has_home=true
 	done
 	[ "$storage_snapshot_has_parent" = true ] && [ "$storage_snapshot_has_target" = true ] || return 1
-	if [ -n "$storage_home_name" ] && [ "$storage_snapshot_has_home" != true ]; then
-		log "persistent home left the UFS node set after resolution; it stays read-only"
-		storage_home_name=
-		storage_home=
-	fi
 	storage_sd_nodes_snapshot_taken=true
+	storage_snapshot_ufs_only=$storage_ufs_only
 	log 'persistent root canonical node snapshot captured'
 }
 
@@ -493,14 +475,21 @@ storage_lock_all() {
 		:
 	else
 		storage_lock_namespace_ok=false
+		[ "$storage_ufs_only" != true ] || return 1
 	fi
-	for storage_path in "$storage_dev_root"/sd*; do
+	if [ "$storage_ufs_only" = true ]; then
+		set --
+		for storage_node in $storage_lock_nodes; do set -- "$@" "$storage_dev_root/$storage_node"; done
+	else
+		set -- "$storage_dev_root"/sd*
+	fi
+	for storage_path in "$@"; do
 		storage_path_is_block "$storage_path" || continue
 		storage_lock_seen=true
 		"$BB" blockdev --setro "$storage_path" 2>/dev/null || storage_lock_ok=false
 	done
 	[ "$storage_lock_seen" = true ] || return 1
-	for storage_path in "$storage_dev_root"/sd*; do
+	for storage_path in "$@"; do
 		storage_path_is_block "$storage_path" || continue
 		[ "$("$BB" blockdev --getro "$storage_path" 2>/dev/null || true)" = 1 ] || storage_lock_ok=false
 	done
@@ -522,6 +511,13 @@ storage_seal_scan() {
 		break
 	done
 	[ "$storage_scan_found" = true ] || return 0
+	if [ "${storage_ufs_only:-false}" = true ]; then
+		# Do not fall back to a broad seal and then enter a desktop with
+		# external media accidentally left read-only. Retry during the wait;
+		# a failed final scope proof selects the strictly sealed RAM path.
+		"$storage_seal_helper" --seal-ufs >/dev/null
+		return $?
+	fi
 	if [ -x "$storage_seal_helper" ] && "$storage_seal_helper" --seal >/dev/null; then
 		return 0
 	fi
@@ -552,11 +548,17 @@ storage_wait_for_ufs() {
 	storage_wait_complete=false
 	storage_wait_proven_once=false
 	storage_wait_previous_proof=
-	# Only normal native boots may finish early. Installer and low-power
-	# charging retain the original ten scan/sleep rounds.
+	storage_wait_probe=--ready
+	# The ADB Recovery branch can prove full enumeration before opening
+	# its maintenance services. Other installers retain the legacy wait.
 	if [ "$storage_mode" = persistent ] && [ "$storage_profile" = native-updatable ]; then
-		case " $1 " in *' androidboot.mode=charger '*) ;; *) storage_wait_fast=true ;; esac
+		storage_wait_fast=true
+		storage_wait_probe=--ready-ufs
+	elif [ "$storage_mode" = readonly ] && [ "${2:-}" = recovery ]; then
+		storage_wait_fast=true
+		storage_wait_probe=--ready-recovery
 	fi
+	case " $1 " in *' androidboot.mode=charger '*) storage_wait_fast=false ;; esac
 	if [ "$storage_wait_fast" = true ]; then
 		if storage_clock_read; then
 			storage_wait_deadline=$((storage_wait_now + 1000))
@@ -576,9 +578,10 @@ storage_wait_for_ufs() {
 				# wall-clock window, rather than adding a timeout on every round.
 				storage_wait_left=$((storage_wait_deadline - storage_wait_now))
 				if [ "$storage_wait_left" -ge 100 ] &&
-				   "$BB" timeout 1 "$storage_seal_helper" --ready \
-				       >"$storage_ready_state.result" 2>"$storage_ready_state.log"; then
-					IFS= read -r storage_ready_description <"$storage_ready_state.result" || storage_ready_description=
+			   "$BB" timeout 1 "$storage_seal_helper" "$storage_wait_probe" \
+			       >"$storage_ready_state.result" 2>"$storage_ready_state.log" &&
+			   IFS= read -r storage_ready_description <"$storage_ready_state.result" &&
+			   [ -n "$storage_ready_description" ]; then
 					# Preserve one scan interval while asynchronous device probes
 					# finish. A second full GPT/sysfs proof is required, rather
 					# than admitting the first momentarily complete namespace.
@@ -622,7 +625,7 @@ storage_wait_for_ufs() {
 
 storage_snapshot_all_ro() {
 	[ "$storage_sd_nodes_snapshot_taken" = true ] || return 0
-	storage_sd_nodes_current=$(storage_collect_sd_nodes "$storage_dev_root") || return 1
+	storage_sd_nodes_current=$(storage_collect_sd_nodes "$storage_dev_root" "$storage_snapshot_ufs_only") || return 1
 	[ "$storage_sd_nodes_current" = "$storage_sd_nodes_snapshot" ] || return 1
 	storage_path_is_block "$storage_parent" || return 1
 	storage_path_is_block "$storage_target" || return 1
@@ -650,19 +653,8 @@ storage_snapshot_persistent_ok() {
 	[ "$("$BB" readlink -f "$storage_check_target" 2>/dev/null || true)" = "$storage_check_target" ] || return 1
 	[ "$("$BB" blockdev --getro "$storage_check_parent" 2>/dev/null || true)" = 0 ] || return 1
 	[ "$("$BB" blockdev --getro "$storage_check_target" 2>/dev/null || true)" = 0 ] || return 1
-	# The home partition, when one was resolved, is the third and last node
-	# this boot is allowed to leave writable.
-	if [ -n "$storage_home_name" ]; then
-		storage_check_home=$storage_nodes_root/$storage_home_name
-		storage_path_is_block "$storage_check_home" || return 1
-		[ "$("$BB" readlink -f "$storage_check_home" 2>/dev/null || true)" = "$storage_check_home" ] || return 1
-		[ "$("$BB" blockdev --getro "$storage_check_home" 2>/dev/null || true)" = 0 ] || return 1
-	fi
 	for storage_block in $storage_sd_nodes_snapshot; do
 		case $storage_block in sda|"$storage_target_name") continue ;; esac
-		if [ -n "$storage_home_name" ] && [ "$storage_block" = "$storage_home_name" ]; then
-			continue
-		fi
 		[ "$("$BB" blockdev --getro "$storage_nodes_root/$storage_block" 2>/dev/null || true)" = 1 ] || return 1
 	done
 	return 0
@@ -685,11 +677,8 @@ storage_abort() {
 		fi
 	fi
 	storage_lock_ok=true
-	# storage_lock_all seals every /dev/sd* node, so the home partition is
-	# re-sealed with the rest; forget it as well, so no later check can treat
-	# a rejected boot's home partition as one that may stay writable.
-	storage_home_name=
-	storage_home=
+	storage_ufs_only=false
+	storage_mode=readonly
 	storage_lock_all || storage_lock_ok=false
 	storage_snapshot_all_ro || storage_lock_ok=false
 	if [ "$storage_unmount_ok" = true ] && [ "$storage_lock_ok" = true ]; then
@@ -748,27 +737,16 @@ storage_prepare_persistent_root() {
 		storage_abort
 		return 1
 	}
-	# The home partition is opened at exactly the same point, for the same
-	# reason: the flag is kernel state that outlives this initramfs.  A
-	# refused BLKROSET here is not fatal -- it leaves the partition in the
-	# sealed baseline -- so drop it from the writable set and continue.
-	if [ -n "$storage_home" ]; then
-		if "$BB" blockdev --setrw "$storage_home"; then
-			log "persistent home opened read-write for the real root's fstab: $storage_home"
-		else
-			log "persistent home could not be opened; it stays read-only: $storage_home"
-			storage_home_name=
-			storage_home=
-		fi
-	fi
-	for storage_block in "$storage_dev_root"/sd*; do
-		storage_path_is_block "$storage_block" || continue
+	for storage_name in $storage_sd_nodes_snapshot; do
+		storage_block=$storage_dev_root/$storage_name
+		storage_path_is_block "$storage_block" || {
+			log 'persistent root UFS snapshot node disappeared'
+			storage_abort
+			return 1
+		}
 		case $storage_block in
 			"$storage_parent"|"$storage_target") continue ;;
 		esac
-		if [ -n "$storage_home" ] && [ "$storage_block" = "$storage_home" ]; then
-			continue
-		fi
 		"$BB" blockdev --setro "$storage_block" 2>/dev/null || {
 			log "persistent root sibling could not be kept read-only: $storage_block"
 			storage_abort
@@ -821,18 +799,6 @@ storage_prepare_persistent_root() {
 	return 0
 }
 
-# LIUQIN_HOME (the optional linux_home partition) is deliberately NOT mounted
-# here.  The initramfs mounts exactly what it must verify before switch_root --
-# the root filesystem -- and everything it mounts it also has to move across
-# the switch and unwind on every failure path.  /home has no admission contract,
-# no marker and nothing in stage 1 needs it, so adding it would buy a second
-# ordering and rollback problem for nothing.  systemd in the real root mounts it
-# from /etc/fstab (the installer writes the LABEL=LIUQIN_HOME entry); if that
-# partition is missing or unlabelled the boot still reaches a shell with an empty
-# /home instead of failing in the initramfs.  What the initramfs does owe it is
-# the BLKROSET flag: storage_prepare_persistent_root clears it alongside the
-# root's, because systemd cannot mount a write-protected block device
-# read-write however correct the fstab entry is.
 storage_switch_persistent_root() {
 	if ! storage_snapshot_persistent_ok "$storage_dev_root"; then
 		log "persistent root UFS state changed before switch_root"
@@ -908,6 +874,7 @@ storage_switch_persistent_root() {
 # /dev, sysfs and command PATH, and never reaches the real init sequence.
 if [ "${LIUQIN_INIT_STORAGE_TEST_ONLY:-0}" = 1 ]; then
 	storage_mode=persistent
+	storage_ufs_only=${LIUQIN_INIT_TEST_UFS_ONLY:-false}
 	if storage_prepare_persistent_root; then
 		case ${LIUQIN_INIT_STORAGE_TEST_PHASE:-prepare} in
 		prepare) exit 0 ;;
@@ -941,24 +908,62 @@ if [ "$storage_mode" = persistent ] && [ "$storage_profile" = native-updatable ]
 	"$storage_splash_helper" start
 fi
 
+storage_wait_mode=
+case " $("$BB" cat /proc/cmdline 2>/dev/null) " in
+*' androidboot.mode=charger '*) storage_ufs_only=false ;;
+esac
+if [ -f /etc/liuqin-native-recovery.json ] && [ -f /etc/liuqin-native-adb ] &&
+   [ "$storage_mode" = readonly ] && [ -x "$storage_seal_helper" ] &&
+   IFS= read -r storage_native_adb </etc/liuqin-native-adb && [ "$storage_native_adb" = 1 ]; then
+	storage_wait_mode=recovery
+fi
 log "waiting for SCSI/UFS block devices and marking them read-only"
-storage_wait_for_ufs "$("$BB" cat /proc/cmdline 2>/dev/null)"
+storage_wait_for_ufs "$("$BB" cat /proc/cmdline 2>/dev/null)" "$storage_wait_mode"
 
 ufs_safe=false
 if [ "$found_block" != true ]; then
 	log "critical: no SCSI/UFS block devices detected; UFS is not fail-closed"
 elif storage_lock_all; then
 	ufs_safe=true
-	for blockdev_path in /dev/sd*; do
-		[ -b "$blockdev_path" ] || continue
-		log "verified read-only: $blockdev_path"
-	done
+	if [ "$storage_ufs_only" = true ]; then
+		log 'internal UFS verified read-only; external media flags preserved'
+	elif [ "$storage_wait_mode" = recovery ]; then
+		log 'native Recovery storage verified read-only'
+	else
+		for blockdev_path in /dev/sd*; do
+			[ -b "$blockdev_path" ] || continue
+			log "verified read-only: $blockdev_path"
+		done
+	fi
+elif [ "$storage_ufs_only" = true ]; then
+	log 'internal UFS scope unproven; rejecting desktop and sealing the RAM rescue environment'
+	storage_ufs_only=false
+	storage_mode=readonly
+	storage_lock_all && ufs_safe=true
 else
 	log "critical: could not prove every SCSI/UFS block device read-only"
 fi
 
 if [ "$ufs_safe" != true ]; then
 	log "critical: remote shell will remain disabled because UFS is not fail-closed"
+fi
+
+# The native Recovery console runs entirely in RAM. A console failure must
+# never relax the storage guard or start an installed operating system.
+if [ -f /etc/liuqin-native-recovery.json ] && [ -f /usr/lib/liuqin/native-status.py ]; then
+    if [ -f /usr/lib/liuqin/native-touch.py ]; then
+        if /usr/bin/python3 -I -B /usr/lib/liuqin/native-touch.py >/run/liuqin-native-touch.log 2>&1; then
+            [ "$storage_wait_mode" != recovery ] || log 'native Recovery touch ready'
+        else
+            log "native touch unavailable; physical keys and computer control remain available"
+        fi
+    fi
+    if [ -x /usr/bin/liuqin-recovery-ui ] && [ -f /usr/lib/liuqin/native-ui-service.py ]; then
+        (/usr/bin/python3 -I -B /usr/lib/liuqin/native-ui-service.py supervise ||
+            /usr/bin/python3 -I -B /usr/lib/liuqin/native-status.py serve) >/run/liuqin-native-ui.log 2>&1 &
+    else
+        /usr/bin/python3 -I -B /usr/lib/liuqin/native-status.py serve >/run/liuqin-native-status.log 2>&1 &
+    fi
 fi
 
 # ABL uses androidboot.mode=charger when external power wakes a deeply
@@ -996,6 +1001,69 @@ if [ "$storage_profile" = native-updatable ] && [ "$charger_boot" = true ]; then
 	while :; do sleep 60; done
 fi
 
+# ADB has its own USB composition; failure must not expose a network shell.
+if [ -f /etc/liuqin-native-recovery.json ] && [ -f /etc/liuqin-native-adb ]; then
+    if [ "$ufs_safe" = true ] && [ "$(cat /etc/liuqin-native-adb)" = 1 ]; then
+        if /usr/bin/python3 -I -B /usr/lib/liuqin/native-adb-start.py >/run/liuqin-native-adb-start.log 2>&1; then
+            log 'native Recovery ADB ready'
+        else
+            log 'native ADB startup failed; keeping the RAM Recovery and local UI'
+        fi
+    else
+        log 'native ADB withheld because storage is not verified read-only'
+    fi
+    while :; do sleep 60; done
+fi
+
+# Admit a persistent system before any diagnostic gadget or role override.
+# UCSI/ADSP may already own a host/PD connection established before boot.
+# A successful switch_root never returns and leaves that connection intact.
+if [ "$storage_mode" = persistent ] && [ "$ufs_safe" = true ]; then
+	if storage_prepare_persistent_root; then
+		slot_success_ok=true
+		# Mark the slot reported by this boot, including temporary diagnostic
+		# boots. Never select a slot here. A missing/ambiguous suffix cannot
+		# safely update ABL retry state, so refuse the persistent handoff.
+		if slot_from_cmdline "$(cat /proc/cmdline)"; then
+			if /bin/liuqin-mark-slot-successful --check "$slot_suffix"; then
+				log "persistent root release: slot $slot_suffix was already successful"
+			elif /bin/liuqin-mark-slot-successful --mark "$slot_suffix" &&
+				/bin/liuqin-mark-slot-successful --check "$slot_suffix"; then
+				log "persistent root release: slot $slot_suffix marked successful"
+			else
+				log "critical: persistent root is valid but slot $slot_suffix success check/update failed"
+				slot_success_ok=false
+			fi
+		else
+			log "critical: refusing a persistent root handoff without a usable androidboot.slot_suffix"
+			slot_success_ok=false
+		fi
+		if [ "$slot_success_ok" != true ]; then
+			storage_abort || ufs_safe=false
+		elif ! storage_switch_persistent_root; then
+			if [ "$storage_fallback_safe" = true ]; then
+				storage_lock_all || ufs_safe=false
+			else
+				ufs_safe=false
+			fi
+		fi
+	else
+		# storage_abort has already restored the fail-closed baseline.  Only
+		# now is it safe to expose the existing RAM rescue shell.
+		if [ "$storage_fallback_safe" = true ]; then
+			storage_lock_all || ufs_safe=false
+		else
+			ufs_safe=false
+		fi
+	fi
+fi
+
+# USB rescue is reached only for RAM images or a safely rejected root.
+if [ "$storage_ufs_only" = true ]; then
+	storage_ufs_only=false
+	storage_mode=readonly
+	storage_lock_all || ufs_safe=false
+fi
 gadget=/sys/kernel/config/usb_gadget/liuqin
 mkdir -p "$gadget"
 echo 0x1d6b >"$gadget/idVendor"
@@ -1068,11 +1136,9 @@ for udc_path in /sys/class/udc/*; do
 	break
 done
 
-# OTG dual-role wiring takes the port role from UCSI on the ADSP, which is not
-# running in this RAM image, so no role arrives and no UDC registers here.
-# The rescue channel is always the peripheral side; claim that role from the
-# switch explicitly.  UCSI takes the port back over after switch_root, so an
-# attached OTG host device still gets host mode in the booted desktop.
+# This fallback is deliberately a peripheral rescue channel. Persistent
+# desktops have already switched root above, so this override cannot displace
+# their pre-attached OTG device or an already-negotiated USB-C connection.
 if [ -z "$udc_name" ]; then
 	for role_path in /sys/class/usb_role/*/role; do
 		[ -w "$role_path" ] || continue
@@ -1089,17 +1155,11 @@ if [ -z "$udc_name" ]; then
 	done
 fi
 
-# boot_a/boot_b/persist are the partitions the installer host side needs before
-# it will do anything, so a missing one is still fatal.  The data partitions are
-# not: a Linux-only install (--android-size 0) deletes userdata, and
-# linux_root/linux_home exist only after a layout has been written.  Refusing on
-# those would leave exactly the install that needs --restore-partition-table
-# without the telnet channel to run it from.  An optional partition that does
-# exist is held to the same standard as a required one -- resolvable to a single
-# block node and still read-only -- because a writable node here means the
-# fail-closed baseline did not take.
+# Boot and calibration partitions are required. userdata is optional in RAM
+# recovery so a damaged table can still be inspected and restored. Existing
+# names must resolve uniquely and remain read-only.
 storage_installer_required='boot_a boot_b persist'
-storage_installer_optional='userdata linux_root linux_home'
+storage_installer_optional='userdata'
 
 start_stage1_telnet() {
 	if [ "$ufs_safe" = true ]; then
@@ -1180,52 +1240,11 @@ else
 	log "warning: no UDC found; USB networking unavailable"
 fi
 
-if [ "$storage_mode" = persistent ] && [ "$ufs_safe" = true ]; then
-	if storage_prepare_persistent_root; then
-		slot_success_ok=true
-		# Mark the slot this boot actually came from.  The dual layout
-		# boots Ubuntu from slot A and only reaches slot B when the
-		# bootloader has fallen back to the copy kept in boot_b; the
-		# Linux-only layout boots it from slot B.  So the suffix -- not a
-		# constant -- decides.  A cmdline without a usable suffix means the
-		# ABL A/B state cannot be reasoned about, and a persistent handoff
-		# that never marks the slot successful would be rolled back by the
-		# retry counter: refuse instead.
-		if slot_from_cmdline "$(cat /proc/cmdline)"; then
-			if /bin/liuqin-mark-slot-successful --check "$slot_suffix"; then
-				log "persistent root release: slot $slot_suffix was already successful"
-			elif /bin/liuqin-mark-slot-successful --mark "$slot_suffix" &&
-				/bin/liuqin-mark-slot-successful --check "$slot_suffix"; then
-				log "persistent root release: slot $slot_suffix marked successful"
-			else
-				log "critical: persistent root is valid but slot $slot_suffix success check/update failed"
-				slot_success_ok=false
-			fi
-		else
-			log "critical: refusing a persistent root handoff without a usable androidboot.slot_suffix"
-			slot_success_ok=false
-		fi
-		if [ "$slot_success_ok" != true ]; then
-			storage_abort || ufs_safe=false
-			[ "$ufs_safe" != true ] || [ ! -e /sys/class/net/usb0 ] || start_stage1_telnet
-		elif ! storage_switch_persistent_root; then
-			if [ "$storage_fallback_safe" = true ]; then
-				storage_lock_all || ufs_safe=false
-			else
-				ufs_safe=false
-			fi
-			[ "$ufs_safe" != true ] || [ ! -e /sys/class/net/usb0 ] || start_stage1_telnet
-		fi
-	else
-		# storage_abort has already restored the fail-closed baseline.  Only
-		# now is it safe to expose the existing RAM rescue shell.
-		if [ "$storage_fallback_safe" = true ]; then
-			storage_lock_all || ufs_safe=false
-		else
-			ufs_safe=false
-		fi
-		[ "$ufs_safe" != true ] || [ ! -e /sys/class/net/usb0 ] || start_stage1_telnet
-	fi
+# A rejected persistent root reaches USB rescue only after storage_abort has
+# re-established the read-only baseline. Successful roots already exec'd above.
+if [ "$storage_mode" = persistent ] && [ "$ufs_safe" = true ] &&
+   [ -e /sys/class/net/usb0 ]; then
+	start_stage1_telnet
 fi
 
 # ---------------------------------------------------------------------------

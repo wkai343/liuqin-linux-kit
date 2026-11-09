@@ -98,6 +98,9 @@ def collect(output, themes_dir=Path('/usr/share/plymouth/themes')):
     subprocess.run([str(helper),'-t',str(raw)],env=env,check=True)
     subprocess.run(['/usr/lib/dracut/dracut-install','-D',str(raw),'-l','-a',
                     '/usr/bin/udevadm','/usr/lib/systemd/systemd-udevd',
+                    # udev dlopens this optional library; ELF DT_NEEDED alone
+                    # does not pull it into the initramfs. Include its closure.
+                    '/usr/lib64/libkmod.so.2',
                     '/usr/lib64/plymouth/script.so','/usr/bin/fc-match'],env=env,check=True)
     # The official script plugin supplies image/text rendering; include its
     # font configuration as well as the four generated project themes.
@@ -142,6 +145,7 @@ def collect(output, themes_dir=Path('/usr/share/plymouth/themes')):
                 records[name]={'sha256':hashlib.sha256(content).hexdigest(),'mode':0o644,'size':len(content)}
     required=['usr/bin/plymouth','usr/bin/plymouthd','usr/bin/udevadm',
               'usr/lib/systemd/systemd-udevd','etc/plymouth/plymouthd.conf',
+              'usr/lib64/libkmod.so.2',
               'usr/share/plymouth/themes/spinner/spinner.plymouth',
               'usr/lib64/plymouth/script.so','usr/bin/fc-match',
               'usr/lib64/plymouth/renderers/frame-buffer.so']

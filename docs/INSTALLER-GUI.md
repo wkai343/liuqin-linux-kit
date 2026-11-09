@@ -1,111 +1,120 @@
 # 安装助手
 
-电脑端 QML 安装向导，支持 Linux、Windows 10/11 x64 与 Xiaomi Pad 6 Pro（liuqin）。
-当前提供 userdata 单根 ext4/Btrfs 安装和 A 槽引导。
-镜像构建使用 Linux/Devbox，安装器不需要构建环境。
+[项目首页](../README.md) ｜ [备份与恢复](FLASHING.md)
 
-## 启动
+当前五步 QML 向导支持 Linux、Windows 10/11 x64。先读取真实分区，再根据所选目标要求材料；Android 和 Linux 可分别或一起安装。
 
-准备 uv、Fastboot、USB 连接及 USB 网络环境，在项目根目录运行：
+## 启动与运行环境
 
 ```sh
 uv run --project installer installer/install-gui.py
 ```
 
-uv 自动准备独立的 Python 3.12 和锁定的 Qt 依赖，首次运行需要下载，之后复用缓存。
-Linux 主机仍需正常图形会话及 Qt 系统运行库，GUI 以普通用户运行。
+连接后只读识别设备，不自动重启。平板需解锁 Bootloader，管理路径要求 A 槽。点击「读取分区」时，从 Bootloader Fastboot 临时启动配套原生 Rec，或连接已运行且有本地校验镜像的 Rec。兼容条件与实测范围以所选镜像的清单、随包 `STATUS.txt` 和验收记录为准。
 
-在界面选择镜像目录，或添加 `--bundle /path/to/images`。
-目录只需要 `installer.img`、`boot.img`、`rootfs.tar.gz`；可选 `bundle.json` 仅用于验收说明。
-`installer.img` 是平板临时运行的安装环境，`boot.img` 与 `rootfs.tar.gz` 是安装后的目标系统。
-当前默认由运行 6.17 的安装环境安装 7.3 系统。程序核对目标 boot 与 rootfs 中的内核/模块身份，
-安装环境自身的内核版本可以不同。
-自定义或尚未验收的包需在确认页接受其测试状态。
+源码模式优先查找 `out/releases/native-recovery-flash/recovery.img` 等默认运行镜像；内置镜像的交付包无需用户另找 Rec。也可明确选择：
 
-## 安装步骤
+```sh
+uv run --project installer installer/install-gui.py --recovery-image /path/to/recovery.img
+```
 
-1. 平板解锁 Bootloader、进入 Fastboot，连接电脑并核对序列号。
-2. 选择三个安装文件，在“安装材料”中选择支持的文件系统。
-3. 在“连接平板”页创建设备备份，或选择同一设备的已有备份。
-4. 点击“检查安装方案”，读取真实容量和布局；准备阶段不格式化。
-5. 核对方案、勾选确认项并输入序列号，开始安装。
-6. 进入桌面后检查网络、声音、旋转和键盘，再正常重启，最后确认首次启动结果。
+GUI 不需要旧 `installer.img`。运行环境与 Linux 的 `boot.img` 是不同镜像，电脑端按构建 ID、内核和运行载荷核验，不能只靠文件名匹配。
 
-**首次安装和重装都会清空整个 userdata，包括原 Linux 和 `/home`。**
-请先把个人文件备份到平板以外。设备备份只含 boot_a、boot_b、persist 和 GPT，不含个人文件或完整 Android 系统。
-安装前检查电量至少 30%，RAM 需能暂存系统归档；备份操作不要求满足归档暂存门槛。
+Android 中需开启 USB 调试并允许电脑；也可先手动进入 Bootloader Fastboot。普通/原厂 Recovery、fastbootd 与 Bootloader Fastboot 分开识别。ROM 名称和 Android 版本本身不证明启动兼容性。当前传输使用 USB ADB，不需要 USB 网卡、DHCP、Telnet 或网络共享。
 
-打开界面只枚举设备、查找本地备份，不自动安装。
-写入前会重新核验设备、会话、文件、分区边界及备份；boot_a 写入后回读校验，再选择 A 槽启动。
+## 五步流程
 
-## 文件系统
+1. **设备与分区**：读取真实 GPT，勾选 userdata 安装 Android，勾选一个或多个 rootfs 安装 Linux。新建、删除、格式化先加入待执行列表，可以撤销。
+2. **安装材料**：Android 选择完整 liuqin ROM；Linux 为每个目标选择配套 `boot.img` 和 `rootfs.tar.gz`。可指定本次安装的默认系统，或在条件允许时保留当前默认引导。
+3. **确认方案**：核验全部材料、容量、系统/分区身份和备份，列出清除范围、ROM 写入、固定 Rec 保护和最终默认引导；确认后才允许写盘。
+4. **执行**：按计划处理分区，逐个安装并回读所选系统，最后提交选定默认系统。联合计划的子任务不再逐个确认；任一步失败即停止并保留记录。
+5. **完成**：操作后留在 Rec，不自动重启或切槽。用户再通过 Rec 电源菜单启动默认系统，并验证首次启动。
 
-可选格式由三个文件的实际支持范围共同决定。ext4 使用普通 `native-root` 目录；
-Btrfs 使用同名子卷、Zstd 三级压缩和元数据 DUP，`/home` 位于其中。
-两者均不增加 GPT 分区或独立 home；Btrfs 不自动配置快照或回滚策略。
-更换格式需取消已有方案后重新检查，确认页会显示最终选择。
+只装 Android 时只勾选 userdata，无需创建 Linux 或 linux_boot。只装 Linux 时无需 ROM；不选系统但有待执行分区操作时，下一步进入分区方案。未选系统继续保留，明确加入的删除/格式化操作仍会执行。
 
-首次使用 Btrfs 须重新构建三个文件：`devbox run build`。
-旧镜像的驱动为模块，不能挂载 Btrfs 根系统。修复后的安装与启动路径已在本机 256GB 上验证桌面启动和正常重启。
+![Android 确认方案（演示模式）](assets/installer-android-plan.png)
+
+![Android 与多个 Linux 的组合方案（演示模式）](assets/installer-multiboot-plan.png)
+
+## 分区操作范围
+
+- 新建分区只使用真实 GPT 空闲区或本次明确删除所释放的空间；不保留数据缩容、不移动相邻分区。
+- 新建对话框按连续空间限制容量，计入已排队分区及引导存储。「使用所有未分配空间」使用最大的一段连续空闲区，并保留精确对齐容量。
+- 重装或格式化所选 rootfs 会清空该系统及其 /home。格式化生成新文件系统身份，安装镜像随之重新绑定；其他系统不重新安装。
+- 格式化 userdata 同时处理 Android metadata，清除相应数据与加密状态。
+- linux_boot 仍被任何登记系统使用时不能随意删除或格式化。boot、persist、super 和底层固件不开放通用删除/格式化。
+- 原厂 userdata 常占满磁盘尾部。Android 设置中的剩余容量是文件系统内部空间，不是可直接新建分区的 GPT 空闲区。
+
+需要重分配原厂尾部时，在方案中明确删除 userdata，再创建新 userdata/rootfs；这会清除原 Android 数据。容量和扇区边界以实际设备为准，不套用其他容量的数字。
+
+## Android 与 Linux 材料
+
+当前使用[Android ROM 安装](FULL-ROM-FLASH.md)：支持的完整 A/B payload OTA ZIP会按实际元数据导出镜像并组装 super，不要求逐个 ROM 加白名单。增量包、任意 updater-script、必须执行的未知 postinstall 或不支持的分区布局会拒绝。旧固定 Fastboot ROM 导入仍由独立兼容规则检查，`fetch-rom` 提取的少量构建输入不能代替完整安装 ROM。
+
+Android 重装不只是替换 userdata：会初始化 userdata/metadata，按包更新 super、A 槽启动资源及固件。Linux rootfs 和既有引导文件保留，但共享固件更新可能改变旧 Linux/Rec 的下次启动条件。
+
+Linux 的 boot 与 rootfs 必须匹配内核模块、系统接口和目标文件系统。ext4 使用 `native-root` 目录，Btrfs 使用同名子卷。重新安装同一发行版到另一个 rootfs 会使用新的系统身份和 GPT 名称。rootfs 分区名只接受 `lqr_` 加 12 位小写十六进制标识；分区名仍受 16 个 ASCII 字符上限检查。
+
+## 默认引导与固定 Rec
+
+读取分区后，在「默认启动系统」选择已安装目标并确认。安装器备份当前 boot_a，核验目标镜像和对应根分区/ROM，完整写入、回读后才更新默认登记。多个 Linux 不需要多个物理 boot 分区。
+
+具备 `tablet_boot_switch_version=1` 的 Rec 也提供平板端系统列表和切换；旧固定版是否具备该界面，以其构建能力为准。完成后选择「启动默认系统」，不是在普通开机时自动显示系统选择菜单。
+
+固定 Rec 已通过固定、冷启动和回刷恢复验证。它使用独立镜像角色，通用 GUI 没有任意 Rec 刷入按钮；默认临时镜像不能直接刷入 Recovery 分区。详见[原生 Rec](NATIVE-RECOVERY.md)。
+
+Android 材料页默认选择「自动保留或恢复本机固定 Rec」。只有匹配的固定资格、镜像及安装后启动链都符合条件时才保留/恢复 recovery_a 并跳过 ROM 内 Recovery。不能证明兼容时会说明原因，可明确改选「按 ROM 原样处理 Recovery」。旧固定版缺少新协议时，需要从 Fastboot 临时启动新版；更新 GUI 不会热改 Rec。
 
 ## 备份复用
 
-| 操作 | 行为 |
-| --- | --- |
-| 创建设备备份 | 优先复用已核验备份；没有时临时启动 RAM，备份完成后返回 Fastboot |
-| 选择/查找已有备份 | 按序列号导入或查找，支持此前 CLI 与早期安装流程的备份 |
-| 另建备份 | 保存新时间点的快照，保留旧目录 |
-| 检查安装方案 | 核验已有备份和当前设备，不重复传输分区备份 |
+备份位置可在材料页更改。基础设备备份按同机、同布局和校准数据匹配复用；当前 boot_a 每次另存本次快照。GPT 改变后补建新布局备份。完整 ROM 另保存待覆盖分区的镜像，按身份与完整摘要核验后复用。
 
-检查包含 SHA256、设备序列号、分区边界与大小。切槽造成的 GPT 属性变化、安装后 boot 内容变化，
-不会直接使原始备份失效。新快照不能替代安装前的原厂恢复材料。
+个人文件、Android 用户数据和 Linux rootfs 内容需要另外备份。恢复 boot 或 GPT 不能撤销已经执行的格式化。备份种类与恢复限制见[安装要求与恢复](FLASHING.md)。
 
-persist 全分区哈希包含文件系统元数据，差异不一定表示校准损坏。
-安装器会提示快照差异，并以只读方式检查当前校准能否导入；不改写原备份或自动另建备份。
-准备方案后 persist 再次变化，会在格式化前停止。
+## 中断恢复与引导存储
 
-备份目录位于安装包之外，可在界面选择。安装记录另存于 state-dir 的 `runs/SESSION_ID/`，
-包含 `receipt.json`、`events.jsonl`；默认位置为 Qt 用户数据目录，可通过 `--state-dir DIRECTORY` 更改。
+在「设置与诊断 → 引导存储与中断恢复」查看默认引导匹配状态、事务及 linux_boot 实际占用。失败结果页也有该入口。检查只读进行，任何恢复/清理都重新生成计划并确认。
+
+- 引导切换中断：原计划、旧镜像、登记和当前分区仍匹配时，可恢复原默认引导；目标 boot 已完整回读时也可补交目标登记。
+- 系统写入已完成但登记中断：新版持久记录和实际系统/ROM均匹配时，可补交登记。不会因此重复格式化或解压。
+- 空间回收：新版保留全部现用系统、每个 Linux 最近一个同文件系统且可核验的内核回退版本，以及最近 8 份分区审计记录；清理已替换/删除系统的过期引导和已结束事务的快照。旧 Android boot 不能回退整套 ROM，不作为 ROM 回滚保留。安装、替换、删除或切换的整次操作成功后自动执行；清理失败单独报告，系统安装仍计为成功。
+- 自动保留依赖 Rec 的 `boot_store_retention_version=1`，旧 Rec 仍只支持等价重复快照回收。存在未完成事务或默认引导不匹配时暂停清理。清理中断后先在该页继续清理，再开始新安装；仅删除当前默认系统前先切换默认系统。
+- 「续接分区初始化（选择原记录）」仍为另一条严格受限路径：只处理原 GPT 已创建、全新 Linux 引导存储/rootfs 尚未初始化的情况，不重复改 GPT 或安装 OS。
+
+这些操作需要相应 Rec 能力。不能完整核验的状态保留现场、报告和备份；未写完的 ROM/rootfs 不会被当成已安装系统续接，也不自动重放原清除计划。实现与回归入口见[安装后端](NATIVE-RECOVERY-INSTALLER.md)。
 
 ## Windows 10/11 使用
 
-1. 安装 [uv](https://docs.astral.sh/uv/getting-started/installation/)，解压安装器源码包。
-2. 解压 [Android Platform-Tools](https://developer.android.com/tools/releases/platform-tools)，
-   将含 `fastboot.exe` 和 DLL 的 `platform-tools` 目录放在 `installer` 旁边。
-   也可使用 PATH、Android SDK 或 `LIUQIN_FASTBOOT` 指定路径。
-3. 安装平板 Fastboot 驱动，确认设备管理器中的 Bootloader 设备正常；
-   参见 [OEM USB 驱动说明](https://developer.android.com/studio/run/oem-usb)。
-4. 双击 `installer/start-windows.cmd`，按前述步骤选择文件、设备和备份。
-5. 备份或检查方案时，平板临时进入 RAM 环境。点击底部“设置 USB 网络”，授权管理员设置；
-   脚本最多等待 60 秒，配置电脑 `192.168.7.1/24`，平板为 `192.168.7.2`。
-6. 继续核对方案并确认安装。GUI 本身保持普通用户权限。
+1. 安装 uv，解压安装器源码包。
+2. 将含 `adb.exe`、`fastboot.exe` 和 DLL 的 `platform-tools` 目录放在 `installer` 旁，或通过 PATH/SDK 配置工具位置。
+3. 准备 Bootloader Fastboot 和 ADB 的 USB 驱动。ADB 未授权时先在 Android 允许电脑。
+4. 双击 `installer/start-windows.cmd`，按五步向导操作。GUI 保持普通用户权限，无需配置 USB 网络或防火墙转发。
 
-Fastboot 驱动与 RAM 的 USB 网卡是两种设备。
+驱动与工具需来自各自发布者。Windows CI 使用模拟数据验证主机与界面，不能代替真实 USB 驱动和设备安装验收。
 
-专用网卡使用 USB ID `1d6b:1041`、主机 MAC `02:00:00:00:07:01` 和 Microsoft OS 描述符，
-适配 Windows 10/11 自带 RNDIS 驱动；已安装桌面的 USB 配置仍为 NCM。
-参见 [Microsoft USB 类驱动](https://learn.microsoft.com/en-us/windows-hardware/drivers/usbcon/supported-usb-classes)
-与 [RNDIS 说明](https://learn.microsoft.com/en-us/windows-hardware/drivers/network/remote-ndis--rndis-2)。
+## 连接排错
 
-网络脚本仅操作匹配的专用网卡，不改 Wi-Fi 或默认网关；防火墙只放行平板到该网卡 TCP 37631。
-规则保留供下次使用。清理时，在管理员 PowerShell 运行：
+- 停在临时启动阶段：检查是否为真正的 Bootloader Fastboot、镜像是否与当前固件和包内校验信息匹配；命令被接受不等于 Rec 已启动。不要用固定刷写代替失败的临时启动。
+- ADB offline/未授权：确认线缆、驱动和授权；原厂 Recovery、TWRP 与原生 Rec 不能仅凭 adb devices 中出现设备就视为同一种安装环境。
+- 「ADB 环回映射返回了无效响应」：更新电脑端安装器及支持 `adb raw` 的 Platform-Tools。端口选择、持开输入管道和响应校验见 [ADB 说明](NATIVE-RECOVERY-INSTALLER.md#adb-连接与传输)。
+- 旧 `liuqin-busybox` 或 GPT 刷新错误：保留执行报告，更新配套软件后先读取真实状态；不要重复分区或格式化来消除工具错误。
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\installer\windows-network.ps1 -Remove
+## 打包与离线演示
+
+不带镜像的源码包使用 `python3 installer/package.py`。原生 ADB 分发包使用：
+
+```sh
+uv run --project installer python installer/package.py \
+  --native-recovery /path/to/temporary-native-recovery/recovery.img \
+  --adbd-sources /path/to/adbd-source.tar.xz \
+  --out /path/to/installer.zip
 ```
 
-这会移除项目规则，并为当前连接的专用网卡恢复 DHCP；执行策略参数仅影响本次进程。
+如需连接设备已固定版本，可另用 `--fixed-installer` 附带其校验镜像与资格记录；这不会自动刷入它。打包检查镜像、载荷和匹配的验收记录，不访问平板。
 
-## 取消、失败与验证
+```sh
+uv run --project installer installer/install-gui.py --demo
+uv run --project installer python tests/gui-qml.py
+```
 
-准备阶段可以有序取消；写入期间不能取消或正常关闭窗口。
-断电、强制结束进程或 USB 断线仍可能中断安装，不支持任意阶段自动恢复。
-失败后保留备份和安装记录，导出诊断报告，先核对已完成阶段，避免直接重跑格式化。
-报告会替换已知序列号和私人路径，不复制原始分区备份。
-
-安装器不提供多分区、双系统、Android 自动恢复或内核构建。
-文件服务仅绑定平板网络地址，并使用会话令牌与允许列表；安装后不新增持久管理员通道。
-本机 256GB 已完成 Linux 主机上的 GUI 单根 Btrfs 安装与重启验证，Windows 主机 GUI 安装也已确认成功；范围见 [硬件说明](HARDWARE.md)，其他容量仍待实测。
-
-开发演示、测试、源码位置和 JSON 协议见 [安装器开发说明](../installer/README.md)。
-独立安装器源码包由 `python3 installer/package.py` 生成；镜像另行提供，构建见 [构建指南](BUILD.md)。
+GUI 回归加载产品使用的 `Main.qml`；协议见[安装器开发说明](../installer/README.md)。

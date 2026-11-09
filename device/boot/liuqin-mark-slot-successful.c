@@ -12,8 +12,7 @@
  * device on 2026-09-25: rewriting only the boot_a/boot_b attribute bytes left
  * the tablet unable to boot.  Switching slots on this ABL means swapping the
  * partition type GUIDs of every _a/_b pair and moving the UFS boot LUN, which
- * only the bootloader's own `fastboot --set-active` does.  Dual boot therefore
- * rotates boot images through slot A instead (liuqin-switch).
+ * only the bootloader's own `fastboot --set-active` does.
  */
 #define _GNU_SOURCE
 #include <errno.h>

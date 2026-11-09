@@ -6,7 +6,7 @@ permissions:
 jobs:
   checks:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -17,23 +17,72 @@ jobs:
           import ast
           import subprocess
           from pathlib import Path
-          for path in [p for base in ('build','installer','shared','device/boot') for p in Path(base).rglob('*.py')]:
+          for path in [p for base in ('build','installer','shared','device/boot','device/recovery') for p in Path(base).rglob('*.py')]:
               ast.parse(path.read_text(), filename=str(path))
           paths = [p for name in ('board-overlay', 'gnome-overlay')
                    for p in (Path('device')/name).rglob('*')]
           for path in sorted(paths):
               if path.is_file() and path.read_bytes().split(b'\n', 1)[0] in (b'#!/usr/bin/env python3', b'#!/usr/bin/python3'):
                   ast.parse(path.read_text(), filename=str(path))
-          for path in [p for base in ('build','device/installer','device/boot') for p in Path(base).rglob('*.sh')]:
+          for path in [p for base in ('build','device/installer','device/boot','device/recovery') for p in Path(base).rglob('*.sh')]:
               subprocess.run(['sh', '-n', str(path)], check=True)
           subprocess.run(['sh', '-n', 'device/boot/initramfs/init'], check=True)
           PY
       - name: 构建与安装器离线检查
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y python3-pyelftools gdisk busybox-static device-tree-compiler rpm rsync pigz acl libcap2-bin btrfs-progs libglib2.0-bin
+          sudo apt-get install --no-install-recommends -y python3-pyelftools python3-lz4 python3-unicorn gdisk busybox-static device-tree-compiler rpm rsync pigz acl libcap2-bin btrfs-progs f2fs-tools gcc-aarch64-linux-gnu libglib2.0-bin nodejs
           python3 tests/installer.py
           python3 tests/storage-layouts.py
+          python3 tests/multiboot.py
+          python3 tests/multiboot-device.py
+          python3 tests/multiboot-store.py
+          python3 tests/android-installer.py
+          python3 tests/android-device.py
+          python3 tests/android-direct.py
+          python3 tests/android-rom.py
+          python3 tests/miku-rom.py
+          python3 tests/multi-rom.py
+          python3 tests/generic-ota.py
+          python3 tests/full-rom.py
+          python3 tests/miku-workflow.py
+          python3 tests/android-runtime.py
+          python3 tests/staged-install.py
+          python3 tests/managed-linux-device.py
+          python3 tests/partition-discovery.py
+          python3 tests/partition-device.py
+          python3 tests/partition-editor-device.py
+          python3 tests/partition-reread.py
+          python3 tests/partition-names.py
+          python3 tests/workflow.py
+          python3 tests/workflow-capacity.py
+          python3 tests/recovery-installer.py
+          python3 tests/paired-recovery.py
+          python3 tests/recovery-compatibility.py
+          python3 tests/native-recovery.py
+          python3 tests/native-installer.py
+          python3 tests/fixed-recovery-preserve.py
+          python3 tests/boot-switch-device.py
+          python3 tests/boot-store.py
+          python3 tests/boot-retention.py
+          python3 tests/transaction-recovery.py
+          python3 tests/native-adb.py
+          python3 tests/native-firmware.py
+          python3 tests/fixed-recovery.py
+          python3 tests/universal-recovery.py
+          python3 tests/rom-preview.py
+          python3 tests/native-ui-service.py
+          python3 tests/native-bcb.py
+          python3 tests/native-touch-service.py
+          python3 tests/recovery-kernel-components.py
+          python3 tests/kernel-common-fixes.py
+          python3 tests/rootless-build.py
+          cc -Wall -Wextra -Werror -I device/recovery/ui tests/native-touch-input.c device/recovery/ui/touch_input.c -o /tmp/liuqin-touch-input
+          /tmp/liuqin-touch-input
+          python3 tests/recovery-session.py
+          python3 tests/recovery-bootstrap.py
+          python3 tests/block-identity.py
+          python3 tests/installer-bundled-runtime.py
           python3 tests/gui-engine.py
           python3 tests/gui-artifacts.py
           python3 tests/filesystems.py
@@ -46,10 +95,14 @@ jobs:
           python3 tests/device-overlays.py
           python3 tests/stock-rom.py
           python3 tests/fedora-build.py
+          python3 tests/fedora-startup.py
           python3 tests/nanosic-folio.py
           python3 tests/selinux-packaging.py
           python3 tests/fedora-fingerprint.py
           python3 tests/fingerprint-irq.py
+          sudo python3 tests/fingerprint-native-provider.py
+          sudo python3 tests/fingerprint-gallery.py
+          python3 tests/fingerprint-gallery-client.py
           sudo python3 tests/fingerprint-enrol-preflight.py
           sudo python3 tests/fingerprint-release.py
           python3 tests/shell-defaults.py
@@ -66,6 +119,8 @@ jobs:
           python3 tests/display-policy.py
           python3 tests/wlan-mac.py
           python3 tests/rtc.py
+          python3 tests/mipps-startup.py
+          python3 tests/storage-scope.py
           python3 tests/memory-reclaim.py
           python3 tests/mkbootimg-fetch.py
           python3 tests/initramfs-inputs.py
@@ -76,6 +131,11 @@ jobs:
           python3 tests/gui-worker.py
           python3 tests/installer-layout.py
           sudo python3 tests/rootfs-archive.py
+      - name: 指纹用户态 ABI 与多指识别
+        run: |
+          sudo apt-get install --no-install-recommends -y meson ninja-build pkg-config gettext libglib2.0-dev libgusb-dev libgudev-1.0-dev libpolkit-gobject-1-dev libdbus-1-dev libsystemd-dev libssl-dev
+          sudo python3 tests/fingerprint-abi.py
+          aarch64-linux-gnu-gcc -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -c device/fingerprint/oem/src/fingerprint/oem/fpc_build_info.c -o "$RUNNER_TEMP/fpc-gallery-client.o"
       - name: 根文件系统存储保护
         run: |
           sudo apt-get update
@@ -109,11 +169,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y busybox-static
           sh tests/install-layout.sh
-      - name: 设备端 home 保留
+      - name: 设备端单根安装
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y busybox-static e2fsprogs
-          sh tests/install-root.sh
           python3 tests/install-root-single.py
       - name: 传感器启动策略
         run: |

@@ -1,0 +1,267 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] Preserve liuqin feature sanitisation and validate factory metadata
+
+Limit the SpecSEI exception to this board and exactly the known 0/1 variation;
+retain HIGHER_SAFE and every unrelated strict field. Accept self-linked factory
+backup GPT headers only on the two measured 32 MiB LUNs, after both header/entry
+CRCs validate and both arrays agree. An internal Qualcomm UFS ancestor is required; OTG disks are excluded.
+No block writes are performed.
+
+Ignore only the inert ABL overlay sink when building mainline supplier links.
+Preserve live GPIO dependencies, DRM, audio, power domains and OTG. Classify
+normal touch state polling as informational, retaining terminal failures, and
+bound keyboard wake NACK retries without delaying successful IRQ reads.
+
+diff --git a/arch/arm64/kernel/cpufeature.c b/arch/arm64/kernel/cpufeature.c
+index 3ae3ad1a1..ae8671e09 100644
+--- a/arch/arm64/kernel/cpufeature.c
++++ b/arch/arm64/kernel/cpufeature.c
+@@ -73,6 +73,7 @@
+ #include <linux/minmax.h>
+ #include <linux/mm.h>
+ #include <linux/cpu.h>
++#include <linux/platform_data/liuqin.h>
+ #include <linux/kasan.h>
+ #include <linux/percpu.h>
+ #include <linux/sched/isolation.h>
+@@ -1281,12 +1282,22 @@ static void update_cpu_ftr_reg(struct arm64_ftr_reg *reg, u64 new)
+ static int check_update_ftr_reg(u32 sys_id, int cpu, u64 val, u64 boot)
+ {
+ 	struct arm64_ftr_reg *regp = get_arm64_ftr_reg(sys_id);
++	u64 strict_mask;
+ 
+ 	if (!regp)
+ 		return 0;
+ 
+ 	update_cpu_ftr_reg(regp, val);
+-	if ((boot & regp->strict_mask) == (val & regp->strict_mask))
++	strict_mask = regp->strict_mask;
++	/* Retain HIGHER_SAFE sanitisation; permit only the observed 0/1
++	 * SpecSEI difference between SM8475's core clusters on this board.
++	 */
++	if (sys_id == SYS_ID_AA64MMFR1_EL1 && liuqin_board_quirks() &&
++	    (val ^ boot) == BIT_ULL(ID_AA64MMFR1_EL1_SpecSEI_SHIFT) &&
++	    ((val | boot) & GENMASK_ULL(27, 24)) ==
++			BIT_ULL(ID_AA64MMFR1_EL1_SpecSEI_SHIFT))
++		strict_mask &= ~GENMASK_ULL(27, 24);
++	if ((boot & strict_mask) == (val & strict_mask))
+ 		return 0;
+ 	pr_warn("SANITY CHECK: Unexpected variation in %s. Boot CPU: %#016llx, CPU%d: %#016llx\n",
+ 			regp->name, boot, cpu, val);
+diff --git a/block/partitions/efi.c b/block/partitions/efi.c
+index 9865d5909..8ff1b8482 100644
+--- a/block/partitions/efi.c
++++ b/block/partitions/efi.c
+@@ -87,6 +87,7 @@
+ #include <linux/ctype.h>
+ #include <linux/math64.h>
+ #include <linux/slab.h>
++#include <linux/platform_data/liuqin.h>
+ #include "check.h"
+ #include "efi.h"
+ 
+@@ -476,13 +477,59 @@ is_pte_valid(const gpt_entry *pte, const u64 lastlba)
+  * and prints warnings on discrepancies.
+  * 
+  */
++static bool liuqin_factory_disk(struct parsed_partitions *state, u64 lastlba)
++{
++	struct device *dev;
++
++	if (!liuqin_board_quirks() || lastlba != 8191 ||
++	    (strcmp(state->disk->disk_name, "sdd") &&
++	     strcmp(state->disk->disk_name, "sdf")))
++		return false;
++
++	/* OTG disks must never inherit the internal factory-LUN exception. */
++	for (dev = disk_to_dev(state->disk)->parent; dev; dev = dev->parent)
++		if (dev->of_node && of_device_is_compatible(dev->of_node,
++						       "qcom,sm8450-ufshc"))
++			return true;
++	return false;
++}
++
++static bool liuqin_factory_backup(struct parsed_partitions *state,
++				 const gpt_header *pgpt, const gpt_header *agpt,
++				 const gpt_entry *pptes, const gpt_entry *aptes,
++				 u64 lastlba)
++{
++	size_t bytes;
++
++	if (!pgpt || !agpt || !pptes || !aptes ||
++	    !liuqin_factory_disk(state, lastlba) ||
++	    le64_to_cpu(pgpt->my_lba) != 1 ||
++	    le64_to_cpu(pgpt->alternate_lba) != lastlba ||
++	    le64_to_cpu(agpt->my_lba) != lastlba ||
++	    le64_to_cpu(agpt->alternate_lba) != lastlba ||
++	    pgpt->first_usable_lba != agpt->first_usable_lba ||
++	    pgpt->last_usable_lba != agpt->last_usable_lba ||
++	    efi_guidcmp(pgpt->disk_guid, agpt->disk_guid) ||
++	    pgpt->num_partition_entries != agpt->num_partition_entries ||
++	    pgpt->sizeof_partition_entry != agpt->sizeof_partition_entry ||
++	    pgpt->partition_entry_array_crc32 != agpt->partition_entry_array_crc32)
++		return false;
++
++	/* Called only after both headers and both entry CRCs validated. */
++	bytes = (size_t)le32_to_cpu(pgpt->num_partition_entries) *
++		le32_to_cpu(pgpt->sizeof_partition_entry);
++	return bytes && !memcmp(pptes, aptes, bytes);
++}
++
++
+ static void
+-compare_gpts(gpt_header *pgpt, gpt_header *agpt, u64 lastlba)
++compare_gpts(gpt_header *pgpt, gpt_header *agpt, u64 lastlba, bool factory_backup)
+ {
+ 	int error_found = 0;
+ 	if (!pgpt || !agpt)
+ 		return;
+-	if (le64_to_cpu(pgpt->my_lba) != le64_to_cpu(agpt->alternate_lba)) {
++	if (!factory_backup &&
++	    le64_to_cpu(pgpt->my_lba) != le64_to_cpu(agpt->alternate_lba)) {
+ 		pr_warn("GPT:Primary header LBA != Alt. header alternate_lba\n");
+ 		pr_warn("GPT:%lld != %lld\n",
+ 		       (unsigned long long)le64_to_cpu(pgpt->my_lba),
+@@ -634,7 +681,14 @@ static int find_valid_gpt(struct parsed_partitions *state, gpt_header **gpt,
+         if (!good_pgpt && !good_agpt)
+                 goto fail;
+ 
+-        compare_gpts(pgpt, agpt, lastlba);
++        if (good_pgpt && good_agpt &&
++	    liuqin_factory_backup(state, pgpt, agpt, pptes, aptes, lastlba)) {
++		pr_info("GPT: %s: validated liuqin factory backup link, using primary\n",
++			disk->disk_name);
++		compare_gpts(pgpt, agpt, lastlba, true);
++	} else {
++		compare_gpts(pgpt, agpt, lastlba, false);
++	}
+ 
+         /* The good cases */
+         if (good_pgpt) {
+diff --git a/drivers/hid/hid-nanosic.c b/drivers/hid/hid-nanosic.c
+index 6de3b684e..db15909cf 100644
+--- a/drivers/hid/hid-nanosic.c
++++ b/drivers/hid/hid-nanosic.c
+@@ -1124,16 +1124,19 @@ static void nanosic_parse_frame(struct nanosic *nano, u8 *frame, size_t len)
+ 
+ static void nanosic_receive_frame(struct nanosic *nano)
+ {
+-	int ret;
++	int ret, retry;
+ 
+ 	lockdep_assert_held(&nano->lock);
+ 
+-	ret = nanosic_read_frame(nano, NANOSIC_I2C_DATA_READ);
+-	if (ret) {
+-		/* Retry only an observed failure; the normal IRQ path never waits. */
++	for (retry = 0; retry < 4; retry++) {
++		ret = nanosic_read_frame(nano, NANOSIC_I2C_DATA_READ);
++		if (!ret || retry == 3)
++			break;
++		/* Permit a bounded wake-up NACK; successful reads never wait. */
++		if (ret != -ENXIO && retry)
++			break;
+ 		usleep_range(NANOSIC_I2C_RETRY_US,
+ 			     NANOSIC_I2C_RETRY_US + 500);
+-		ret = nanosic_read_frame(nano, NANOSIC_I2C_DATA_READ);
+ 	}
+ 	if (ret) {
+ 		dev_err_ratelimited(&nano->client->dev,
+diff --git a/drivers/input/touchscreen/nt36523/nt36xxx.c b/drivers/input/touchscreen/nt36523/nt36xxx.c
+index 1c9032b92..19cbbc505 100644
+--- a/drivers/input/touchscreen/nt36523/nt36xxx.c
++++ b/drivers/input/touchscreen/nt36523/nt36xxx.c
+@@ -304,7 +304,7 @@ void nvt_tx_auto_copy_mode(void)
+ 		nvt_write_addr(ts->mmap->TX_AUTO_COPY_EN, 0x56);
+ 	}
+ 
+-	NVT_ERR("tx auto copy mode %d enable\n", ts->auto_copy);
++	NVT_LOG("tx auto copy mode %d enable\n", ts->auto_copy);
+ }
+ /*******************************************************
+ Description:
+@@ -513,8 +513,7 @@ int32_t nvt_check_fw_reset_state(RST_COMPLETE_STATE check_reset_state)
+ 		buf[0] = EVENT_MAP_RESET_COMPLETE;
+ 		buf[1] = 0x00;
+ 		CTP_SPI_READ(ts->client, buf, 6);
+-NVT_ERR("error, retry=%d, buf[1]=0x%02X, 0x%02X, 0x%02X, 0x%02X, 0x%02X\n",
+-				retry, buf[1], buf[2], buf[3], buf[4], buf[5]);
++
+ 		if ((buf[1] >= check_reset_state) && (buf[1] <= RESET_STATE_MAX)) {
+ 			ret = 0;
+ 			break;
+@@ -1798,7 +1797,7 @@ static int32_t nvt_ts_probe(struct spi_device *client)
+ 		ret = drm_panel_add_follower(&client->dev,
+ 					     &ts->panel_follower);
+ 		if (ret) {
+-			NVT_ERR("failed to add panel follower: %d\n", ret);
++			dev_err_probe(&client->dev, ret, "failed to add panel follower\n");
+ 			goto err_register_panel_follower_failed;
+ 		}
+ 		ts->panel_follower_registered = true;
+diff --git a/drivers/input/touchscreen/nt36523/nt36xxx.h b/drivers/input/touchscreen/nt36523/nt36xxx.h
+index 5e493104f..07969887b 100644
+--- a/drivers/input/touchscreen/nt36523/nt36xxx.h
++++ b/drivers/input/touchscreen/nt36523/nt36xxx.h
+@@ -30,7 +30,7 @@
+ 
+ #include "nt36xxx_mem_map.h"
+ 
+-#define NVT_DEBUG 1
++#define NVT_DEBUG 0
+ 
+ //---GPIO number---
+ #define NVTTOUCH_RST_PIN 980
+diff --git a/drivers/of/property.c b/drivers/of/property.c
+index 72cf12907..8ebf95c50 100644
+--- a/drivers/of/property.c
++++ b/drivers/of/property.c
+@@ -23,6 +23,7 @@
+ 
+ #include <linux/ctype.h>
+ #include <linux/of.h>
++#include <linux/platform_data/liuqin.h>
+ #include <linux/of_address.h>
+ #include <linux/of_device.h>
+ #include <linux/of_graph.h>
+@@ -1678,6 +1679,16 @@ static int of_fwnode_add_links(struct fwnode_handle *fwnode)
+ 	if (!con_np)
+ 		return -EINVAL;
+ 
++	/* ABL's vendor bindings live outside the hardware buses. */
++	if (liuqin_board_quirks()) {
++		struct device_node *ancestor;
++
++		for (ancestor = con_np; ancestor; ancestor = ancestor->parent)
++			if (ancestor->parent == of_root &&
++			    of_node_name_eq(ancestor, "liuqin-abl-overlay-sink"))
++				return 0;
++	}
++
+ 	for_each_property_of_node(con_np, p)
+ 		of_link_property(con_np, p->name);
+ 
+diff --git a/include/linux/platform_data/liuqin.h b/include/linux/platform_data/liuqin.h
+new file mode 100644
+index 000000000..2a629b4e4
+--- /dev/null
++++ b/include/linux/platform_data/liuqin.h
+@@ -0,0 +1,18 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _LINUX_PLATFORM_DATA_LIUQIN_H
++#define _LINUX_PLATFORM_DATA_LIUQIN_H
++#include <linux/of.h>
++
++/* ABL may replace compatible with generic cape identifiers. */
++static inline bool liuqin_board_quirks(void)
++{
++	u32 id[2];
++
++	if (of_machine_is_compatible("xiaomi,liuqin"))
++		return true;
++	return of_property_match_string(of_root, "model",
++		"Liuqin based on Qualcomm Technologies, Inc SM8475") == 0 &&
++		!of_property_read_u32_array(of_root, "xiaomi,miboard-id", id, 2) &&
++		id[0] == 0x10 && id[1] == 0;
++}
++#endif

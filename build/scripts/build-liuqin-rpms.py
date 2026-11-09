@@ -15,6 +15,7 @@ from rpm_package import build as rpm
 from source_build import sha
 from speaker_firmware import install as install_speakers
 from device_overlay import stage_overlay
+from storage_scope import build as build_storage_helper, legacy_cleanup
 
 
 def docs(root, name):
@@ -22,7 +23,7 @@ def docs(root, name):
     for document in ('LICENSE','NOTICE','CREDITS.md'):shutil.copyfile(PROJECT/document,target/document)
 
 
-def board_overlay(root, busybox):
+def board_overlay(root, busybox, storage_helper):
     stage_overlay(root, board_overlay=PROJECT/'device/board-overlay')
     guard=root/'usr/local/sbin/liuqin-gnome-storage-guard';text=guard.read_text()
     recovery=root/'etc/systemd/user/default.target.wants/liuqin-display-recovery.service'
@@ -36,6 +37,8 @@ def board_overlay(root, busybox):
     guard.write_text(text)
     binary=root/'usr/local/bin/busybox';binary.parent.mkdir(parents=True,exist_ok=True)
     shutil.copyfile(busybox,binary);binary.chmod(0o755)
+    binary=root/'usr/libexec/liuqin-storage-seal';binary.parent.mkdir(parents=True,exist_ok=True)
+    shutil.copyfile(storage_helper,binary);binary.chmod(0o755)
 
 
 def sensor_payload(archive, root):
@@ -101,9 +104,11 @@ def build(firmware, speakers, sensors, busybox, output, version):
         docs(root,'liuqin-firmware')
         rpm(root,'liuqin-firmware',version,packages,architecture='noarch',license='LicenseRef-Proprietary',
             requires=['wireless-regdb'],summary='Liuqin stock firmware and protected speaker tuning')
-        root=work/'board';board_overlay(root,busybox);docs(root,'liuqin-device-support')
+        helper=build_storage_helper(work/'liuqin-storage-seal')
+        root=work/'board';board_overlay(root,busybox,helper);docs(root,'liuqin-device-support')
         rpm(root,'liuqin-device-support',version,packages,requires=['systemd','systemd-udev','python3',
-            'NetworkManager','bluez','glib2','iproute','chrony'],summary='Liuqin board services independent of the desktop')
+            'NetworkManager','bluez','glib2','iproute','chrony'],summary='Liuqin board services independent of the desktop',
+            posttrans=legacy_cleanup(),provides=['liuqin-storage-policy-ufs = 1'])
         root=work/'sensors';root.mkdir();sensor_payload(sensors,root);docs(root,'liuqin-sensors')
         rpm(root,'liuqin-sensors',version,packages,requires=['glib2','libgudev','polkit-libs','libqmi',
             'libqrtr-glib','qrtr-libs','protobuf-c','iio-sensor-proxy','systemd'],

@@ -9,7 +9,47 @@ import unittest
 PROJECT=Path(__file__).resolve().parents[1]
 
 class Tests(unittest.TestCase):
-    def test_installer_uses_rndis_os_descriptors_and_desktop_retains_ncm(self):
+    def test_persistent_handoff_precedes_usb_role_override_and_failed_roots_stay_sealed(self):
+        init=(PROJECT/'device/boot/initramfs/init').read_text()
+        start=init.index('# Admit a persistent system before any diagnostic gadget or role override.')
+        end=init.index('# USB rescue is reached only for RAM images or a safely rejected root.',start)
+        handoff=init[start:end]
+        self.assertLess(end,init.index('gadget=/sys/kernel/config/usb_gadget/liuqin\n'))
+        self.assertLess(init.index('native-adb-start.py >/run/liuqin-native-adb-start.log'),start)
+        self.assertLess(init.index('exec /bin/liuqin-charger-mode'),start)
+        self.assertEqual(init.count('if storage_prepare_persistent_root; then\n'),2)  # storage-only test entry + normal entry
+        self.assertNotIn('start_stage1_telnet',handoff)
+        handoff=handoff.replace('/bin/liuqin-mark-slot-successful','slot_tool')
+        for mode,case,expected in [('persistent','success','prepare\nslot\nhandoff\n'),
+                                   ('persistent','reject','prepare\nseal\nrescue:true\n'),
+                                   ('persistent','slot-fail','prepare\nslot\nslot\nabort\nrescue:true\n'),
+                                   ('persistent','handoff-fail','prepare\nslot\nhandoff\nseal\nrescue:true\n'),
+                                   ('persistent','unsafe','prepare\nrescue:false\n'),
+                                   ('readonly','success','rescue:true\n')]:
+            with self.subTest(mode=mode,case=case):
+                script='''
+storage_mode=$1; scenario=$2; ufs_safe=true; storage_fallback_safe=true
+BB=busybox
+log() { :; }
+storage_prepare_persistent_root() {
+ printf 'prepare\\n'
+ case $scenario in reject) return 1;; unsafe) storage_fallback_safe=false; return 1;; esac
+}
+slot_from_cmdline() { slot_suffix=a; return 0; }
+slot_tool() { printf 'slot\\n'; [ "$scenario" != slot-fail ]; }
+storage_abort() { printf 'abort\\n'; return 0; }
+storage_lock_all() { printf 'seal\\n'; return 0; }
+storage_switch_persistent_root() {
+ printf 'handoff\\n'
+ [ "$scenario" != handoff-fail ] || return 1
+ exit 0
+}
+'''+handoff+'''printf 'rescue:%s\\n' "$ufs_safe"\n'''
+                result=subprocess.run(['sh','-c',script,'test',mode,case],capture_output=True,text=True,timeout=5)
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertEqual(result.stdout,expected)
+
+    def test_installer_uses_rndis_os_descriptors_and_ram_rescue_retains_ncm(self):
         init=(PROJECT/'device/boot/initramfs/init').read_text()
         start=init.index('gadget=/sys/kernel/config/usb_gadget/liuqin\n')
         end=init.index('udc_name=\n',start)

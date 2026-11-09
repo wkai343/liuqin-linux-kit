@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: MIT
 """Host portability helpers; importing this module never accesses USB."""
-import base64
 import errno
 import os
 from pathlib import Path
@@ -12,7 +11,6 @@ import time
 
 IS_WINDOWS = sys.platform == 'win32'
 INSTALLER = Path(__file__).resolve().parents[1]
-WINDOWS_HTTP_PORT = 37631
 
 
 def configure_stdio():
@@ -21,13 +19,13 @@ def configure_stdio():
             stream.reconfigure(encoding='utf-8', errors='replace')
 
 
-def fastboot_path():
-    explicit = os.environ.get('LIUQIN_FASTBOOT')
-    name = 'fastboot.exe' if IS_WINDOWS else 'fastboot'
+def platform_tool_path(tool):
+    explicit = os.environ.get('LIUQIN_'+tool.upper())
+    name = tool+'.exe' if IS_WINDOWS else tool
     if explicit:
         path = Path(explicit).expanduser()
         if not path.is_file():
-            raise FileNotFoundError('LIUQIN_FASTBOOT 指定的文件不存在。')
+            raise FileNotFoundError('LIUQIN_'+tool.upper()+' 指定的文件不存在。')
         return str(path.resolve())
     candidates = [INSTALLER.parent/'platform-tools'/name, INSTALLER/'platform-tools'/name]
     for variable in ('ANDROID_SDK_ROOT', 'ANDROID_HOME'):
@@ -39,7 +37,11 @@ def fastboot_path():
     found = shutil.which(name)
     if found:
         return found
-    raise FileNotFoundError('未找到 Fastboot。请将官方 platform-tools 目录放在 installer 旁边，或加入 PATH。')
+    raise FileNotFoundError('未找到 '+tool+'。请将官方 platform-tools 目录放在 installer 旁边，或加入 PATH。')
+
+
+def fastboot_path():return platform_tool_path('fastboot')
+def adb_path():return platform_tool_path('adb')
 
 
 def run_process(arguments, **kwargs):
@@ -105,28 +107,6 @@ class FileLock:
         self.close()
 
 
-def check_installer_support(manifest):
-    if IS_WINDOWS and manifest.get('installer_usb_network') != 'rndis':
-        raise RuntimeError('Windows 需要新版 installer.img 的 RNDIS 安装通道，请先重新构建安装镜像。')
-
-
-def server_address(address):
-    if IS_WINDOWS and address != '192.168.7.1':
-        raise RuntimeError('请点击“设置 USB 网络”，为平板专用网卡配置地址后重试。')
-    return address, WINDOWS_HTTP_PORT if IS_WINDOWS else 0
-
-
-def windows_network_command():
-    script = INSTALLER/'windows-network.ps1'
-    if not script.is_file():
-        raise FileNotFoundError('缺少 Windows USB 网络设置脚本。')
-    # ArgumentList becomes a Windows command line. Quote the file argument,
-    # then quote that literal for PowerShell; use UTF-16 for Unicode paths.
-    argument = ('"'+str(script)+'"').replace("'", "''")
-    command = ("$ErrorActionPreference='Stop'; try { $p=Start-Process -FilePath "
-               "(Join-Path $PSHOME 'powershell.exe') -Verb RunAs -Wait -PassThru "
-               "-ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','"+argument+
-               "'); exit $p.ExitCode } catch { Write-Error $_; exit 1 }")
-    powershell = Path(os.environ.get('SystemRoot', r'C:\Windows'))/'System32/WindowsPowerShell/v1.0/powershell.exe'
-    return [str(powershell), '-NoProfile', '-EncodedCommand',
-            base64.b64encode(command.encode('utf-16le')).decode('ascii')]
+def check_gui_recovery_support(manifest):
+    if manifest.get('installer_usb_network') not in ('adb','adb-native'):
+        raise RuntimeError('旧 USB 网络安装环境已停用，请选择 ADB Recovery；未访问设备。')

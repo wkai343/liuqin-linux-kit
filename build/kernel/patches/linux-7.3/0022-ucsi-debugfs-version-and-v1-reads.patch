@@ -1,0 +1,49 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] Bound UCSI debugfs reads and expose the negotiated interface version
+
+UCSI 1.x accepts at most 16 response bytes, but debugfs requests 24.
+Clamp reads so GET commands work on the qualified Liuqin UCSI 1.0 firmware.
+Expose its actual interface version read-only so the boot-time PD recovery
+uses the correct connector-reset encoding instead of guessing from board name.
+
+Read-length fix also proposed upstream:
+https://lists.openwall.net/linux-kernel/2026/10/24/732
+
+diff --git a/drivers/usb/typec/ucsi/debugfs.c b/drivers/usb/typec/ucsi/debugfs.c
+index 77a0dd75e..2ade4de59 100644
+--- a/drivers/usb/typec/ucsi/debugfs.c
++++ b/drivers/usb/typec/ucsi/debugfs.c
+@@ -60,7 +60,8 @@ static int ucsi_cmd(void *data, u64 val)
+ 	case UCSI_GET_LPM_PPM_INFO:
+ 		ret = ucsi_send_command(ucsi, val,
+ 					&ucsi->debugfs->response,
+-					sizeof(ucsi->debugfs->response));
++					min_t(size_t, sizeof(ucsi->debugfs->response),
++					      UCSI_MAX_DATA_LENGTH(ucsi)));
+ 		break;
+ 	default:
+ 		ret = -EOPNOTSUPP;
+@@ -75,6 +76,15 @@ static int ucsi_cmd(void *data, u64 val)
+ }
+ DEFINE_DEBUGFS_ATTRIBUTE(ucsi_cmd_fops, NULL, ucsi_cmd, "0x%llx\n");
+ 
++static int ucsi_version_get(void *data, u64 *value)
++{
++	struct ucsi *ucsi = data;
++
++	*value = ucsi->version;
++	return 0;
++}
++DEFINE_DEBUGFS_ATTRIBUTE(ucsi_version_fops, ucsi_version_get, NULL, "0x%04llx\n");
++
+ static int ucsi_resp_show(struct seq_file *s, void *not_used)
+ {
+ 	struct ucsi *ucsi = s->private;
+@@ -146,6 +156,7 @@ void ucsi_debugfs_register(struct ucsi *ucsi)
+ 		return;
+ 
+ 	ucsi->debugfs->dentry = debugfs_create_dir(dev_name(ucsi->dev), ucsi_debugfs_root);
++	debugfs_create_file("version", 0400, ucsi->debugfs->dentry, ucsi, &ucsi_version_fops);
+ 	debugfs_create_file("command", 0200, ucsi->debugfs->dentry, ucsi, &ucsi_cmd_fops);
+ 	debugfs_create_file("response", 0400, ucsi->debugfs->dentry, ucsi, &ucsi_resp_fops);
+ 	debugfs_create_file("peak_current", 0400, ucsi->debugfs->dentry, ucsi, &ucsi_peak_curr_fops);

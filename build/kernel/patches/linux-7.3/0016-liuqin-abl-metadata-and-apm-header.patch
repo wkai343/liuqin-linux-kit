@@ -1,0 +1,109 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] Keep ABL metadata out of the live OF tree and restore the APM header
+
+ABL fills a build-tagged, top-level sink with vendor GPIO and clock bindings.
+Keep it in the bootloader-facing FDT and omit just that subtree during initial
+unflattening. This covers early OF lookups as well as fw_devlink. The live
+board topology, the raw firmware FDT, and later overlay unflattening are kept.
+
+The stock liuqin DSP responded to the headerless SPF query with BASIC status 1.
+Restore the standard empty APM command header while retaining the r2 callback
+ordering and explicit state/error handling.
+
+diff --git a/drivers/of/fdt.c b/drivers/of/fdt.c
+index a64afc3de..c43d71c2a 100644
+--- a/drivers/of/fdt.c
++++ b/drivers/of/fdt.c
+@@ -274,10 +274,11 @@ static int unflatten_dt_nodes(const void *blob,
+ {
+ 	struct device_node *root;
+ 	int offset = 0, depth = 0, initial_depth = 0;
++	int abl_sink = -1, marker_len;
+ #define FDT_MAX_DEPTH	64
+ 	struct device_node *nps[FDT_MAX_DEPTH];
+ 	void *base = mem;
+-	bool dryrun = !base;
++	bool dryrun = !base, skip_abl_sink = false;
+ 	int ret;
+ 
+ 	if (nodepp)
+@@ -293,6 +294,19 @@ static int unflatten_dt_nodes(const void *blob,
+ 	if (dad)
+ 		depth = initial_depth = 1;
+ 
++	/*
++	 * The image builder tags this top-level node for Xiaomi ABL to
++	 * absorb vendor overlays. Leave the flat tree intact for handoff
++	 * diagnostics, but never instantiate the sink as Linux hardware.
++	 */
++	if (!dad && blob == initial_boot_params) {
++		abl_sink = fdt_path_offset(blob, "/liuqin-abl-overlay-sink");
++		if (abl_sink >= 0 &&
++		    (!fdt_getprop(blob, abl_sink, "xiaomi,abl-overlay-sink",
++				  &marker_len) || marker_len))
++			abl_sink = -1;
++	}
++
+ 	root = dad;
+ 	nps[depth] = dad;
+ 
+@@ -302,6 +316,11 @@ static int unflatten_dt_nodes(const void *blob,
+ 		if (WARN_ON_ONCE(depth >= FDT_MAX_DEPTH - 1))
+ 			continue;
+ 
++		if (depth <= 1)
++			skip_abl_sink = offset == abl_sink;
++		if (skip_abl_sink)
++			continue;
++
+ 		if (!IS_ENABLED(CONFIG_OF_KOBJ) &&
+ 		    !of_fdt_device_is_available(blob, offset))
+ 			continue;
+diff --git a/drivers/of/property.c b/drivers/of/property.c
+index 8ebf95c50..72cf12907 100644
+--- a/drivers/of/property.c
++++ b/drivers/of/property.c
+@@ -23,7 +23,6 @@
+ 
+ #include <linux/ctype.h>
+ #include <linux/of.h>
+-#include <linux/platform_data/liuqin.h>
+ #include <linux/of_address.h>
+ #include <linux/of_device.h>
+ #include <linux/of_graph.h>
+@@ -1679,16 +1678,6 @@ static int of_fwnode_add_links(struct fwnode_handle *fwnode)
+ 	if (!con_np)
+ 		return -EINVAL;
+ 
+-	/* ABL's vendor bindings live outside the hardware buses. */
+-	if (liuqin_board_quirks()) {
+-		struct device_node *ancestor;
+-
+-		for (ancestor = con_np; ancestor; ancestor = ancestor->parent)
+-			if (ancestor->parent == of_root &&
+-			    of_node_name_eq(ancestor, "liuqin-abl-overlay-sink"))
+-				return 0;
+-	}
+-
+ 	for_each_property_of_node(con_np, p)
+ 		of_link_property(con_np, p->name);
+ 
+diff --git a/sound/soc/qcom/qdsp6/q6apm.c b/sound/soc/qcom/qdsp6/q6apm.c
+index 312ee69c5..4e0442159 100644
+--- a/sound/soc/qcom/qdsp6/q6apm.c
++++ b/sound/soc/qcom/qdsp6/q6apm.c
+@@ -152,10 +152,11 @@ static void q6apm_put_audioreach_graph(struct kref *ref)
+ 
+ static int q6apm_get_apm_state(struct q6apm *apm)
+ {
++	struct gpr_pkt *pkt __free(kfree) =
++		audioreach_alloc_apm_cmd_pkt(0, APM_CMD_GET_SPF_STATE, 0);
+ 	int ret;
+-	/* GET_SPF_STATE has no APM command payload header. */
+-	struct gpr_pkt *pkt __free(kfree) = audioreach_alloc_apm_pkt(0,
+-			APM_CMD_GET_SPF_STATE, 0, GPR_APM_MODULE_IID);
++
++	/* The DSP expects the common APM header even with no command data. */
+ 	if (IS_ERR(pkt))
+ 		return PTR_ERR(pkt);
+ 

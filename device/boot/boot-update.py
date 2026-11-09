@@ -17,7 +17,7 @@ import struct
 import sys
 import uuid
 
-from liuqin_artifacts import boot_interface
+from liuqin_artifacts import boot_interface, verify_storage_policy
 from liuqin_kernel import digest, parse_contract, verify_installed, module_records, RELEASE
 
 BLKROSET, BLKROGET, BLKGETSIZE64, BLKFLSBUF = 0x125d, 0x125e, 0x80081272, 0x1261
@@ -228,6 +228,7 @@ class Updater:
         if not re.fullmatch(RELEASE, release): raise RuntimeError('无效内核版本。')
         path = self.regular(self.root / 'usr/lib/liuqin/boot-images' / release / 'boot.img')
         info = boot_interface(path)
+        verify_storage_policy(self.root,info.get('storage_policy_version',0))
         self.check_root_filesystem(info)
         if info['profile'] != b'native-updatable\n':
             raise RuntimeError('仅支持当前启动接口的镜像。')
@@ -241,6 +242,7 @@ class Updater:
             raise RuntimeError('更新配置与当前设备或布局不匹配。')
 
     def verify_root_for_boot(self, info):
+        verify_storage_policy(self.root,info.get('storage_policy_version',0))
         self.check_root_filesystem(info)
         return verify_installed(self.root, info['contract'])['release']
 

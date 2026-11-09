@@ -9,15 +9,40 @@ from pathlib import PurePosixPath
 import re
 import struct
 import tarfile
+import stat
 from liuqin_kernel import ROOT_MARKER, parse_contract, module_records
 from liuqin_filesystems import CAPABILITY_PATH, parse_support
+from liuqin_boot_target import CAPABILITY as MULTIBOOT_CAPABILITY, TARGET_PATH, HELPER_PATH, parse as parse_boot_target
 
 
 class ArtifactError(ValueError):
     pass
 
 
+def verify_storage_policy(root, version):
+    """Require the installed userspace companion before using a new boot."""
+    if not version:
+        return
+    from pathlib import Path
+    root = Path(root)
+    names = ((STORAGE_POLICY_PATH,0o644),('usr/local/sbin/liuqin-gnome-storage-guard',0o755),
+             ('usr/libexec/liuqin-storage-seal',0o755))
+    for name, mode in names:
+        p=root/name
+        try:info=p.lstat()
+        except OSError as error:raise ArtifactError('请先升级配套的 UFS 存储保护设备支持包。') from error
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode)!=mode:
+            raise ArtifactError('UFS 存储保护文件属性不正确。')
+    helper=(root/'usr/libexec/liuqin-storage-seal').read_bytes()[:20]
+    if (version!=1 or (root/STORAGE_POLICY_PATH).read_bytes()!=STORAGE_POLICY or
+            'policy_version=LIUQIN_DESKTOP_UFS_ONLY_V1' not in (root/names[1][0]).read_text().splitlines() or
+            len(helper)<20 or helper[:6]!=b'\x7fELF\x02\x01' or helper[18:20]!=b'\xb7\x00'):
+        raise ArtifactError('启动镜像需要配套的 UFS 存储保护设备支持包。')
+
+
 INSTALLER_INTERFACE = b'liuqin-installer-v2\n'
+STORAGE_POLICY_PATH = 'etc/liuqin-storage-policy'
+STORAGE_POLICY = b'LIUQIN_DESKTOP_UFS_ONLY_V1\n'
 
 
 ROOT_DEVICES = {'dev/console': (5, 1), 'dev/null': (1, 3), 'dev/zero': (1, 5),
@@ -64,6 +89,8 @@ def bounded_initramfs(data, maximum):
 
 
 def cpio_files(data):
+    from liuqin_native_recovery import ALL_PAYLOADS
+    retained=set(ALL_PAYLOADS)|{HELPER_PATH}
     position, files = 0, {}
     while position + 110 <= len(data):
         header = data[position:position + 110]
@@ -87,7 +114,7 @@ def cpio_files(data):
         if name in files:
             raise ArtifactError('安装环境包含重复文件：' + name)
         # Store only interface files; the installer runtime can be large.
-        files[name] = (mode, data[start:start + size] if name.startswith('etc/liuqin-') else b'')
+        files[name] = (mode, data[start:start + size] if name.startswith('etc/liuqin-') or name in retained else b'')
         position = (start + size + 3) & ~3
     raise ArtifactError('安装环境缺少完整的 CPIO 结束记录。')
 
@@ -97,13 +124,25 @@ def boot_interface(path, installer=False):
     if len(data) < 4096 or len(data) > 192 * 1024 * 1024 or data[:8] != b'ANDROID!':
         raise ArtifactError(path.name + ' 不是有效的 liuqin 启动镜像。')
     integer = lambda offset: struct.unpack_from('<I', data, offset)[0]
+    if installer and integer(40) in (3,4):
+        from liuqin_recovery_image import runtime_interface
+        return runtime_interface(path)
     kernel_size, ramdisk_size, second_size = integer(8), integer(16), integer(24)
     page = integer(36)
     if (page, integer(40), integer(1644)) != (4096, 2, 1660) or not integer(1648):
         raise ArtifactError(path.name + ' 需要项目使用的 Android v2 嵌入设备树格式。')
+    fixed_installer=False
+    if integer(1632):
+        from liuqin_universal_recovery import inspect as inspect_fixed
+        from liuqin_native_install import FIXED_USAGE
+        checked=inspect_fixed(path)
+        if not installer or checked['manifest']['usage']!=FIXED_USAGE:
+            raise ArtifactError('内嵌 DTBO 的通用 Recovery 候选尚未开放自动启动或安装。')
+        if checked['image_sha256']!=hashlib.sha256(data).hexdigest():raise ArtifactError('固定 Recovery 在读取期间发生变化。')
+        fixed_installer=True
     align = lambda size: (size + page - 1) // page * page
     ramdisk_start = page + align(kernel_size)
-    dtb_start = ramdisk_start + align(ramdisk_size) + align(second_size)
+    dtb_start = ramdisk_start + align(ramdisk_size) + align(second_size) + align(integer(1632))
     if not kernel_size or not ramdisk_size or dtb_start + integer(1648) > len(data):
         raise ArtifactError(path.name + ' 的内核、安装环境或设备树不完整。')
     if b'xiaomi,liuqin\0' not in data[dtb_start:dtb_start + integer(1648)]:
@@ -128,6 +167,26 @@ def boot_interface(path, installer=False):
         raise ArtifactError('镜像文件系统支持信息必须是普通文件。')
     result = dict(kernel_sha256=hashlib.sha256(kernel).hexdigest(),
                   filesystems=parse_support(support[1] if support else None))
+    if STORAGE_POLICY_PATH in files:
+        if (installer or files[STORAGE_POLICY_PATH][0] & 0o177777 != 0o100644 or
+                regular(STORAGE_POLICY_PATH) != STORAGE_POLICY):
+            raise ArtifactError('启动镜像的存储保护策略无效。')
+        result['storage_policy_version'] = 1
+    if 'etc/liuqin-native-recovery.json' in files:
+        if not installer:raise ArtifactError('原生 Recovery 不能作为系统 boot.img。')
+        from liuqin_native_recovery import validate
+        result['native_recovery_manifest']=validate(regular('etc/liuqin-native-recovery.json'),result['kernel_sha256'],
+            data[dtb_start:dtb_start+integer(1648)],files,**({'usage':FIXED_USAGE} if fixed_installer else {}))
+    multiboot = files.get(MULTIBOOT_CAPABILITY)
+    if multiboot and (multiboot[0] & 0o177777 != 0o100644 or multiboot[1] != b'1\n'):
+        raise ArtifactError('多系统启动能力标记无效。')
+    result['multiboot_version'] = 1 if multiboot else 0
+    if HELPER_PATH in files:
+        result['boot_target_helper_sha256'] = hashlib.sha256(regular(HELPER_PATH)).hexdigest()
+    if TARGET_PATH in files:
+        if installer or not multiboot or files[TARGET_PATH][0] & 0o177777 != 0o100644:
+            raise ArtifactError('引导绑定的角色或文件属性无效。')
+        result['boot_target'] = parse_boot_target(files[TARGET_PATH][1])
     if installer:
         interface = regular('etc/liuqin-installer-interface')
         if interface != INSTALLER_INTERFACE:
@@ -141,8 +200,13 @@ def boot_interface(path, installer=False):
         if network is not None:
             if network[0] & 0o177777 != 0o100644 or network[1] != b'rndis\n':
                 raise ArtifactError('安装镜像的 USB 网络能力信息无效。')
+        android = files.get('etc/liuqin-android-installer')
+        if android and (android[0] & 0o177777 != 0o100644 or android[1] != b'1\n'):
+            raise ArtifactError('Android 安装能力标记无效。')
+        native_adb=result.get('native_recovery_manifest',{}).get('native_adb_version')==1
+        if native_adb and network is not None:raise ArtifactError('ADB 原生 Rec 不能同时声明 USB 网络。')
         return dict(**result, interface=interface.decode().strip(), kernel_release=release,
-                    usb_network='rndis' if network else 'ncm')
+                    android_version=1 if android else 0, usb_network='adb-native' if native_adb else 'rndis' if network else 'ncm')
     profile = regular('etc/liuqin-root-profile')
     if profile != b'native-updatable\n':
         raise ArtifactError('启动镜像的目标系统接口不受支持。')
@@ -161,7 +225,7 @@ def contract_hashes(content):
             base + '/modules.manifest': identity['modules_sha256']}
 
 
-def inspect_root(path, pins, check_cancel=lambda: None, profile='native-updatable'):
+def inspect_root(path, pins, check_cancel=lambda: None, profile='native-updatable', storage_policy_version=None):
     if profile != 'native-updatable':
         raise ArtifactError('根接口不受支持，请使用当前构建流程生成安装文件。')
     found, paths, symlinks, hardlinks, size = {}, set(), set(), [], 0
@@ -211,12 +275,18 @@ def inspect_root(path, pins, check_cancel=lambda: None, profile='native-updatabl
                 expected_mode = 0o755 if name.startswith('usr/') else 0o644
                 if not entry.isfile() or (entry.mode, entry.uid, entry.gid) != (expected_mode, 0, 0):
                     raise ArtifactError('存储保护文件无效：' + name)
-                runtime[name] = b'present'
+                if entry.size > 65536:
+                    raise ArtifactError('存储保护脚本过大。')
+                runtime[name] = archive.extractfile(entry).read()
+            if name == 'usr/libexec/liuqin-storage-seal':
+                if not entry.isfile() or (entry.mode,entry.uid,entry.gid)!=(0o755,0,0):
+                    raise ArtifactError('UFS 识别工具无效。')
+                runtime[name] = archive.extractfile(entry).read(20)
             if name in ('etc/passwd', 'etc/group'):
                 if not entry.isfile() or entry.size > 1024 * 1024:
                     raise ArtifactError('根文件系统账号文件无效。')
                 identities[name] = archive.extractfile(entry).read().decode('utf-8')
-            if name in (CAPABILITY_PATH, 'etc/liuqin-root-filesystem'):
+            if name in (CAPABILITY_PATH, 'etc/liuqin-root-filesystem', 'etc/liuqin-system-id', TARGET_PATH, STORAGE_POLICY_PATH):
                 if not entry.isfile() or (entry.mode, entry.uid, entry.gid) != (0o644, 0, 0) or entry.size > 64:
                     raise ArtifactError('根文件系统支持信息必须是 root 拥有的普通文件。')
                 runtime[name] = archive.extractfile(entry).read()
@@ -268,6 +338,17 @@ def inspect_root(path, pins, check_cancel=lambda: None, profile='native-updatabl
     if not all(name in runtime for name in ('usr/local/sbin/liuqin-gnome-storage-guard',
                 'etc/systemd/system/liuqin-gnome-storage-guard.service')):
         raise ArtifactError('根文件系统缺少存储保护文件。')
+    policy = runtime.get(STORAGE_POLICY_PATH)
+    policy_version = 1 if policy == STORAGE_POLICY else 0
+    if policy is not None and policy_version != 1:
+        raise ArtifactError('根文件系统的存储保护策略不受支持。')
+    if storage_policy_version is not None and policy_version != storage_policy_version:
+        raise ArtifactError('boot/rootfs 的存储保护版本不匹配，请同步升级启动镜像和设备支持包。')
+    if policy_version:
+        helper = runtime.get('usr/libexec/liuqin-storage-seal',b'')
+        if (b'policy_version=LIUQIN_DESKTOP_UFS_ONLY_V1' not in runtime['usr/local/sbin/liuqin-gnome-storage-guard'] or
+                helper[:6] != b'\x7fELF\x02\x01' or len(helper)<20 or helper[18:20]!=b'\xb7\x00'):
+            raise ArtifactError('根文件系统缺少配套的 UFS 保护脚本或 ARM64 识别工具。')
     if not release or not re.fullmatch(r'[A-Za-z0-9._+-]+', release):
         raise ArtifactError('根文件系统缺少有效内核版本。')
     systemd = runtime.get('usr/lib/systemd/systemd', b'')
@@ -281,15 +362,23 @@ def inspect_root(path, pins, check_cancel=lambda: None, profile='native-updatabl
     support = parse_support(runtime.get(CAPABILITY_PATH))
     if 'btrfs' in support and runtime.get('etc/liuqin-root-filesystem') not in (b'ext4\n', b'btrfs\n'):
         raise ArtifactError('Btrfs 根归档缺少预先标记的文件系统配置模板。')
-    return dict(kernel_release=release, expanded_bytes=size, root_filesystems=support)
+    templates = ('etc/liuqin-system-id', TARGET_PATH)
+    for name in templates:
+        if name in runtime and runtime[name] != b'unbound\n':
+            raise ArtifactError('根归档包含设备私有引导绑定，请使用干净模板。')
+    return dict(kernel_release=release, expanded_bytes=size, root_filesystems=support,
+                **({'storage_policy_version':policy_version} if policy_version else {}),
+                root_multiboot_version=1 if all(runtime.get(name) == b'unbound\n' for name in templates) else 0)
 
 
-def inspect_package(directory, check_cancel=lambda: None):
+def inspect_package(directory, check_cancel=lambda: None, installer_path=None):
     boot = boot_interface(directory / 'boot.img')
-    installer = boot_interface(directory / 'installer.img', installer=True)
+    if boot.get('boot_target'):
+        raise ArtifactError('安装包中的 boot.img 已绑定设备，请使用未绑定的发布模板。')
+    installer = boot_interface(installer_path or directory / 'installer.img', installer=True)
     try:
         root = inspect_root(directory / 'rootfs.tar.gz', contract_hashes(boot['contract']), check_cancel,
-                            profile=boot['profile'].decode().strip())
+                            profile=boot['profile'].decode().strip(), storage_policy_version=boot.get('storage_policy_version',0))
     except tarfile.TarError as error:
         raise ArtifactError('根文件系统归档损坏或不是 tar.gz。') from error
     return dict(**root, root_profile=boot['profile'].decode().strip(),
@@ -298,5 +387,9 @@ def inspect_package(directory, check_cancel=lambda: None):
                 root_contract_sha256=hashlib.sha256(boot['contract']).hexdigest(),
                 installer_interface=installer['interface'],
                 installer_usb_network=installer['usb_network'],
+                boot_multiboot_version=boot['multiboot_version'],
+                installer_multiboot_version=installer['multiboot_version'],
+                installer_android_version=installer['android_version'],
                 installer_kernel_release=installer['kernel_release'],
-                installer_kernel_sha256=installer['kernel_sha256'])
+                installer_kernel_sha256=installer['kernel_sha256'],
+                **({key:installer[key] for key in ('recovery_manifest','native_recovery_manifest') if key in installer}))

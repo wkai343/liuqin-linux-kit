@@ -10,6 +10,8 @@ def main():
     parser.add_argument('--demo', action='store_true', help='Simulate; never access USB or a tablet')
     parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--bundle', type=Path)
+    parser.add_argument('--recovery-image','--installer-image',dest='installer_image',type=Path,
+                        help='Override the bundled paired Recovery (legacy RAM images remain supported)')
     parser.add_argument('--state-dir', type=Path)
     parser.add_argument('--screenshot', type=Path, help='Save an initial offscreen preview and exit')
     args = parser.parse_args()

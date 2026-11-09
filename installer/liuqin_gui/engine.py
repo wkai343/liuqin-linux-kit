@@ -15,7 +15,6 @@ from pathlib import Path
 import re
 import shlex
 import shutil
-import socket
 import subprocess
 import tempfile
 import threading
@@ -36,8 +35,13 @@ FILES = ('installer.img', 'boot.img', 'rootfs.tar.gz')
 PHASES = {
     'validate_bundle': '校验安装包', 'probe_device': '识别平板',
     'boot_installer': '临时启动安装环境', 'check_hardware': '读取真实存储与硬件信息',
+    'recovery_adb': '等待 Recovery ADB 连接', 'recovery_session': '建立 Recovery 安装会话',
     'backup': '备份并核验原始分区', 'verify_backup': '核验已有设备备份',
     'revalidate': '复核已确认的方案',
+    'android_scan': '核对已有 Android 与受保护的 Linux',
+    'android_plan': '校验 ROM 与生成分块写入计划', 'android_write': '写入并回读 Android ROM',
+    'write_layout': '创建多系统分区', 'store_boots': '保存各系统引导与恢复材料',
+    'bind_boot': '绑定系统引导与 rootfs',
     'transfer': '向平板发送系统归档', 'verify_archive': '校验平板上的系统归档',
     'format_root': '格式化 Linux 根分区', 'extract_root': '解压系统文件',
     'configure_device': '配置本机固件与校准信息', 'verify_root': '检查系统启动文件',
@@ -94,7 +98,13 @@ class Transport:
             raise InstallerError(str(error)) from error
         self.ram_active = False
 
+    http_peer='127.0.0.1'
+
+    def http_server(self, handler):
+        raise InstallerError('请选择提供 ADB 安装服务的 Recovery。')
+
     def fastboot(self, *arguments, timeout=1800):
+        if arguments == ('reboot',) and getattr(self.engine,'defer_reboot',False):return 'Reboot deferred until workflow completes.'
         result = host.run_process([self.fastboot_path, '-s', self.serial, *arguments],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, timeout=timeout)
@@ -116,53 +126,31 @@ class Transport:
             raise InstallerError('仅支持已解锁的小米平板 6 Pro（liuqin）。')
         if values['current-slot'] not in ('a', 'b'):
             raise InstallerError('无法确认当前启动槽位。')
+        if self.engine.receipt.get('operation') in ('linux-managed','scan-layout','scan-partitions','partition-add','wizard') and values['current-slot'] != 'a':
+            raise InstallerError('分步安装当前要求 A 槽；请先核对默认系统槽位。')
         size = cli.boot_partition_bytes(quiet(cli.load_rom_table, Parser()))
         if int(self.getvar('partition-size:boot_a'), 0) != size:
             raise InstallerError('boot_a 大小与项目要求不一致。')
         if int(self.getvar('max-download-size'), 0) < size:
             raise InstallerError('Bootloader 单次下载上限不足。')
+        if self.engine.receipt.get('operation') == 'android':
+            if values['current-slot'] != 'a':
+                raise InstallerError('Android 管理当前要求 A 槽；不会自动切换已有系统槽位。')
+            anti = self.getvar('anti')
+            if not re.fullmatch(r'[0-9]{1,8}', anti):
+                raise InstallerError('无法确认设备防回滚等级。')
+            values['anti_version'] = int(anti)
+            if int(anti) > self.engine.android_profile['anti_version']:
+                raise InstallerError('设备防回滚等级高于固定 ROM，拒绝降级。')
+        if 'anti_version' not in values:
+            try:
+                anti=self.getvar('anti')
+                if re.fullmatch(r'[0-9]{1,8}',anti):values['anti_version']=int(anti)
+            except InstallerError:pass  # Linux and inspection do not require a ROM downgrade decision.
         return dict(values, serial=self.serial, boot_bytes=size)
 
     def boot_ram(self):
-        self.boot_id = None
-        image = self.engine.installer_snapshot
-        if digest_file(image) != self.engine.manifest['files']['installer.img']:
-            raise InstallerError('临时安装镜像校验不再匹配。')
-        self.fastboot('boot', str(image))
-        # The boot command changed the device state even if the network fails.
-        self.ram_active = True
-        deadline = time.monotonic() + 120
-        last = ''
-        if host.IS_WINDOWS:
-            self.engine.emit('notice', message='正在等待平板 USB 网卡；首次使用请点击下方“设置 USB 网络”，允许管理员设置后继续。')
-        while time.monotonic() < deadline:
-            self.engine.check_cancel()
-            try:
-                if host.IS_WINDOWS:
-                    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
-                        route.connect(('192.168.7.2', 2323))
-                        host.server_address(route.getsockname()[0])
-                value = cli.command('192.168.7.2',
-                                    'test "$(cat /etc/liuqin-installer)" = liuqin && '
-                                    'cat /proc/sys/kernel/random/boot_id', timeout=10,
-                                    cancel_check=self.engine.check_cancel).decode().strip()
-                uuid.UUID(value)
-                self.boot_id = value
-                break
-            except Cancelled:
-                raise
-            except (OSError, RuntimeError, ValueError) as exc:
-                last = str(exc)
-                self.engine.pause(1)
-        else:
-            raise InstallerError('USB 安装通道未就绪；未格式化。' + last[-300:])
-        cmdline = shlex.split(self.remote('cat /proc/cmdline').decode())
-        serial = next((p.split('=', 1)[1] for p in cmdline
-                       if p.startswith('androidboot.serialno=')), '')
-        if serial != self.serial:
-            self.boot_id = None  # Never send a cleanup reboot to another tablet.
-            raise InstallerError('RAM 环境序列号与选定平板不一致。')
-        self.verify_ram_interface()
+        raise InstallerError('旧 USB 网络安装环境已停用；请选择 ADB Recovery。')
 
     def verify_ram_interface(self):
         manifest = self.engine.manifest
@@ -170,13 +158,18 @@ class Transport:
             raise InstallerError('RAM 安装环境接口与选定 installer.img 不匹配。')
         if self.remote('uname -r').decode().strip() != manifest['installer_kernel_release']:
             raise InstallerError('RAM 内核与选定 installer.img 不匹配。')
+        if manifest.get('installer_multiboot_version') == 1:
+            from liuqin_boot_target import current_helper
+            shared=Path(cli.layout.__file__).parent
+            expected={'boot-target-v1.sh':hashlib.sha256(current_helper()).hexdigest(),
+                      'liuqin_partition_names.py':digest_file(shared/'liuqin_partition_names.py')}
+            output=self.remote('/bin/busybox sha256sum /usr/lib/liuqin/boot-target-v1.sh /usr/lib/liuqin/liuqin_partition_names.py').decode()
+            actual={Path(f[1]).name:f[0] for line in output.splitlines() if len(f:=line.split())==2}
+            if actual!=expected:
+                raise InstallerError('安装环境仍使用旧分区名称规则，请更新配套 Recovery 或重新构建 installer.img；未修改分区。')
 
     def remote(self, text, timeout=60, observe=None):
-        if not self.boot_id:
-            raise InstallerError('没有经过验证的 RAM 会话。')
-        guard = 'test "$(cat /proc/sys/kernel/random/boot_id)" = ' + shlex.quote(self.boot_id)
-        return cli.command('192.168.7.2', guard + ' && ' + text, timeout,
-                           on_output=observe, cancel_check=self.engine.check_cancel)
+        raise InstallerError('没有可用的 ADB Recovery 传输。')
 
     def device_layout(self, *args):
         command = shlex.join(['sh', '/usr/lib/liuqin/install-layout.sh', self.boot_id, *args])
@@ -195,8 +188,7 @@ class Transport:
         if not available.isdigit() or (require_archive and int(available) * 1024 <= self.engine.rootfs_bytes + 536870912):
             raise InstallerError('当前可用内存不足以暂存系统归档。')
         checks = ('test "$(cat /sys/class/block/sda/queue/logical_block_size)" = 4096 && '
-                  'test -b /dev/disk/by-partlabel/userdata && '
-                  'test "$(/bin/busybox blockdev --getro /dev/disk/by-partlabel/userdata)" = 1')
+                  'test -b /dev/sda && test "$(/bin/busybox blockdev --getro /dev/sda)" = 1')
         self.remote(checks)
         return {'battery': int(battery), 'available_memory_bytes': int(available) * 1024}
 
@@ -242,25 +234,24 @@ class Transport:
         result['calibration_usable'] = self.validate_calibration()
         return result
 
-    def install_root(self, padded_image):
+    def install_root(self, padded_image, system=None):
         engine = self.engine
         try:
             contract = artifacts.boot_interface(padded_image)['contract']
         except (ValueError, OSError) as error:
             raise InstallerError('安装前发现目标设备接口发生变化，未执行写入。') from error
         contract_digest = hashlib.sha256(contract).hexdigest()
-        if contract_digest != engine.manifest['root_contract_sha256']:
+        expected_contract = system['source']['contract_sha256'] if system else engine.manifest['root_contract_sha256']
+        if contract_digest != expected_contract:
             raise InstallerError('待写入 boot.img 的设备接口发生变化；未格式化。')
         script = (DEVICE_SCRIPTS / 'install-root.sh').read_bytes()
         token = uuid.uuid4().hex
-        routes = {'/' + token + '/rootfs.tar.gz': engine.bundle / 'rootfs.tar.gz',
+        routes = {'/' + token + '/rootfs.tar.gz': Path(system['source']['archive']) if system else engine.bundle / 'rootfs.tar.gz',
                   '/' + token + '/install-root.sh': script,
                   '/' + token + '/target-root.contract': contract}
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
-            route.connect(('192.168.7.2', 2323))
-            address = route.getsockname()[0]
-        if address in ('0.0.0.0', '127.0.0.1'):
-            raise InstallerError('没有可用的平板 USB 网络地址。')
+        if system:
+            from liuqin_boot_target import encode
+            routes['/' + token + '/boot-target'] = encode(system['target'])
         transport = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -269,7 +260,7 @@ class Transport:
 
             def do_GET(self):
                 item = routes.get(self.path)
-                if self.client_address[0] != '192.168.7.2' or item is None:
+                if self.client_address[0] != transport.http_peer or item is None:
                     self.send_error(404)
                     return
                 size = len(item) if isinstance(item, bytes) else item.stat().st_size
@@ -290,15 +281,11 @@ class Transport:
                 except (BrokenPipeError, ConnectionResetError):
                     pass  # Device-side hash/command result determines success.
 
-        server = http.server.ThreadingHTTPServer(host.server_address(address), Handler)
-        server.daemon_threads = True
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        base = f'http://{address}:{server.server_port}/{token}'
         directory = '/run/liuqin-gui/' + token
         target = directory + '/install-root.sh'
         contract_target = directory + '/target-root.contract'
-        try:
+        with self.http_server(Handler) as endpoint:
+            base = endpoint+'/'+token
             self.remote('mkdir -p ' + directory + ' && /bin/busybox wget -O ' + target +
                         ' ' + shlex.quote(base + '/install-root.sh'), 120)
             self.remote('printf "%s  %s\\n" ' + hashlib.sha256(script).hexdigest() + ' ' +
@@ -308,10 +295,18 @@ class Transport:
             self.remote('chmod 0644 ' + contract_target + '; printf "%s  %s\\n" ' +
                         contract_digest + ' ' + contract_target + ' | /bin/busybox sha256sum -c -')
             fields = ['sh', target, self.boot_id, base + '/rootfs.tar.gz',
-                      engine.manifest['files']['rootfs.tar.gz'], str(engine.rootfs_bytes),
+                      system['source']['archive_sha256'] if system else engine.manifest['files']['rootfs.tar.gz'],
+                      str(system['source']['archive_bytes'] if system else engine.rootfs_bytes),
                       'ERASE-LIUQIN-USERDATA', 'userdata', '-',
                       'ROOT-CONTRACT', contract_target, contract_digest]
-            fields += ['FILESYSTEM', engine.filesystem]
+            fields += ['FILESYSTEM', system['filesystem'] if system else engine.filesystem]
+            if system:
+                binding = routes['/' + token + '/boot-target']
+                binding_path = directory + '/boot-target'
+                self.remote('/bin/busybox wget -O ' + binding_path + ' ' + shlex.quote(base + '/boot-target'))
+                fields[7] = system['partition']['name']
+                fields += ['BOOT-TARGET', binding_path, hashlib.sha256(binding).hexdigest()]
+                fields += ['ROOT-RANGE', str(system['partition']['start']), str(system['partition']['bytes'])]
             pending = bytearray()
 
             def observe(chunk):
@@ -327,14 +322,21 @@ class Transport:
             # dispatch, not after receiving an asynchronously buffered marker.
             engine.receipt['write_dispatched'] = True
             engine.save_receipt()
-            result = self.remote(shlex.join(fields), 3600, observe=observe)
+            prefix=self.root_command_prefix() if hasattr(self,'root_command_prefix') else ''
+            result = self.remote(prefix+shlex.join(fields), 3600, observe=observe)
             if b'liuqin-install: ROOT_INSTALLED' not in result:
                 raise InstallerError('平板未确认根系统安装完成。')
-        finally:
-            server.shutdown()
-            server.server_close()
+
+    def ensure_fastboot_names(self):
+        if not self.boot_id:
+            raise InstallerError('无法核验分区名称，保留当前安装环境；未请求返回 Fastboot。')
+        output=self.remote(shlex.join(['/usr/bin/python3','-I','-B','/usr/lib/liuqin/android-device.py',
+            'check-fastboot-names',self.boot_id,self.serial]),180)
+        if output.strip()!=b'FASTBOOT_NAMES_OK':
+            raise InstallerError('设备未确认分区名称兼容 Fastboot，保留当前安装环境。')
 
     def return_fastboot(self):
+        self.ensure_fastboot_names()
         self.remote('(sleep 2; /usr/sbin/liuqin-reboot bootloader) >/dev/null 2>&1 &')
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline:
@@ -373,6 +375,41 @@ class Transport:
         engine.receipt['active_slot_set'] = True
         engine.save_receipt()
         self.fastboot('reboot')
+
+    def current_boot_digest(self):
+        return self.remote('/bin/busybox sha256sum /dev/disk/by-partlabel/boot_a', 180).decode().split()[0]
+
+    def snapshot_boot(self, directory):
+        return quiet(cli.backup_partition, self.remote, directory, 'boot_a')
+
+    def snapshot_recovery(self, directory, name):
+        if name not in ('recovery_a','recovery_b'):raise InstallerError('不是 Recovery 备份目标。')
+        return quiet(cli.backup_partition, self.remote, directory, name)
+
+    def android_rpc(self, action, request):
+        from .android_transport import rpc
+        return rpc(self, action, request)
+
+    def android_default(self, registry):
+        from .android_transport import set_default
+        return set_default(self, self.engine, registry)
+
+    def multiboot_info(self):
+        if self.remote('cat /etc/liuqin-multiboot').strip() != b'1':
+            raise InstallerError('实际 RAM 环境不支持多系统。')
+        return self.device_layout('info', 'userdata')
+
+    def multiboot_apply(self, plan, payload, report, info):
+        from .multiboot_transport import apply_layout
+        return apply_layout(self, plan, payload, report, info)
+
+    def multiboot_store(self, action, store, payload=None, digest=None, expected_boot='-'):
+        from .multiboot_transport import store_payload
+        return store_payload(self, action, store, payload, digest, expected_boot)
+
+    def multiboot_default(self, system, store, registry, backup):
+        from .multiboot_transport import set_default
+        return set_default(self, system, store, registry, backup)
 
     def cancel_cleanup(self):
         if self.boot_id and self.ram_active:
@@ -426,12 +463,15 @@ class Engine:
 
     def set_state(self, state):
         self.state = state
-        self.emit('state', state=state, can_cancel=state in ('preparing', 'backing_up'),
+        self.emit('state', state=state, can_cancel=state in ('preparing', 'backing_up','rom_analyzing'),
                   can_close=state not in ('preparing', 'backing_up', 'prepared', 'installing'))
 
     def phase(self, phase, detail=''):
         self.current_phase = phase
-        self.emit('phase', phase=phase, message=PHASES[phase], detail=detail, progress=None)
+        message=PHASES[phase]
+        if phase=='boot_installer' and (self.manifest or {}).get('native_recovery_manifest',{}).get('fixed_installer_version')==1:
+            message='连接固定 Recovery'
+        self.emit('phase', phase=phase, message=message, detail=detail, progress=None)
         if self.receipt:
             self.receipt['phase'] = phase
             self.save_receipt()
@@ -473,6 +513,12 @@ class Engine:
         devices = [{'serial': fields[0], 'description': ' '.join(fields[1:])}
                    for line in result.stdout.splitlines()
                    if len(fields := line.split()) >= 2 and fields[1] == 'fastboot']
+        try:
+            adb=host.run_process([host.adb_path(),'devices','-l'],capture_output=True,text=True,timeout=15,check=True)
+            known={d['serial'] for d in devices}
+            devices += [dict(serial=f[0],description='ADB · '+f[1]) for line in adb.stdout.splitlines()
+                        if len(f:=line.split())>=2 and f[1] in ('device','recovery','unauthorized','sideload') and f[0] not in known]
+        except (OSError,subprocess.SubprocessError):pass
         self.emit('devices', devices=devices)
 
     def validate_bundle(self, directory):
@@ -489,15 +535,17 @@ class Engine:
             except (ValueError, UnicodeError):
                 pass
         total = 0
+        def artifact_path(name):
+            return Path(self.runtime_path) if name=='installer.img' and getattr(self,'runtime_path',None) else bundle/name
         for name in FILES:
-            path = bundle / name
+            path = artifact_path(name)
             if path.is_symlink() or not path.is_file() or path.stat().st_size == 0:
                 raise InstallerError('安装包文件缺失、为空或为符号链接：' + name)
             total += path.stat().st_size
         completed = 0
         hashes = {}
         for name in FILES:
-            path = bundle / name
+            path = artifact_path(name)
             last = [0.0]
 
             def observe(count):
@@ -515,14 +563,16 @@ class Engine:
         else:
             self.emit('notice', message='正在检查内核和根文件系统接口，首次检查可能需要几分钟。')
             try:
-                interface = artifacts.inspect_package(bundle, self.check_cancel)
+                interface = artifacts.inspect_package(bundle, self.check_cancel, installer_path=artifact_path('installer.img'))
             except (artifacts.ArtifactError, ValueError, OSError, EOFError) as error:
                 raise InstallerError(str(error)) from error
             self._artifact_cache = (hashes, interface)
         tested = (metadata.get('device') == 'liuqin' and metadata.get('files') == hashes
                   and metadata.get('kernel_release') == interface['kernel_release']
                   and metadata.get('status') == 'DEVICE_TESTED')
-        manifest = dict(device='liuqin', files=hashes, **interface,
+        runtime_name='native-recovery.img' if 'native_recovery_manifest' in interface else 'recovery.img' if 'recovery_manifest' in interface else 'installer.img'
+        actual_hashes={runtime_name if name=='installer.img' else name:digest for name,digest in hashes.items()}
+        manifest = dict(device='liuqin', files=actual_hashes, runtime_file=runtime_name, **interface,
                         installer_layouts=['linux-single'], single_root_boot_slot='a',
                         status='DEVICE_TESTED' if tested else 'CUSTOM_UNVERIFIED')
         self.bundle, self.manifest = bundle, manifest
@@ -530,12 +580,49 @@ class Engine:
         self.rootfs_bytes = (bundle / 'rootfs.tar.gz').stat().st_size
         self.emit('bundle', valid=True, path=str(bundle), kernel=manifest['kernel_release'],
                   filesystems=manifest['filesystems'],
-                  host_compatible=not host.IS_WINDOWS or self.simulation or manifest.get('installer_usb_network') == 'rndis',
-                  status=manifest.get('status', 'UNKNOWN'), layouts=['linux-single'],
+                  host_compatible=not host.IS_WINDOWS or self.simulation or manifest.get('installer_usb_network') in ('adb-native','adb'),
+                  status=manifest.get('status', 'UNKNOWN'),
+                  layouts=(['linux-single', 'multi-root'] + (['linux-managed'] if manifest.get('installer_android_version') == 1 else [])) if manifest.get('installer_multiboot_version') == 1 else ['linux-single'],
                   experimental=manifest.get('status') != 'DEVICE_TESTED')
 
+    def android_profile_for_run(self):
+        from liuqin_android import load_profile
+        return load_profile()
+
+    def android_rom_path(self, path):
+        return path
+
+    def phase_if_android_partition(self, name):
+        if getattr(self, '_android_partition', None) != name:
+            self._android_partition = name
+            self.phase('android_write', detail=name)
+
+    def validate_installer(self, directory):
+        self.phase('validate_bundle')
+        bundle = Path(directory).expanduser().resolve()
+        path = Path(self.runtime_path) if getattr(self,'runtime_path',None) else bundle/'installer.img'
+        if path.is_symlink() or not path.is_file():
+            raise InstallerError('请选择含 installer.img 的目录。')
+        digest = digest_file(path, check=self.check_cancel)
+        interface = artifacts.boot_interface(path, installer=True)
+        runtime_name='native-recovery.img' if 'native_recovery_manifest' in interface else 'recovery.img' if 'recovery_manifest' in interface else 'installer.img'
+        manifest = dict(device='liuqin', files={runtime_name: digest}, runtime_file=runtime_name,
+            installer_interface=interface['interface'], installer_usb_network=interface['usb_network'],
+            installer_kernel_release=interface['kernel_release'], installer_kernel_sha256=interface['kernel_sha256'],
+            kernel_release=interface['kernel_release'], installer_android_version=interface['android_version'],
+            installer_multiboot_version=interface['multiboot_version'],
+            filesystems=interface['filesystems'], status='CUSTOM_UNVERIFIED',
+            **({key:interface[key] for key in ('recovery_manifest','native_recovery_manifest') if key in interface}))
+        self.bundle, self.manifest = bundle, manifest
+        self.manifest_digest = hashlib.sha256(canonical(manifest)).hexdigest()
+        self.rootfs_bytes = 0
+        self.emit('bundle', valid=True, path=str(bundle), kernel=manifest['kernel_release'],
+            filesystems=manifest['filesystems'], layouts=(['android-manage', 'partition-only', 'partition-reset'] if interface['android_version']==1 and interface['multiboot_version']==1 else []),
+            host_compatible=not host.IS_WINDOWS or self.simulation or interface['usb_network'] in ('adb-native','adb'),
+            status='CUSTOM_UNVERIFIED', experimental=True)
+
     def guard_operation(self):
-        if self.state in ('preparing', 'backing_up', 'prepared', 'installing'):
+        if self.state in ('preparing', 'backing_up', 'prepared', 'installing','rom_analyzing'):
             raise InstallerError('请先结束当前会话。')
         if self.state == 'failed' and self.receipt.get('write_dispatched'):
             raise InstallerError('上次写入未完成，请先检查执行记录和平板状态，再结束此会话。')
@@ -649,7 +736,11 @@ class Engine:
         self.session_id = uuid.uuid4().hex
         self.plan_id = ''
         self.transport = None
-        self.validate_bundle(payload.get('bundle', ''))
+        self.runtime_path=payload.get('installer_path')
+        if payload.get('layout') in ('android-manage', 'partition-only', 'partition-reset'):
+            self.validate_installer(payload.get('bundle', ''))
+        else:
+            self.validate_bundle(payload.get('bundle', ''))
         self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         if self.state_dir == self.bundle or self.bundle in self.state_dir.parents:
             raise InstallerError('运行记录不能存入安装包目录。')
@@ -660,7 +751,7 @@ class Engine:
         serial = self.require_serial(payload)
         self.receipt = dict(schema_version=2, simulation=self.simulation, serial=serial,
                             session_id=self.session_id, run_dir=str(directory), operation=operation,
-                            bundle=str(self.bundle), layout='linux-single', slot='a',
+                            bundle=str(self.bundle), layout=payload.get('layout', 'linux-single'), slot='a',
                             created_at=datetime.now(timezone.utc).isoformat(),
                             write_dispatched=False, root_installed=False,
                             boot_flash_started=False, boot_written=False,
@@ -672,18 +763,26 @@ class Engine:
     def connect_ram(self, require_archive=True):
         if not self.simulation:
             try:
-                host.check_installer_support(self.manifest)
+                host.check_gui_recovery_support(self.manifest)
             except RuntimeError as error:
                 raise InstallerError(str(error)) from error
         serial = self.receipt['serial']
-        self.transport = self.transport_factory(self, serial)
+        factory=self.transport_factory
+        if factory is Transport and 'native_recovery_manifest' in self.manifest:
+            from .native_recovery_transport import NativeRecoveryTransport
+            factory=NativeRecoveryTransport
+        elif factory is Transport and 'recovery_manifest' in self.manifest:
+            from .recovery_transport import RecoveryTransport
+            factory=RecoveryTransport
+        self.transport = factory(self, serial)
         self.lock_device(serial)
         self.phase('probe_device')
         self.device = self.transport.check_device()
         self.scratch = tempfile.TemporaryDirectory(prefix='run-', dir=self.state_dir)
-        self.installer_snapshot = Path(self.scratch.name) / 'installer.img'
-        shutil.copyfile(self.bundle / 'installer.img', self.installer_snapshot)
-        if digest_file(self.installer_snapshot) != self.manifest['files']['installer.img']:
+        runtime_name=self.manifest.get('runtime_file','installer.img')
+        self.installer_snapshot = Path(self.scratch.name) / runtime_name
+        shutil.copyfile(self.runtime_path or self.bundle / runtime_name, self.installer_snapshot)
+        if digest_file(self.installer_snapshot) != self.manifest['files'][runtime_name]:
             raise InstallerError('复制临时安装镜像时校验不匹配。')
         if require_archive:
             self.padded, self.padded_digest = cli.pad_boot_image(
@@ -696,7 +795,7 @@ class Engine:
         self.report_text = self.transport.report()
         disk = cli.layout.parse_print(self.report_text)
         cli.layout.check_geometry(disk)
-        self.device['userdata_bytes'] = disk.by_name('userdata').size
+        self.device['userdata_bytes'] = next((p.size for p in disk.partitions if p.name == 'userdata'), 0)
         if require_archive and self.manifest['expanded_bytes'] + 512 * 1024 * 1024 > self.device['userdata_bytes']:
             raise InstallerError('根文件系统解压后的大小超过 userdata 可用容量。')
         self.emit('device', device=self.device)
@@ -705,7 +804,8 @@ class Engine:
     def create_backup(self, payload):
         self.guard_operation()
         serial = self.require_serial(payload)
-        if payload.get('force_new') is not True:
+        reuse_current = payload.get('reuse_current') is True and payload.get('force_new') is not True
+        if payload.get('force_new') is not True and not reuse_current:
             candidates = self.backup_candidates(serial, payload['backup_parent'])
             if candidates:
                 self.cancel_event.clear()
@@ -724,29 +824,64 @@ class Engine:
         if parent == self.bundle or self.bundle in parent.parents:
             raise InstallerError('私有备份不能存入安装包目录。')
         parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        if shutil.disk_usage(parent).free < 768 * 1024**2:
-            raise InstallerError('备份位置可用空间不足 768MiB。')
         self.connect_ram(require_archive=False)
-        directory = parent / (serial + '-' + datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + self.session_id[:8])
-        directory.mkdir(mode=0o700)
-        self.receipt['backup_dir'] = str(directory)
-        self.save_receipt()
-        self.phase('backup')
-        self.transport.backup(directory)
-        self.check_cancel()
-        self.phase('verify_backup')
-        record = backups.publish(directory, serial, self.simulation, cli.layout)
+        record = None
+        if reuse_current:
+            self.phase('verify_backup')
+            current_geometry = backups.geometry(cli.layout.parse_print(self.report_text))
+            for candidate in self.backup_candidates(serial, parent)[:32]:
+                if Path(candidate).resolve().parent != parent:
+                    continue
+                self.check_cancel()
+                try:
+                    existing = self.load_backup(candidate, serial)
+                except InstallerError:
+                    continue
+                if existing['geometry'] != current_geometry:
+                    continue
+                if any(existing['sizes'][name] != self.device['boot_bytes'] for name in ('boot_a.img', 'boot_b.img')):
+                    continue
+                compatibility = self.verify_current_backup(existing)
+                if compatibility['persist_snapshot_matches']:
+                    record = existing
+                    break
+        source = 'reused' if record else 'created'
+        if record is None:
+            if shutil.disk_usage(parent).free < 768 * 1024**2:
+                raise InstallerError('备份位置可用空间不足 768MiB。')
+            directory = parent / (serial + '-' + datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + self.session_id[:8])
+            directory.mkdir(mode=0o700)
+            self.receipt['backup_dir'] = str(directory)
+            self.save_receipt()
+            self.phase('backup')
+            self.transport.backup(directory)
+            self.check_cancel()
+            self.phase('verify_backup')
+            record = backups.publish(directory, serial, self.simulation, cli.layout)
         self.remember_backup(record)
-        self.receipt.update(backup_verified=True, backup_id=record['backup_id'])
+        self.receipt.update(backup_dir=record['path'], backup_verified=True,
+                            backup_id=record['backup_id'], backup_reused=source=='reused')
         self.save_receipt()
         self.phase('return_fastboot')
         self.transport.cancel_cleanup()
         self.clean_scratch()
         self.release_device()
         self.set_state('backup_complete')
-        self.emit_backup(record, 'created')
+        self.emit_backup(record, source)
 
     def prepare(self, payload):
+        if payload.get('layout') == 'partition-only':
+            from .partitioning import prepare
+            return prepare(self, payload)
+        if payload.get('layout') == 'linux-managed':
+            from .managed_linux import prepare
+            return prepare(self, payload)
+        if payload.get('layout') == 'android-manage':
+            from .android import prepare
+            return prepare(self, payload)
+        if payload.get('layout') in ('multi-root', 'partition-reset'):
+            from .multiboot import prepare
+            return prepare(self, payload)
         self.guard_operation()
         try:
             filesystem = validate_filesystem(payload.get('filesystem', 'ext4'))
@@ -767,9 +902,7 @@ class Engine:
         self.receipt['backup_dir'] = record['path']
         self.save_receipt()
         disk = self.connect_ram()
-        self.plan = cli.plan_for_disk(SimpleNamespace(layout='linux-single', keep_home=False,
-                                        filesystem=filesystem,
-                                        android_size=None, root_size=None), disk)
+        self.plan = cli.plan_for_disk(SimpleNamespace(layout='linux-single', filesystem=filesystem), disk)
         self.phase('verify_backup')
         compatibility = self.verify_current_backup(record)
         self.backup_record = record
@@ -798,6 +931,18 @@ class Engine:
     def install(self, payload):
         if self.state != 'prepared':
             raise InstallerError('没有可以确认的准备会话。')
+        if self.receipt.get('operation') == 'android':
+            from .android import install
+            return install(self, payload)
+        if self.receipt.get('layout') == 'linux-managed':
+            from .managed_linux import install
+            return install(self, payload)
+        if self.receipt.get('layout') == 'partition-only':
+            from .partitioning import install
+            return install(self, payload)
+        if self.receipt.get('layout') in ('multi-root', 'partition-reset'):
+            from .multiboot import install
+            return install(self, payload)
         consent = payload.get('confirmation', {})
         if self.filesystem != self.plan_snapshot['filesystem']:
             raise InstallerError('确认后的文件系统选择发生变化，请重新检查安装方案。')
@@ -905,6 +1050,7 @@ class Engine:
                                         simulation=self.simulation, **values))
         self.committing = False
         self.clean_scratch()
+        self.workflow_committing = False
         if not self.receipt.get('write_dispatched'):
             self.release_device()
 

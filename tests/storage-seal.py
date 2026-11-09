@@ -181,27 +181,27 @@ assert args[:2]==['timeout','1']
 if os.environ.get('HANG')=='1':clock.write_text(str(now+100)+'\\n');sys.exit(124)
 os.execv(args[2],args[2:])
 ''');self.bb.chmod(0o755)
-        self.helper.write_text(prefix+'''assert sys.argv[1:]==['--ready']
+        self.helper.write_text(prefix+'''assert sys.argv[1:]==[os.environ.get('READY_COMMAND','--ready-ufs')]
 count=Path(os.environ['COUNT']);n=int(count.read_text())+1 if count.exists() else 1;count.write_text(str(n))
 with open(os.environ['CALLS'],'a') as out:out.write('ready\\n')
 if n<int(os.environ.get('READY_AFTER','1')) or n==int(os.environ.get('FAIL_READY_AT','0')):sys.exit(1)
-print('2 UFS LUNs; 5 block nodes')
+if os.environ.get('EMPTY_PROOF')!='1':print('2 UFS LUNs; 5 block nodes')
 ''');self.helper.chmod(0o755)
 
     def tearDown(self):self.temp.cleanup()
 
-    def run_wait(self, *, mode='persistent', profile='native-updatable', cmdline='', **settings):
+    def run_wait(self, *, mode='persistent', profile='native-updatable', cmdline='', wait_mode='', **settings):
         env=dict(os.environ,BB=str(self.bb),storage_seal_helper=str(self.helper),
                  storage_ready_state=str(self.root/'ready'),CLOCK=str(self.clock),CALLS=str(self.calls),
                  COUNT=str(self.root/'count'),storage_mode=mode,storage_profile=profile,
-                 CMDLINE=cmdline,**{k:str(v) for k,v in settings.items()})
+                 CMDLINE=cmdline,WAIT_MODE=wait_mode,**{k:str(v) for k,v in settings.items()})
         script='''log() { echo "$*"; }
 storage_clock_read() { [ "${CLOCK_FAIL:-0}" != 1 ] || return 1; read -r storage_wait_now <"$CLOCK"; }
 storage_seal_scan() {
  storage_scan_found=${NODES:-true}
  [ "${SEAL_FAIL:-0}" != 1 ]
 }
-'''+self.wait+'''\nstorage_wait_for_ufs "$CMDLINE"
+'''+self.wait+'''\nstorage_wait_for_ufs "$CMDLINE" "$WAIT_MODE"
 printf 'result=%s,%s\\n' "$found_block" "$storage_wait_complete"
 '''
         result=subprocess.run(['sh','-c',script],env=env,capture_output=True,text=True)
@@ -212,6 +212,14 @@ printf 'result=%s,%s\\n' "$found_block" "$storage_wait_complete"
         out,calls,elapsed=self.run_wait()
         self.assertIn('result=true,true',out);self.assertEqual(calls.count('bb sleep'),1)
         self.assertEqual(calls.splitlines().count('ready'),2)
+        self.assertGreaterEqual(elapsed,100);self.assertLess(elapsed,200)
+
+    def test_native_recovery_exits_after_two_proofs(self):
+        out,calls,elapsed=self.run_wait(mode='readonly',profile='ram',wait_mode='recovery',
+                                       READY_COMMAND='--ready-recovery')
+        self.assertIn('result=true,true',out)
+        self.assertEqual(calls.splitlines().count('ready'),2)
+        self.assertEqual(calls.count('bb sleep 1\n'),1)
         self.assertGreaterEqual(elapsed,100);self.assertLess(elapsed,200)
 
     def test_delayed_readiness_is_retried_then_finishes(self):
@@ -229,6 +237,12 @@ printf 'result=%s,%s\\n' "$found_block" "$storage_wait_complete"
         self.assertIn('result=true,false',out);self.assertGreaterEqual(elapsed,1000)
         self.assertLessEqual(elapsed,1010)
 
+    def test_recovery_requires_actual_proof_output(self):
+        out,_,elapsed=self.run_wait(mode='readonly',profile='ram',wait_mode='recovery',
+                                   READY_COMMAND='--ready-recovery',EMPTY_PROOF=1)
+        self.assertIn('result=true,false',out)
+        self.assertGreaterEqual(elapsed,1000)
+
     def test_slow_query_is_counted_inside_the_deadline(self):
         out,calls,elapsed=self.run_wait(HANG=1)
         self.assertIn('result=true,false',out);self.assertLessEqual(elapsed,1010)
@@ -244,6 +258,7 @@ printf 'result=%s,%s\\n' "$found_block" "$storage_wait_complete"
 
     def test_installer_charger_and_failed_clock_keep_ten_legacy_rounds(self):
         for settings in [{'mode':'readonly','profile':'installer'},
+                         {'mode':'readonly','wait_mode':'recovery','cmdline':'androidboot.mode=charger'},
                          {'cmdline':'androidboot.mode=charger rhgb'},{'CLOCK_FAIL':1}]:
             with self.subTest(settings=settings):
                 self.clock.write_text('0\n');self.calls.unlink(missing_ok=True)

@@ -2,14 +2,14 @@
 
 [项目首页](../../README.md)
 
-`usr/lib/firmware/` 下的 197 个二进制文件构成锁定的通用固件组合，包括
+`usr/lib/firmware/` 下的 199 个二进制文件构成锁定的通用固件组合，包括
 SM8475 DSP（adsp/cdsp/slpi）、QCA6490 WLAN（ath11k WCN6855，含项目生成的
 `board-2.bin`）、蓝牙、两种面板的 Novatek NT36532 触控、Adreno 730 GPU、
 音频拓扑、VPU 和无线监管数据库。
 
 CS35L41 的保护程序及四路通用调音另从同版原厂 ROM 的 `vendor/firmware` 提取，
 由 `build/lib/speaker_firmware.py` 校验并转换成主线驱动使用的文件名。
-默认官方系统的 `liuqin-firmware` 包因此包含上述 197 个文件和这 5 个保护固件文件。
+默认官方系统的 `liuqin-firmware` 包因此包含上述 199 个文件和这 5 个保护固件文件。
 它们与每台平板独有的 `*-calr.bin` 校准数据不同，后者仍只在安装时读取本机 persist。
 
 ## 来源
@@ -17,7 +17,7 @@ CS35L41 的保护程序及四路通用调音另从同版原厂 ROM 的 `vendor/f
 - 使用 `build/scripts/build-liuqin-firmware-prep.sh` 从原厂 Fastboot ROM
   `OS2.0.6.0.VMYCNXM`（liuqin_images_15.0_cn）离线提取。
   每个文件的 SHA256 锁定于 `firmware.manifest`，该清单 SHA256 为
-  `012c413e0a5d5c3c14631fbdfe50da5c51e95ffc1ae431b8d93f776538b65ba2`。
+  `68c946c4f11d0cd8faa13ecbf28ef7ab5dd46ac6d499a6b5027c384153733af0`。
 - `ath11k/WCN6855/*/board-2.bin*` 由项目通过
   `build/scripts/build-liuqin-wlan.py` 从厂商组合生成。
 - 这些文件适用于同型号设备，不包含每台平板独有的扬声器保护校准、传感器

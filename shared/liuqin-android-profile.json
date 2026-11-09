@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "device": "liuqin",
+  "rom": "OS2.0.6.0.VMYCNXM",
+  "slot": "a",
+  "anti_version": 1,
+  "shared_firmware": [
+    "BTFM.bin",
+    "NON-HLOS.bin",
+    "dspso.bin"
+  ],
+  "install_images": [
+    "super.img",
+    "vendor_boot.img",
+    "dtbo.img",
+    "vbmeta_system.img",
+    "vbmeta.img"
+  ],
+  "super": {
+    "source_sha256": "e01baf61b4417921a5a856039bf712ed37d86d9279e08104020a38d69aa1647e",
+    "expanded_bytes": 9126805504,
+    "verification_ranges": [
+      {
+        "offset": 0,
+        "bytes": 405504,
+        "sha256": "206b9456269b66106cde0af2667bee69f7860a509ae46444b4118d95ffb6e5e1"
+      },
+      {
+        "offset": 1048576,
+        "bytes": 526495744,
+        "sha256": "570ff143885ddc9fea70d06be0cae80c2aa5a78e410911ffd0de8e4c376f7c1b"
+      },
+      {
+        "offset": 528482304,
+        "bytes": 4402311168,
+        "sha256": "0bdd658036d42eec8806acc5f842f011be49365f37a2de02602f8c4083bd6d57"
+      },
+      {
+        "offset": 4931452928,
+        "bytes": 770969600,
+        "sha256": "ff65fc4a7f321273b76f0d5607b8a6da7e3ffe8db33ed200dfa86adf5dcc903b"
+      },
+      {
+        "offset": 5703204864,
+        "bytes": 646275072,
+        "sha256": "fbae647da6162870aa7b779d0d9792df759f359b3043713565056418a14b29f6"
+      },
+      {
+        "offset": 6350176256,
+        "bytes": 1402441728,
+        "sha256": "181acf6a6d8a59d2c128c34629e1243817ea912d0a5bb4a4dc4d7d27afdfffef"
+      },
+      {
+        "offset": 7753170944,
+        "bytes": 29577216,
+        "sha256": "f7be124c4d8e747462be10565cc3fab0a8fcdad7b8b1ec7b503fd34b5b3f4c11"
+      },
+      {
+        "offset": 7783579648,
+        "bytes": 155648,
+        "sha256": "3969e18eccdd79df4000c89bf8ab3d119d0944a67cd559b2ca03609ca769bf16"
+      }
+    ]
+  },
+  "archive": {
+    "archive": "liuqin_images_OS2.0.6.0.VMYCNXM_20250318.0000.00_15.0_cn_c29f6de5df.tgz",
+    "archive_root": "liuqin_images_OS2.0.6.0.VMYCNXM_15.0",
+    "bytes": 7087928263,
+    "sha256": "af7bd8c434ed6811e3e2fe17db165472e69c94001cea679c8b20e931de4f51cc"
+  },
+  "userdata": {
+    "filesystem": "f2fs",
+    "mkfs_args": [
+      "-f",
+      "-t",
+      "0",
+      "-g",
+      "android",
+      "-O",
+      "extra_attr,inode_checksum,sb_checksum,compression",
+      "-w",
+      "4096",
+      "-l",
+      "userdata"
+    ]
+  },
+  "metadata": {
+    "filesystem": "ext4",
+    "mkfs_args": [
+      "-F",
+      "-b",
+      "4096",
+      "-I",
+      "256",
+      "-m",
+      "0",
+      "-O",
+      "none,has_journal,extent,huge_file,flex_bg,metadata_csum,dir_index,extra_isize,uninit_bg",
+      "-L",
+      "metadata"
+    ]
+  },
+  "evidence": [
+    "vendor_boot first_stage_ramdisk/fstab.qcom: /data f2fs, formattable, wrappedkey_v0 metadata encryption, /metadata ext4",
+    "Android creates hardware-backed encryption keys on its first boot; the RAM installer does not decrypt existing data."
+  ]
+}

@@ -1,0 +1,10 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# D-Bus may activate Powerdevil outside the greeter target's lifetime. Avoid
+# starting a Qt process against a missing socket; regular desktops are unchanged.
+[ "$(id -un)" = plasmalogin ] || exit 0
+systemctl --user is-active --quiet plasma-login-kwin_wayland.service || exit 1
+case ${WAYLAND_DISPLAY:-} in
+    ''|*/*) exit 1 ;;
+esac
+[ -n "${XDG_RUNTIME_DIR:-}" ] && [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]

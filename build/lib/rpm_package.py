@@ -10,7 +10,7 @@ import tempfile
 
 def build(payload, name, version, output, *, requires=(), prerequires=(), provides=(),
           release='1.liuqin', architecture='aarch64', license='MIT', summary=None,
-          post='', posttrans='', conflicts=()):
+          post='', posttrans='', conflicts=(), owned_directories=()):
     payload, output = Path(payload).resolve(), Path(output).resolve()
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.+_-]*', name) or not re.fullmatch(r'[0-9][A-Za-z0-9.+~^_]*', version):
         raise ValueError('RPM 包名称或版本无效。')
@@ -22,13 +22,25 @@ def build(payload, name, version, output, *, requires=(), prerequires=(), provid
         work=Path(temp)
         for directory in ('BUILD','BUILDROOT','RPMS','SOURCES','SPECS','SRPMS'):(work/directory).mkdir()
         source=work/'SOURCES/payload';shutil.copytree(payload,source,symlinks=True)
+        owned_roots = tuple(source / name for name in owned_directories)
+        if any(source not in root.parents or not root.is_dir() or root.resolve() != root
+               for root in owned_roots):
+            raise ValueError('RPM 目录所有权范围无效。')
         files=[]
         for path in sorted(source.rglob('*')):
-            if path.is_dir() and not path.is_symlink():continue
+            directory = path.is_dir() and not path.is_symlink()
+            if directory and not any(path.is_relative_to(root) for root in owned_roots):
+                continue
             rel=path.relative_to(source).as_posix()
             if any(c in rel for c in ('\n','\r','%','"')):raise ValueError('RPM 文件路径无效。')
-            tag='%license ' if rel.startswith(('usr/share/doc/','usr/share/licenses/')) else ''
-            if rel.startswith('etc/') and not path.is_symlink():tag='%config(noreplace) '
+            if directory:
+                tag = '%dir '
+            elif rel.startswith(('usr/share/doc/', 'usr/share/licenses/')):
+                tag = '%license '
+            elif rel.startswith('etc/') and not path.is_symlink():
+                tag = '%config(noreplace) '
+            else:
+                tag = ''
             files.append(tag+'"/'+rel+'"')
         if not files:raise ValueError('RPM 文件树为空。')
         spec=[f'Name: {name}',f'Version: {version}',f'Release: {release}',

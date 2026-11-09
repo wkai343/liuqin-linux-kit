@@ -2,21 +2,24 @@
 # SPDX-License-Identifier: MIT
 """Build coinstallable kernel packages and an opt-in boot updater, without device access."""
 import argparse
+import io
 import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
 
 PROJECT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT / 'shared'))
 from liuqin_kernel import build_contract, parse_contract, digest, extract_modules
 from liuqin_artifacts import boot_interface
 
-TOOLS_VERSION = '0.1.3'
+TOOLS_VERSION = '0.1.6'
 
 
 def put(root, name, content, mode=0o644):
@@ -61,8 +64,12 @@ def build(kernel, modules, boot_image, output, version, kernel_source=None, pack
                 'Liuqin versioned kernel boot update and recovery tools')
         put(tools, 'usr/lib/liuqin/boot-update.py', (PROJECT / 'device/boot/boot-update.py').read_bytes(), 0o755)
         put(tools, 'etc/liuqin-root-interface', b'liuqin-root-v2\n')
-        for name in ('liuqin_kernel.py', 'liuqin_artifacts.py', 'liuqin_filesystems.py'):
-            put(tools, 'usr/lib/liuqin/' + name, (PROJECT / 'shared' / name).read_bytes())
+        # boot_interface also validates multi-system/Recovery capabilities.
+        # Ship the complete shared closure rather than importing from a source checkout.
+        for path in sorted((PROJECT/'shared').glob('*.py')):
+            put(tools, 'usr/lib/liuqin/'+path.name, path.read_bytes())
+        for path in sorted((PROJECT/'shared').glob('*.json')):
+            put(tools, 'usr/lib/liuqin/'+path.name, path.read_bytes())
         put(tools, 'usr/sbin/liuqin-boot-update', '#!/bin/sh\nexec /usr/bin/python3 /usr/lib/liuqin/boot-update.py "$@"\n', 0o755)
         put(tools, 'etc/kernel/postinst.d/zz-liuqin-boot', '#!/bin/sh\nset -eu\nexec /usr/sbin/liuqin-boot-update hook "$1" >&2\n', 0o755)
         put(tools, 'etc/apt/apt.conf.d/99-liuqin-kernels',
@@ -87,7 +94,8 @@ def build(kernel, modules, boot_image, output, version, kernel_source=None, pack
         manifest = extract_modules(modules, module, content)
         put(module, 'usr/share/liuqin/kernels/' + release + '/modules.manifest', manifest)
         put(module, 'usr/share/liuqin/kernels/' + release + '/modules.contract', content)
-        control(image, image_name, version, f'{module_name} (= {version})', 'Liuqin boot image for ' + release,
+        storage_dep = ', liuqin-storage-policy-ufs (>= 1)' if boot.get('storage_policy_version') else ''
+        control(image, image_name, version, f'{module_name} (= {version})'+storage_dep, 'Liuqin boot image for ' + release,
                 f'liuqin-boot-tools (>= {TOOLS_VERSION})')
         for root, name in ((image, image_name), (module, module_name)):
             put(root, f'usr/share/doc/{name}/kernel-COPYING', (source / 'COPYING').read_bytes())
@@ -96,6 +104,32 @@ def build(kernel, modules, boot_image, output, version, kernel_source=None, pack
                 'Kernel source commit: ' + commit + '\nCorresponding configuration: kernel-config\n'
                 'Redistribution must include or provide the corresponding kernel source and changes.\n')
             put(root, f'usr/share/doc/{name}/kernel-config', (kernel / '.config').read_bytes())
+            source_lock=kernel/'source-lock.json'
+            if source_lock.is_file():
+                if digest(source_lock)!=recorded.get('source_lock_sha256'):
+                    raise ValueError('内核源码锁与构建记录不匹配。')
+                put(root,f'usr/share/doc/{name}/kernel-source-lock.json',source_lock.read_bytes())
+            if recorded.get('target_patches'):
+                archive=io.BytesIO()
+                with tarfile.open(fileobj=archive,mode='w:xz') as tar:
+                    for relative,expected in sorted(recorded['target_patches'].items()):
+                        path=PROJECT/relative
+                        if (not path.is_relative_to(PROJECT/'build/kernel/patches') or path.is_symlink()
+                                or digest(path)!=expected):
+                            raise ValueError('内核补丁与构建记录不匹配：'+relative)
+                        data=path.read_bytes();entry=tarfile.TarInfo(relative)
+                        entry.size=len(data);entry.mode=0o644
+                        tar.addfile(entry,io.BytesIO(data))
+                put(root,f'usr/share/doc/{name}/kernel-patches.tar.xz',archive.getvalue())
+            alignment=recorded.get('load_alignment')
+            if alignment:
+                for relative,key in (('device/boot/arm64-aligned-entry.S','entry_sha256'),
+                                     ('build/lib/arm64_alignment.py','helper_sha256')):
+                    path=PROJECT/relative
+                    if digest(path)!=alignment[key]:raise ValueError('对齐入口源码已改变。')
+                    put(root,f'usr/share/doc/{name}/'+path.name,path.read_bytes())
+                put(root,f'usr/share/doc/{name}/arm64-alignment.json',
+                    json.dumps(alignment,indent=2)+'\n')
         put(image, 'usr/lib/liuqin/boot-images/' + release + '/boot.img', boot_image.read_bytes())
         packaged_boot = image / 'usr/lib/liuqin/boot-images' / release / 'boot.img'
         packaged_interface = boot_interface(packaged_boot)
@@ -123,20 +157,38 @@ def build(kernel, modules, boot_image, output, version, kernel_source=None, pack
                 sys.path.insert(0,str(PROJECT/'build/lib'))
                 from rpm_package import build as rpm
                 shutil.rmtree(root/'DEBIAN')
+                directories = ()
+                boot_hook = ''
                 if root==tools:
                     shutil.rmtree(root/'etc/apt')
                     shutil.rmtree(root/'etc/kernel')
-                    dependencies=['python3 >= 3.11','python3-zstandard >= 0.23'];pre=[];posttrans=''
+                    dependencies=['python3 >= 3.11','python3-zstandard >= 0.23'];pre=[]
                 elif root==module:
-                    dependencies=['kmod'];pre=['liuqin-boot-tools >= '+TOOLS_VERSION];posttrans=''
+                    dependencies=['kmod'];pre=['liuqin-boot-tools >= '+TOOLS_VERSION]
+                    directories = (f'usr/lib/modules/{release}', f'usr/share/liuqin/kernels/{release}',
+                                   f'usr/share/doc/{module_name}')
                 elif root==image:
                     dependencies=[module_name+' = '+version+'-1.liuqin'];pre=['liuqin-boot-tools >= '+TOOLS_VERSION]
-                    posttrans='/usr/sbin/liuqin-boot-update hook '+release
+                    if boot.get('storage_policy_version'):dependencies.append('liuqin-storage-policy-ufs >= 1')
+                    directories = (f'usr/lib/liuqin/boot-images/{release}', f'usr/share/doc/{image_name}')
+                    boot_hook = '/usr/sbin/liuqin-boot-update hook ' + shlex.quote(release)
                 else:
-                    dependencies=[image_name+' = '+version+'-1.liuqin'];pre=[];posttrans=''
+                    dependencies=[image_name+' = '+version+'-1.liuqin'];pre=[]
+                posttrans = ''
+                if directories:
+                    targets = ' '.join(shlex.quote('/' + path) for path in directories)
+                    # Rec has no active Fedora policy. Its explicit offline transaction
+                    # labels the version-owned trees and skips automatic boot updates.
+                    posttrans = ('if [ "${LIUQIN_OFFLINE_SELINUX_RELABEL:-0}" = 1 ]; then\n'
+                                 '    /usr/sbin/setfiles -F /etc/selinux/targeted/contexts/files/file_contexts '
+                                 + targets + ' || exit 1\n')
+                    if boot_hook:
+                        posttrans += 'else\n    ' + boot_hook + '\n'
+                    posttrans += 'fi\n'
                 rpm(root,name,package_version,packages,requires=dependencies,prerequires=pre,
                     license='GPL-2.0-only' if root in (image,module) else 'MIT',
-                    summary='Liuqin versioned kernel package',posttrans=posttrans)
+                    summary='Liuqin versioned kernel package',posttrans=posttrans,
+                    owned_directories=directories)
             else:raise ValueError('需要 deb 或 rpm 包格式。')
         record = dict(status='OFFLINE_BUILT_NOT_DEVICE_TESTED', release=release,
                       source=recorded['commit'],

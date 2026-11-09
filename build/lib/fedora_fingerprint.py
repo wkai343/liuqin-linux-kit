@@ -74,16 +74,18 @@ def stage(root,work,output):
     for name in ['fpc_build_info','qsee-gatekeeper','qsee-supplicant','qsee-app-loader']:
         shutil.copy2(work/'clients'/name,runtime/name)
     shutil.copytree(work/'clients/ufs-rpmb-provider',runtime/'ufs-rpmb-provider')
-    for path in (OEM/'src/fingerprint/oem').glob('*.py'):shutil.copy2(path,runtime/path.name)
+    for name in ('native_enrol.py','native_credentials.py','oem_runtime.py','authorize_oem.py','gallery_state.py','gallery_match.py'):
+        shutil.copy2(OEM/'src/fingerprint/oem'/name,runtime/name)
     for name in ['stable_module.py','provision_firmware.py']:
         shutil.copy2(OEM/'src/fingerprint/deployment'/name,runtime/name)
     shutil.copy2(PROJECT/'shared/liuqin_kernel.py',runtime/'liuqin_kernel.py')
     firmware=runtime/'firmware';firmware.mkdir()
     for name in ['SHA256.json','NOTICE']:shutil.copy2(OEM/'firmware'/name,firmware/name)
     candidate=dict(schema=1,id='liuqin-fpc-oem-fedora-v1',deployment_mode='installed',
-        enrollment_interface='fprintd',account_profile='primary-uid-1000',linux_uid=1000,
-        native_uid=0x600003e8,kernel_profile='liuqin-root-v2',display_service='display-manager',
-        firmware_source='modem_a-read-only',program_path=PREFIX,supports_one_finger_per_user=True)
+        enrollment_interface='fprintd',account_profile='fprintd-user',supports_multiple_users=True,
+        kernel_profile='liuqin-root-v2',display_service='display-manager',
+        firmware_source='modem_a-read-only',program_path=PREFIX,supports_one_finger_per_user=False,
+        multi_finger_version=1,max_fingers_per_user=5)
     (runtime/'CANDIDATE.json').write_text(json.dumps(candidate,indent=2)+'\n')
     for path in runtime.rglob('*'):
         if path.is_symlink():continue
@@ -134,13 +136,19 @@ def pack(payload, output, versions=()):
         with path.open('rb') as stream:header=stream.read(20)
         if header[:4]==b'\x7fELF' and (header[4:6]!=b'\x02\x01' or header[18:20]!=b'\xb7\x00'):
             raise ValueError('指纹组件不是 ARM64 ELF：'+str(path))
+    runtime=Path(payload)/PREFIX.lstrip('/')
+    info=json.loads((runtime/'CANDIDATE.json').read_text())
+    if info.get('multi_finger_version') == 1:
+        for name in ('fpc_build_info','fpc-oem-print','tod/libfprint-tod-fpc1264-oem.so'):
+            if b'LIUQIN_FPC_GALLERY_V1\0' not in (runtime/name).read_bytes():
+                raise ValueError('多指能力与编译后的运行组件不匹配：'+name)
     tool=shutil.which('patchelf')
     if not tool:raise ValueError('指纹私有库需要 patchelf 设置运行时路径。')
     runtime=Path(payload)/PREFIX.lstrip('/')
     for path in [runtime/'fprintd',runtime/'fpc-oem-print',runtime/'tod/libfprint-tod-fpc1264-oem.so',
                  *[p for p in (runtime/'lib').glob('*.so*') if p.is_file() and not p.is_symlink()]]:
         subprocess.run([tool,'--set-rpath',PREFIX+'/lib',str(path)],check=True)
-    return rpm(payload,'liuqin-fingerprint','0.1.0',output,release='7.liuqin',
+    return rpm(payload,'liuqin-fingerprint','0.1.0',output,release='10.liuqin',
         requires=[*RUNTIME_PACKAGES,*versions],license='MIT AND LGPL-2.1-or-later AND GPL-2.0-or-later AND BSD-2-Clause AND BSD-3-Clause-Clear AND Apache-2.0',
         summary='Native FPC1264 fingerprint authentication for Fedora on Liuqin',
         posttrans='/usr/libexec/liuqin-fingerprint-activate')

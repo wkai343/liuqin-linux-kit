@@ -40,18 +40,59 @@ class SourceTests(unittest.TestCase):
         (self.project/'build').symlink_to(PROJECT/'build',target_is_directory=True)
     def tearDown(self):self.tmp.cleanup()
 
-    def test_target_source_lock_does_not_change_the_installer_baseline(self):
+    def test_target_source_lock_supports_explicit_override(self):
         data=builder.config(PROJECT/'build/devbox/build.example.json')
         pipeline=flow.Flow(data,lambda *_a,**_k:self.fail('unexpected build'),distribution='fedora')
         self.assertEqual(pipeline.kernel_source_lock(),PROJECT/'build/kernel/source.json')
-        self.assertEqual(pipeline.kernel_source_lock(True),PROJECT/'build/kernel/source-6.17.json')
         target=json.loads(pipeline.kernel_source_lock().read_text())
-        installer=json.loads(pipeline.kernel_source_lock(True).read_text())
-        self.assertEqual(target['branch'],'v7.3')
-        self.assertEqual(installer['commit'],'fe81794b5e1b8a3f11a165f3acbfdb8fa671dbb3')
+        self.assertEqual(target['branch'],'v7.3.3')
         data['kernel_source_lock']='custom/target.json'
         self.assertEqual(pipeline.kernel_source_lock(),PROJECT/'custom/target.json')
-        self.assertEqual(pipeline.kernel_source_lock(True),PROJECT/'build/kernel/source-6.17.json')
+
+    def test_retired_source_stages_stop_before_initializing_or_downloading(self):
+        data=builder.config(PROJECT/'build/devbox/build.example.json')
+        for action in ('all','build-target','images','installer','build-installer','installer-kernel','runtime'):
+            with self.subTest(action=action), patch.object(flow,'download') as download:
+                with self.assertRaisesRegex(ValueError,'退役'):
+                    flow.execute(data,action,lambda *_a,**_k:self.fail('unexpected command'))
+                download.assert_not_called()
+
+    def test_complete_build_uses_rootfs_graph(self):
+        from unittest.mock import Mock
+        data=builder.config(PROJECT/'build/devbox/build.example.json')
+        data['rootfs_config']=str(PROJECT/'build/rootfs/ubuntu-plasma.json')
+        pipeline=Mock(data=data)
+        pipeline.rootfs.return_value=self.root/'packed'
+        with patch.object(flow,'PROJECT',self.project),patch.object(flow,'Flow',return_value=pipeline) as factory, \
+             contextlib.redirect_stdout(io.StringIO()):
+            factory.resolve.side_effect=Path
+            flow.execute(data,'rootfs',lambda *_a,**_k:self.fail('unexpected command'))
+        pipeline.board.assert_called_once_with()
+        pipeline.rootfs.assert_called_once_with()
+        pipeline.images.assert_not_called()
+        pipeline.runtime.assert_not_called()
+
+    def test_image_export_uses_results_from_this_flow_and_skips_failed_builds(self):
+        from unittest.mock import Mock
+        data=builder.config(PROJECT/'build/devbox/build.example.json')
+        data['rootfs_config']=str(PROJECT/'build/rootfs/ubuntu-plasma.json')
+        pipeline=Mock(data=data)
+        pipeline.rootfs.return_value=self.root/'selected-rootfs/packed'
+        pipeline.boot.return_value=self.root/'selected-boot/image/boot-liuqin-native.img'
+        with patch.object(flow,'PROJECT',self.project),patch.object(flow,'Flow',return_value=pipeline) as factory, \
+             patch('image_export.export_images') as export,contextlib.redirect_stdout(io.StringIO()):
+            factory.resolve.side_effect=Path
+            flow.execute(data,'rootfs',lambda *_a,**_k:self.fail('unexpected command'),export_dir=Path('export'))
+            export.assert_called_once_with(pipeline.boot.return_value,
+                pipeline.rootfs.return_value/'rootfs.tar.gz',self.project/'export')
+            export.reset_mock();pipeline.rootfs.side_effect=RuntimeError('build failed')
+            with self.assertRaisesRegex(RuntimeError,'build failed'):
+                flow.execute(data,'rootfs',lambda *_a,**_k:None,export_dir=Path('export'))
+            export.assert_not_called()
+            factory.reset_mock();(self.project/'export').mkdir()
+            with self.assertRaisesRegex(ValueError,'已存在'):
+                flow.execute(data,'rootfs',lambda *_a,**_k:None,export_dir=Path('export'))
+            factory.assert_not_called()
 
     def test_verified_download_reuses_cache_and_rejects_changed_bytes(self):
         payload=b'official test bytes';target=self.root/'base.tar.gz';expected=hashlib.sha256(payload).hexdigest()
@@ -148,7 +189,7 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(result['recipe']['desktop'],'plasma')
         self.assertEqual(result['usb_device'],{'usb_manufacturer':'Xiaomi','usb_product':'Pad 6 Pro'})
 
-    def test_usb_settings_reach_both_images_and_only_change_image_cache_inputs(self):
+    def test_usb_settings_reach_target_boot_and_change_its_cache(self):
         configurations = [builder.config(PROJECT/'build/devbox/build.example.json') for _ in range(2)]
         configurations[1].update(usb_manufacturer='我的设备',usb_product='小米平板')
         stages = []
@@ -162,25 +203,24 @@ class SourceTests(unittest.TestCase):
                 return out
             with patch.object(pipeline,'kernel',return_value=(self.root,self.root)), \
                  patch.object(pipeline,'modules',return_value=self.root), \
-                 patch.object(pipeline,'runtime',return_value=self.root), \
                  patch.object(pipeline,'board',return_value=self.root), \
                  patch.object(pipeline,'board_inputs',return_value={}), \
                  patch.object(flow,'sha',side_effect=lambda path:str(path)), \
                  patch.object(flow,'tree_identity',side_effect=lambda path:str(path)), \
                  patch.object(pipeline,'stage',side_effect=stage),patch.object(pipeline,'run') as run:
-                pipeline.boot();pipeline.boot(True)
-            self.assertEqual(len(run.call_args_list),2)
+                pipeline.boot()
+            self.assertEqual(len(run.call_args_list),1)
             for call in run.call_args_list:
                 self.assertEqual(call.kwargs['env']['LIUQIN_USB_PRODUCT'],data['usb_product'])
                 self.assertEqual(call.kwargs['env']['LIUQIN_USB_MANUFACTURER'],data['usb_manufacturer'])
-            self.assertEqual([name for name,_ in records],['boot','installer'])
+            self.assertEqual([name for name,_ in records],['boot'])
             stages.append(dict(records))
-        for name in ('boot','installer'):
+        for name in ('boot',):
             self.assertNotEqual(stages[0][name],stages[1][name])
 
-    def test_boot_argument_changes_invalidate_only_the_selected_image(self):
+    def test_boot_argument_changes_invalidate_target_image(self):
         device=self.project/'device';device.mkdir()
-        for name in ('native-bootargs.txt','installer-bootargs.txt'):
+        for name in ('native-bootargs.txt',):
             shutil.copyfile(PROJECT/'device'/name,device/name)
         data=builder.config(PROJECT/'build/devbox/build.example.json')
         pipeline=flow.Flow(data,lambda *_a,**_k:self.fail('unexpected build'),distribution='fedora')
@@ -193,21 +233,15 @@ class SourceTests(unittest.TestCase):
         with patch.object(flow,'PROJECT',self.project), \
              patch.object(pipeline,'kernel',return_value=(self.root,self.root)), \
              patch.object(pipeline,'modules',return_value=self.root), \
-             patch.object(pipeline,'runtime',return_value=self.root), \
              patch.object(pipeline,'board',return_value=self.root), \
              patch.object(pipeline,'board_inputs',return_value={}), \
              patch.object(flow,'sha',side_effect=digest), \
              patch.object(flow,'tree_identity',side_effect=lambda path:str(path)), \
              patch.object(pipeline,'stage',side_effect=capture):
-            pipeline.boot();pipeline.boot(True);first=dict(records)
+            pipeline.boot();first=dict(records)
             path=device/'native-bootargs.txt';path.write_text(path.read_text()+' consoleblank=0\n')
-            pipeline.boot();pipeline.boot(True);second=dict(records)
+            pipeline.boot();second=dict(records)
             self.assertNotEqual(first['boot'],second['boot'])
-            self.assertEqual(first['installer'],second['installer'])
-            path=device/'installer-bootargs.txt';path.write_text(path.read_text()+' consoleblank=0\n')
-            pipeline.boot();pipeline.boot(True)
-            self.assertEqual(second['boot'],records['boot'])
-            self.assertNotEqual(second['installer'],records['installer'])
 
     def test_splash_runtime_reaches_only_target_boot_and_has_an_independent_cache_identity(self):
         data=builder.config(PROJECT/'build/devbox/build.example.json')
@@ -218,27 +252,24 @@ class SourceTests(unittest.TestCase):
             records[name]=helpers.key(dependency);build(self.root/name);return self.root/name
         with patch.object(pipeline,'kernel',return_value=(self.root,self.root)), \
              patch.object(pipeline,'modules',return_value=self.root), \
-             patch.object(pipeline,'runtime',return_value=self.root), \
              patch.object(pipeline,'board',return_value=self.root), \
              patch.object(pipeline,'board_inputs',return_value={}), \
              patch.object(pipeline,'boot_splash_runtime',return_value=runtime) as splash, \
              patch.object(flow,'sha',side_effect=lambda path:str(path)), \
              patch.object(flow,'tree_identity',side_effect=identity), \
              patch.object(pipeline,'stage',side_effect=capture),patch.object(pipeline,'run') as run:
-            pipeline.boot();pipeline.boot(True);before=dict(records)
+            pipeline.boot();before=dict(records)
             self.assertEqual(run.call_args_list[0].kwargs['env']['BOOT_SPLASH_RUNTIME'],str(runtime))
-            self.assertNotIn('BOOT_SPLASH_RUNTIME',run.call_args_list[1].kwargs['env'])
             revision[0]='updated'
-            pipeline.boot();pipeline.boot(True)
+            pipeline.boot()
             self.assertNotEqual(before['boot'],records['boot'])
-            self.assertEqual(before['installer'],records['installer'])
             self.assertEqual(splash.call_count,2)
 
     def test_missing_rom_stops_full_build_before_network_or_privileged_work(self):
         data=builder.config(PROJECT/'build/devbox/build.example.json');data['rom_images']=str(self.root/'missing')
         with patch.object(flow,'PROJECT',self.project), patch.object(flow,'download',side_effect=AssertionError('network')):
             with self.assertRaisesRegex(ValueError,'原厂 ROM 缺少'):
-                flow.execute(data,'all',lambda *_a,**_k:self.fail('unexpected command'))
+                flow.execute(data,'rootfs',lambda *_a,**_k:self.fail('unexpected command'))
 
     def test_native_display_fragment_reaches_build_and_only_invalidates_target_kernel(self):
         data=builder.config(PROJECT/'build/devbox/build.example.json')
@@ -258,14 +289,12 @@ class SourceTests(unittest.TestCase):
              patch.object(flow,'sha',side_effect=digest), \
              patch.object(flow,'tree_identity',side_effect=lambda path:str(path)), \
              patch.object(pipeline,'run') as run:
-            pipeline.kernel();pipeline.kernel(True);first=dict(records)
-            target=run.call_args_list[0].args[0];installer=run.call_args_list[1].args[0]
+            pipeline.kernel();first=dict(records)
+            target=run.call_args_list[0].args[0]
             self.assertLess(target.index(str(PROJECT/native)),target.index('/custom/override.config'))
-            self.assertNotIn(str(PROJECT/native),installer)
             revision[0]='changed'
-            pipeline.kernel();pipeline.kernel(True)
+            pipeline.kernel()
             self.assertNotEqual(first['kernel'],records['kernel'])
-            self.assertEqual(first['installer-kernel'],records['installer-kernel'])
         self.assertEqual(data['kernel_fragments'],['/custom/override.config'])
         explicit=dict(data,kernel_fragments=[native,'/custom/override.config'])
         self.assertEqual(flow.kernel_fragments(explicit).count(native),1)
@@ -283,13 +312,9 @@ class SourceTests(unittest.TestCase):
             commands=[]
             run=lambda argv,**_kwargs:commands.append(argv)
             flow.execute(data,'kernel',run,configure_only=True)
-            flow.execute(data,'installer-kernel',run,configure_only=True)
         self.assertLess(commands[0].index(native),commands[0].index('/custom/override.config'))
-        self.assertNotIn(native,commands[1])
         self.assertEqual(commands[0][commands[0].index('--source-lock')+1],
                          str(self.project/'custom/target.json'))
-        self.assertEqual(commands[1][commands[1].index('--source-lock')+1],
-                         str(self.project/'build/kernel/source-6.17.json'))
 
     def test_kernel_only_dispatch_does_not_require_rootfs_or_rom(self):
         data=builder.config(PROJECT/'build/devbox/build.example.json');data['rom_images']=str(self.root/'missing')
@@ -433,38 +458,6 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(run.call_args.args[0],['/host/tools/chroot',str(self.root),'apt-get','update'])
         self.assertEqual(run.call_args.kwargs['env']['PATH'],'/usr/sbin:/usr/bin:/sbin:/bin')
 
-    def test_three_file_publication_and_credentials_are_separate(self):
-        sys.path.insert(0,str(PROJECT/'tests'))
-        from kernel_fixtures import kernel_fixture,install_fixture,archive_root,installer_fixture
-        data=builder.config(PROJECT/'build/devbox/build.example.json')
-        data['rootfs_config']=str(PROJECT/'build/rootfs/ubuntu-plasma.json')
-        pipeline=flow.Flow(data,lambda *_a,**_k:self.fail('unexpected command'))
-        pipeline.recipe['first_boot_setup']=False
-        fixture=kernel_fixture(self.root/'kernel-input','6.17.0-liuqin-test')
-        root=self.root/'root';root.mkdir();install_fixture(root,'6.17.0-liuqin-test',fixture)
-        packed=self.root/'packed';packed.mkdir();archive_root(root,packed/'rootfs.tar.gz')
-        installer=self.root/'installer.img';installer.write_bytes(installer_fixture())
-        apps=self.root/'apps';apps.mkdir();(apps/'login.txt').write_text('SYNTHETIC CREDENTIALS\n');(apps/'packages.tsv').write_text('fixture\n')
-        fake_project=self.root/'project';(fake_project/'out').mkdir(parents=True)
-        with patch.object(flow,'PROJECT',fake_project),patch.object(pipeline,'boot',side_effect=lambda is_installer=False:installer if is_installer else fixture[2]), \
-             patch.object(pipeline,'rootfs',return_value=packed),patch.object(pipeline,'apps',return_value=apps), \
-             patch.object(pipeline,'kernel',return_value=(self.root,fixture[0])):
-            output=pipeline.images();again=pipeline.images()
-        self.assertEqual(output,again)
-        self.assertEqual({p.name for p in output.iterdir()},{'installer.img','boot.img','rootfs.tar.gz'})
-        login=next((fake_project/'out/login').glob('*.txt'))
-        self.assertEqual(login.stat().st_mode & 0o777,0o600)
-        self.assertFalse(any('login' in p.name for p in output.iterdir()))
-        # The same publisher must not produce host-side passwords for an OEM image.
-        pipeline.recipe['first_boot_setup']=True
-        oem_project=self.root/'oem-project';(oem_project/'out').mkdir(parents=True)
-        with patch.object(flow,'PROJECT',oem_project),patch.object(pipeline,'boot',side_effect=lambda is_installer=False:installer if is_installer else fixture[2]), \
-             patch.object(pipeline,'rootfs',return_value=packed),patch.object(pipeline,'apps',return_value=apps), \
-             patch.object(pipeline,'kernel',return_value=(self.root,fixture[0])):
-            output=pipeline.images()
-        self.assertFalse((oem_project/'out/login').exists())
-        report=json.loads(next((oem_project/'out/reports').glob('*.json')).read_text())
-        self.assertEqual(report['account_setup'],'first-boot');self.assertIsNone(report['login_file'])
 
     def test_preexisting_service_policy_is_preserved_when_mount_setup_stops(self):
         target=self.root/'root';(target/'usr/sbin').mkdir(parents=True);policy=target/'usr/sbin/policy-rc.d'
@@ -658,6 +651,8 @@ class DevicePackageTests(unittest.TestCase):
             package=next(out.glob('liuqin-device-support_*.deb'));extracted=root/'extracted'
             subprocess.run(['dpkg-deb','-x',str(package),str(extracted)],check=True)
             depends=subprocess.check_output(['dpkg-deb','-f',str(package),'Depends'],text=True)
+            provides=subprocess.check_output(['dpkg-deb','-f',str(package),'Provides'],text=True)
+            self.assertIn('liuqin-storage-policy-ufs (= 1)',provides)
             self.assertNotIn('gnome-control-center',depends)
             self.assertTrue((extracted/'usr/local/sbin/liuqin-gnome-storage-guard').is_file())
             self.assertFalse((extracted/'usr/local/libexec/liuqin-power-key-action').exists())

@@ -31,10 +31,9 @@ elif [[ $# -gt 0 ]]; then
     printf 'usage: %s [--with-rpmb-provider]\n' "$0" >&2
     exit 2
 fi
-cp "$client/acceptance_input.py" "$client/authorize_oem.py" "$client/native_credential_preflight.py" \
-   "$client/native_credentials.py" "$client/user_credentials.py" "$client/enrol_publish.py" "$client/oem_runtime.py" "$out/"
-hash_files=(fpc_build_info qsee-gatekeeper qsee-supplicant qsee-app-loader
-            acceptance_input.py authorize_oem.py native_credential_preflight.py native_credentials.py user_credentials.py enrol_publish.py oem_runtime.py)
+helpers=(authorize_oem.py native_credentials.py native_enrol.py oem_runtime.py gallery_state.py gallery_match.py)
+for name in "${helpers[@]}"; do cp "$client/$name" "$out/"; done
+hash_files=(fpc_build_info qsee-gatekeeper qsee-supplicant qsee-app-loader "${helpers[@]}")
 if [[ ${1:-} == --with-rpmb-provider ]]; then
     hash_files+=(ufs-rpmb-provider/liuqin-rpmb-supplicant)
 fi

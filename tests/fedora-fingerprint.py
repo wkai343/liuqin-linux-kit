@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 """Offline FPC kernel identity checks. No fingerprint hardware or credentials."""
-import hashlib,importlib.util,sys,tempfile,unittest
+import hashlib,importlib.util,json,sys,tempfile,unittest
 from pathlib import Path
+from unittest.mock import patch
 PROJECT=Path(__file__).resolve().parents[1]
-sys.path.insert(0,str(PROJECT/'shared'))
+sys.path[:0]=[str(PROJECT/'shared'),str(PROJECT/'build/lib')]
 spec=importlib.util.spec_from_file_location('fpc_stable',PROJECT/'device/fingerprint/oem/src/fingerprint/deployment/stable_module.py')
 stable=importlib.util.module_from_spec(spec);spec.loader.exec_module(stable)
+spec=importlib.util.spec_from_file_location('fpc_packaging',PROJECT/'build/lib/fedora_fingerprint.py')
+packaging=importlib.util.module_from_spec(spec);spec.loader.exec_module(packaging)
 class KernelIdentityTests(unittest.TestCase):
  def setUp(self):
   self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name);self.release='6.17.0-liuqin-test'
@@ -39,4 +42,40 @@ class KernelIdentityTests(unittest.TestCase):
   self.assertEqual(stable.readiness_services({'deployment_mode':'installed','display_service':'display-manager'}),('display-manager','iio-sensor-proxy'))
   with self.assertRaisesRegex(ValueError,'display service'):
    stable.readiness_services({'deployment_mode':'installed','display_service':'arbitrary-service'})
+ def test_release_payload_is_not_bound_to_any_build_host_account(self):
+  root=self.root/'assembly';work=self.root/'work'
+  libraries=root/packaging.PREFIX.lstrip('/')/'lib';libraries.mkdir(parents=True)
+  (libraries/'libfprint-fixture.so').write_bytes(b'fixture library')
+  for name in ('native/fprintd','native/fpc-oem-print','native/libfprint-tod-fpc1264-oem.so',
+               'clients/fpc_build_info','clients/qsee-gatekeeper','clients/qsee-supplicant',
+               'clients/qsee-app-loader','clients/ufs-rpmb-provider/liuqin-rpmb-supplicant'):
+   p=work/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(b'fixture compiled component')
+  for name in ('fprintd-source','libfprint-v1.95.1'):(work/name).mkdir()
+  payload=packaging.stage(root,work,self.root/'export')
+  runtime=payload/packaging.PREFIX.lstrip('/')
+  info=json.loads((runtime/'CANDIDATE.json').read_text())
+  self.assertEqual(info['account_profile'],'fprintd-user')
+  self.assertEqual(info['enrollment_interface'],'fprintd')
+  self.assertTrue(info['supports_multiple_users'])
+  self.assertFalse(info['supports_one_finger_per_user'])
+  self.assertEqual(info['multi_finger_version'],1)
+  self.assertEqual(info['max_fingers_per_user'],5)
+  for key in ('linux_uid','linux_username','native_uid'):self.assertNotIn(key,info)
+  self.assertEqual((runtime/'native_enrol.py').read_bytes(),
+                   (PROJECT/'device/fingerprint/oem/src/fingerprint/oem/native_enrol.py').read_bytes())
+  self.assertFalse((payload/'var/lib/liuqin-fingerprint').exists())
+  self.assertFalse((payload/'var/lib/fprint').exists())
+  self.assertFalse((payload/'etc/passwd').exists())
+  self.assertFalse((payload/'usr/share/applications').exists())
+  unit=(payload/'usr/lib/systemd/system/liuqin-fpc-stable-module.service').read_text()
+  self.assertIn('After=display-manager.service iio-sensor-proxy.service',unit)
+  self.assertNotIn('NetworkManager',unit)
+  self.assertNotIn('ssh',unit)
+  self.assertIn('UMask=0077',(payload/'etc/systemd/system/fprintd.service.d/60-liuqin-fpc-oem.conf').read_text())
+  for name in ('pam-input','user_credentials.py','acceptance.py','enrol_publish.py'):
+   self.assertFalse((runtime/name).exists(),name)
+  with patch.object(packaging.subprocess,'run') as command:
+   with self.assertRaisesRegex(ValueError,'多指能力'):
+    packaging.pack(payload,self.root/'must-not-publish')
+   command.assert_not_called()
 if __name__=='__main__':unittest.main(verbosity=2)

@@ -129,6 +129,11 @@ done
 printf '%s\n' "$bt_names" | while read -r name; do
 	install -m 0644 "$bt_dir/$name" "$fw/qca/$name"
 done
+# Linux 7.3 requests the WCN-prefixed WCN6855 names before legacy fallback.
+# These bytes are the same pinned stock 2.1 firmware; no new blob is fetched.
+cp "$fw/qca"/hpbtfw21.tlv "$fw/qca"/wcnhpbtfw21.tlv
+cp "$fw/qca"/hpnv21g.bin "$fw/qca"/wcnhpnv21g.bin
+
 for rev in hw2.0 hw2.1; do
 	install -m 0644 "$wlan_board" "$fw/ath11k/WCN6855/$rev/board.bin"
 done

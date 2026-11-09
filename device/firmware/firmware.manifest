@@ -195,3 +195,5 @@ cc3e477fa698a28bdb8c8115a071893f9b2f5230de190ad525e74fd69bbb6092  /usr/lib/firmw
 e67d1829f57fc8326d806234b932dc3b78e28a9940df34c70752f17d5f38b7aa  /usr/lib/firmware/updates/qcom/a730_sqe.fw
 b2d3f0e2a98fd6259ab9ffef16df63265542e6cc9a970d53d476e823d432042a  /usr/lib/firmware/updates/qcom/gmu_gen70000.bin
 3567fd4522323b132ae4dd0f94a34782b2bc6a8c5c5fb51edfdbe364450fc118  /usr/lib/firmware/updates/qcom/vpu/vpu20_4v.mbn
+8ccb65437781f31e52ea065c0e71f0c3a0e876ef56f7abec20020f63da5fbe72  /usr/lib/firmware/qca/wcnhpbtfw21.tlv
+e2bc61dd8152e640a6f8f0ec2eb91403e02b97cc60ba455dd584e425de361552  /usr/lib/firmware/qca/wcnhpnv21g.bin

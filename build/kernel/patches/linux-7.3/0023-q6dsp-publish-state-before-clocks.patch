@@ -1,0 +1,33 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] Publish Q6DSP clock state before registering clocks
+
+Registering a clock may reparent an orphan and prepare its new parent while
+resuming a consumer. The prepare/vote callbacks use dev_get_drvdata(), so
+publish the fully initialized controller before any clock registration.
+Keep the allocation/devres order, firmware operations and clock tables intact.
+
+The liuqin ADSP restart diagnostic reproduced the NULL dereference at
+clk_q6dsp_prepare. A synchronous-reparenting C fixture fails on the original
+probe and passes with early publication, including registration failures.
+
+--- a/sound/soc/qcom/qdsp6/q6dsp-lpass-clocks.c
++++ b/sound/soc/qcom/qdsp6/q6dsp-lpass-clocks.c
+@@ -146,6 +146,9 @@
+ 	cc->dev = dev;
+ 	q6dsp_clks = desc->clks;
+ 
++	/* Registration can prepare clocks while reparenting orphan consumers. */
++	dev_set_drvdata(dev, cc);
++
+ 	for (i = 0; i < desc->num_clks; i++) {
+ 		unsigned int id = q6dsp_clks[i].clk_id;
+ 		struct clk_init_data init = {
+@@ -178,8 +181,6 @@
+ 	if (ret)
+ 		return ret;
+ 
+-	dev_set_drvdata(dev, cc);
+-
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(q6dsp_clock_dev_probe);

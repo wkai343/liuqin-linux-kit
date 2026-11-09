@@ -2,9 +2,9 @@
 
 [项目首页](../README.md) ｜ [安装助手](INSTALLER-GUI.md) ｜ [内核更新](KERNEL-UPDATES.md)
 
-从官方 ARM64 基础系统装配 KDE Plasma，生成 `installer.img`、`boot.img`、`rootfs.tar.gz`。
-默认使用 Fedora 44，保留 Ubuntu 26.04 配方。内核、桌面和安装环境分别配置与缓存；
-设备适配沿用原项目并加入本项目补丁。构建成功与硬件验收分别记录，见 [硬件说明](HARDWARE.md)。
+当前使用 `build`构建配套目标 boot 与 rootfs，安装环境使用独立构建/随包提供的原生 ADB Rec。默认配方为 Fedora 45 + KDE Plasma，目标内核为 Linux 7.3.3，保留 Ubuntu 26.04 Plasma。
+
+内核、桌面和 Rec 分别配置与缓存，构建成功与硬件验收分别记录；硬件覆盖见[硬件说明](HARDWARE.md)，镜像资格以产物记录为准。
 
 ## 1. 准备环境与配置
 
@@ -13,11 +13,16 @@
 ```sh
 devbox install
 devbox run doctor
-devbox run init-build
+devbox run init
 ```
 
-Devbox 提供交叉编译器、QEMU、镜像和打包工具，三个文件共用这套环境。
-完整构建还需要网络、宿主 sudo 和支持 binfmt 的 Linux 内核，构建器按阶段提权。
+Devbox 提供交叉编译器、QEMU、镜像和打包工具。
+静态 QEMU 已补入 [64 位挂载标识的上游修复](https://github.com/qemu/qemu/commit/3b68c2db2392eadfa89c64647e96a69d8490477a)，避免 Fedora 45 的 systemd 工具在 ARM64 模拟环境中崩溃。`doctor` 包含对应的文件句柄 ABI 检查；Fedora 装配还会检查目标 `systemctl` 能否运行，失败时停止，不把脚本失败的系统继续发布。修改 Devbox 工具后先重新运行 `devbox install`。
+完整构建还需要网络、Podman、完整 subuid/subgid 映射和 Linux 6.7+。
+rootfs 阶段默认在普通用户的用户命名空间中运行，不请求 sudo 密码，也不修改 sudoers。
+构建器使用独立的挂载、PID 和 binfmt_misc 命名空间，保留目标 UID/GID、ACL 和文件能力；
+宿主的 ARM64 binfmt 注册保持不变。宿主需安装 `newuidmap`、`newgidmap`，并为当前用户分配至少 65535 个从属 UID/GID。
+只有当前用户的单个 UID 映射时会停止，避免产生所有者错误的 rootfs。
 命令和配置中的相对路径均从项目根目录解析，也可填写绝对路径。
 
 主要维护两份配置：
@@ -25,29 +30,31 @@ Devbox 提供交叉编译器、QEMU、镜像和打包工具，三个文件共用
 - `build.json`：本机内核与板级输入，不提交 Git；模板为 `build/devbox/build.example.json`。
 - `rootfs_config` 指向的 JSON：发行版、软件、overlay 和首次初始化方式。
 
-已有 `build.json` 时，`init-build` 保留原设置并正常退出。
-需要另一份配置可运行 `devbox run init-build -- --config build.new.json`，后续例如 `devbox run plan -- --config build.new.json`。
+所有构建目标使用同一套源码构建流程，`rootfs_config` 必填。配置只接受当前字段，不再读取旧手工输出路径或自动导入素材清单；过时字段会报错。已有配置不适用时，用 `devbox run init -- --config build.new.json` 创建新文件，再填写当前输入。
+
+已有有效的 `build.json` 时，`init` 保留原设置并正常退出；无效配置会报错且不覆盖文件。
+需要另一份配置可运行 `devbox run init -- --config build.new.json`，后续例如 `devbox run plan -- --config build.new.json`。
 脚本参数放在 `--` 之后，与 Devbox 自身的选项分开。
 
-`build.json` 示例：
+当前默认配置示例；已有配置不会被 `init` 覆盖，升级时也需将 `kernel_source` 改为新的 7.3.3 目录，避免旧源码被视为自定义内核：
 
 ```json
 {
-  "kernel_source": "sources/linux-liuqin-7.3",
+  "kernel_source": "sources/linux-liuqin-7.3.3",
   "kernel_fragments": ["build/kernel/configs/custom-zram.config"],
-  "kernel_localversion": "-liuqin-fedora-v73",
+  "kernel_localversion": "-liuqin-fedora-v733",
   "rootfs_config": "build/rootfs/fedora-plasma.json",
   "usb_manufacturer": "Xiaomi",
   "usb_product": "Pad 6 Pro",
   "rom_images": "inputs/roms/liuqin/OS2.0.6.0.VMYCNXM/images",
-  "package_version": "0.3.3"
+  "package_version": "0.3.19"
 }
 ```
 
 | 配置项 | 用途 |
 | --- | --- |
 | `kernel_source` | 目标内核 Git 源码目录；不存在时获取 `build/kernel/source.json` 中的固定提交 |
-| `kernel_source_lock` | 可选，安装到平板的目标内核来源；默认 `build/kernel/source.json`（7.3）。安装环境自身运行的内核由 `source-6.17.json` 独立锁定 |
+| `kernel_source_lock` | 可选，安装到平板的目标内核来源；默认 `build/kernel/source.json`（7.3.3）。原生 Rec 由 build/recovery/ 的独立构建记录和组件清单锁定 |
 | `kernel_fragments` | 叠加的内核配置片段，示例启用 zram |
 | `kernel_localversion` | 自定义内核版本后缀；修改源码或配置时更换，避免同名内核对应不同模块 |
 | `rootfs_config` | Fedora 或 Ubuntu 的 rootfs 配方路径 |
@@ -58,6 +65,17 @@ Devbox 提供交叉编译器、QEMU、镜像和打包工具，三个文件共用
 
 已有内核源码必须是干净的 Git 提交，修改后先提交再构建。
 切换到 Ubuntu 时，将 `rootfs_config` 改为 `build/rootfs/ubuntu-plasma.json`；其他发行版需要另行适配。
+
+rootless 构建保留归档中的所有权、ACL 和文件能力。缺少 rootless 依赖时会报告原因，不会自动转为 sudo。
+确需使用已有 rootful 环境时可显式设置 `LIUQIN_ROOTFS_MODE=sudo`，密码要求由宿主原有 sudo 策略决定。
+
+### 发行版与桌面配方
+
+默认 Fedora 45 ARM64 + Plasma 使用 DNF/RPM、Plasma Setup 和 Plasma Login；Ubuntu 26.04 Plasma 使用 APT/DEB、项目打包的 Plasma Setup 和 SDDM。通过 `rootfs_config` 选择，两者均支持软件裁剪和 overlay，默认不安装 Snap。
+
+内核、DTB、固件和安装接口共用；目标 rootfs 须提供 systemd、设备服务、`fastrpc` 账号/组及同版内核模块和元数据。Rec 的工具运行时与目标发行版分离。
+
+新增发行版需固定官方 ARM64 基础系统，适配包管理、账号、服务及登录流程，装入配套内核/boot，再检查安装、恢复和硬件功能。板级与桌面文件的边界见[overlay](STRUCTURE.md#板级与桌面-overlay)。
 
 ## 2. 准备原厂资料
 
@@ -82,6 +100,7 @@ devbox run fetch-rom -- --archive /path/to/liuqin_images_OS2.0.6.0.VMYCNXM_20250
 
 原厂资料用于设备树、传感器配置、音频保护程序及通用调音等硬件适配；
 操作系统本身来自官方 Fedora 或 Ubuntu。构建不连接平板，也不运行 ROM 内的刷机脚本。
+Fedora 软件包装配使用命令行临时指定官方仓库下载地址，减少自动镜像选择造成的低速与重试；成品保留 Fedora 自带的仓库配置及软件包签名检查。基础 OCI 归档仍按 `fedora-source.json` 指定的镜像与 SHA256 下载。
 每台平板的设备地址和校准数据在安装时从本机导入，不放进通用镜像。
 
 ## 3. 构建与输出
@@ -89,103 +108,69 @@ devbox run fetch-rom -- --archive /path/to/liuqin_images_OS2.0.6.0.VMYCNXM_20250
 ```sh
 devbox run plan
 devbox run build
+devbox run outputs
 ```
 
-`plan` 只显示配置和缺失材料。`build` 自动补齐依赖；也可先运行 `devbox run prepare`，
-仅准备 ROM 输入、官方基础系统、BusyBox、mkbootimg 和内核源码。
+`build` 构建配套目标 boot/rootfs。`outputs` 按内核/模块契约列出实际路径；Rec 使用独立构建入口。
 
-成品位于 `out/releases/<发行版>-plasma-<内容标识>/`，只包含：
+### 当前构建产物
 
-```text
-installer.img
-boot.img
-rootfs.tar.gz
+| 产物 | 构建输入 |
+| --- | --- |
+| `boot-liuqin-native.img`（可复制为 `boot.img`） | 目标内核、设备树、固件、启动脚本与模块身份 |
+| `rootfs.tar.gz` | 官方基础系统、桌面、设备包及同版内核模块 |
+| 原生 `recovery.img` | 独立维护内核、运行载荷、UI、触控与 ADB；见[原生 Rec 构建](NATIVE-RECOVERY.md#构建与交付) |
+
+目标 boot 与 rootfs 的内核模块必须配套。更换目标内核时可以复用已完成的桌面装配，再打包根归档。
+构建输出保存在 `out/build/from-source/`。
+
+需要交付文件时，可将本次配套结果导出到一个尚不存在的目录：
+
+```sh
+devbox run build -- --export-dir out/releases/my-fedora-build
 ```
 
-报告放在 `out/reports/`，包版本清单随构建缓存保存。
-成品状态为 `BUILT_NOT_DEVICE_TESTED`，实际安装后的验收另行记录。
+导出包含 `boot.img`、`rootfs.tar.gz`、`native-root.contract` 和 `SHA256SUMS`，核对配套标识及完成记录中的摘要后才发布目录。它不扫描其他缓存，不覆盖已有目录，不附带 Rec、构建配置或独立登录信息；CI 使用同一入口。
 
-### 三个文件的输入
+### 常用命令与构建目标
 
-| 文件 | 构建输入 | 何时需要更新 |
-| --- | --- | --- |
-| `installer.img` | 安装环境的运行内核（默认 6.17）、最小 ARM64 runtime、RAM 安装脚本及板级资料 | 安装能力、安装环境内核或通道改变时 |
-| `boot.img` | 安装后运行的目标内核（默认 7.3）、设备树、固件、启动脚本与模块身份 | 目标内核、设备树或启动配置改变时 |
-| `rootfs.tar.gz` | 官方基础系统、桌面/软件配方、设备包、目标内核包及同版模块 | 用户态改变，或为新安装打包另一版内核时 |
-
-默认构建中，`installer.img` 临时运行 6.17，负责将 7.3 系统写入平板；安装完成后从目标 `boot.img` 启动。
-安装环境与目标系统的内核版本可以不同，但目标 boot 与 rootfs 中的内核模块必须配套；
-更换目标内核只需重打包最终 rootfs，已完成的桌面装配可以复用。
-已安装系统使用内核升级包，见 [内核更新](KERNEL-UPDATES.md)。
-
-### 分别构建
-
-用 `devbox run help` 查看常用入口及范围。已有独立 `installer.img`、只更新目标系统时，
-使用 `devbox run build-target`，它与当前官方系统工作流的 `rootfs` 命令等效，会补齐目标 boot 和
-根归档依赖，不构建 installer。完成后运行 `devbox run outputs`，按内核和模块标识查找配套的
-`boot-liuqin-native.img` 与 `rootfs.tar.gz` 绝对路径；boot 阶段文件复制为 `boot.img` 即可使用。
-`outputs` 只读取完成记录及小型内核标识，不联网、不构建，也不重新校验大型镜像；
-它列出已有缓存，不推断哪些产物对应当前 `build.json`。孤立的 boot 或 rootfs 也会显示在各自组中。
+Devbox 提供八个入口：`help`、`init`、`doctor`、`fetch-rom`、`plan`、`build`、`outputs`、`test`。`build` 默认生成完整配套 boot/rootfs；单独构建用 `--target`，各目标自动补齐依赖。
 
 | 命令 | 输出或范围 |
 | --- | --- |
-| `devbox run help` | 查看推荐命令、原有阶段入口与参数示例 |
-| `devbox run outputs` | 列出已完成的 boot/rootfs 配套组，以及独立 installer 路径 |
-| `devbox run build-target` | 构建目标 boot 与 rootfs，不构建 installer；不汇总三文件发布目录 |
-| `devbox run kernel -- --configure-only` | 生成最终 `.config` 预览，不编译 |
-| `devbox run kernel` | 目标内核 Image 与 DTB |
-| `devbox run modules` | 同版内核模块 |
-| `devbox run boot` | 目标引导镜像，不装配桌面 |
-| `devbox run kernel-packages` | 按配方生成版本化 RPM/DEB 内核升级包 |
-| `devbox run rootfs` | 装配用户态、设备包与目标内核，生成根归档 |
-| `devbox run build-installer` | 安装环境自身的运行内核与 RAM 安装镜像 |
-| `devbox run build` / `devbox run images` | 当前官方系统工作流中均构建并汇总 installer、boot、rootfs 三文件 |
-| `devbox run build -- --refresh` | 重新装配 APT/DNF 软件阶段，保留旧缓存 |
+| `devbox run build` | 配套 boot 与 rootfs |
+| `devbox run build -- --target kernel` | Image 与 DTB |
+| `devbox run build -- --target modules` | 同版内核模块 |
+| `devbox run build -- --target boot` | 引导镜像，不装配桌面 |
+| `devbox run build -- --target packages` | 配套内核 RPM/DEB 升级包 |
+| `devbox run build -- --target kernel --configure-only` | 预览最终 `.config`，不编译 |
+| `devbox run build -- --refresh` | 重新装配系统软件阶段，保留旧缓存 |
+| `devbox run outputs` | 按内核标识查看已完成的 boot/rootfs |
 
-各命令自动补齐依赖，结束时打印实际产物路径。
-首次准备完整安装目录使用 `devbox run build`。
+`outputs` 不联网、不构建或重验大型镜像；它列出缓存，不推断是否对应当前配置。交付本次结果应使用 `--export-dir`。
+
+开发诊断可在 Devbox 环境直接运行 `python3 build/devbox/build.py show-config`、`check-inputs` 或 `prepare`，带同一 `--config`。这些入口用于检查有效配置、核验素材或预先准备依赖。
 
 ### 启动与设备适配
 
-目标内核包含键盘、指纹、显示和电池接口补丁，顺序以 `build/kernel/source.json` 为准。
-正常系统使用 `device/native-bootargs.txt` 和 `build/kernel/configs/native-display.config`；
-独立安装环境使用自己的内核与启动参数，不随这些目标补丁改变。
-显示策略、CABC 用法和调试参数见 [显示与画质](DISPLAY.md)，未完成事项见 [待改进与验证](DEVELOPMENT-STATUS.md)。
+目标内核的版本、基础提交、配置与 `target_patches` 由 [source.json](../build/kernel/source.json) 固定；构建核对 `expected_source_tree` 及 Image/模块/boot 身份。`tested_source_commit` / `tested_source_tree` 仅记录历史基线，验收须绑定本次产物。补丁以清单为准，不按编号补齐空缺。
 
-电池补丁修正容量单位并停止提供固件固定的 10 W 占位值，已在临时内核核对读数。
-它不改变充电或供电策略；容量刷新仍有延迟，不能用短时容量差计算可靠的待机功耗。
+目标 boot 与 rootfs 模块必须配套，使用 `device/native-bootargs.txt` 与 `native-display.config`。原生 Rec 使用独立的 Linux 6.17 维护内核和配置，无需与目标内核同版。
 
-正常引导还设置 `deferred_probe_timeout=60`，让驱动能等到根系统装配完毕并加载模块；
-依赖就绪便继续，不会强制等待 60 秒。
-
-Fedora 配方包含 `plymouth` 时，构建会从官方 Fedora 基础系统生成并缓存独立的
-Plymouth 运行包（含官方 Spinner 素材和 script 插件），再将它与匹配的显示模块放入 `boot.img`。
-此时额外应用 `firmware-splash.config`，将 KTZ8866 改为模块，先绘制早期画面再接管背光。
-首次生成运行包需要与根系统装配相同的 root/ARM64 执行环境；内核更新可复用该运行包。
-桌面根归档不参与运行库收集，`installer.img` 保持独立。
-运行库中内容和权限相同的 ELF 文件在 CPIO 中共享数据，全部路径保持可用，配置文件仍独立。
-正常引导在目标内核启用 `CONFIG_RD_ZSTD=y` 时使用 Zstd 压缩，否则使用 gzip；
-独立安装环境继续使用 gzip。安装器与引导更新工具均可读取这两种格式。
-开机方向从保留的小米标识别，关机方向跟随退出前的显示方向；原生驱动接手仍会短暂黑屏。
-方向规则、回退与验证范围见 [开关机画面](DISPLAY.md#开关机画面)。
-早期显示设备就绪后即继续，检查间隔为 50 毫秒，等待上限为 5 秒。
-可在正常引导参数中加入 `plymouth.enable=0` 停用动画。
-正常启动会核对 UFS 逻辑单元、双份 GPT 与内核分区节点，连续两轮完整就绪后提前结束存储等待；
-无法证明就绪时保留约 10 秒等待上限，随后仍执行独立只读校验。安装和充电模式保留原等待流程。
-初始只读操作使用静态批量工具，工具缺失或失败时退回 BusyBox。
-存储节点快照通过 BusyBox 批量解析规范路径，保留每个交接阶段的完整节点和只读状态核对。
-兼容 ABL 留下旧备用数组校验值的情况：主表必须有效、主备条目必须完全相同；检查不改写 GPT。
-Fastboot 刷写或设置槽位后的首次启动仍可能走完整等待；正常重启已验证可以提前结束。
-根系统配置原厂 Wi-Fi MAC 时只等待目标网卡完成 udev 初始化，不等待全局设备队列；
-配置成功后才启动 NetworkManager，已通过真机正常重启验证。
+- 图形启动：Fedora 配方包含 Plymouth 时，从官方基础系统装配独立运行包，并应用 `firmware-splash.config`。固件帧缓冲先显示画面，随后原生 DRM 接管；方向、CABC 和调试参数见[显示说明](DISPLAY.md)。运行库不依赖桌面根归档。
+- 压缩：目标启用 `CONFIG_RD_ZSTD=y` 时使用 Zstd，否则使用 gzip；独立安装环境使用 gzip。安装器和引导更新器支持这两种格式。
+- 驱动等待：`deferred_probe_timeout=60` 允许依赖等待根系统模块；依赖就绪即继续，不强制等满 60 秒。
+- 存储：完整核验 UFS、双份 GPT 和分区节点后提前结束等待，否则保留有上限的等待及只读检查。持久化系统仅封存内部 UFS，外接磁盘保持原权限；安装、充电和失败回退仍封存全部 SCSI 设备。
+- 配套保护：boot/rootfs 的 `LIUQIN_DESKTOP_UFS_ONLY_V1` 策略和设备支持包须匹配。节点身份在新根交接前后重新核验，无法证明安全就拒绝桌面启动，不写盘修表。
+- 网络：设置本机 Wi-Fi MAC 时只等待目标网卡完成 udev 初始化，再启动 NetworkManager。桌面不启动诊断 USB 网络；RAM 故障救援与原生 Rec 的 ADB 分别维护。
 
 ## 4. 自定义内核
 
-默认安装目标为保留现有设备适配的 Linux 7.3；安装环境自身的内核独立配置。
-迁移范围、已知问题和旧版构建方式见 [7.3 内核说明](KERNEL-7.3.md)；不能直接使用未适配的主线源码替换。
+默认安装目标为保留现有设备适配的 Linux 7.3.3；安装环境自身的内核独立配置。
+适配范围和已知问题见[硬件说明](HARDWARE.md)；不能直接使用未适配的主线源码替换。
 
 通过 `kernel_fragments` 添加配置片段，例如复制 `build/kernel/configs/custom-zram.config` 后修改。
-项目板级配置先应用，自定义片段最后应用；用 `kernel --configure-only` 检查最终结果。
+项目板级配置先应用，自定义片段最后应用；用 `devbox run build -- --target kernel --configure-only` 检查最终结果。
 zram 内核选项只提供能力，容量与算法由 rootfs 的服务配置决定。
 
 修改内核代码后提交 Git，并更新 `kernel_localversion`。默认固定基础提交会在构建缓存中自动应用
@@ -203,7 +188,7 @@ Fedora 图形启动构建使用 `CONFIG_BACKLIGHT_KTZ8866=m`、`CONFIG_FB_SIMPLE
 
 使用仍含该预留的旧版或自定义设备树时，可加入 `"kernel_reclaim_mte": true`，
 从目标 boot 的 DTB 移除已核对的预留节点。
-该选项不改变 Image、模块或独立 installer；节点地址、大小、属性不符或被引用时构建停止。
+该选项不改变 Image、模块或独立原生 Rec；节点地址、大小、属性不符或被引用时构建停止。
 仅改变此项时可以保留内核 release，但仍须提高 `package_version` 并安装同批升级包。
 
 此前在 6.17 上，一台 8GB / 256GB、HW16.9.0 设备已通过内存读写、启动、重启及桌面主要功能检查，
@@ -212,9 +197,9 @@ MPSS 回收试验失败。此结果不覆盖其他批次，因此该选项默认
 
 ### USB 显示名称
 
-`usb_manufacturer`、`usb_product` 同时用于系统引导与安装镜像。
+`usb_manufacturer`、`usb_product` 设置目标引导中 USB 救援模式的显示名称。
 每项为非空文本，可含中文，不含控制字符，最多 126 个 UTF-8 字节。
-修改后运行 `devbox run boot`；安装环境也要改名时再运行 `devbox run build-installer`。
+修改后运行 `devbox run build -- --target boot`。原生 Rec 的 USB 身份由其独立 ADB 构建参数和清单管理。
 安装新引导后生效，仅重装 rootfs 或修改系统主机名不会改变 USB 产品名。
 
 ### 根文件系统格式
@@ -222,15 +207,15 @@ MPSS 回收试验失败。此结果不覆盖其他批次，因此该选项默认
 在安装器中选择 ext4 或 Btrfs，同一份 rootfs 归档可用于两者。
 Btrfs 必须在目标内核和安装内核中内置（`CONFIG_BTRFS_FS=y`，不能为模块），
 安装 runtime 还需提供 ARM64 Btrfs 工具；两个发行版均安装 `btrfs-progs`。
-GUI 根据三个文件的实际能力开放选项，自定义配置关闭 Btrfs 时仅开放 ext4。
+GUI 核对 boot、rootfs 与运行 Rec 的实际能力；自定义配置关闭 Btrfs 时仅开放 ext4。
 
 Btrfs 使用单设备、元数据 DUP、Zstd 三级压缩，系统在 `native-root` 子卷中，`/home` 位于其中。
 不增加 GPT 分区、独立 home 子卷或自动快照策略。
 启动检查使用 `ro,rescue=nologreplay,subvolid=5`，避免只读挂载仍重放日志；
 见 [Btrfs 挂载说明](https://btrfs.readthedocs.io/en/latest/Administration.html#btrfs-specific-mount-options)。
 
-首次启用须重新构建三个文件。旧镜像的 Btrfs 驱动为模块；
-修复后的路径已在本机 256GB 上通过 GUI 安装、桌面启动及正常重启。
+更改文件系统支持时需重建配套 boot/rootfs，并使用支持该格式的 Rec。
+Btrfs 安装、桌面启动及正常重启已验证。
 
 ## 5. 自定义根文件系统
 
@@ -333,6 +318,8 @@ Fedora 登录管理器默认接键盘横屏、平板模式自动旋转，其保�
 
 根归档优先通过写时复制准备，使用 `pigz` 最多 8 线程压缩，无 `pigz` 时回退到 gzip。
 阶段与耗时会输出到终端。基础归档固定 SHA256，APT/DNF 实际包版本另有记录，尚未锁定整套仓库快照。
+
+清理时保留当前 Rec/固定回刷基线、配套 boot/rootfs、版本化内核包和设备外备份；旧缓存按完整阶段删除，不要只移除完成记录中的一部分文件。旧 rootful 构建目录可能仍归 root，删除权限由宿主决定；改用 rootless 不会自动改变旧目录所有者。
 构建在私有挂载/PID 命名空间中运行，隔离宿主 Nix 工具与库，并阻止目标软件自动启动服务。
 
 Fedora SELinux 标签由 ARM64 目标策略校验后写入归档，保留所有权、ACL、文件能力和扩展属性。
@@ -340,7 +327,7 @@ Fedora SELinux 标签由 ARM64 目标策略校验后写入归档，保留所有�
 
 | 现象 | 处理 |
 | --- | --- |
-| `init-build` 提示配置已存在 | 保留即可，继续 `plan` 和 `build` |
+| `init` 提示配置已存在 | 保留即可，继续 `plan` 和 `build` |
 | 模块构建后出现 `The read operation timed out` | 下一步会下载 Fedora 基础归档。默认使用清华镜像，官方地址保存在 `build/rootfs/fedora-source.json` 的 `upstream_url`；下载仍校验固定 SHA256。若当前网络无法连接，可将 `url` 改为可达的 HTTPS 镜像地址，保留 `sha256` 后重试原命令，无需清理 `out/` |
 | 输入或源码校验失败 | 核对固定来源与本地修改；保留缓存定位问题，不跳过校验 |
 | mkbootimg 缓存被改动 | 工具校验固定 AOSP 源码树；自动忽略并清理已验证模块的字节码，未知源码仍会拒绝 |
@@ -356,9 +343,8 @@ uv run --project installer installer/install-gui.py --bundle out/releases/fedora
 安装会清空 userdata；备份、确认和恢复准备见 [安装助手](INSTALLER-GUI.md)及[安装指南](FLASHING.md)。
 已有系统的日常软件更新使用 DNF/APT，内核更新使用 [配套升级包](KERNEL-UPDATES.md)。
 
-离线验证覆盖来源校验、ARM64 装配、缓存、软件包、SELinux 归档、三文件接口及存储保护。
-本机 256GB 已通过 Linux GUI 单根 Btrfs 安装、桌面启动及正常重启。
-Windows GUI 安装也已验证成功，范围见 [硬件说明](HARDWARE.md)；其他容量及系统内自动写 boot 仍需单独验收。
+离线验证覆盖来源校验、ARM64 装配、缓存、软件包、SELinux 归档、目标构建路由、Rec 基础装配及存储保护。
+Linux ext4/Btrfs 安装、桌面启动、正常重启及 Windows GUI 安装已验证。系统内自动写 boot 默认停用，见[内核更新](KERNEL-UPDATES.md)。
 
 基础系统来源：[Fedora Container Base](https://fedoraproject.org/en/misc/#container)、
 [Ubuntu Base](https://cdimage.ubuntu.com/ubuntu-base/releases/26.04/release/)。

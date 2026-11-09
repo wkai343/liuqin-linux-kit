@@ -20,13 +20,15 @@ def main():
         database = None
     elif len(sys.argv) == 6 and sys.argv[1] == "--enrol":
         mode, database, uid, handle_fd, password_fd = sys.argv[1:]
+    elif len(sys.argv) == 9 and sys.argv[1] == "--enrol-gallery":
+        mode, existing_database, database, active_ids, metadata, uid, handle_fd, password_fd = sys.argv[1:]
     elif len(sys.argv) == 7 and sys.argv[1] == "--enrol-existing":
         mode, existing_database, database, uid, handle_fd, password_fd = sys.argv[1:]
     else:
         print("usage: authorize_oem.py --preflight UID HANDLE_FD DERIVED_INPUT_FD | "
               "--preflight-renew UID HANDLE_FD DERIVED_INPUT_FD | "
               "--enrol DATABASE UID HANDLE_FD DERIVED_INPUT_FD | "
-              "--enrol-existing INPUT_DATABASE OUTPUT_DATABASE UID HANDLE_FD DERIVED_INPUT_FD", file=sys.stderr)
+              "--enrol-existing INPUT_DATABASE OUTPUT_DATABASE UID HANDLE_FD DERIVED_INPUT_FD | --enrol-gallery INPUT|- OUTPUT ACTIVE META UID HANDLE_FD DERIVED_INPUT_FD", file=sys.stderr)
         return 2
 
     try:
@@ -71,6 +73,9 @@ def main():
             pass_fds=(challenge_read, handle_fd, password_fd, hat_write))
         if mode in ("--preflight", "--preflight-renew"):
             fpc_args = ["--auth-preflight-renew" if mode == "--preflight-renew" else "--auth-preflight",
+                        str(hat_read), str(challenge_write)]
+        elif mode == "--enrol-gallery":
+            fpc_args = ["--bio-gallery", existing_database, database, active_ids, metadata,
                         str(hat_read), str(challenge_write)]
         elif mode == "--enrol-existing":
             fpc_args = ["--bio-pipeline-existing", existing_database, database,

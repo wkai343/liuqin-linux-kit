@@ -4,46 +4,46 @@
 set -eu
 die() { printf 'liuqin-install: %s\n' "$*" >&2; exit 1; }
 phase() { printf 'liuqin-gui: phase=%s\n' "$1"; }
-usage='usage: install-root.sh BOOT_ID ROOTFS_URL SHA256 BYTES ERASE-LIUQIN-USERDATA ROOT_PARTNAME HOME_PARTNAME_OR_- [ROOT-CONTRACT RAM_PATH SHA256] [FILESYSTEM ext4|btrfs] [ENABLE-USB-RESCUE] [KEEP-HOME] [SWITCH-STORE ubuntu URL SHA256 BYTES android URL SHA256 BYTES]'
+usage='usage: install-root.sh BOOT_ID ROOTFS_URL SHA256 BYTES ERASE-LIUQIN-USERDATA ROOT_PARTNAME HOME_PARTNAME_OR_- [ROOT-CONTRACT RAM_PATH SHA256] [FILESYSTEM ext4|btrfs] [BOOT-TARGET RAM_PATH SHA256] [ROOT-RANGE START_BYTES LENGTH_BYTES]'
 [ "$#" -ge 7 ] || die "$usage"
 [ "$5" = ERASE-LIUQIN-USERDATA ] || die 'explicit data-erasure acknowledgement required'
 root_name=$6
 home_name=$7
-# The options follow the seven fixed arguments.  ENABLE-USB-RESCUE and
-# KEEP-HOME may each be given once, in either order (the host sends them in
-# the order of the usage line).  KEEP-HOME reinstalls the system and keeps the
-# existing LIUQIN_HOME filesystem.  The dual layout adds the switch store: the
-# Ubuntu and Android boot images that liuqin-switch rotates through boot_a,
-# fetched from the host like the root archive.  SWITCH-STORE and its eight
-# fields are always last.
-rescue=
+# Options follow the seven fixed arguments of the single-root interface.
 filesystem=ext4
 filesystem_given=
-keep_home=
-store=
 target_contract=/etc/liuqin-native-root.contract
 target_contract_sha=
-switch_store=${0%/*}/install-switch-store.sh
-store_ubuntu_url='' store_ubuntu_sha='' store_ubuntu_bytes=''
-store_android_url='' store_android_sha='' store_android_bytes=''
-store_fields() { # SWITCH-STORE ubuntu URL SHA256 BYTES android URL SHA256 BYTES
-	shift
-	[ -f "$switch_store" ] || die 'the switch-store step is missing from the installer image'
-	# Validate everything before anything is formatted.
-	sh "$switch_store" --check "$@"
-	store=SWITCH-STORE
-	store_ubuntu_url=$2 store_ubuntu_sha=$3 store_ubuntu_bytes=$4
-	store_android_url=$6 store_android_sha=$7 store_android_bytes=$8
-}
+boot_target=
+boot_target_sha=
+expected_start=
+expected_bytes=
 parse_options() { # the script's own arguments
 	shift 7
 	while [ "$#" -gt 0 ]; do
         case $1 in
+        ROOT-RANGE)
+            [ "$#" -ge 3 ] && [ -z "$expected_start" ] || die "$usage"
+            expected_start=$2; expected_bytes=$3
+            for value in "$expected_start" "$expected_bytes"; do
+                case $value in ''|*[!0-9]*) die 'invalid root range' ;; esac
+            done
+            shift 2
+            ;;
         FILESYSTEM)
             [ "$#" -ge 2 ] && [ -z "$filesystem_given" ] || die "$usage"
             filesystem=$2; filesystem_given=1
             case $filesystem in ext4|btrfs) ;; *) die 'unsupported root filesystem' ;; esac
             shift
+            ;;
+        BOOT-TARGET)
+            [ "$#" -ge 3 ] && [ -z "$boot_target" ] || die "$usage"
+            boot_target=$2; boot_target_sha=$3
+            case $boot_target in /run/*) ;; *) die 'boot target must be in RAM' ;; esac
+            case $boot_target in *'/../'*|*'/./'*|*'//'*) die 'invalid boot target path' ;; esac
+            case $boot_target_sha in ''|*[!0-9a-f]*) die 'invalid boot target hash' ;; esac
+            [ "${#boot_target_sha}" = 64 ] || die 'invalid boot target hash length'
+            shift 2
             ;;
         ROOT-CONTRACT)
             [ "$#" -ge 3 ] && [ -z "$target_contract_sha" ] || die "$usage"
@@ -55,39 +55,22 @@ parse_options() { # the script's own arguments
             [ "${#target_contract_sha}" = 64 ] || die 'invalid target contract hash length'
             shift 2
             ;;
-		ENABLE-USB-RESCUE)
-			[ -z "$rescue" ] || die "option given twice: $1; $usage"
-			rescue=$1
-			;;
-		KEEP-HOME)
-			[ -z "$keep_home" ] || die "option given twice: $1; $usage"
-			keep_home=$1
-			;;
-		SWITCH-STORE)
-			[ "$#" = 9 ] || die "$usage"
-			store_fields "$@"
-			return 0
-			;;
 		*) die "unsupported option: $1; $usage" ;;
 		esac
 		shift
 	done
 }
 parse_options "$@"
-case $root_name:$home_name in
-linux_root:linux_home) ;;
-userdata:-)
-	[ -z "$keep_home" ] && [ -z "$store" ] ||
-		die 'single root cannot keep home or install a dual-boot switch store'
-	;;
-*) die 'unsupported root/home partition combination' ;;
-esac
+if [ -z "$boot_target" ]; then
+    [ "$root_name:$home_name" = userdata:- ] || die 'unsupported root/home partition combination'
+else
+    [ "$home_name" = - ] || die 'bound roots do not have a separate home'
+fi
 [ "$(cat /proc/sys/kernel/random/boot_id)" = "$1" ] || die 'RAM boot identity changed'
 [ "$(cat /etc/liuqin-installer 2>/dev/null)" = liuqin ] || die 'not the installer RAM image'
 # The selected target boot supplies the authenticated kernel contract.
 [ "$(cat /etc/liuqin-installer-interface 2>/dev/null)" = liuqin-installer-v2 ] || die 'unsupported installer interface'
 [ -n "$target_contract_sha" ] || die 'installer requires ROOT-CONTRACT'
-[ "$root_name:$home_name" = userdata:- ] || die 'root currently requires linux-single'
 [ -f "$target_contract" ] && [ ! -L "$target_contract" ] || die 'target contract is not a regular file'
 [ "$(stat -c '%u %g' "$target_contract")" = '0 0' ] || die 'target contract must be root owned'
 [ "$(stat -c %s "$target_contract")" -le 32768 ] || die 'target contract is too large'
@@ -95,6 +78,16 @@ printf '%s  %s\n' "$target_contract_sha" "$target_contract" | /bin/busybox sha25
 BB=/bin/busybox
 . /usr/lib/liuqin/root-interface-v2.sh
 liuqin_contract_v2_parse "$target_contract" || die 'invalid root contract'
+root_label=LIUQIN_ROOT
+if [ -n "$boot_target" ]; then
+    [ "$(cat /etc/liuqin-multiboot)" = 1 ] || die 'installer lacks multiboot capability'
+    [ -f "$boot_target" ] && [ ! -L "$boot_target" ] || die 'invalid boot target'
+    printf '%s  %s\n' "$boot_target_sha" "$boot_target" | "$BB" sha256sum -c -
+    . /usr/lib/liuqin/boot-target-v1.sh
+    liuqin_target_parse "$boot_target" || die 'invalid boot target binding'
+    [ "$root_name" = "$bt_name" ] && [ "$filesystem" = "$bt_fstype" ] || die 'root target mismatch'
+    root_label=LQ_$(printf '%s' "$bt_id" | "$BB" tr -d '-' | "$BB" cut -c1-12)
+fi
 if [ "$filesystem" = btrfs ]; then
     [ -x /usr/sbin/mkfs.btrfs ] && [ -x /usr/bin/btrfs ] || die 'installer lacks Btrfs tools'
     grep -qx btrfs /etc/liuqin-filesystems || die 'installer kernel lacks builtin Btrfs support'
@@ -102,11 +95,7 @@ if [ "$filesystem" = btrfs ]; then
 fi
 ln -sf /proc/self/fd/0 /dev/stdin
 # The host checks Fastboot product/serial; boot_id binds this operation to it.
-# Partition numbers and offsets are not pinned: liuqin capacity variants place
-# the tail partitions differently, and the layout step may have just created
-# these two.  PARTNAME is the identity, read from sysfs rather than from
-# /dev/disk/by-partlabel, which is built once at boot from a fixed name list
-# and therefore cannot describe a table the layout step has changed.
+# Partition numbers vary with capacity; resolve userdata by its GPT name.
 find_part() {
 	found=
 	for info in /sys/class/block/sd*/uevent; do
@@ -119,78 +108,25 @@ find_part() {
 		die "partition is missing: $1 —— 该设备不是受支持的小米平板 6 Pro（liuqin），或分区步骤未完成"
 	printf '%s' "$found"
 }
-# The label is the identity of the home filesystem, as it is in fstab.
-# e2label comes with the installer's e2fsprogs.  The installer's BusyBox has no
-# blkid, so an image built without e2label reads the ext2/3/4 superblock
-# itself: magic 0xEF53 at byte 1080, the 16-byte volume name at byte 1144.
-home_label() { # <device>
-	if [ -x /usr/sbin/e2label ]; then
-		/usr/sbin/e2label "$1"
-		return
-	fi
-	[ "$(/bin/busybox dd if="$1" bs=1 skip=1080 count=2 2>/dev/null |
-		/bin/busybox od -An -tx1 | /bin/busybox tr -d ' \n')" = 53ef ] || return 1
-	/bin/busybox dd if="$1" bs=1 skip=1144 count=16 2>/dev/null | /bin/busybox tr -d '\000'
-}
-check_home() { # <device>: KEEP-HOME keeps only the filesystem this installer made
-	ch_label=$(home_label "$1") || ch_label=
-	[ "$ch_label" = LIUQIN_HOME ] ||
-		die "KEEP-HOME: $1 does not hold the LIUQIN_HOME filesystem (label '$ch_label');" \
-			'nothing was formatted —— linux_home 上没有可保留的 LIUQIN_HOME 文件系统，未格式化任何分区'
-}
-# Without KEEP-HOME the home partition is formatted.  With it, the existing
-# filesystem must carry the LIUQIN_HOME label and pass `e2fsck -p` (status 0,
-# nothing to fix, or 1, fixed); anything else stops the installation.  This
-# runs in the write window before the system partition is formatted, so a
-# home that cannot be kept stops the installation with nothing changed.
-prepare_home() { # <device> <KEEP-HOME or empty>
-	case $2 in
-	'')
-		/usr/sbin/mkfs.ext4 -F -L LIUQIN_HOME -m 0 "$1"
-		return 0
-		;;
-	KEEP-HOME) ;;
-	*) die 'unsupported home mode' ;;
-	esac
-	check_home "$1"
-	ph_status=0
-	/usr/sbin/e2fsck -p "$1" || ph_status=$?
-	[ "$ph_status" -lt 2 ] ||
-		die "KEEP-HOME: e2fsck -p $1 exited with status $ph_status; nothing was formatted" \
-			'—— linux_home 文件系统检查未通过，未格式化任何分区'
-}
-# Whether the root archive's /home skeleton is copied onto the mounted home:
-# always onto a fresh filesystem; onto a kept one only when it holds nothing
-# but lost+found.
-home_needs_skeleton() { # <mounted home> <KEEP-HOME or empty>
-	[ "$2" = KEEP-HOME ] || return 0
-	hs_count=0
-	for hs_entry in "$1"/* "$1"/.[!.]* "$1"/..?*; do
-		[ -e "$hs_entry" ] || [ -L "$hs_entry" ] || continue
-		[ "${hs_entry##*/}" != lost+found ] || continue
-		hs_count=$((hs_count + 1))
-	done
-	if [ "$hs_count" -gt 0 ]; then
-		printf 'liuqin-install: keeping existing /home (%s entries)\n' "$hs_count"
-		return 1
-	fi
-	printf 'liuqin-install: home partition is empty; seeding the skeleton\n'
-}
 root=$(find_part "$root_name")
-home=
-if [ "$home_name" != - ]; then
-	home=$(find_part "$home_name")
-	[ "$root" != "$home" ] || die 'the system and home partitions must differ'
-fi
 node=${root##*/}
+if [ -n "$boot_target" ]; then
+    if ! "$BB" grep -qx "PARTUUID=$bt_partuuid" "/sys/class/block/$node/uevent"; then
+        # Recovery's private aliases are rebuilt from GPT and matched against
+        # the live kernel name/range/device number before each command.
+        [ -f /etc/liuqin-recovery-session.json ] &&
+            [ -L "/dev/disk/by-partuuid/$bt_partuuid" ] &&
+            [ "$("$BB" readlink -f "/dev/disk/by-partuuid/$bt_partuuid")" = "$root" ] || die 'root partition identity mismatch'
+    fi
+fi
 size=$(cat "/sys/class/block/$node/size")
 case $size in ''|*[!0-9]*) die 'system partition size is unavailable' ;; esac
-[ "$size" -ge 33554432 ] || die 'the system partition is smaller than 16 GiB —— 不支持该布局'
-if [ -n "$home" ]; then
-	home_size=$(cat "/sys/class/block/${home##*/}/size")
-	case $home_size in ''|*[!0-9]*) die 'home partition size is unavailable' ;; esac
-	[ "$home_size" -ge 16777216 ] || die 'the home partition is smaller than 8 GiB —— 不支持该布局'
+if [ -n "$expected_start" ]; then
+    [ -n "$boot_target" ] || die 'root range requires a bound root'
+    [ "$(( $(cat "/sys/class/block/$node/start") * 512 ))" = "$expected_start" ] &&
+        [ "$((size * 512))" = "$expected_bytes" ] || die 'root range changed'
 fi
+[ "$size" -ge 33554432 ] || die 'the system partition is smaller than 16 GiB —— 不支持该布局'
 parent_path=$(/bin/busybox readlink -f "/sys/class/block/$node/.." 2>/dev/null || true)
 [ -n "$parent_path" ] || die 'the system partition parent disk is unavailable'
 parent=/dev/${parent_path##*/}
@@ -199,20 +135,12 @@ parent=/dev/${parent_path##*/}
 [ "$(cat /sys/class/block/sda/queue/logical_block_size)" = 4096 ] ||
 	die 'the root disk does not report 4096-byte logical sectors'
 targets=$root
-if [ -n "$home" ]; then
-	home_parent=$(/bin/busybox readlink -f "/sys/class/block/${home##*/}/.." 2>/dev/null || true)
-	[ "/dev/${home_parent##*/}" = "$parent" ] || die 'root and home are on different disks'
-	targets="$targets $home"
-fi
 for target in $targets; do
 	device_number=$(cat "/sys/class/block/${target##*/}/dev")
 	awk -v device="$device_number" '$3 == device {found=1} END {exit !found}' /proc/self/mountinfo &&
 		die 'a target partition is mounted (including through a device alias)'
 	[ "$(/bin/busybox blockdev --getro "$target")" = 1 ] || die 'a target partition is not initially read-only'
 done
-# A home that cannot be kept is refused before anything is downloaded; the
-# check is repeated in the write window, together with e2fsck.
-[ -z "$keep_home" ] || check_home "$home"
 battery=
 for supply in /sys/class/power_supply/*; do
 	[ "$(cat "$supply/type" 2>/dev/null)" = Battery ] || continue
@@ -229,22 +157,20 @@ available=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
 	die 'insufficient RAM to stage this archive safely'
 archive=/mnt/install-download/rootfs.tar.gz
 mounted=false
-home_mounted=false
 opened=false
 persist_mounted=false
 download_mounted=false
 cleanup() {
-	sync
-	if [ "$home_mounted" = true ]; then
-		umount /mnt/install-home || return 1
-		home_mounted=false
+	cleanup_status=$?
+	if [ "$cleanup_status" != 0 ] && [ -f /etc/liuqin-native-recovery.json ]; then
+		/usr/bin/python3 -I -B /usr/lib/liuqin/native-root-guard.py failed >/run/liuqin-root-failure.log 2>&1 || true
 	fi
+	sync
 	if [ "$mounted" = true ]; then
 		umount /mnt/install || return 1
 		mounted=false
 	fi
 	if [ "$opened" = true ]; then
-		[ -z "$home" ] || /bin/busybox blockdev --setro "$home"
 		/bin/busybox blockdev --setro "$root"
 		/bin/busybox blockdev --setro "$parent"
 		opened=false
@@ -259,9 +185,9 @@ cleanup() {
 	fi
 }
 trap cleanup EXIT
-trap 'exit 130' HUP INT TERM
+trap 'exit 130' HUP INT TERM PIPE
 # A default /run tmpfs is too small for some complete desktop archives.
-mkdir -p /mnt/install-download /run/persist /mnt/install /mnt/install-home
+mkdir -p /mnt/install-download /run/persist /mnt/install
 mount -t tmpfs -o "size=$(( $4 + 16777216 ))" tmpfs /mnt/install-download
 download_mounted=true
 phase transfer
@@ -290,22 +216,43 @@ if [ "$filesystem" = btrfs ]; then
     template=$(archive_metadata etc/liuqin-root-filesystem) || die 'target root lacks a filesystem configuration template'
     case $template in ext4|btrfs) ;; *) die 'target root lacks a filesystem configuration template' ;; esac
 fi
+if [ -n "$boot_target" ]; then
+    [ "$(archive_metadata etc/liuqin-system-id)" = unbound ] &&
+    [ "$(archive_metadata etc/liuqin-boot-target)" = unbound ] || die 'root lacks clean binding templates'
+fi
 phase format_root
+if [ -f /etc/liuqin-native-recovery.json ]; then
+    # The native guard checks that every UFS partition is unmounted and
+    # read-only. Release the calibration mount after validating its files.
+    umount /run/persist
+    persist_mounted=false
+    if [ "$filesystem" = btrfs ]; then
+        /usr/bin/python3 -I -B /usr/lib/liuqin/native-root-guard.py "$root_name" "$3" PREPARE-BTRFS
+    else
+        /usr/bin/python3 -I -B /usr/lib/liuqin/native-root-guard.py "$root_name" "$3"
+    fi
+    mount -t ext4 -o ro,noload /dev/disk/by-partlabel/persist /run/persist
+    persist_mounted=true
+fi
 /bin/busybox blockdev --setrw "$parent"
 opened=true
 /bin/busybox blockdev --setrw "$root"
-if [ -n "$home" ]; then
-	/bin/busybox blockdev --setrw "$home"
-	prepare_home "$home" "$keep_home"
-fi
 case $filesystem in
 ext4)
-    /usr/sbin/mkfs.ext4 -F -L LIUQIN_ROOT -m 0 "$root"
+    if [ -n "$boot_target" ]; then
+        /usr/sbin/mkfs.ext4 -F -L "$root_label" -U "$bt_fsuuid" -m 0 "$root"
+    else
+        /usr/sbin/mkfs.ext4 -F -L LIUQIN_ROOT -m 0 "$root"
+    fi
     mount -t ext4 "$root" /mnt/install
     ;;
 btrfs)
     # Avoid a synchronous whole-userdata TRIM on the tablet's UFS.
-    /usr/sbin/mkfs.btrfs -f -K -L LIUQIN_ROOT -d single -m dup -s 4096 "$root"
+    if [ -n "$boot_target" ]; then
+        /usr/sbin/mkfs.btrfs -f -K -L "$root_label" -U "$bt_fsuuid" -d single -m dup -s 4096 "$root"
+    else
+        /usr/sbin/mkfs.btrfs -f -K -L LIUQIN_ROOT -d single -m dup -s 4096 "$root"
+    fi
     mount -t btrfs -o subvolid=5,noatime,compress=zstd:3 "$root" /mnt/install
     ;;
 esac
@@ -319,40 +266,21 @@ phase extract_root
 /usr/bin/tar -xzf "$archive" -C /mnt/install/native-root \
 	--numeric-owner --same-owner --same-permissions --acls --xattrs --xattrs-include='*' --warning=no-timestamp
 phase configure_device
+if [ -n "$boot_target" ]; then
+    liuqin_target_fs_check "$root" || die 'formatted filesystem UUID mismatch'
+    printf '%s\n' "$bt_id" >/mnt/install/native-root/etc/liuqin-system-id
+    cat "$boot_target" >/mnt/install/native-root/etc/liuqin-boot-target
+    chmod 0644 /mnt/install/native-root/etc/liuqin-system-id /mnt/install/native-root/etc/liuqin-boot-target
+fi
 # Overwrite the packaged template in place, retaining its Fedora SELinux xattr.
 printf '%s\n' "$filesystem" >/mnt/install/native-root/etc/liuqin-root-filesystem
 chmod 0644 /mnt/install/native-root/etc/liuqin-root-filesystem
 PERSIST_SRC=/run/persist sh /usr/lib/liuqin/provision.sh /mnt/install/native-root
-if [ "$rescue" = ENABLE-USB-RESCUE ]; then
-	touch /mnt/install/native-root/etc/liuqin-rescue-enabled
-fi
-# /home is a separate partition so that a later system reinstall can keep it.
-# The label is the identity here too; nofail keeps a missing or unreadable
-# home partition from holding up the boot at the console-less first start.
-if [ -n "$home" ]; then
-	mount -t ext4 "$home" /mnt/install-home
-	home_mounted=true
-	if home_needs_skeleton /mnt/install-home "$keep_home" && [ -d /mnt/install/native-root/home ]; then
-		/usr/bin/tar -C /mnt/install/native-root/home -cf - . --numeric-owner --acls --xattrs \
-			--xattrs-include='*' | /usr/bin/tar -C /mnt/install-home -xf - \
-			--numeric-owner --same-owner --same-permissions --acls --xattrs --xattrs-include='*' \
-			--warning=no-timestamp
-	fi
-fi
-if [ -n "$store" ]; then
-	sh "$switch_store" /mnt/install/native-root \
-		ubuntu "$store_ubuntu_url" "$store_ubuntu_sha" "$store_ubuntu_bytes" \
-		android "$store_android_url" "$store_android_sha" "$store_android_bytes"
-fi
 {
 	printf '# Written by the liuqin installer. The root filesystem is mounted by\n'
-	printf '# the boot image, which finds it by LABEL=LIUQIN_ROOT.\n'
+	printf '# the boot image, using its root binding or the single-root label.\n'
     printf '# Root filesystem: %s.\n' "$filesystem"
-	if [ -n "$home" ]; then
-		printf 'LABEL=LIUQIN_HOME\t/home\text4\tdefaults,nofail,x-systemd.device-timeout=30s\t0\t2\n'
-	else
-		printf '# Single root: /home is a directory on the root filesystem.\n'
-	fi
+	printf '# Single root: /home is a directory on the root filesystem.\n'
 } >/mnt/install/native-root/etc/fstab
 chmod 0644 /mnt/install/native-root/etc/fstab
 if [ -f /mnt/install/native-root/usr/lib/snapd/snap-confine ]; then
@@ -364,5 +292,5 @@ phase verify_root
 liuqin_root_v2_check /mnt/install/native-root "$target_contract" 1 || die 'root or modules do not match'
 phase sync_root
 cleanup
-trap - EXIT HUP INT TERM
+trap - EXIT HUP INT TERM PIPE
 printf 'liuqin-install: ROOT_INSTALLED\n'

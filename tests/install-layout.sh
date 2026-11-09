@@ -42,7 +42,7 @@ fail() { printf 'test-liuqin-layout: %s\n' "$*" >&2; exit 1; }
 # explain why it must not be used, and only code that runs on the tablet is
 # under test here.
 for device_script in device/installer/install-layout.sh device/installer/install-root.sh \
-	device/installer/install-switch-store.sh device/installer/provision-liuqin-from-persist.sh device/boot/initramfs/init; do
+	device/installer/provision-liuqin-from-persist.sh device/boot/initramfs/init; do
 	[ -f "$project_root/$device_script" ] ||
 		fail "no such device-side script: $device_script"
 	! sed 's/^[[:space:]]*#.*$//' "$project_root/$device_script" |
@@ -196,7 +196,6 @@ build_script() {
 			fail "the fixture rewrite missed $stale; the script's paths changed"
 	done
 	grep -qF "$work" "$script" || fail 'the scratch-directory rewrite matched nothing'
-	grep -qF "if=/dev/zero" "$script" || fail 'the zero source was rewritten away'
 	grep -qF "$dev/\${" "$script" || fail 'the /dev rewrite matched nothing'
 
 	# The function bundle, in the style of tests/persistent-root.sh: die, the
@@ -208,8 +207,8 @@ build_script() {
 		sed -n '/^BB=/p' "$script"
 		sed -n '/^[a-z_]*() {$/,/^}$/p' "$script"
 	} >"$functions"
-	for name in find_part parent_disk sector_size sector_count byte_size \
-		assert_idle seal block_digest; do
+	for name in find_part parent_disk sector_size sector_count \
+		assert_idle seal; do
 		grep -q "^$name() {\$" "$functions" ||
 			fail "function $name was not extracted; the script's shape changed"
 	done
@@ -278,7 +277,7 @@ assert_idle "$dev/sda"
 EOF
 expect_ok assert-idle-is-the-last-statement
 
-# The same call in the shape the wipe-head verb uses it: a plain command under
+# The same call in the shape the restore-gpt verb uses it: a plain command under
 # `set -e`, where a stray non-zero status aborts the script with no message.
 reset_fixture
 run_fn <<EOF
@@ -353,12 +352,10 @@ reset_fixture
 run_fn <<EOF
 printf 'SECTOR %s\n' "\$(sector_size "$dev/sda")"
 printf 'SECTORS %s\n' "\$(sector_count "$dev/sda")"
-printf 'BYTES %s\n' "\$(byte_size "$dev/sda35")"
 EOF
 expect_ok geometry-helpers
 expect_output geometry-helpers 'SECTOR 4096'
 expect_output geometry-helpers 'SECTORS 16384'
-expect_output geometry-helpers 'BYTES 17825792'
 
 reset_fixture
 rm -f "$devices/sda/queue/logical_block_size"
@@ -399,46 +396,6 @@ seal "$dev/sda"
 printf 'SEALED\n'
 EOF
 expect_die seal-refuses-a-failed-flag 'cannot restore the read-only flag'
-
-# --------------------------------------------------------------------------
-# wipe-head, end to end through the shipped verb dispatch.
-# --------------------------------------------------------------------------
-reset_fixture
-run_verb wipe-head userdata 16777216
-expect_ok wipe-head
-expect_output wipe-head 'liuqin-layout: WIPED userdata'
-cmp -s -n 16777216 "$dev/sda35" /dev/zero || fail 'wipe-head: the head was not zeroed'
-[ "$(dd if="$dev/sda35" bs=1 skip=16777216 count=1 2>/dev/null | od -An -tx1 | tr -d ' ')" = ff ] ||
-	fail 'wipe-head: the wipe ran past the requested length'
-[ "$(cat "$state/sda")" = 1 ] || fail 'wipe-head: the disk was left writable'
-[ "$(cat "$state/sda35")" = 1 ] || fail 'wipe-head: the partition was left writable'
-grep -q -- '--setrw' "$command_log" || fail 'wipe-head: never opened the write window'
-
-reset_fixture
-printf '36 35 8:35 / /mnt rw,relatime - ext4 /dev/sda35 rw\n' >"$mountinfo"
-run_verb wipe-head userdata 16777216
-expect_die wipe-head-mounted 'a partition of the target disk is mounted'
-! grep -q -- '--setrw' "$command_log" || fail 'wipe-head-mounted: opened the write window anyway'
-[ "$(dd if="$dev/sda35" bs=1 count=1 2>/dev/null | od -An -tx1 | tr -d ' ')" = ff ] ||
-	fail 'wipe-head-mounted: wrote to a mounted disk'
-
-reset_fixture
-run_verb wipe-head userdata 4096
-expect_die wipe-head-partial-mebibyte 'wipe length must be a whole number of mebibytes'
-! grep -q -- '--setrw' "$command_log" ||
-	fail 'wipe-head-partial-mebibyte: opened the write window for a wipe of zero blocks'
-
-reset_fixture
-run_verb wipe-head userdata 67108864
-expect_die wipe-head-too-large 'partition is smaller than the requested wipe'
-
-reset_fixture
-run_verb wipe-head userdata 0
-expect_die wipe-head-zero 'wipe length is out of range'
-
-reset_fixture
-run_verb wipe-head userdata 16MiB
-expect_die wipe-head-not-a-number 'invalid wipe length'
 
 # --------------------------------------------------------------------------
 # The read-only verbs.
@@ -531,17 +488,12 @@ run_verb backup-gpt userdata middle
 expect_die backup-gpt-half 'backup-gpt takes head or tail'
 
 reset_fixture
-run_verb digest metadata 4096
-expect_ok digest-verb
-expect_output digest-verb 'size 4194304'
-expect_output digest-verb "content $(dd if="$dev/sda3" bs=4096 count=1 2>/dev/null |
-	sha256sum | cut -d' ' -f1)"
-expect_output digest-verb "padding $(dd if="$dev/sda3" bs=4096 skip=1 count=1023 2>/dev/null |
-	sha256sum | cut -d' ' -f1)"
-
-reset_fixture
-run_verb digest metadata 1024
-expect_die digest-block-size 'length must be a whole number of 4096-byte blocks'
+for verb in wipe-head apply digest; do
+    reset_fixture
+    run_verb "$verb" userdata 4096
+    expect_die "retired-$verb" "unknown verb: $verb"
+    ! grep -q -- '--setrw' "$command_log" || fail "retired-$verb: opened a write window"
+done
 
 # --------------------------------------------------------------------------
 # The RAM-image guards, on the real dispatch.

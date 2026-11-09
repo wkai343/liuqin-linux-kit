@@ -1,0 +1,283 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] Complete ADC sensor and peripheral probe lifecycles
+
+Describe the internal PMK8350 die sensor instead of an empty ADC instance.
+Bound eUSB2 wake NACK retries and never print an uninitialised revision.
+Preserve PHY/OTG behaviour on an optional revision-query failure. Sort the
+merged RX register defaults, use the current default workqueue API, and
+classify deferred DSI and explicit SoundWire port overrides as probe state.
+No display clocks, audio calibration gates or USB roles are removed.
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+index 1d882db1d..8293b42e3 100644
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+@@ -2,6 +2,7 @@
+ /dts-v1/;
+ 
+ #include <dt-bindings/input/input.h>
++#include <dt-bindings/iio/qcom,spmi-adc7-pmk8350.h>
+ #include <dt-bindings/interrupt-controller/irq.h>
+ #include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
+ #include <dt-bindings/regulator/qcom,rpmh-regulator.h>
+@@ -1252,6 +1253,17 @@ eusb2_reset_default: eusb2-reset-state {
+ 	};
+ };
+ 
++&pmk8350_vadc {
++	/* The PMIC's internal sensor needs no external board wiring. Battery
++	 * and USB measurements continue to come from PMIC GLINK.
++	 */
++	channel@3 {
++		reg = <PMK8350_ADC7_DIE_TEMP>;
++		label = "pmk8350_die_temp";
++		qcom,pre-scaling = <1 1>;
++	};
++};
++
+ &pmk8350_rtc {
+ 	/*
+ 	 * Disabled upstream because not every SM8450-family board wires the RTC
+diff --git a/drivers/gpu/drm/msm/dsi/dsi.c b/drivers/gpu/drm/msm/dsi/dsi.c
+index 3c9f01ed6..398b820f9 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi.c
++++ b/drivers/gpu/drm/msm/dsi/dsi.c
+@@ -43,12 +43,12 @@ static int dsi_get_phy(struct msm_dsi *msm_dsi)
+ 	of_node_put(phy_node);
+ 
+ 	if (!phy_pdev) {
+-		DRM_DEV_ERROR(&pdev->dev, "%s: phy driver is not ready\n", __func__);
++		DRM_DEV_DEBUG(&pdev->dev, "%s: waiting for PHY driver\n", __func__);
+ 		return -EPROBE_DEFER;
+ 	}
+ 	if (!msm_dsi->phy) {
+ 		put_device(&phy_pdev->dev);
+-		DRM_DEV_ERROR(&pdev->dev, "%s: phy driver is not ready\n", __func__);
++		DRM_DEV_DEBUG(&pdev->dev, "%s: waiting for PHY driver\n", __func__);
+ 		return -EPROBE_DEFER;
+ 	}
+ 
+diff --git a/drivers/hid/hid-nanosic.c b/drivers/hid/hid-nanosic.c
+index db15909cf..f70f1f922 100644
+--- a/drivers/hid/hid-nanosic.c
++++ b/drivers/hid/hid-nanosic.c
+@@ -620,7 +620,7 @@ static irqreturn_t nanosic_fold_irq(int irq, void *data)
+ 
+ 	guard(mutex)(&nano->lock);
+ 	if (!nano->posture_stopping && !nano->suspended)
+-		mod_delayed_work(system_wq, &nano->posture_work, msecs_to_jiffies(40));
++		mod_delayed_work(system_dfl_wq, &nano->posture_work, msecs_to_jiffies(40));
+ 	return IRQ_HANDLED;
+ }
+ 
+@@ -633,7 +633,7 @@ static void nanosic_lid_event(struct input_handle *handle, unsigned int type,
+ 	if (type == EV_SW && code == SW_LID) {
+ 		WRITE_ONCE(nano->lid_closed, !!value);
+ 		if (!READ_ONCE(nano->posture_stopping))
+-			mod_delayed_work(system_wq, &nano->posture_work, 0);
++			mod_delayed_work(system_dfl_wq, &nano->posture_work, 0);
+ 	}
+ }
+ 
+@@ -661,7 +661,7 @@ static int nanosic_lid_connect(struct input_handler *handler,
+ 	/* Snapshot under the same lock as callbacks, including an already closed lid. */
+ 	scoped_guard(spinlock_irqsave, &dev->event_lock)
+ 		WRITE_ONCE(nano->lid_closed, test_bit(SW_LID, dev->sw));
+-	mod_delayed_work(system_wq, &nano->posture_work, 0);
++	mod_delayed_work(system_dfl_wq, &nano->posture_work, 0);
+ 	return 0;
+ clear:
+ 	handle->dev = NULL;
+@@ -677,7 +677,7 @@ static void nanosic_lid_disconnect(struct input_handle *handle)
+ 	handle->dev = NULL;
+ 	WRITE_ONCE(nano->lid_closed, false);
+ 	if (!READ_ONCE(nano->posture_stopping))
+-		mod_delayed_work(system_wq, &nano->posture_work, 0);
++		mod_delayed_work(system_dfl_wq, &nano->posture_work, 0);
+ }
+ 
+ static const struct input_device_id nanosic_lid_ids[] = {
+@@ -748,7 +748,7 @@ static void nanosic_idle_work(struct work_struct *work)
+ 	 * lock prevents that stale instance from undoing a concurrent wake.
+ 	 */
+ 	if (time_before(jiffies, nano->wake_deadline)) {
+-		mod_delayed_work(system_wq, &nano->idle_work,
++		mod_delayed_work(system_dfl_wq, &nano->idle_work,
+ 				 nano->wake_deadline - jiffies);
+ 		return;
+ 	}
+@@ -775,7 +775,7 @@ static void nanosic_wake(struct nanosic *nano)
+ 	}
+ 
+ 	nano->wake_deadline = jiffies + delay;
+-	mod_delayed_work(system_wq, &nano->idle_work, delay);
++	mod_delayed_work(system_dfl_wq, &nano->idle_work, delay);
+ }
+ 
+ static const char *nanosic_i2c_operation_name(enum nanosic_i2c_operation operation)
+@@ -1233,7 +1233,7 @@ static void nanosic_status_work(struct work_struct *work)
+ 			nanosic_parse_frame(nano, nano->rxbuf, sizeof(nano->rxbuf));
+ 	}
+ 	if (nano->connection_reports == nano->status_query_report && nano->status_attempts < 3)
+-		mod_delayed_work(system_wq, &nano->status_work, msecs_to_jiffies(200));
++		mod_delayed_work(system_dfl_wq, &nano->status_work, msecs_to_jiffies(200));
+ }
+ 
+ static ssize_t keyboard_connected_show(struct device *dev,
+@@ -1566,7 +1566,7 @@ static int nanosic_power_on(struct nanosic *nano)
+ 	 * system with nothing on the other end of it.
+ 	 */
+ 	nano->wake_deadline = jiffies + delay;
+-	mod_delayed_work(system_wq, &nano->idle_work, delay);
++	mod_delayed_work(system_dfl_wq, &nano->idle_work, delay);
+ 
+ 	return 0;
+ }
+@@ -1706,7 +1706,7 @@ static int nanosic_probe(struct i2c_client *client)
+ 
+ 		nano->led_ready = true;
+ 		nanosic_queue_led(nano);
+-		mod_delayed_work(system_wq, &nano->status_work, msecs_to_jiffies(200));
++		mod_delayed_work(system_dfl_wq, &nano->status_work, msecs_to_jiffies(200));
+ 	}
+ 	return ret;
+ }
+@@ -1762,7 +1762,7 @@ static int nanosic_suspend(struct device *dev)
+ 		WRITE_ONCE(nano->suspended, false);
+ 		nanosic_refresh_posture(nano);
+ 		nano->status_attempts = 0;
+-		mod_delayed_work(system_wq, &nano->status_work, msecs_to_jiffies(200));
++		mod_delayed_work(system_dfl_wq, &nano->status_work, msecs_to_jiffies(200));
+ 		nanosic_wake(nano);
+ 		if (nano->data_pending) {
+ 			nano->data_pending = false;
+@@ -1790,7 +1790,7 @@ static int nanosic_resume(struct device *dev)
+ 		WRITE_ONCE(nano->suspended, false);
+ 		nanosic_refresh_posture(nano);
+ 		nano->status_attempts = 0;
+-		mod_delayed_work(system_wq, &nano->status_work, msecs_to_jiffies(200));
++		mod_delayed_work(system_dfl_wq, &nano->status_work, msecs_to_jiffies(200));
+ 		nanosic_wake(nano);
+ 		if (nano->data_pending) {
+ 			nano->data_pending = false;
+diff --git a/drivers/phy/qualcomm/phy-qcom-i2c-eusb2-repeater.c b/drivers/phy/qualcomm/phy-qcom-i2c-eusb2-repeater.c
+index e386336e5..87ea85eb6 100644
+--- a/drivers/phy/qualcomm/phy-qcom-i2c-eusb2-repeater.c
++++ b/drivers/phy/qualcomm/phy-qcom-i2c-eusb2-repeater.c
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include <linux/err.h>
++#include <linux/delay.h>
+ #include <linux/i2c.h>
+ #include <linux/gpio/consumer.h>
+ #include <linux/module.h>
+@@ -88,10 +89,18 @@ struct i2c_eusb2_repeater {
+ 
+ static int eusb2_i2c_read_reg(struct i2c_eusb2_repeater *rptr, u8 reg, u8 *val)
+ {
+-	int ret;
++	int ret, attempt;
+ 	unsigned int reg_val;
+ 
+-	ret = regmap_read(rptr->regmap, reg, &reg_val);
++	/* A newly powered repeater may NACK until its I2C interface wakes.
++	 * Retry only transient bus errors; keep terminal failures visible.
++	 */
++	for (attempt = 0; attempt < 5; attempt++) {
++		ret = regmap_read(rptr->regmap, reg, &reg_val);
++		if (!ret || (ret != -ENXIO && ret != -EREMOTEIO) || attempt == 4)
++			break;
++		usleep_range(1000, 2000);
++	}
+ 	if (ret < 0) {
+ 		dev_err(rptr->dev, "Failed to read reg: 0x%02x ret=%d\n", reg, ret);
+ 		return ret;
+@@ -186,19 +195,24 @@ static int i2c_eusb2_repeater_init(struct phy *phy)
+ 
+ 	switch (chip->repeater_type) {
+ 	case TI_REPEATER:
+-		eusb2_i2c_read_reg(rptr, REV_ID, &reg_val);
++		ret = eusb2_i2c_read_reg(rptr, REV_ID, &reg_val);
+ 		break;
+ 	case NXP_REPEATER:
+-		eusb2_i2c_read_reg(rptr, REVISION_ID, &reg_val);
++		ret = eusb2_i2c_read_reg(rptr, REVISION_ID, &reg_val);
+ 		break;
+ 	default:
+ 		dev_err(rptr->dev, "Invalid repeater\n");
++		ret = -EINVAL;
+ 	}
+ 
+-	dev_info(rptr->dev, "eUSB2 repeater version = 0x%x\n", reg_val);
++	/* The revision is diagnostic; an unavailable value must not be printed
++	 * uninitialised, or prevent the otherwise working PHY/OTG lifecycle.
++	 */
++	if (!ret)
++		dev_info(rptr->dev, "eUSB2 repeater version = 0x%x\n", reg_val);
+ 	dev_info(rptr->dev, "eUSB2 repeater init\n");
+ 
+-	return ret;
++	return 0;
+ }
+ 
+ static int i2c_eusb2_repeater_set_mode(struct phy *phy,
+diff --git a/drivers/soundwire/qcom.c b/drivers/soundwire/qcom.c
+index 55678a30c..25b3b21da 100644
+--- a/drivers/soundwire/qcom.c
++++ b/drivers/soundwire/qcom.c
+@@ -1444,7 +1444,7 @@ static int qcom_swrm_get_port_config(struct qcom_swrm_ctrl *ctrl)
+ 	ret = of_property_read_u32(np, "qcom,din-ports", &val);
+ 	if (!ret) { /* only if present */
+ 		if (val != ctrl->num_din_ports) {
+-			dev_err(ctrl->dev, "din-ports (%d) mismatch with controller (%d)",
++			dev_dbg(ctrl->dev, "DT overrides din-ports (%d), controller reports (%d)\n",
+ 				val, ctrl->num_din_ports);
+ 		}
+ 
+@@ -1454,7 +1454,7 @@ static int qcom_swrm_get_port_config(struct qcom_swrm_ctrl *ctrl)
+ 	ret = of_property_read_u32(np, "qcom,dout-ports", &val);
+ 	if (!ret) { /* only if present */
+ 		if (val != ctrl->num_dout_ports) {
+-			dev_err(ctrl->dev, "dout-ports (%d) mismatch with controller (%d)",
++			dev_dbg(ctrl->dev, "DT overrides dout-ports (%d), controller reports (%d)\n",
+ 				val, ctrl->num_dout_ports);
+ 		}
+ 
+diff --git a/sound/soc/codecs/lpass-rx-macro.c b/sound/soc/codecs/lpass-rx-macro.c
+index 282a6aaa9..6b8c67fdd 100644
+--- a/sound/soc/codecs/lpass-rx-macro.c
++++ b/sound/soc/codecs/lpass-rx-macro.c
+@@ -8,6 +8,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/pm_clock.h>
+ #include <linux/pm_runtime.h>
++#include <linux/sort.h>
+ #include <linux/clk.h>
+ #include <sound/soc.h>
+ #include <sound/pcm.h>
+@@ -3766,6 +3767,13 @@ static const struct snd_soc_component_driver rx_macro_component_drv = {
+ 	.num_dapm_routes = ARRAY_SIZE(rx_audio_map),
+ };
+ 
++static int rx_macro_reg_compare(const void *left, const void *right)
++{
++	const struct reg_default *a = left, *b = right;
++
++	return (a->reg > b->reg) - (a->reg < b->reg);
++}
++
+ static int rx_macro_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+@@ -3858,6 +3866,10 @@ static int rx_macro_probe(struct platform_device *pdev)
+ 	if (!reg_config)
+ 		return -ENOMEM;
+ 
++	/* Both source arrays are sorted, but their concatenation is not.
++	 * Sort our writable copy before giving it to regmap.
++	 */
++	sort(reg_defaults, def_count, sizeof(*reg_defaults), rx_macro_reg_compare, NULL);
+ 	reg_config->reg_defaults = reg_defaults;
+ 	reg_config->num_reg_defaults = def_count;
+ 

@@ -18,6 +18,7 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include "../protocol/fpc_gallery.h"
 
 #define QSEE_IMPL_ID 5u
 #define APP_NAME "fpcliu"
@@ -611,7 +612,7 @@ static int query(int fd, uint32_t session_id, enum query_kind kind)
  * OEM module 11: subcmd 8 count at +8 and up to five IDs at +12;
  * subcmd 11 database/authenticator ID at +16. Do not print those identifiers.
  */
-static int template_inventory(int fd, uint32_t session, uint32_t *loaded_count)
+static int read_template_inventory(int fd, uint32_t session, struct fpc_inventory *inventory)
 {
 	struct shared payload = {};
 	int result = 1;
@@ -633,6 +634,11 @@ static int template_inventory(int fd, uint32_t session, uint32_t *loaded_count)
 			goto out;
 		}
 		count = words[2];
+        if (inventory) {
+            inventory->count = count;
+            for (uint32_t i = 0; i < count; i++) inventory->ids[i] = words[3 + i];
+            if (!fpc_valid_ids(inventory)) goto out;
+        }
 		printf("loaded_template_count=%u\n", count);
 	} else {
 		printf("loaded_template_count=unavailable\n");
@@ -648,8 +654,6 @@ static int template_inventory(int fd, uint32_t session, uint32_t *loaded_count)
 	}
 	printf("template_inventory_scope=current_loaded_TA_DB persistent_storage_not_searched=1\n");
 	result = enumerate_status || id_status ? 1 : 0;
-	if (!result && loaded_count)
-		*loaded_count = count;
 out:
 	explicit_bzero(&authenticator_id, sizeof(authenticator_id));
 	explicit_bzero(payload.address, payload.size);
@@ -900,6 +904,81 @@ out:
 	return result;
 }
 
+static int template_inventory(int fd, uint32_t session, uint32_t *loaded_count)
+{
+    struct fpc_inventory inventory = {};
+    int result = read_template_inventory(fd, session, &inventory);
+    if (!result && loaded_count) *loaded_count = inventory.count;
+    return result;
+}
+
+/* Matched against stock HAL ce2ffe2b...: fpc_tee_delete_template at 0x3ba18
+ * sends module 11/subcommand 9 and the exact template ID at byte offset 8.
+ * Only the imported working DB is changed; the original host file is retained.
+ */
+static int gallery_prepare(int fd, uint32_t session, const char *active_path,
+                           const struct fpc_inventory *before, struct fpc_inventory *active)
+{
+    uint8_t data[4 + 4 * FPC_GALLERY_MAX];
+    struct stat info;
+    int input = open(active_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (input < 0) return 1;
+    ssize_t length = read(input, data, sizeof(data));
+    int valid = !fstat(input, &info) && S_ISREG(info.st_mode) && info.st_uid == 0 &&
+                (info.st_mode & 0777) == 0600 && length == info.st_size && length >= 4;
+    close(input);
+    if (!valid) return 1;
+    uint32_t count = fpc_le32(data);
+    if (count == UINT32_MAX) {
+        if (length != 4 || before->count != 1) return 1;
+        *active = *before; /* First upgrade of one legacy single-finger print. */
+    } else {
+        if (count > FPC_GALLERY_MAX || length != (ssize_t)(4 + 4 * count)) return 1;
+        active->count = count;
+        for (uint32_t i = 0; i < count; i++) active->ids[i] = fpc_le32(data + 4 + 4 * i);
+        if (!fpc_valid_ids(active)) return 1;
+        for (uint32_t i = 0; i < count; i++) if (!fpc_has_id(before, active->ids[i])) return 1;
+    }
+    for (uint32_t i = 0; i < before->count; i++) {
+        if (fpc_has_id(active, before->ids[i])) continue;
+        struct shared payload = {};
+        if (allocate_shared(fd, PAYLOAD_SIZE, &payload)) return 1;
+        uint32_t *words = payload.address;
+        words[0] = 11; words[1] = 9; words[2] = before->ids[i];
+        int status = invoke_payload(fd, session, &payload);
+        explicit_bzero(payload.address, payload.size); munmap(payload.address, payload.size);
+        if (status) return 1;
+    }
+    if (!before->count) return active->count != 0;
+    struct fpc_inventory actual = {};
+    return read_template_inventory(fd, session, &actual) || !fpc_same_ids(active, &actual);
+}
+
+static int gallery_metadata(const char *path, const struct fpc_inventory *before,
+                            const struct fpc_inventory *after, uint32_t id, uint32_t retry)
+{
+    uint8_t data[FPC_METADATA_SIZE] = {};
+    if (!fpc_valid_ids(before) || !fpc_valid_ids(after)) return 1;
+    memcpy(data, "FPCMETA2", 8); fpc_put32(data + 8, before->count);
+    fpc_put32(data + 32, after->count);
+    for (uint32_t i = 0; i < before->count; i++) fpc_put32(data + 12 + 4 * i, before->ids[i]);
+    for (uint32_t i = 0; i < after->count; i++) fpc_put32(data + 36 + 4 * i, after->ids[i]);
+    fpc_put32(data + 56, id); fpc_put32(data + 60, retry);
+    int output = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (output < 0) return 1;
+    int result = 0;
+    for (size_t offset = 0; offset < sizeof(data);) {
+        ssize_t count = write(output, data + offset, sizeof(data) - offset);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) { result = 1; break; }
+        offset += (size_t)count;
+    }
+    if (fsync(output)) result = 1;
+    if (close(output)) result = 1;
+    if (result) unlink(path);
+    explicit_bzero(data, sizeof(data)); return result;
+}
+
 /* Original HAL set_auth_challenge is 3/1, with the 64-bit value at +8.
  * This is a verification operation ID, separate from the enrol 3/2 challenge.
  */
@@ -936,7 +1015,7 @@ static int set_auth_challenge(int fd, uint32_t session, uint64_t *challenge)
  * statistics at +12. Neither identifiers nor auxiliary data enter logs.
  * The TA's auxiliary template index at +44 is not the HAL callback ID.
  */
-static int identify_finger(int fd, uint32_t session, int *matched)
+static int identify_finger(int fd, uint32_t session, uint32_t *matched)
 {
 	struct shared payload = {};
 	int status = -1;
@@ -949,8 +1028,8 @@ static int identify_finger(int fd, uint32_t session, int *matched)
 	words[1] = 4;
 	status = invoke_payload(fd, session, &payload);
 	if (!status)
-		*matched = words[2] != 0;
-	printf("identify_app_status=%d candidate_present=%u\n", status, *matched);
+		*matched = words[2];
+	printf("identify_app_status=%d candidate_present=%u\n", status, *matched != 0);
 	explicit_bzero(payload.address, payload.size);
 	munmap(payload.address, payload.size);
 	return status;
@@ -996,23 +1075,26 @@ out:
  */
 static int match_existing(int fd, uint32_t session, int power_fd,
 			  const char *database, const char *updated_database,
-			  int single_template)
+			  int single_template, const char *metadata)
 {
 	uint32_t count = 0, changed = 0;
 	uint64_t challenge;
-	int status, matched, auth_status = 0;
+	int status, auth_status = 0;
+    uint32_t matched = 0;
+    struct fpc_inventory before = {}, after = {};
 
 	if (query(fd, session, BIO_INIT) || init_hw_auth(fd, session) ||
 	    query(fd, session, BIO_SET_GID) || load_database(fd, session, database) ||
 	    query(fd, session, BIO_SET_ACTIVE_GROUP) ||
 	    query(fd, session, BIO_LOAD_INSTANCE_DATA) ||
-	    template_inventory(fd, session, &count))
+	    read_template_inventory(fd, session, &before))
 		return 1;
+    count = before.count;
 	if (!count) {
 		fprintf(stderr, "match_unavailable=database_has_no_templates touch_not_collected=1\n");
 		return 1;
 	}
-	if (single_template && count != 1) {
+	if (single_template == 1 && count != 1) {
 		fprintf(stderr, "match_unavailable=single_template_database_required touch_not_collected=1\n");
 		return 1;
 	}
@@ -1021,12 +1103,15 @@ static int match_existing(int fd, uint32_t session, int power_fd,
 	status = capture_with_wait(fd, session, power_fd);
 	if (status) {
 		fprintf(stderr, "match_incomplete=capture_rejected app_status=%d\n", status);
+        if (metadata && status == 1)
+            (void)gallery_metadata(metadata, &before, &before, 0, 1);
 		return 1;
 	}
 	status = identify_finger(fd, session, &matched);
 	if (status < 0)
 		return 1;
 	if (!status) {
+        if (matched && !fpc_has_id(&before, matched)) return 1;
 		if (matched)
 			auth_status = get_auth_result(fd, session, challenge);
 		if (query_output(fd, session, BIO_UPDATE_TEMPLATE, &changed))
@@ -1046,6 +1131,10 @@ static int match_existing(int fd, uint32_t session, int power_fd,
 			printf("database_update_pending=1 updated_output_not_requested=1\n");
 		}
 	}
+    if (metadata && !auth_status) {
+        if (read_template_inventory(fd, session, &after) || !fpc_same_ids(&before, &after) ||
+            gallery_metadata(metadata, &before, &after, status ? 0 : matched, status ? 1 : 0)) return 1;
+    }
 	if (status) {
 		printf("match_result=inconclusive identify_app_status=%d\n", status);
 		return 1;
@@ -1073,15 +1162,17 @@ int main(int argc, char **argv)
 	int keymaster_probe = argc == 2 && !strcmp(argv[1], "--keymaster-info");
 	int auth_renew_preflight = argc == 4 && !strcmp(argv[1], "--auth-preflight-renew");
 	int auth_preflight = auth_renew_preflight || ((argc == 3 || argc == 4) && !strcmp(argv[1], "--auth-preflight"));
+	int bio_gallery = argc == 8 && !strcmp(argv[1], "--bio-gallery");
 	int bio_existing = argc == 6 && !strcmp(argv[1], "--bio-pipeline-existing");
-	int bio_pipeline = bio_existing || (argc >= 2 && !strcmp(argv[1], "--bio-pipeline"));
+	int bio_pipeline = bio_gallery || bio_existing || (argc >= 2 && !strcmp(argv[1], "--bio-pipeline"));
 	int bio_prepare = argc == 2 && !strcmp(argv[1], "--bio-prepare");
 	int db_export_empty = argc == 3 && !strcmp(argv[1], "--db-export-empty");
 	int db_import_export = argc == 4 && !strcmp(argv[1], "--db-import-export");
 	int inventory = argc == 2 && !strcmp(argv[1], "--template-inventory");
+	int match_gallery = argc == 5 && !strcmp(argv[1], "--match-gallery");
 	int match_single = (argc == 3 || argc == 4) && !strcmp(argv[1], "--match-single");
-	int match = match_single || ((argc == 3 || argc == 4) && !strcmp(argv[1], "--match-existing"));
-	const char *db_path = bio_existing ? argv[3] : argc >= 3 ? argv[2] : "template.db";
+	int match = match_gallery || match_single || ((argc == 3 || argc == 4) && !strcmp(argv[1], "--match-existing"));
+	const char *db_path = (bio_gallery || bio_existing) ? argv[3] : argc >= 3 ? argv[2] : "template.db";
 	int hat_fd = -1;
 	int challenge_fd = -1;
 	int loader_fd = -1;
@@ -1090,7 +1181,7 @@ int main(int argc, char **argv)
 	int result = 1;
 	int sensor_initialized = 0;
 
-	if (argc > 6 || (argc > 1 && !init_sensor && !init_bio && !capture_once &&
+	if (argc > 8 || (argc > 1 && !init_sensor && !init_bio && !capture_once &&
 			 !capture_after_enter && !capture_wait && !sensortest && !sensor_otp &&
 			 !finger_lost_check && !hw_auth_probe && !keymaster_probe &&
 			 !auth_preflight && !bio_pipeline &&
@@ -1101,12 +1192,13 @@ int main(int argc, char **argv)
 			"--auth-preflight HAT_FD [CHALLENGE_FD]|--auth-preflight-renew HAT_FD CHALLENGE_FD|--bio-prepare|--bio-pipeline DATABASE HAT_FD CHALLENGE_FD|"
 			"--bio-pipeline-existing INPUT_DATABASE OUTPUT_DATABASE HAT_FD CHALLENGE_FD|"
 			"--db-export-empty DATABASE|--db-import-export INPUT OUTPUT|--template-inventory|"
-			"--match-existing DATABASE [UPDATED_DATABASE]|--match-single DATABASE [UPDATED_DATABASE]]\n",
+			"--match-existing DATABASE [UPDATED_DATABASE]|--match-single DATABASE [UPDATED_DATABASE]|"
+            "--match-gallery DATABASE UPDATED_DATABASE META|--bio-gallery INPUT|- OUTPUT ACTIVE META HAT_FD CHALLENGE_FD]\n",
 			argv[0]);
 		return 2;
 	}
 	setvbuf(stdout, NULL, _IONBF, 0);
-	if (bio_pipeline && !bio_existing && argc != 5) {
+	if (bio_pipeline && !bio_existing && !bio_gallery && argc != 5) {
 		fprintf(stderr, "bidirectional_signed_HAT_provider_required=1 usage: %s --bio-pipeline DATABASE HAT_FD CHALLENGE_FD\n",
 			argv[0]);
 		return 2;
@@ -1128,7 +1220,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	if (bio_pipeline || auth_preflight) {
-		const char *descriptor = argv[bio_existing ? 4 : bio_pipeline ? 3 : 2];
+		const char *descriptor = argv[bio_gallery ? 6 : bio_existing ? 4 : bio_pipeline ? 3 : 2];
 		char *end;
 		errno = 0;
 		long value = strtol(descriptor, &end, 10);
@@ -1142,7 +1234,7 @@ int main(int argc, char **argv)
 			fprintf(stderr, "hat_fd_invalid=readable_binary_provider_required\n");
 			return 2;
 		}
-		int challenge_arg = bio_existing ? 5 : bio_pipeline ? 4 : 3;
+		int challenge_arg = bio_gallery ? 7 : bio_existing ? 5 : bio_pipeline ? 4 : 3;
 		if (argc > challenge_arg) {
 			descriptor = argv[challenge_arg];
 			errno = 0;
@@ -1204,7 +1296,7 @@ int main(int argc, char **argv)
 	}
 	if (match) {
 		result = match_existing(client_fd, client_session, power_fd, argv[2],
-					argc == 4 ? argv[3] : NULL, match_single);
+					(argc == 4 || match_gallery) ? argv[3] : NULL, match_single, match_gallery ? argv[4] : NULL);
 		goto out;
 	}
 
@@ -1278,17 +1370,24 @@ int main(int argc, char **argv)
 
 	if (bio_pipeline || bio_prepare) {
 		uint32_t remaining = UINT32_MAX;
+        struct fpc_inventory gallery_before = {}, gallery_active = {};
+        int has_input = bio_existing || (bio_gallery && strcmp(argv[2], "-"));
 		uint64_t challenge;
 		int status;
 		if (query(client_fd, client_session, BIO_INIT) ||
 		    init_hw_auth(client_fd, client_session) ||
 		    query(client_fd, client_session, BIO_SET_GID) ||
-		    (bio_existing ? load_database(client_fd, client_session, argv[2]) :
+		    (has_input ? load_database(client_fd, client_session, argv[2]) :
 				    query(client_fd, client_session, BIO_LOAD_EMPTY_DB)) ||
 		    query(client_fd, client_session, BIO_SET_ACTIVE_GROUP))
 			goto out;
-		if (bio_existing && query(client_fd, client_session, BIO_LOAD_INSTANCE_DATA))
+		if (has_input && query(client_fd, client_session, BIO_LOAD_INSTANCE_DATA))
 			goto out;
+        if (bio_gallery && ((has_input && read_template_inventory(client_fd, client_session, &gallery_before)) ||
+            gallery_prepare(client_fd, client_session, argv[4], &gallery_before, &gallery_active))) goto out;
+        if (bio_gallery && gallery_active.count >= FPC_GALLERY_MAX) {
+            fprintf(stderr, "enrol_output_rejected=gallery_full touch_not_collected=1\n"); goto out;
+        }
 		if (bio_pipeline &&
 		    (get_enrol_challenge(client_fd, client_session, &challenge) ||
 		     authorize_enrol(client_fd, client_session, hat_fd, challenge_fd, challenge)))
@@ -1324,19 +1423,29 @@ int main(int argc, char **argv)
 						fprintf(stderr, "end_enrol_not_submitted=1 fresh_authorization_failed=1\n");
 						goto out;
 					}
-					if (query(client_fd, client_session, BIO_END_ENROL))
+					uint32_t new_id = 0;
+					if (query_output(client_fd, client_session, BIO_END_ENROL, &new_id))
 						goto out;
 					/* Fresh databases published as one FpPrint must contain
 					 * exactly one template; do not turn a 1:N gallery into a
 					 * single-finger desktop credential.
 					 */
-					if (!bio_existing) {
+					if (!bio_existing && !bio_gallery) {
 						uint32_t count;
 						if (template_inventory(client_fd, client_session, &count) || count != 1) {
 							fprintf(stderr, "enrol_output_rejected=single_template_database_required\n");
 							goto out;
 						}
 					}
+                    if (bio_gallery) {
+                        struct fpc_inventory after = {};
+                        if (!new_id || fpc_has_id(&gallery_active, new_id) ||
+                            read_template_inventory(client_fd, client_session, &after) ||
+                            after.count != gallery_active.count + 1 || !fpc_has_id(&after, new_id)) goto out;
+                        for (uint32_t i = 0; i < gallery_active.count; i++)
+                            if (!fpc_has_id(&after, gallery_active.ids[i])) goto out;
+                        if (gallery_metadata(argv[5], &gallery_before, &after, new_id, 0)) goto out;
+                    }
 					result = store_database(client_fd, client_session, db_path) ? 1 : 0;
 					goto out;
 				}

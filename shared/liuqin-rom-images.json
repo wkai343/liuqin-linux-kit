@@ -1,18 +1,11 @@
 {
   "comment": [
-    "Pinned identities of the stock Xiaomi Fastboot ROM images that the dual",
-    "layout writes to the Android slot.  These are checksums of a published",
-    "vendor package, not secrets: they exist so that the installer refuses a",
-    "ROM directory that is not the exact release this port was validated",
-    "against.  The ROM itself is an upstream input and is not redistributed",
-    "here.  'partition' is always the _a slot name (or the non-slotted super);",
-    "the installer never writes _b apart from boot_b with the project image.",
-    "boot.img is the exception to flashing: in the dual layout both systems",
-    "boot from slot A, so boot_a receives the project image and boot.img (or",
-    "the --android-boot override) is stored on the Ubuntu root, from where",
-    "liuqin-switch writes it to the 'partition' named here.",
-    "'sparse' marks an Android sparse image, whose bytes cannot be compared",
-    "against the partition content, so it is always flashed when requested."
+    "Pinned stock-ROM identities used by board/firmware preparation and ROM fetching.",
+    "The boot.img size also defines the validated boot partition geometry for the installer.",
+    "partition names describe the source ROM; they are not an Android flashing plan.",
+    "Android installation requires the separate pinned profile, verified managed layout and explicit operation consent.",
+    "The vendor ROM is an upstream input and is not redistributed here.",
+    "sparse identifies Android sparse images that require expansion for content inspection."
   ],
   "rom": "OS2.0.6.0.VMYCNXM",
   "package": "liuqin_images_OS2.0.6.0.VMYCNXM_20250318.0000.00_15.0_cn",

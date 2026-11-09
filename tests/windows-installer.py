@@ -49,21 +49,16 @@ class Tests(unittest.TestCase):
             value=json.loads((engine.state_dir/'backups-index.json').read_text(encoding='utf-8'))
             self.assertEqual(value['real:TEST'],str(self.root/'设备备份'))
         finally:engine.close()
-    def test_windows_old_installer_is_rejected_before_usb(self):
-        with patch.object(host,'IS_WINDOWS',True):
-            with self.assertRaisesRegex(RuntimeError,'新版 installer.img'):
-                host.check_installer_support({'installer_usb_network':'ncm'})
-            host.check_installer_support({'installer_usb_network':'rndis'})
-            self.assertEqual(host.server_address('192.168.7.1'),('192.168.7.1',37631))
-            with self.assertRaises(RuntimeError):host.server_address('192.168.1.3')
-    def test_network_elevation_quotes_the_whole_script_path(self):
-        installer=self.root/"O'Neil installer";installer.mkdir();(installer/'windows-network.ps1').write_text('# fixture')
-        with patch.object(host,'INSTALLER',installer):
-            command=host.windows_network_command()
-        decoded=base64.b64decode(command[-1]).decode('utf-16le')
-        self.assertIn('-Verb RunAs',decoded)
-        self.assertIn('"'+str(installer).replace("'","''"),decoded)
-        self.assertNotIn('Set-ExecutionPolicy',decoded)
+    def test_gui_accepts_only_adb_on_every_host(self):
+        for windows in (False,True):
+            with patch.object(host,'IS_WINDOWS',windows):
+                for mode in ('rndis','ncm','network',''):
+                    with self.assertRaisesRegex(RuntimeError,'旧 USB 网络'):host.check_gui_recovery_support({'installer_usb_network':mode})
+                for mode in ('adb','adb-native'):host.check_gui_recovery_support({'installer_usb_network':mode})
+    def test_no_network_elevation_entry_or_shipped_script(self):
+        self.assertFalse(hasattr(host,'windows_network_command'))
+        self.assertFalse((PROJECT/'installer/windows-network.ps1').exists())
+        self.assertNotIn('configureWindowsNetwork',(PROJECT/'installer/liuqin_gui/qml/Main.qml').read_text())
     def test_windows_processes_use_argument_arrays_and_no_console(self):
         with patch.object(host,'IS_WINDOWS',True),patch.object(host.subprocess,'run') as run:
             host.run_process(['fastboot.exe','boot',r'C:\中文 空间\installer.img'],text=True)
@@ -75,12 +70,4 @@ class Tests(unittest.TestCase):
         engine=DemoEngine(lambda _event:None,self.root/'demo')
         try:self.assertEqual(inspect_package(engine.demo_bundle)['installer_usb_network'],'rndis')
         finally:engine.close()
-    def test_network_script_is_limited_to_the_usb_identity_and_port(self):
-        source=(PROJECT/'installer/windows-network.ps1').read_text(encoding='utf-8-sig')
-        for value in ('VID_1D6B&PID_1041','020000000701','-LocalPort 37631',"-RemoteAddress '192.168.7.2'",'-InterfaceAlias $adapter.Name'):
-            self.assertIn(value,source)
-        self.assertNotIn('Set-NetFirewallProfile',source)
-        self.assertNotIn('Set-ExecutionPolicy',source)
-        self.assertNotIn('-DefaultGateway',source)
-
 if __name__=='__main__':unittest.main(verbosity=2)

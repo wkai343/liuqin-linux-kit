@@ -22,17 +22,17 @@ def main():
         "--keymaster-negotiate": ["qsee-gatekeeper", "--negotiate"],
         "--shared-hmac-probe": ["qsee-gatekeeper", "--shared-hmac-probe"],
         "--hw-auth-probe": ["fpc_build_info", "--hw-auth-probe"],
-        "--native-auth-preflight": ["native_credential_preflight.py", "--preflight"],
         "--template-inventory": ["fpc_build_info", "--template-inventory"],
     }
-    match = len(arguments) in (2, 3) and arguments[0] in ("--match-existing", "--match-single")
+    match = (len(arguments) in (2, 3) and arguments[0] in ("--match-existing", "--match-single")) or (len(arguments) == 4 and arguments[0] == "--match-gallery")
     create = len(arguments) == 4 and arguments[0] == "--new-native-credential"
     change = len(arguments) == 6 and arguments[0] == "--change-native-credential"
+    enrol_gallery = len(arguments) == 8 and arguments[0] == "--enrol-gallery"
     enrol_existing = len(arguments) == 6 and arguments[0] == "--enrol-existing"
-    enrol = enrol_existing or len(arguments) == 5 and arguments[0] == "--enrol"
+    enrol = enrol_gallery or enrol_existing or len(arguments) == 5 and arguments[0] == "--enrol"
     authorize = len(arguments) == 4 and arguments[0] in ("--auth-preflight", "--auth-preflight-renew")
     if os.geteuid() != 0 or not (match or create or change or enrol or authorize or len(arguments) == 1 and arguments[0] in commands):
-        print("usage (root): oem_runtime.py [--ufs-rpmb-read-only | --ufs-rpmb-authenticated] --keymaster-negotiate | --shared-hmac-probe | --hw-auth-probe | --native-auth-preflight | --template-inventory | --match-existing DATABASE [UPDATED_DATABASE] | --match-single DATABASE [UPDATED_DATABASE] | --new-native-credential NATIVE_UID DERIVED_INPUT_FD HANDLE_OUTPUT_FD | --change-native-credential NATIVE_UID HANDLE_FD CURRENT_INPUT_FD DESIRED_INPUT_FD HANDLE_OUTPUT_FD | --auth-preflight NATIVE_UID HANDLE_FD DERIVED_INPUT_FD | --enrol DATABASE NATIVE_UID HANDLE_FD DERIVED_INPUT_FD | --enrol-existing INPUT_DATABASE OUTPUT_DATABASE NATIVE_UID HANDLE_FD DERIVED_INPUT_FD", file=sys.stderr)
+        print("usage (root): oem_runtime.py [--ufs-rpmb-read-only | --ufs-rpmb-authenticated] --keymaster-negotiate | --shared-hmac-probe | --hw-auth-probe | --template-inventory | --match-existing DATABASE [UPDATED_DATABASE] | --match-single DATABASE [UPDATED_DATABASE] | --new-native-credential NATIVE_UID DERIVED_INPUT_FD HANDLE_OUTPUT_FD | --change-native-credential NATIVE_UID HANDLE_FD CURRENT_INPUT_FD DESIRED_INPUT_FD HANDLE_OUTPUT_FD | --auth-preflight NATIVE_UID HANDLE_FD DERIVED_INPUT_FD | --enrol DATABASE NATIVE_UID HANDLE_FD DERIVED_INPUT_FD | --enrol-existing INPUT_DATABASE OUTPUT_DATABASE NATIVE_UID HANDLE_FD DERIVED_INPUT_FD | --enrol-gallery INPUT|- OUTPUT ACTIVE META NATIVE_UID HANDLE_FD DERIVED_INPUT_FD", file=sys.stderr)
         return 2
     credential_fds = ()
     if create or change or enrol or authorize:
@@ -40,7 +40,7 @@ def main():
             print("native credential/authorization operations require the authenticated UFS listener", file=sys.stderr)
             return 2
         try:
-            uid = int(arguments[3 if enrol_existing else 2 if enrol else 1], 10)
+            uid = int(arguments[5 if enrol_gallery else 3 if enrol_existing else 2 if enrol else 1], 10)
             credential_fds = tuple(int(value, 10) for value in arguments[-(4 if change else 2):])
             if not 0x40000000 <= uid <= 0x7fffffff or any(fd < 3 for fd in credential_fds) or len(set(credential_fds)) != len(credential_fds):
                 raise ValueError("native UID or distinct binary FDs invalid")

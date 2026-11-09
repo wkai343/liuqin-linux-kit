@@ -242,10 +242,15 @@ class SplashTests(unittest.TestCase):
         (raw/'usr/lib64/test.so').write_bytes(elf())
         (raw/'lib64').symlink_to('usr/lib64')
         (raw/'usr/lib64/alias.so').symlink_to('/usr/lib64/test.so')
+        # udev's dlopened module loader must survive usrmerge materialisation,
+        # even though it is not a DT_NEEDED dependency of systemd-udevd.
+        (raw/'usr/lib64/libkmod.so.2.6.1').write_bytes(elf())
+        (raw/'usr/lib64/libkmod.so.2').symlink_to('libkmod.so.2.6.1')
         self.assertEqual(rooted(raw,'lib64/alias.so'),raw/'usr/lib64/test.so')
         out=self.root/'normalized';records,_=materialize(raw,out)
         self.assertFalse((out/'lib64').is_symlink())
         self.assertEqual(records['lib64/alias.so']['sha256'],hashlib.sha256(elf()).hexdigest())
+        self.assertEqual(records['usr/lib64/libkmod.so.2']['sha256'],hashlib.sha256(elf()).hexdigest())
         (raw/'escape').symlink_to('../outside')
         with self.assertRaisesRegex(ValueError,'escapes'):rooted(raw,'escape')
 

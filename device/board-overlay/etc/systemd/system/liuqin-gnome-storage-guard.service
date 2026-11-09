@@ -5,16 +5,8 @@ DefaultDependencies=no
 # namespace before systemd starts.  Waiting for udev-settle here duplicates
 # that gate and costs minutes under emulation without adding authority.
 #
-# The guard derives its read-write set from /proc/mounts, so the mounts it
-# judges must be final before it runs.  local-fs.target covers the ordinary
-# fstab mounts, but the split layout's /home is nofail, and a nofail mount is
-# not ordered before local-fs.target (systemd.mount(5)), so home.mount is named
-# explicitly.  Without it the guard re-sealed linux_home seconds before
-# systemd mounted /home, which then came up read-only and first-boot user
-# creation failed.  In the legacy layout there is no home.mount and the
-# ordering is inert.  Neither mount unit is ordered after basic.target, so
-# staying before basic.target adds no cycle.
-After=local-fs.target home.mount
+# Keep the single-root storage guard before normal services.
+After=local-fs.target
 Before=basic.target network-pre.target display-manager.service
 
 [Service]

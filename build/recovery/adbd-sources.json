@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "sources": {
+    "adbd4linux": {
+      "url": "https://github.com/Roboparty/adbd4linux.git",
+      "commit": "525d041ac3812d06e46f52ac876d4a902a483abb"
+    },
+    "adbd-brotli": {
+      "url": "https://github.com/google/brotli.git",
+      "commit": "ed738e842d2fbdf2d6459e39267a633c4a9b2f5d"
+    },
+    "adbd-lz4": {
+      "url": "https://github.com/lz4/lz4.git",
+      "commit": "ebb370ca83af193212df4dcbadcc5d87bc0de2f0"
+    },
+    "adbd-zstd": {
+      "url": "https://github.com/facebook/zstd.git",
+      "commit": "f8745da6ff1ad1e7bab384bd1f9d742439278e99"
+    },
+    "adbd4linux/thirdparty/adb": {
+      "commit": "1cf2f017d312f73b3dc53bda85ef2610e35a80e9"
+    },
+    "adbd4linux/thirdparty/core": {
+      "commit": "a3b721a32242006b59cb12bd62c9133632af3a2d"
+    },
+    "adbd4linux/thirdparty/fmtlib": {
+      "commit": "97ceae9d27415d6444f3e24f491da8ed6902ecfa"
+    },
+    "adbd4linux/thirdparty/libbase": {
+      "commit": "6d19b5c690fa4220c10e42c2326150bbd4d4b7bb"
+    },
+    "adbd4linux/thirdparty/logging": {
+      "commit": "bcac7c30d88a3773a7c0bc9f5617a23a886331fd"
+    }
+  },
+  "license": "GPL-3.0-only Linux portability/build integration; AOSP Apache-2.0; dependency licenses retained",
+  "mode": "USB FunctionFS only in production; unauthenticated root on trusted physical USB"
+}

@@ -1,0 +1,748 @@
+{
+  "schema": 1,
+  "device": "liuqin",
+  "preview_only": true,
+  "profiles": [
+    {
+      "id": "miui14",
+      "label": "本机 MIUI 14.0.3 / Android 13",
+      "device": "liuqin",
+      "images": {
+        "abl": [
+          {
+            "bytes": 8388608,
+            "sha256": "2fbe028f35389df5a9489dc9d436fe7973fd14a257313e7cd731a46d37f7bbb7"
+          }
+        ],
+        "dtbo": [
+          {
+            "bytes": 20633856,
+            "sha256": "8160577305786116453926787053fe3db4cdb9481133cff12fecbb7851a7c050"
+          }
+        ],
+        "vbmeta": [
+          {
+            "bytes": 131072,
+            "sha256": "8e278786c7c3f140ba0b3fced5196b0de8911f0cfbf17b39b17554461b5b1591"
+          }
+        ],
+        "vbmeta_system": [
+          {
+            "bytes": 131072,
+            "sha256": "d9b6c69aab4c8756a5e7e996f1eaf05c979d172ce6fd683fa83cddbe46bda1b5"
+          }
+        ],
+        "boot": [
+          {
+            "bytes": 201326592,
+            "sha256": "e70c9e92b227416410461d80590725e663a4762b4d29641c7d4e3d6a9c7d607c"
+          }
+        ],
+        "vendor_boot": [
+          {
+            "bytes": 100663296,
+            "sha256": "941cdbd31994ae9e7f6e0a4bd836d4866c683688bcfd890f65e9b68aee58c729"
+          }
+        ]
+      },
+      "projected": {
+        "vbmeta": {
+          "measurement": {
+            "partition_bytes": 131072,
+            "hash_bytes": 131072,
+            "sha256": "8e278786c7c3f140ba0b3fced5196b0de8911f0cfbf17b39b17554461b5b1591"
+          },
+          "avb": {
+            "status": "complete",
+            "metadata_bytes": 5952,
+            "metadata_sha256": "870277d27c94a5fa1e96b44005e4abac22847bd7bc54df13c147b5acfb3aae38",
+            "normalized_flags_sha256": "870277d27c94a5fa1e96b44005e4abac22847bd7bc54df13c147b5acfb3aae38",
+            "flags": 0,
+            "partition_sha256": "8e278786c7c3f140ba0b3fced5196b0de8911f0cfbf17b39b17554461b5b1591"
+          }
+        },
+        "vbmeta_system": {
+          "measurement": {
+            "partition_bytes": 131072,
+            "hash_bytes": 131072,
+            "sha256": "d9b6c69aab4c8756a5e7e996f1eaf05c979d172ce6fd683fa83cddbe46bda1b5"
+          },
+          "avb": {
+            "status": "complete",
+            "metadata_bytes": 3008,
+            "metadata_sha256": "445191688446749a86c2bd3e527ec2d4730f374e1030fe01ec04cee03388e4f5",
+            "normalized_flags_sha256": "445191688446749a86c2bd3e527ec2d4730f374e1030fe01ec04cee03388e4f5",
+            "flags": 0,
+            "partition_sha256": "d9b6c69aab4c8756a5e7e996f1eaf05c979d172ce6fd683fa83cddbe46bda1b5"
+          }
+        },
+        "dtbo": {
+          "measurement": {
+            "partition_bytes": 25165824,
+            "hash_bytes": 20633856,
+            "sha256": "8160577305786116453926787053fe3db4cdb9481133cff12fecbb7851a7c050"
+          }
+        }
+      },
+      "super_bytes": null,
+      "rom_abl": "miui-abl-20230422",
+      "archive": null,
+      "evidence": "ROM comparison 2026-11-03; actual MIUI reads / pinned HyperOS images and official payload metadata / pinned Miku ZIP. Preview only; no install qualification."
+    },
+    {
+      "id": "hyperos206",
+      "label": "HyperOS 2.0.6 / Android 15",
+      "device": "liuqin",
+      "images": {
+        "abl": [
+          {
+            "bytes": 204800,
+            "sha256": "de7a02fce95e004b785987555eaf0c0ce02b0f2ed3e646b21d46d4b43551e303"
+          }
+        ],
+        "dtbo": [
+          {
+            "bytes": 25165824,
+            "sha256": "5e0377c7781e57f65c474f20edf3d7fb61f03f6030ca170e4edc29467a7993dd"
+          }
+        ],
+        "vbmeta": [
+          {
+            "bytes": 8192,
+            "sha256": "e076dd1bd60d51032e952c32db0eb27ca42fd5e4306ae5b50a7e34b393e6e495"
+          }
+        ],
+        "vbmeta_system": [
+          {
+            "bytes": 4096,
+            "sha256": "747152a24814e4aa37ef89c15ca69777218351e2d2f351168b9a6eb4bace70cf"
+          }
+        ],
+        "boot": [
+          {
+            "bytes": 201326592,
+            "sha256": "aa6060fc0e8f3612164dbcd260f4c8b3ef720d0d5d704d2db56e601a80e7c7bd"
+          }
+        ],
+        "recovery": [
+          {
+            "bytes": 104857600,
+            "sha256": "1ef3c1a66e52d0f1e46dcbe327ccadf4eeb7eb9504009b75a80a7c03984d392f"
+          }
+        ],
+        "aop": [
+          {
+            "bytes": 237568,
+            "sha256": "e8aafa0181a4fc1b44846d5c517365535ddef89f27488755b52806f9054158db"
+          }
+        ],
+        "aop_config": [
+          {
+            "bytes": 16384,
+            "sha256": "184a5f0868805e1631df33f73dd1b66eb1b66fdbbfc9eb6ff8645950d2273c89"
+          }
+        ],
+        "bluetooth": [
+          {
+            "bytes": 2240512,
+            "sha256": "0e274bdecd3c83c2b93e3f7c4ccbc2d8cfb77ab707648588810de1658472fa15"
+          }
+        ],
+        "cpucp": [
+          {
+            "bytes": 159744,
+            "sha256": "b810db0f94c6a6400ec9e1a3b8f4997c8e59e75812ed8bfbecefce843336b400"
+          }
+        ],
+        "devcfg": [
+          {
+            "bytes": 57344,
+            "sha256": "4eb66362952555291cd629655a4fded678fc246c8828d20e47e14821c689a88c"
+          }
+        ],
+        "dsp": [
+          {
+            "bytes": 67108864,
+            "sha256": "e8854f99423bb6c638c6f605de0359de2f6261325b4b2126dd0323165f3e445b"
+          }
+        ],
+        "featenabler": [
+          {
+            "bytes": 98304,
+            "sha256": "ff61aeac64af3e49d55e9baf7147ef76b1f2bbfc8ecd94cd6d8341e13fc0aae0"
+          }
+        ],
+        "hyp": [
+          {
+            "bytes": 1257472,
+            "sha256": "46c088215f1153cf235be779ad6a40260efee75ac2ce9c3bd9fd3d402f84cc23"
+          }
+        ],
+        "imagefv": [
+          {
+            "bytes": 6299648,
+            "sha256": "531fe4f173b791dda7de73b685440bce24a44968d4c129807317c825161e0714"
+          }
+        ],
+        "keymaster": [
+          {
+            "bytes": 368640,
+            "sha256": "95afa2c9a029a74548498ca9f168f2801594361fe35e9e3ba7f57704f43b89ac"
+          }
+        ],
+        "modem": [
+          {
+            "bytes": 114151424,
+            "sha256": "4b28f839d45f5fabec8c874bd076957dc672e3810726f76e78070143bad6d563"
+          }
+        ],
+        "odm": [
+          {
+            "bytes": 526495744,
+            "sha256": "570ff143885ddc9fea70d06be0cae80c2aa5a78e410911ffd0de8e4c376f7c1b"
+          }
+        ],
+        "product": [
+          {
+            "bytes": 4402311168,
+            "sha256": "0bdd658036d42eec8806acc5f842f011be49365f37a2de02602f8c4083bd6d57"
+          }
+        ],
+        "qupfw": [
+          {
+            "bytes": 53248,
+            "sha256": "c71d47649fb1d2022559b9d545393d3d426bb5b2c61f55e2e720a5f58e293365"
+          }
+        ],
+        "shrm": [
+          {
+            "bytes": 65536,
+            "sha256": "0855441126e88d4280cf0fb97ad3f6f8963128fe9cb03198736832ed0ae25965"
+          }
+        ],
+        "system": [
+          {
+            "bytes": 770969600,
+            "sha256": "ff65fc4a7f321273b76f0d5607b8a6da7e3ffe8db33ed200dfa86adf5dcc903b"
+          }
+        ],
+        "system_ext": [
+          {
+            "bytes": 646275072,
+            "sha256": "fbae647da6162870aa7b779d0d9792df759f359b3043713565056418a14b29f6"
+          }
+        ],
+        "tz": [
+          {
+            "bytes": 3911680,
+            "sha256": "ffc8dae3992be691636353c30cfe0c6eb7f889a5aad52b49edbcdec2ad733375"
+          }
+        ],
+        "uefi": [
+          {
+            "bytes": 2760704,
+            "sha256": "acf7ca320ad78df93f51285b6523f0dba880e99fdb7772b4f8ea52baea76f2fd"
+          }
+        ],
+        "uefisecapp": [
+          {
+            "bytes": 172032,
+            "sha256": "759bf496871dd51b2b2309da15e7d384aed0423a50d65cec47652bf153a99365"
+          }
+        ],
+        "vendor": [
+          {
+            "bytes": 1402441728,
+            "sha256": "181acf6a6d8a59d2c128c34629e1243817ea912d0a5bb4a4dc4d7d27afdfffef"
+          }
+        ],
+        "vendor_boot": [
+          {
+            "bytes": 100663296,
+            "sha256": "ec4c6543c254873bd6490ca01185c90cd11f01d99e16c70008923c13d73feab7"
+          }
+        ],
+        "vendor_dlkm": [
+          {
+            "bytes": 29577216,
+            "sha256": "f7be124c4d8e747462be10565cc3fab0a8fcdad7b8b1ec7b503fd34b5b3f4c11"
+          }
+        ],
+        "vm-bootsys": [
+          {
+            "bytes": 269996032,
+            "sha256": "d1a9864bb85d2448398376ba0221216f70bbe65a167c8213d0ad1aa74ae887ff"
+          }
+        ],
+        "xbl": [
+          {
+            "bytes": 1093632,
+            "sha256": "c4ff4a36f593c48bf77c6accadec93e71cdab82e495c326a898fca182cc9faa1"
+          }
+        ],
+        "xbl_config": [
+          {
+            "bytes": 114688,
+            "sha256": "5a61d4d593377e33040ea13e6ffe233114becd565f48248cf92ccdd295a251ce"
+          }
+        ],
+        "xbl_ramdump": [
+          {
+            "bytes": 872448,
+            "sha256": "49fbf87a28511be922ebf087ea7c217858303326788904b359e09806e486880d"
+          }
+        ],
+        "mi_ext": [
+          {
+            "bytes": 155648,
+            "sha256": "3969e18eccdd79df4000c89bf8ab3d119d0944a67cd559b2ca03609ca769bf16"
+          }
+        ],
+        "super": [
+          {
+            "bytes": 7725176632,
+            "sha256": "e01baf61b4417921a5a856039bf712ed37d86d9279e08104020a38d69aa1647e"
+          }
+        ]
+      },
+      "projected": {
+        "vbmeta": {
+          "measurement": {
+            "partition_bytes": 131072,
+            "hash_bytes": 131072,
+            "sha256": "99955b2ce89fcdaaac4327c8858557dd758eb6908c15db409f219959396fc86f"
+          },
+          "avb": {
+            "status": "complete",
+            "metadata_bytes": 5824,
+            "metadata_sha256": "ec4475ad5dda3d64930dea0bffd0d1469d8ee9717912c8d983cd2a191445193b",
+            "normalized_flags_sha256": "ec4475ad5dda3d64930dea0bffd0d1469d8ee9717912c8d983cd2a191445193b",
+            "flags": 0,
+            "partition_sha256": "99955b2ce89fcdaaac4327c8858557dd758eb6908c15db409f219959396fc86f"
+          }
+        },
+        "vbmeta_system": {
+          "measurement": {
+            "partition_bytes": 131072,
+            "hash_bytes": 131072,
+            "sha256": "017e0b39ad1d76d470b6c76350d7c584b87988f0e7dadd600c09f259c5bbed0f"
+          },
+          "avb": {
+            "status": "complete",
+            "metadata_bytes": 2816,
+            "metadata_sha256": "f4d260b4ea2bcecebabc87e7541d59d8f9c4445745b50df6e86c0df79d3c9d24",
+            "normalized_flags_sha256": "f4d260b4ea2bcecebabc87e7541d59d8f9c4445745b50df6e86c0df79d3c9d24",
+            "flags": 0,
+            "partition_sha256": "017e0b39ad1d76d470b6c76350d7c584b87988f0e7dadd600c09f259c5bbed0f"
+          }
+        },
+        "dtbo": {
+          "measurement": {
+            "partition_bytes": 25165824,
+            "hash_bytes": 16765179,
+            "sha256": "837ba18a301200a12e89cf04d728adb872f3de60c517d7f40a096b6ed22b466a"
+          }
+        }
+      },
+      "super_bytes": 9126805504,
+      "rom_abl": "hyperos-abl-20250318",
+      "archive": null,
+      "evidence": "ROM comparison 2026-11-03; actual MIUI reads / pinned HyperOS images and official payload metadata / pinned Miku ZIP. Preview only; no install qualification.",
+      "install_profile_id": "stock"
+    },
+    {
+      "id": "miku26101322",
+      "label": "MikuUI Blooming 26101322 / Android 16",
+      "device": "liuqin",
+      "images": {
+        "dtbo": [
+          {
+            "bytes": 25165824,
+            "sha256": "5b9a9d2f67449d733e3594300b6f96fc816f09ab94c4e38bdbf429694c74d8f7"
+          }
+        ],
+        "vbmeta": [
+          {
+            "bytes": 8192,
+            "sha256": "513d71df459fe82c31003b705ad419b20b451db87ce1185906b0eb5bca9291df"
+          }
+        ],
+        "vbmeta_system": [
+          {
+            "bytes": 4096,
+            "sha256": "d42f9983a37e43abb9351344bb2bb2a16b7e038329b4c8a44d4a5bf8208c7231"
+          }
+        ],
+        "boot": [
+          {
+            "bytes": 201326592,
+            "sha256": "f1a40a6addf1ce1b6ec2f9bb8c534a4239823ebd40e47ec4e4ef0a6479fe7b64"
+          }
+        ],
+        "recovery": [
+          {
+            "bytes": 104857600,
+            "sha256": "f52352006ced99a632d7a4f7ab57b27f9bc8ef0c01f4a692e2247212b467601f"
+          }
+        ],
+        "odm": [
+          {
+            "bytes": 868352,
+            "sha256": "62468d31b8dde27ef23ce0e717ad19ac4110b74f1a0eef2f7a9347d4a6f0299c"
+          }
+        ],
+        "product": [
+          {
+            "bytes": 771784704,
+            "sha256": "dd46cdabb649cdd78c3ae2551f57af46db0102acbe27892290b67e89c183eb10"
+          }
+        ],
+        "system": [
+          {
+            "bytes": 710361088,
+            "sha256": "6b60886142534dc46cbc729b22219d1860fab10a84ab2e3cec49125da47a7141"
+          }
+        ],
+        "system_ext": [
+          {
+            "bytes": 323723264,
+            "sha256": "78a42248d146203494725e2ea15ab2f92316a41fe7bbeb82d46ec5c1156e6c07"
+          }
+        ],
+        "vendor": [
+          {
+            "bytes": 1148882944,
+            "sha256": "2cb507d661417d6ea84ef11287070dc82e9e2f135481681a6be7026571f79614"
+          }
+        ],
+        "vendor_boot": [
+          {
+            "bytes": 100663296,
+            "sha256": "07d5d57785ee8968746517d1a02896eac7a2e4971e53b1f4a092a283bc69718a"
+          }
+        ],
+        "vendor_dlkm": [
+          {
+            "bytes": 29601792,
+            "sha256": "a8e268eee4cd2353beb556a452b8a4d72c188017f8a07722efd470dd820f8c66"
+          }
+        ],
+        "super": [
+          {
+            "bytes": 9126805504,
+            "sha256": "b02910400aaef43822cc6b5ad2b2bc5cf70a433894b7d767b3ff4b97a584921e"
+          }
+        ]
+      },
+      "projected": {
+        "vbmeta": {
+          "measurement": {
+            "partition_bytes": 131072,
+            "hash_bytes": 131072,
+            "sha256": "8f744e2b88e3297ebefe6881742d3694e492eb86531afefdff7bee67c5842c39"
+          },
+          "avb": {
+            "status": "complete",
+            "metadata_bytes": 4992,
+            "metadata_sha256": "c7e4fa8a5f7e5030ac6ca8dd0505b3749590bab504a24ca40685adc908f915cf",
+            "normalized_flags_sha256": "47addfb72d7dc018663f55aba1cde4a38bf080bd0aaed8cae8e907e2d148b11f",
+            "flags": 3,
+            "partition_sha256": "8f744e2b88e3297ebefe6881742d3694e492eb86531afefdff7bee67c5842c39"
+          }
+        },
+        "vbmeta_system": {
+          "measurement": {
+            "partition_bytes": 131072,
+            "hash_bytes": 131072,
+            "sha256": "4725aeeb32f62f4923ed817a8e944b9f7d24be63d7b1ac26ef4617d3e0919905"
+          },
+          "avb": {
+            "status": "complete",
+            "metadata_bytes": 2816,
+            "metadata_sha256": "0fc959b63ff81f9a8c06f8914851e0a1f18d79e20afe7dce75c9e7d4403bee3a",
+            "normalized_flags_sha256": "0fc959b63ff81f9a8c06f8914851e0a1f18d79e20afe7dce75c9e7d4403bee3a",
+            "flags": 0,
+            "partition_sha256": "4725aeeb32f62f4923ed817a8e944b9f7d24be63d7b1ac26ef4617d3e0919905"
+          }
+        },
+        "dtbo": {
+          "measurement": {
+            "partition_bytes": 25165824,
+            "hash_bytes": 16762185,
+            "sha256": "72f88985d0729a274e8f832f68a889207a0f6aba8bfd0b25bd783cde050ac1a8"
+          }
+        }
+      },
+      "super_bytes": 9126805504,
+      "rom_abl": null,
+      "archive": {
+        "format": "payload-zip-v2",
+        "archive": "MikuUI-Blooming-liuqin-26101322-GAPPS-UNOFFICIAL.zip",
+        "bytes": 2172677658,
+        "sha256": "177883dc762cc2ebccf1978d911a1026ef278cef24d18cd302fced1a532b7323"
+      },
+      "evidence": "ROM comparison 2026-11-03; actual MIUI reads / pinned HyperOS images and official payload metadata / pinned Miku ZIP. Preview only; no install qualification.",
+      "install_profile_id": "miku-blooming-26101322"
+    },
+    {
+      "id": "lineage241022",
+      "label": "LineageOS 24.0 · 20261022（仅分析，未准入写入）",
+      "device": "liuqin",
+      "rom_abl": null,
+      "install_profile_id": "lineage-24-20261022",
+      "current_firmware_admitted": false,
+      "super_bytes": 9126805504,
+      "archive": {
+        "format": "payload-zip-v2",
+        "archive": "lineage-24.0-20261022-UNOFFICIAL-liuqin.zip",
+        "bytes": 1657860317,
+        "sha256": "f2b79cdf443e41300fef26b2d497ae40376a0d32a68e4d32e6baecb810cf36a8"
+      },
+      "images": {
+        "abl": [
+          {
+            "bytes": 204800,
+            "sha256": "7fb3bcf4e4d9b4ef217613cba7f715254a1506e0c3bbaf5955ee279fe6fe26f0"
+          }
+        ],
+        "aop": [
+          {
+            "bytes": 237568,
+            "sha256": "abef0100f942b7f9f39d49190ce2d7c22c5ffc543570dcb608ef717030126627"
+          }
+        ],
+        "aop_config": [
+          {
+            "bytes": 16384,
+            "sha256": "8dc8f18762558441119276ba2121690fe291619a091b57e5b81e41921dca2c07"
+          }
+        ],
+        "bluetooth": [
+          {
+            "bytes": 2240512,
+            "sha256": "1a29b883de39fef54bd379edd7cd748549d98703fbc196828a9dc5a99a62b168"
+          }
+        ],
+        "boot": [
+          {
+            "bytes": 201326592,
+            "sha256": "b21e0d5002f70f4bf6ce74d690503168ea01bc194ca1b08c247243c1bd0e4e1d"
+          }
+        ],
+        "cpucp": [
+          {
+            "bytes": 159744,
+            "sha256": "89eb7ac0b5b8a39f74849f76a51aba37b6ce28cfa57538ac43b823fa9237cc3a"
+          }
+        ],
+        "devcfg": [
+          {
+            "bytes": 57344,
+            "sha256": "28853bfb6b74ad7b222fb41918f4c965dd3b4d5f2a1f0ee247680347cba3e70e"
+          }
+        ],
+        "dsp": [
+          {
+            "bytes": 67108864,
+            "sha256": "e8854f99423bb6c638c6f605de0359de2f6261325b4b2126dd0323165f3e445b"
+          }
+        ],
+        "dtbo": [
+          {
+            "bytes": 25165824,
+            "sha256": "b6a2b3d4e03c595ecf7de0ac83bef4440197188268111a32cc8dcce38812c011"
+          }
+        ],
+        "featenabler": [
+          {
+            "bytes": 98304,
+            "sha256": "ccb33d079d3a8ccfea3cdb9eb71971f98c6ae542eab33b9b04e1fd5bed1f7a1d"
+          }
+        ],
+        "hyp": [
+          {
+            "bytes": 1257472,
+            "sha256": "b6a8860aec0f540655236cab50edd65c0718309fc5e71f7cb2ed8b68dfaeb75f"
+          }
+        ],
+        "imagefv": [
+          {
+            "bytes": 6299648,
+            "sha256": "078410e5432d02166752c13f2e67bd93ce0bece026fe96dbced7c5b140244db7"
+          }
+        ],
+        "keymaster": [
+          {
+            "bytes": 368640,
+            "sha256": "fa9faa17a555376abf16c7a860a776bff63a71f7c166abfbb7b827ba1e0db949"
+          }
+        ],
+        "modem": [
+          {
+            "bytes": 114511872,
+            "sha256": "b28b395d78093aa69323f689ee0c7178310890b612b932d701fe5d7a9fbf453e"
+          }
+        ],
+        "odm": [
+          {
+            "bytes": 2007040,
+            "sha256": "51f79c686235c7add33af4519a9d2ecd5577787c01319190e3ca13b427eb9652"
+          }
+        ],
+        "product": [
+          {
+            "bytes": 1695076352,
+            "sha256": "6c6703c8b8f2a2a39243d50ada1baed4d5852f1a228d7b70079b5219036d73b7"
+          }
+        ],
+        "qupfw": [
+          {
+            "bytes": 53248,
+            "sha256": "62d2678763d55e8a57d48196b0690ed272ea26a857d6e12d2b3b3e834f63c6b1"
+          }
+        ],
+        "recovery": [
+          {
+            "bytes": 104857600,
+            "sha256": "f213ff15125fe23ac7999daf8508ff78aebff3db7abf77b2ae35e987233fc8ed"
+          }
+        ],
+        "shrm": [
+          {
+            "bytes": 65536,
+            "sha256": "620c5bcd23c9718aaae99155d34c529e4ff41b020fe1ec4b0ee4b01043bd091b"
+          }
+        ],
+        "system": [
+          {
+            "bytes": 1159905280,
+            "sha256": "3a51f46a7bf88f51e87420a4858ef876b312b65fd6b5aed5fbb668bb9b53923b"
+          }
+        ],
+        "system_ext": [
+          {
+            "bytes": 594792448,
+            "sha256": "bd9cd5b722bca0776a4b747b55f2b580f73fe56c656518bbbed2763dc172057d"
+          }
+        ],
+        "tz": [
+          {
+            "bytes": 3911680,
+            "sha256": "c9bd3f5b46c58f977bc53182cbc6ad4f429dcb10a40278c87963cfdddb84f691"
+          }
+        ],
+        "uefi": [
+          {
+            "bytes": 2760704,
+            "sha256": "4d9cded821eeea4df6db579bdb44a92cff88c2a0a04d3d40f1bbb2e79148493b"
+          }
+        ],
+        "uefisecapp": [
+          {
+            "bytes": 172032,
+            "sha256": "fbcbdb11ce980d83affbbcb6af0d635fd51d01b7b4e059964a77b18288b3f042"
+          }
+        ],
+        "vbmeta": [
+          {
+            "bytes": 8192,
+            "sha256": "d39c0cea7ec8a2eb02627e666fa599d171e9492ea4baf00af51a44e2d4139a5f"
+          }
+        ],
+        "vbmeta_system": [
+          {
+            "bytes": 4096,
+            "sha256": "880340bbe5c9d92343e64944569eab16958c244309b6a499ab11479d967eba57"
+          }
+        ],
+        "vendor": [
+          {
+            "bytes": 1691529216,
+            "sha256": "7074c24ec3841c28be7ea98afe3cfda660264c5154447b7b6ded40f6c6aa559e"
+          }
+        ],
+        "vendor_boot": [
+          {
+            "bytes": 100663296,
+            "sha256": "156dddfbe944d44a1c2284723f9709286ebfe9fcd866be216e0160f3fb84b945"
+          }
+        ],
+        "vendor_dlkm": [
+          {
+            "bytes": 95215616,
+            "sha256": "43e9af4b4685a6c3e2613aef5d2926b386aed96211298b3d3d290a237c0ad25b"
+          }
+        ],
+        "vm-bootsys": [
+          {
+            "bytes": 269996032,
+            "sha256": "d1a9864bb85d2448398376ba0221216f70bbe65a167c8213d0ad1aa74ae887ff"
+          }
+        ],
+        "xbl": [
+          {
+            "bytes": 1093632,
+            "sha256": "ed71b5aa1f752dc3ccec5e29e0c3239fa6baa4b2f7178105d0980eab4d4bcfe0"
+          }
+        ],
+        "xbl_config": [
+          {
+            "bytes": 114688,
+            "sha256": "f3ffab12bd29aa36233ec1f2254f8284d4802d5c201e47bb76f10b729bda135e"
+          }
+        ],
+        "xbl_ramdump": [
+          {
+            "bytes": 872448,
+            "sha256": "eda659610b325370141d0dc87a6306c968d931c96f85e6d0f08a0c62896b5a1b"
+          }
+        ],
+        "super": [
+          {
+            "bytes": 9126805504,
+            "sha256": "5921ea0dcbda56acd212fb8a97dedd4519563238af84798c73943591436085b8"
+          }
+        ]
+      },
+      "projected": {
+        "vbmeta": {
+          "measurement": {
+            "partition_bytes": 131072,
+            "hash_bytes": 131072,
+            "sha256": "9012944aff6ff38f0821f71079ae07d61230b7d3301e5d12e4eb6ca4ba26c6d5"
+          },
+          "avb": {
+            "status": "complete",
+            "metadata_bytes": 5056,
+            "metadata_sha256": "b95c4a48e8ebc8936c85994de5331a551ad784b9029259d3fa46757c047dfdc8",
+            "normalized_flags_sha256": "880f0ee0627b69695c5c6b4349479d48e69a5a0233a6441558d3a95402c597bf",
+            "flags": 3,
+            "partition_sha256": "9012944aff6ff38f0821f71079ae07d61230b7d3301e5d12e4eb6ca4ba26c6d5"
+          }
+        },
+        "vbmeta_system": {
+          "measurement": {
+            "partition_bytes": 131072,
+            "hash_bytes": 131072,
+            "sha256": "e1759dd25c0cab3f815191e7177dff47f21099fea9de2b8885038b029ebf7a9a"
+          },
+          "avb": {
+            "status": "complete",
+            "metadata_bytes": 2816,
+            "metadata_sha256": "a2e5d23771dfd4bd05aa0bdfba1dc3800fe2efd4b98e17c904c3a9745bb945e4",
+            "normalized_flags_sha256": "a2e5d23771dfd4bd05aa0bdfba1dc3800fe2efd4b98e17c904c3a9745bb945e4",
+            "flags": 0,
+            "partition_sha256": "e1759dd25c0cab3f815191e7177dff47f21099fea9de2b8885038b029ebf7a9a"
+          }
+        },
+        "dtbo": {
+          "measurement": {
+            "partition_bytes": 25165824,
+            "hash_bytes": 24613491,
+            "sha256": "48f3095fddb6fbe263cb07c596cecb08003cb0729de9f31dabfaaa5ac7187903"
+          }
+        }
+      }
+    }
+  ]
+}

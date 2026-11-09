@@ -8,15 +8,12 @@ PROJECT = Path(__file__).resolve().parents[2]
 
 # These legacy Ubuntu integrations are still shipped by the GNOME DEB profile.
 # They do not depend on GNOME, but the current generic profiles do not enable
-# Snap, flash-kernel or the old image-switching installation layout.
+# Snap or flash-kernel.
 LEGACY_UBUNTU_FILES = (
     'etc/flash-kernel',
     'etc/liuqin-gnome-root',
     'etc/systemd/system/liuqin-snap-root-admission.service',
     'usr/local/sbin/liuqin-snap-root-admission',
-    'usr/local/sbin/liuqin-switch',
-    'usr/local/share/applications/liuqin-reboot-to-android.desktop',
-    'usr/share/polkit-1/actions/io.github.liuqin.switch.policy',
 )
 
 

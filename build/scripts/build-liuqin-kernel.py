@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 from pathlib import Path
 import shutil
 import subprocess
@@ -43,7 +44,13 @@ def main():
     if args.localversion and not re.fullmatch(r'-[A-Za-z0-9._+-]+', args.localversion):
         parser.error('--localversion must start with - and contain safe release characters')
     source, out = args.source.resolve(), args.out.resolve()
-    lock = json.loads(args.source_lock.read_text())
+    source_lock_bytes=args.source_lock.read_bytes()
+    lock = json.loads(source_lock_bytes)
+    sys.path.insert(0,str(project/'build/lib'))
+    import arm64_alignment
+    alignment=lock.get('load_alignment')
+    if alignment not in (None,arm64_alignment.PROTOCOL):
+        parser.error('unsupported ARM64 load-alignment protocol')
     pinned_commit = lock['commit']
     if args.custom:
         lock['commit'] = output('git', '-C', str(source), 'rev-parse', 'HEAD')
@@ -78,6 +85,10 @@ def main():
         'compiler_version': output(compiler, '--version'),
         'builder_sha256': digest(__file__),
     }
+    if alignment:
+        identity['load_alignment_inputs']=arm64_alignment.inputs()
+    if lock.get('expected_source_tree') == output('git','-C',str(source),'rev-parse','HEAD^{tree}'):
+        identity['target_patches']={name:digest(project/name) for name in lock.get('target_patches',[])}
     out.mkdir(parents=True, exist_ok=True)
     with (out / '.build.lock').open('a') as owner:
         try:
@@ -134,6 +145,15 @@ def main():
             identity['invalidated'] = 'source changed during build'
             stamp.write_text(json.dumps(identity, indent=2) + '\n')
             parser.error('source changed during build; discard this output')
+        aligned=None
+        if alignment:
+            objcopy=shutil.which(cross+'objcopy')
+            if not objcopy:
+                parser.error('missing matching ARM64 objcopy')
+            aligned=arm64_alignment.publish(out/'arch/arm64/boot/Image',compiler,objcopy)
+            if any(aligned[k]!=v for k,v in identity['load_alignment_inputs'].items()):
+                parser.error('alignment inputs changed during kernel build')
+            (out/'arm64-alignment.json').write_text(json.dumps(aligned,indent=2)+'\n')
         paths = ['arch/arm64/boot/Image', 'arch/arm64/boot/dts/' + lock['dtb'],
                  '.config', 'vmlinux', 'System.map']
         public_info = {key: identity[key] for key in
@@ -142,6 +162,15 @@ def main():
         public_info['config_sha256'] = config_sha256
         public_info.update(product_kernel_commit=pinned_commit,
                            build_kind='custom' if args.custom else ('development' if args.revision else 'product-input'))
+        if aligned:
+            public_info['load_alignment']=aligned
+            paths+=['arch/arm64/boot/Image.raw','arm64-alignment.json']
+        if args.source_lock.read_bytes()!=source_lock_bytes:
+            parser.error('source lock changed during kernel build')
+        (out/'source-lock.json').write_bytes(source_lock_bytes)
+        paths.append('source-lock.json')
+        public_info['source_lock_sha256']=hashlib.sha256(source_lock_bytes).hexdigest()
+        if 'target_patches' in identity:public_info['target_patches']=identity['target_patches']
         (out / 'build-info.json').write_text(json.dumps(public_info, indent=2) + '\n')
         paths.append('build-info.json')
         (out / 'SHA256SUMS').write_text(''.join(f'{digest(out / p)}  {p}\n' for p in paths))

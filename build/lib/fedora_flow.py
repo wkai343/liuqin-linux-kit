@@ -7,6 +7,7 @@ import shutil
 import sys
 from source_flow import Flow, load_module
 from source_build import PROJECT, download, sha, tree_identity
+from storage_scope import inputs as storage_scope_inputs
 
 
 class FedoraFlow(Flow):
@@ -61,14 +62,16 @@ class FedoraFlow(Flow):
             build,['assembled/sensor-stack.tar'])/'assembled/sensor-stack.tar'
 
     def device_debs(self):
-        sensors=self.sensors();board=self.board();tools=self.tools()
+        sensors=self.sensors();board=self.board();tools=self.tools();storage=storage_scope_inputs()
         def build(out):self.run([sys.executable,'build/scripts/build-liuqin-rpms.py',
             '--firmware',str(PROJECT/'device/firmware'),'--speakers',str(board/'speaker-firmware'),
-            '--sensors',str(sensors),'--busybox',tools['BUSYBOX'],'--out',str(out/'rpms'),'--version',self.version])
+            '--sensors',str(sensors),'--busybox',tools['BUSYBOX'],'--out',str(out/'rpms'),'--version',self.version],
+            env=dict(STORAGE_SCOPE_CC=storage['compiler']))
         return self.stage('fedora-device-rpms',dict(sensors=sha(sensors),
             firmware=tree_identity(PROJECT/'device/firmware'),speakers=tree_identity(board/'speaker-firmware'),
             board_overlay=tree_identity(PROJECT/'device/board-overlay'),
             overlay_builder=sha(PROJECT/'build/lib/device_overlay.py'),busybox=sha(tools['BUSYBOX']),version=self.version,
+            storage_scope=storage,storage_builder=sha(PROJECT/'build/lib/storage_scope.py'),
             builder=sha(PROJECT/'build/scripts/build-liuqin-rpms.py'),packager=sha(PROJECT/'build/lib/rpm_package.py')),
             build,['rpms'])/'rpms'
 
@@ -102,7 +105,7 @@ class FedoraFlow(Flow):
 
     def fingerprint_rpm(self):
         base=self.target_runtime_root();sources=self.fingerprint_sources()
-        name='liuqin-fingerprint-0.1.0-7.liuqin.aarch64.rpm'
+        name='liuqin-fingerprint-0.1.0-10.liuqin.aarch64.rpm'
         def build(out):
             self.target_action('fingerprint',base,out/'assembled',
                 fingerprint_libfprint_source=sources['libfprint'],
@@ -179,9 +182,9 @@ class FedoraFlow(Flow):
             build,['packed/rootfs.tar.gz','packed/native-root.contract'])/'packed'
 
     def plan(self):
-        result=super().plan();result['steps'][0]='官方 Fedora 44 ARM64 基础系统'
-        result['output']='out/releases/fedora-plasma-<内容标识>/'
-        result['installer_base']=self.installer_source
+        result=super().plan();result['steps'][0]='官方 Fedora '+self.source['release']+' ARM64 基础系统'
+        result['output']='out/build/from-source/（使用 outputs 查看配套 boot/rootfs）'
+        result['runtime_base']=self.runtime_source
         result['kernel_configuration']='额外启用 Fedora SELinux 片段；图形启动包含固件帧缓冲配置'
         result['package_format']='rpm'
         if self.recipe['first_boot_setup']:

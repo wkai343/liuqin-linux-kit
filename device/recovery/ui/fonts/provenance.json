@@ -1,0 +1,15 @@
+{
+  "source_font": "Noto Sans SC, instantiated at weight 500",
+  "source_font_sha256": "6d5db97d212552553a3ea26d656c287da940a02db3482fe98bb5db13f08895da",
+  "source_font_license": "SIL Open Font License 1.1",
+  "generator": "lv_font_conv 1.5.3",
+  "range": "U+0020–U+007E plus Recovery captions and switch diagnostics",
+  "bpp": 4,
+  "compression": false,
+  "files": {
+    "ui_font_20.c": "044b689aafe4a3d1827ac92833f429c4a97196722e0cb7d4c1e41d0bd8812f04",
+    "ui_font_26.c": "79aa1cf4c4d925387fb4336417efbd290623d20b1c32cc75773b891a4f453630",
+    "ui_font_34.c": "82a8a8e5f2fc0889468b4b5aa2ddcfc9188843f67a5c357f57f935652db1b992",
+    "OFL.txt": "1c05c68c34f9708415aada51f17e1b0092d2cea709bf4a94cd38114f9e73d7d9"
+  }
+}

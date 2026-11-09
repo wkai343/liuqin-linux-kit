@@ -1,0 +1,40 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] Serialize notification enable and publish initial power state
+
+The power-supply registration event can precede charger-service readiness,
+so a cable already attached before boot may not produce another physical
+attach event for consumers. Serialize notification enable on the same mutex
+as property requests, then publish the available supplies after the ACK.
+Do not change charger limits, voltage, PD policy or USB roles.
+
+diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
+index b807b9c9c..490a16ca1 100644
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -2492,9 +2492,26 @@ static void qcom_battmgr_enable_worker(struct work_struct *work)
+ 	};
+ 	int ret;
+ 
++	mutex_lock(&battmgr->lock);
+ 	ret = qcom_battmgr_request(battmgr, &req, sizeof(req));
++	mutex_unlock(&battmgr->lock);
+ 	if (ret)
+ 		dev_err(battmgr->dev, "failed to request power notifications\n");
++	else {
++		/* Re-publish an already-attached supply after the firmware client
++		 * is ready. Registration may have been observed while service_up
++		 * was false, and no new physical attach event is guaranteed.
++		 * Keep all charge-current/voltage policy inside the firmware.
++		 */
++		if (battmgr->bat_psy)
++			power_supply_changed(battmgr->bat_psy);
++		if (battmgr->usb_psy)
++			power_supply_changed(battmgr->usb_psy);
++		if (battmgr->ac_psy)
++			power_supply_changed(battmgr->ac_psy);
++		if (battmgr->wls_psy)
++			power_supply_changed(battmgr->wls_psy);
++	}
+ }
+ 
+ static void qcom_battmgr_pdr_notify(void *priv, int state)

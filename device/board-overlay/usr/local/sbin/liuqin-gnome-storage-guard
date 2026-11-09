@@ -10,6 +10,8 @@ marker_sha=bd86a359f5b6bf05f09abf544967489e924c251ab7c07684df62b0dbda4c3fca
 dev_root=${LIUQIN_GNOME_GUARD_TEST_DEV_ROOT:-/dev}
 mounts=${LIUQIN_GNOME_GUARD_TEST_MOUNTS:-/proc/mounts}
 kmsg=${LIUQIN_GNOME_GUARD_TEST_KMSG:-/dev/kmsg}
+scope=${LIUQIN_GNOME_GUARD_TEST_SCOPE_HELPER:-/usr/libexec/liuqin-storage-seal}
+policy_version=LIUQIN_DESKTOP_UFS_ONLY_V1
 
 fail() {
 	echo "liuqin-gnome-guard: critical: $*" >>"$kmsg" 2>/dev/null || :
@@ -32,16 +34,11 @@ path_is_block() {
 root_source=
 root_fstype=
 roots=0
-homes=0
-home_candidate=
-home_fstype=
-home_options=
 while IFS=' ' read -r source target fstype options _; do
 	case $target in
 	/)
 		roots=$((roots + 1))
-		# The initramfs already proved PARTNAME=linux_root (split layout) or
-		# PARTNAME=userdata before switch_root; the exact partition number
+		# The initramfs already proved PARTNAME=userdata before switch_root; the exact partition number
 		# varies with the capacity variant, so here the rw pair is derived from
 		# the actual root mount on the first UFS LUN.
 		case $source in "$dev_root"/sda[0-9]*) ;; *) fail 'unexpected root source' ;; esac
@@ -49,12 +46,6 @@ while IFS=' ' read -r source target fstype options _; do
 		case ,$options, in *,rw,*) ;; *) fail 'root is not read-write' ;; esac
 		root_source=$source
         root_fstype=$fstype
-		;;
-	/home)
-		homes=$((homes + 1))
-		home_candidate=$source
-		home_fstype=$fstype
-		home_options=$options
 		;;
 	esac
 done <"$mounts"
@@ -68,47 +59,22 @@ elif [ "$root_fstype" != ext4 ]; then
     fail 'Btrfs root lacks its installation marker'
 fi
 
-# The split layout mounts LABEL=LIUQIN_HOME at /home from fstab.  The unit is
-# ordered after home.mount, so that mount is final here, and a home node that
-# passes every check below stays read-write beside the root pair: sealing it
-# made systemd mount /home read-only and first-boot user creation fail.
-#
-# A home that fails a check does not take the root down.  /home is nofail by
-# design, and the initramfs deliberately leaves an unverified linux_home
-# sealed, which systemd then mounts read-only; failing here would turn that
-# degraded boot into a read-only root.  Such a home is not admitted -- it is
-# sealed with the siblings, exactly the legacy behaviour -- and the reason is
-# logged.
-home_source=
-home_reject() {
-	echo "liuqin-gnome-guard: warning: /home not admitted read-write: $*; sealing it with the siblings" >>"$kmsg" 2>/dev/null || :
-}
-if [ "$homes" -gt 1 ]; then
-	home_reject 'the /home mount is duplicated'
-elif [ "$homes" = 1 ]; then
-	case $home_candidate in
-	"$dev_root"/sda[0-9]*)
-		if [ "$home_fstype" != ext4 ]; then
-			home_reject "unexpected filesystem $home_fstype"
-		elif [ "$home_candidate" = "$root_source" ]; then
-			home_reject 'it shares the root source'
-		else
-			case ,$home_options, in
-			*,rw,*) home_source=$home_candidate ;;
-			*) home_reject 'it is mounted read-only' ;;
-			esac
-		fi
-		;;
-	*) home_reject "unexpected source $home_candidate" ;;
-	esac
-fi
-
+nodes=$("$scope" --list-ufs) || fail 'internal UFS scope is unproven'
+has_parent=false
+has_root=false
+for name in $nodes; do
+    [ "$name" != sda ] || has_parent=true
+    [ "$dev_root/$name" != "$root_source" ] || has_root=true
+done
+[ "$has_parent" = true ] || fail 'root parent is outside internal UFS'
+[ "$has_root" = true ] || fail 'root is outside internal UFS'
 total=0
-for node in "$dev_root"/sd*; do
-	path_is_block "$node" || continue
+for name in $nodes; do
+    node=$dev_root/$name
+    path_is_block "$node" && [ ! -L "$node" ] || fail 'noncanonical UFS block node'
 	total=$((total + 1))
 	case $node in
-	"$dev_root/sda"|"$root_source"|"$home_source")
+	"$dev_root/sda"|"$root_source")
 		[ "$($BB blockdev --getro "$node" 2>/dev/null)" = 0 ] || fail "$node is unexpectedly read-only"
 		;;
 	*)
@@ -118,8 +84,5 @@ for node in "$dev_root"/sd*; do
 	esac
 done
 [ "$total" -ge 2 ] || fail 'no UFS namespace'
-if [ -n "$home_source" ]; then
-	echo "liuqin-gnome-guard: PASS ($total nodes; root and home pairs rw, all siblings ro)" >>"$kmsg" 2>/dev/null || :
-else
-	echo "liuqin-gnome-guard: PASS ($total nodes; root pair rw, all siblings ro)" >>"$kmsg" 2>/dev/null || :
-fi
+[ "$("$scope" --list-ufs)" = "$nodes" ] || fail 'internal UFS namespace changed'
+echo "liuqin-gnome-guard: PASS ($total nodes; root pair rw, all UFS siblings ro)" >>"$kmsg" 2>/dev/null || :

@@ -23,14 +23,6 @@ def readiness_services(candidate):
     return (candidate.get("control_service", "ssh"), "NetworkManager", *desktop)
 
 
-def render_module_unit(template, candidate):
-    services = " ".join(name.removesuffix(".service") + ".service"
-                        for name in readiness_services(candidate))
-    return "\n".join(line.split("=", 1)[0] + "=" + services
-                     if line.startswith(("After=", "Wants=")) else line
-                     for line in template.splitlines()) + "\n"
-
-
 def installed_kernel_module(root=Path("/"), release=None):
     """Use the running kernel's authenticated V2 module record, not a copied KO."""
     sys.path.insert(0, str(root / "usr/lib/liuqin"))

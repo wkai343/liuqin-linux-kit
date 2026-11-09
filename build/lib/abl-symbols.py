@@ -16,6 +16,7 @@ from pathlib import Path
 
 SINK_NODE_NAME = "liuqin-abl-overlay-sink"
 SINK_PATH = "/" + SINK_NODE_NAME
+SINK_MARKER = "xiaomi,abl-overlay-sink"
 ENTRY_RE = re.compile(r"^entry\.(\d+)$")
 
 
@@ -232,7 +233,7 @@ def main():
 
     sink_phandle = max_phandle(source) + 1
 
-    lines = [f"\t{SINK_NODE_NAME} {{"]
+    lines = [f"\t{SINK_NODE_NAME} {{", f"\t\t{SINK_MARKER};"]
     if args.sink_phandle:
         lines.append(f"\t\tphandle = <{sink_phandle:#x}>;")
     lines += ["\t};", ""]
@@ -302,6 +303,8 @@ def main():
     sink_body = extract_block(result, SINK_NODE_NAME)
     if sink_body is None:
         raise SystemExit("error: the output DTB has no sink node")
+    if not re.search(rf"^\s*{re.escape(SINK_MARKER)};\s*$", sink_body, re.MULTILINE):
+        raise SystemExit("error: the output DTB lost the ABL sink marker")
     if args.sink_phandle:
         rendered = f"phandle = <{sink_phandle:#x}>;"
         occurrences = result.count(rendered)

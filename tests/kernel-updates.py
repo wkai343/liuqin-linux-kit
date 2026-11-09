@@ -82,6 +82,16 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(self.device.writes,0)
         self.assertEqual(self.block.read_bytes(), self.original)
 
+    def test_new_storage_policy_requires_userspace_update_before_boot_write(self):
+        original_interface=updater.boot_interface
+        def new_policy(path):
+            return dict(original_interface(path),storage_policy_version=1)
+        with patch.object(updater,'boot_interface',side_effect=new_policy):
+            with self.assertRaisesRegex(ArtifactError,'设备支持包'):
+                self.update.apply(self.new)
+        self.assertEqual(self.device.writes,0)
+        self.assertEqual(self.block.read_bytes(),self.original)
+
     def test_repeating_same_update_never_replaces_original_backup(self):
         record = self.update.apply(self.new); count = self.device.writes
         self.update.apply(self.new)
@@ -274,6 +284,40 @@ class PackageTests(unittest.TestCase):
             self.assertTrue((installed / 'usr/lib/modules/6.17.0-liuqin1/kernel/demo.ko').exists())
             self.assertFalse((installed / 'usr/share/liuqin/kernel.release').exists())
             self.assertFalse((installed / 'etc/liuqin/boot-updates.json').exists())
+            subprocess.run([sys.executable, '-I', '-c',
+                'import sys; sys.path.insert(0, sys.argv[1]); import liuqin_artifacts, liuqin_boot_target',
+                str(installed / 'usr/lib/liuqin')], check=True)
+
+
+@unittest.skipUnless(shutil.which('rpmbuild') and shutil.which('rpm'), 'RPM tools unavailable')
+class FedoraPackageTests(unittest.TestCase):
+    def test_offline_rpm_labels_versioned_directories_and_bypasses_the_boot_hook(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            release = '7.3.0-liuqin-fedora-label-test'
+            fixture = kernel_fixture(base / 'kernel', release)
+            output = base / 'rpms'
+            packager.build(*fixture[:3], output, '0.3.5', package_format='rpm')
+            for kind, directory in (('modules', '/usr/lib/modules'),
+                                    ('image', '/usr/lib/liuqin/boot-images')):
+                with self.subTest(kind=kind):
+                    package = next(output.glob(f'liuqin-kernel-{kind}-{release}-*.rpm'))
+                    listing = subprocess.check_output(['rpm', '-qpl', str(package)], text=True).splitlines()
+                    owned = directory + '/' + release
+                    self.assertIn(owned, listing)
+                    self.assertNotIn(directory, listing)
+                    if kind == 'modules':
+                        self.assertIn(owned + '/kernel', listing)
+                    scripts = subprocess.check_output(['rpm', '-qp', '--scripts', str(package)], text=True)
+                    posttrans = scripts.splitlines(keepends=True)[1:]
+                    command = ''.join(posttrans).replace('/usr/sbin/setfiles', 'printf "label %s\\n"')
+                    command = command.replace('/usr/sbin/liuqin-boot-update', 'printf "boot %s\\n"')
+                    def run(mode):
+                        return subprocess.check_output(['sh', '-ec', command], text=True,
+                            env=dict(os.environ, LIUQIN_OFFLINE_SELINUX_RELABEL=mode))
+                    self.assertIn('label ' + owned + '\n', run('1'))
+                    self.assertNotIn('boot ', run('1'))
+                    self.assertEqual(run('0'), f'boot hook\nboot {release}\n' if kind == 'image' else '')
 
 
 if __name__ == '__main__': unittest.main(verbosity=2)

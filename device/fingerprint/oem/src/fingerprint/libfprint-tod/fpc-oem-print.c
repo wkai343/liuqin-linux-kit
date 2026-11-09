@@ -12,6 +12,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "../protocol/fpc_gallery.h"
 
 static int
 descriptor (const char *argument)
@@ -22,110 +23,65 @@ descriptor (const char *argument)
   return errno || end == argument || *end || value < 3 || value > INT_MAX ? -1 : (int) value;
 }
 
+/* Decode private host prints without enumerating or opening a device. */
+static int
+decode_print (const char *username, const char *input_text, const char *output_text)
+{
+  int input = descriptor (input_text), output = descriptor (output_text);
+  struct stat in, out;
+  struct passwd *user = getpwnam (username);
+  g_autofree guint8 *serialized = NULL;
+  g_autoptr(FpPrint) print = NULL;
+  g_autoptr(GVariant) data = NULL;
+  g_autoptr(GVariant) bytes = NULL;
+  g_autoptr(GError) error = NULL;
+  guint32 version;
+  gsize length;
+  if (!user || input < 0 || output < 0 || input == output ||
+      fstat (input, &in) || fstat (output, &out) ||
+      !S_ISREG (in.st_mode) || !S_ISREG (out.st_mode) || in.st_uid || out.st_uid ||
+      (in.st_mode & 0777) != 0600 || (out.st_mode & 0777) != 0600 ||
+      in.st_size <= 0 || in.st_size > FPC_DATABASE_MAX + 1024 * 1024 || out.st_size ||
+      (in.st_dev == out.st_dev && in.st_ino == out.st_ino) ||
+      lseek (input, 0, SEEK_SET) < 0 || lseek (output, 0, SEEK_SET) < 0) return 2;
+  serialized = g_malloc (in.st_size);
+  for (gsize offset = 0; offset < (gsize) in.st_size;) {
+    ssize_t count = read (input, serialized + offset, in.st_size - offset);
+    if (count < 0 && errno == EINTR) continue;
+    if (count <= 0) return 1;
+    offset += count;
+  }
+  print = fp_print_deserialize (serialized, in.st_size, &error);
+  explicit_bzero (serialized, in.st_size);
+  if (!print || g_strcmp0 (fp_print_get_username (print), username) ||
+      g_strcmp0 (fp_print_get_driver (print), "fpc1264_oem") ||
+      g_strcmp0 (fp_print_get_device_id (print), "liuqin-fpc1264-oem") ||
+      !FP_FINGER_IS_VALID (fp_print_get_finger (print))) return 1;
+  g_object_get (print, "fpi-data", &data, NULL);
+  if (!data || !g_variant_is_of_type (data, G_VARIANT_TYPE ("(uay)"))) return 1;
+  g_variant_get (data, "(u@ay)", &version, &bytes);
+  const guint8 *payload = g_variant_get_fixed_array (bytes, &length, 1);
+  if (version != 2 || !length || length > FPC_DATABASE_MAX) return 1;
+  if (version == 2 && (length != FPC_REFERENCE_SIZE || memcmp (payload, "FPCREF2", 8) ||
+      fpc_le32 (payload + 8) != user->pw_uid ||
+      fpc_le32 (payload + 12) != (guint32) fp_print_get_finger (print))) return 1;
+  guint8 header[8]; fpc_put32 (header, version);
+  fpc_put32 (header + 4, fp_print_get_finger (print));
+  if (write (output, header, sizeof header) != sizeof header) return 1;
+  for (gsize offset = 0; offset < length;) {
+    ssize_t count = write (output, payload + offset, length - offset);
+    if (count < 0 && errno == EINTR) continue;
+    if (count <= 0) return 1;
+    offset += count;
+  }
+  return fsync (output) ? 1 : 0;
+}
+
 int
 main (int argc, char **argv)
 {
-  static const char *fingers[] = {NULL, "left-thumb", "left-index-finger", "left-middle-finger",
-    "left-ring-finger", "left-little-finger", "right-thumb", "right-index-finger",
-    "right-middle-finger", "right-ring-finger", "right-little-finger"};
-  struct stat input_info, output_info;
-  int input, output, finger = 0, result = 1;
-  guint8 *database = NULL, *serialized = NULL;
-  gsize length = 0, serialized_length = 0;
-  g_autoptr(FpContext) context = NULL;
-  g_autoptr(FpPrint) print = NULL;
-  g_autoptr(FpPrint) roundtrip = NULL;
-  g_autoptr(GError) error = NULL;
-  g_autoptr(GDateTime) now = NULL;
-  FpDevice *device = NULL;
-
-  if (argc != 6 || strcmp (argv[1], "--serialize") || geteuid () != 0) {
-    g_printerr ("usage (root): fpc-oem-print --serialize LINUX_USERNAME FINGER_NAME DATABASE_FD OUTPUT_FD\n");
-    return 2;
-  }
-  for (int i = FP_FINGER_FIRST; i <= FP_FINGER_LAST; i++)
-    if (!strcmp (argv[3], fingers[i]))
-      finger = i;
-  input = descriptor (argv[4]);
-  output = descriptor (argv[5]);
-  if (!getpwnam (argv[2]) || !finger || input < 0 || output < 0 || input == output ||
-      fstat (input, &input_info) || fstat (output, &output_info) ||
-      !S_ISREG (input_info.st_mode) || !S_ISREG (output_info.st_mode) ||
-      input_info.st_uid != 0 || output_info.st_uid != 0 ||
-      (input_info.st_mode & 0777) != 0600 || (output_info.st_mode & 0777) != 0600 ||
-      input_info.st_size <= 0 || input_info.st_size > 16 * 1024 * 1024 || output_info.st_size != 0 ||
-      (input_info.st_dev == output_info.st_dev && input_info.st_ino == output_info.st_ino)) {
-    g_printerr ("oem_print_serialization=FAILED phase=caller_metadata_or_private_binary_fds\n");
-    return 2;
-  }
-  int input_flags = fcntl (input, F_GETFL), output_flags = fcntl (output, F_GETFL);
-  if (input_flags < 0 || output_flags < 0 || (input_flags & O_ACCMODE) == O_WRONLY ||
-      (output_flags & O_ACCMODE) == O_RDONLY || lseek (input, 0, SEEK_SET) < 0 || lseek (output, 0, SEEK_SET) < 0) {
-    g_printerr ("oem_print_serialization=FAILED phase=binary_fd_access\n");
-    return 2;
-  }
-  length = input_info.st_size;
-  database = g_malloc (length);
-  for (gsize offset = 0; offset < length;) {
-    ssize_t count = read (input, database + offset, length - offset);
-    if (count < 0 && errno == EINTR)
-      continue;
-    if (count <= 0)
-      goto out;
-    offset += count;
-  }
-  context = fp_context_new ();
-  fp_context_enumerate (context);
-  GPtrArray *devices = fp_context_get_devices (context);
-  for (guint i = 0; i < devices->len; i++) {
-    FpDevice *candidate = g_ptr_array_index (devices, i);
-    if (!strcmp (fp_device_get_driver (candidate), "fpc1264_oem"))
-      device = candidate;
-  }
-  if (!device)
-    goto out;
-  print = g_object_ref_sink (fp_print_new (device));
-  fpi_print_set_type (print, FPI_PRINT_RAW);
-  fp_print_set_username (print, argv[2]);
-  fp_print_set_finger (print, (FpFinger) finger);
-  now = g_date_time_new_now_local ();
-  GDate date;
-  g_date_clear (&date, 1);
-  g_date_set_dmy (&date, g_date_time_get_day_of_month (now), g_date_time_get_month (now), g_date_time_get_year (now));
-  fp_print_set_enroll_date (print, &date);
-  GVariant *bytes = g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE, database, length, 1);
-  g_object_set (print, "fpi-data", g_variant_new ("(u@ay)", 1u, bytes), NULL);
-  if (!fp_print_serialize (print, &serialized, &serialized_length, &error))
-    goto out;
-  roundtrip = fp_print_deserialize (serialized, serialized_length, &error);
-  if (!roundtrip || !fp_print_compatible (roundtrip, device) ||
-      g_strcmp0 (fp_print_get_username (roundtrip), argv[2]) ||
-      fp_print_get_finger (roundtrip) != (FpFinger) finger ||
-      !fp_print_equal (print, roundtrip))
-    goto out;
-  for (gsize offset = 0; offset < serialized_length;) {
-    ssize_t count = write (output, serialized + offset, serialized_length - offset);
-    if (count < 0 && errno == EINTR)
-      continue;
-    if (count <= 0)
-      goto out;
-    offset += count;
-  }
-  if (fsync (output))
-    goto out;
-  result = 0;
-out:
-  if (result && serialized && ftruncate (output, 0))
-    g_printerr ("opaque_output_cleanup_failed=1 output_not_publishable=1\n");
-  if (database) {
-    explicit_bzero (database, length);
-    g_free (database);
-  }
-  if (serialized) {
-    explicit_bzero (serialized, serialized_length);
-    g_free (serialized);
-  }
-  g_print ("oem_print_serialization=%s opaque_output_forwarded=%d roundtrip_checked=%d template_validation=TA_required desktop_authentication=disabled\n",
-           result ? "FAILED" : "OK", result == 0, result == 0);
-  return result;
+  if (argc == 5 && !strcmp (argv[1], "--decode") && geteuid () == 0)
+    return decode_print (argv[2], argv[3], argv[4]);
+  g_printerr ("usage (root): fpc-oem-print --decode USERNAME PRINT_FD DATA_FD\n");
+  return 2;
 }

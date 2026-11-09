@@ -128,7 +128,7 @@ static int fake_stat(const char *path, struct stat *s)
 }
 
 #define main storage_seal_main
-int liuqin_storage_ready(void) { return 1; }
+int liuqin_storage_ready(int recovery) { (void)recovery; return 1; }
 #define glob fake_glob
 #define globfree fake_globfree
 #define lstat(path, out) fake_lstat(path, out)

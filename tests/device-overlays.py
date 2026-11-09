@@ -34,6 +34,10 @@ class DeviceOverlayTests(unittest.TestCase):
                      'usr/local/sbin/liuqin-gnome-storage-guard'):
             self.assertEqual((target / name).read_bytes(), (BOARD / name).read_bytes())
         self.assertTrue((target / 'usr/libexec/liuqin-rtc').stat().st_mode & 0o111)
+        for name in ('usr/local/bin/liuqin-shell','usr/local/sbin/liuqin-rescue',
+                     'usr/local/sbin/liuqin-gnome-usb-rescue',
+                     'etc/systemd/system/liuqin-gnome-usb-rescue.service'):
+            self.assertFalse((target/name).exists(),name)
         for name in (SCHEMA, 'etc/dconf', 'usr/local/libexec/liuqin-power-key-action',
                      'usr/local/bin/liuqin-camera', 'usr/local/sbin/liuqin-switch',
                      'usr/local/sbin/liuqin-snap-root-admission', 'etc/flash-kernel'):
@@ -45,7 +49,7 @@ class DeviceOverlayTests(unittest.TestCase):
         self.assertEqual((target / SLEEP).read_bytes(), (BOARD / SLEEP).read_bytes())
         self.assertEqual((target / SCHEMA).read_bytes(), (GNOME / SCHEMA).read_bytes())
         self.assertTrue((target / 'usr/local/bin/liuqin-camera').is_file())
-        self.assertTrue((target / 'usr/local/sbin/liuqin-switch').is_file())
+        self.assertFalse((target / 'usr/local/sbin/liuqin-switch').exists())
         self.assertTrue((target / 'usr/local/sbin/liuqin-snap-root-admission').is_file())
         self.assertFalse((target / 'etc/systemd/system/apt-daily.timer').is_symlink())
 

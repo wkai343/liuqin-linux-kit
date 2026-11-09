@@ -24,7 +24,6 @@ def load(name, path):
 
 
 firmware = load("firmware", ROOT / "device/fingerprint/oem/src/fingerprint/deployment/provision_firmware.py")
-package = load("release_package", ROOT / "build/scripts/build-liuqin-fingerprint-deb.py")
 image_builder = load("firmware_image", ROOT / "build/scripts/extract-liuqin-fingerprint-firmware.py")
 
 
@@ -264,24 +263,6 @@ class ReleaseTests(unittest.TestCase):
         with patch.object(pipeline, 'apps', side_effect=AssertionError('must check firmware first')):
             with self.assertRaisesRegex(ValueError, 'NON-HLOS.bin'):
                 pipeline.rootfs()
-
-    def test_root_staging_has_no_account_services_or_credentials(self):
-        payload = self.base / "payload"
-        (payload / "deployment").mkdir(parents=True)
-        conf = ROOT / "device/fingerprint/oem/src/fingerprint/libfprint-tod/fprintd-fpc1264-oem.conf"
-        (payload / "deployment/fprintd-fpc1264-oem.conf").write_text(conf.read_text())
-        root = self.base / "root"
-        with patch.object(package.subprocess, "run") as command:
-            package.stage_root(payload, root, {"deployment_mode": "installed"})
-            command.assert_not_called()
-        self.assertFalse((root / "var").exists())
-        self.assertFalse((root / "etc/passwd").exists())
-        self.assertFalse((root / "usr/share/applications").exists())
-        self.assertIn("UMask=0077", (root / "etc/systemd/system/fprintd.service.d/60-liuqin-fpc-oem.conf").read_text())
-        unit = (root / "usr/lib/systemd/system/liuqin-fpc-stable-module.service").read_text()
-        self.assertNotIn("ssh", unit)
-        self.assertNotIn("NetworkManager", unit)
-        self.assertTrue((root / "etc/systemd/system/multi-user.target.wants/liuqin-fpc-stable-module.service").is_symlink())
 
 
 if __name__ == "__main__":

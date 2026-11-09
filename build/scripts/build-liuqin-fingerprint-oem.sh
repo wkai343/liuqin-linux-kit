@@ -11,7 +11,6 @@ case ${1:-} in
     ;;
   native)
     OUT_DIR="$out" bash "$root/tools/build-tod.sh"
-    OUT_DIR="$out" bash "$root/tools/build-pam-input.sh"
     OUT_DIR="$out" bash "$root/tools/build-fprintd-oem.sh"
     ;;
   *) printf 'usage: %s clients|native\n' "$0" >&2; exit 2 ;;

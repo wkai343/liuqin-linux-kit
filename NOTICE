@@ -103,8 +103,9 @@ build/scripts/generate-boot-logo-signature.py.
 Linux 7.3 device adaptation
 --------------------------
 
-The default source record build/kernel/source.json pins Torvalds Linux
-v7.3 and a port of the existing Liuqin adaptations. The Iris SM8450 platform
+The default source record build/kernel/source.json pins Linux stable
+v7.3.3, based on Torvalds Linux v7.3, and a port of the existing Liuqin
+adaptations. The Iris SM8450 platform
 layout references Seeker0472/liuqin-nixos commit
 73e8071e09880aeb47f0a427b9a65b8cc10927c4,
 pkgs/kernel/patches/0006-liuqin-media-iris.patch:

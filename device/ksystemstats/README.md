@@ -10,7 +10,7 @@
 Adreno 共享系统内存，本适配不伪造独立显存、温度或功耗。
 
 当前 Fedora 路径从固定的 KDE 6.7.5 源码构建 `ksystemstats` RPM，并在 rootfs 装配时安装。
-2026-10-13 已在 liuqin 的 Fedora 上验证：系统概览和历史页均可显示变化的 GPU 使用率，
+Fedora 已验证系统概览和历史页显示变化的 GPU 使用率，
 用户态还可读取 GPU MHz 频率。概览使用 `gpu/all/usage`，历史页通过 `gpu/gpu` 加数字匹配单 GPU。
 源码来源和校验值见 `build/rootfs/fedora-stats-source.json`；构建代码见 `build/lib/fedora_stats.py`。
 软件包版本使用较高的 `101.liuqin` release 区分 Fedora 原包。同一版本的普通 DNF 更新会保留它；

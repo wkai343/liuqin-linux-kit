@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: MIT
+/dts-v1/;
+/plugin/;
+
+// Keep the bootloader's already initialized display for the RAM console.
+// Do not attempt a DPU/DSI or 3D handoff during this maintenance boot. The
+// simple-framebuffer node in /chosen owns scanout memory; its clocks and the
+// board's always-on panel rails remain in the original device tree.
+/ {
+    fragment@0 {
+        target-path = "/soc@0/display-subsystem@ae00000";
+        __overlay__ { status = "disabled"; };
+    };
+    fragment@1 {
+        target-path = "/soc@0/gpu@3d00000";
+        __overlay__ { status = "disabled"; };
+    };
+    // The old maintenance kernel parks the MDP root clock and reconfigures
+    // its PLL during DISPCC registration, even without an MDSS consumer.
+    // Preserve the bootloader clock setup along with its scanout. The
+    // simplefb node uses GCC_DISP_HF_AXI_CLK, not this clock provider.
+    fragment@2 {
+        target-path = "/soc@0/clock-controller@af00000";
+        __overlay__ { status = "disabled"; };
+    };
+};

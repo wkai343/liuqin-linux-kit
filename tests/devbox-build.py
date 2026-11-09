@@ -3,7 +3,6 @@
 """Build-stage routing checks without Nix, compilation, sudo or device access."""
 import importlib.util
 import contextlib
-import copy
 import hashlib
 import io
 import json
@@ -21,6 +20,7 @@ builder = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(builder)
 sys.path.insert(0, str(project / 'installer'))
 from liuqin_gui.demo import demo_image
+from image_export import export_images
 
 
 class BuildTests(unittest.TestCase):
@@ -29,22 +29,7 @@ class BuildTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.project = patch.object(builder, 'PROJECT', self.root)
         self.project.start()
-        legacy = self.root / 'legacy.json'
-        legacy.write_text(json.dumps({'root_source': 'out/build/root-custom-work'}))
-        self.data = builder.config(legacy)
-        self.data.pop('inputs_file')
-        for key in ('kernel_source', 'installer_kernel_source', 'kernel_out', 'modules_out', 'root_source', 'runtime_root', 'root_out', 'runtime_out', 'boot_out'):
-            (self.root / self.data[key]).mkdir(parents=True, exist_ok=True)
-        (self.root / self.data['installer_kernel_out']).mkdir(parents=True)
-        image = self.root / self.data['installer_image']
-        image.parent.mkdir(parents=True)
-        image.write_bytes(b'prepared installer fixture')
-        for key, name in self.data['inputs'].items():
-            path = self.root / name
-            if key in ('AUDIO_TOPOLOGY', 'BUSYBOX'):
-                path.parent.mkdir(parents=True, exist_ok=True); path.touch()
-            else:
-                path.mkdir(parents=True, exist_ok=True)
+        (self.root/'legacy.json').write_text(json.dumps({'root_source':'old-root'}))
 
     def tearDown(self):
         self.project.stop()
@@ -109,7 +94,7 @@ class BuildTests(unittest.TestCase):
         first = text.split('配套组 ' + hashlib.sha256(contract).hexdigest()[:12], 1)[1].split('\n配套组 ', 1)[0]
         self.assertIn(str(boot), first); self.assertIn(str(root), first)
         self.assertNotIn(str(alternate), first)
-        self.assertIn(str(installer), text)
+        self.assertNotIn(str(installer), text)
         self.assertEqual(text.count('配套组 '), 2)
         self.assertEqual({path: path.read_bytes() for path in self.root.rglob('*') if path.is_file()}, before)
 
@@ -121,143 +106,152 @@ class BuildTests(unittest.TestCase):
         missing = self.output_fixture('boot-missing', 'image/boot-liuqin-native.img', contract); missing.unlink()
         corrupt = self.output_fixture('boot-corrupt', 'image/boot-liuqin-native.img', contract)
         (corrupt.parent / 'native-root.contract').write_bytes(contract.replace(b'1' * 64, b'3' * 64))
-        linked = self.output_fixture('installer-linked', 'image/installer.img')
-        linked.unlink(); linked.symlink_to(self.root / self.data['installer_image'])
+        linked = self.output_fixture('boot-linked', 'image/boot-liuqin-native.img', contract)
+        outside=self.root/'outside-boot.img';outside.write_bytes(b'untrusted external image')
+        linked.unlink(); linked.symlink_to(outside)
         with contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as errors:
             builder.show_outputs()
         self.assertIn('尚无已完成', output.getvalue())
         self.assertIn('内核标识与完成记录不一致', errors.getvalue())
         self.assertNotIn(str(corrupt), output.getvalue())
 
-    def test_build_target_routes_only_to_official_rootfs_and_preserves_options(self):
+    def test_build_routes_to_system_recipe_and_preserves_options(self):
         config = self.root / 'build.json'
         config.write_text(json.dumps(dict(rootfs_config='build/rootfs/fedora-plasma.json')))
-        with patch.object(sys, 'argv', ['build.py', 'build-target', '--config', str(config), '--refresh']), \
-             patch('source_flow.execute') as execute, patch.object(builder, 'stage') as stage:
+        with patch.object(sys,'argv',['build.py','build','--config',str(config),'--refresh']), \
+             patch('source_flow.execute') as execute,patch.object(builder,'run') as run:
             builder.main()
-        self.assertEqual(execute.call_count, 1)
-        self.assertEqual(execute.call_args.args[1], 'rootfs')
+        self.assertEqual(execute.call_args.args[1],'rootfs')
         self.assertTrue(execute.call_args.kwargs['refresh'])
-        stage.assert_not_called()
-
-    def test_build_target_rejects_legacy_config_without_running_stages(self):
-        with patch.object(sys, 'argv', ['build.py', 'build-target', '--config', str(self.root / 'legacy.json')]), \
-             patch.object(builder, 'stage') as stage, self.assertRaisesRegex(ValueError, 'rootfs_config'):
-            builder.main()
-        stage.assert_not_called()
-
-    def test_kernel_uses_custom_config_and_configure_only_never_builds_images(self):
-        with patch.object(builder, 'run') as run:
-            builder.stage(self.data, 'kernel', configure_only=True)
-        argv = run.call_args.args[0]
-        self.assertIn('--custom', argv)
-        self.assertIn('--configure-only', argv)
-        self.assertIn('--config-fragment', argv)
-        self.assertNotIn('images', argv)
-
-    def test_only_rootfs_step_is_elevated(self):
-        (self.root / self.data['root_out']).rmdir()
-        with patch.object(builder, 'run') as run:
-            builder.stage(self.data, 'rootfs')
-        self.assertTrue(run.call_args.kwargs['root'])
-        self.assertIn('build/scripts/build-liuqin-custom-root.py', run.call_args.args[0])
-        (self.root / self.data['root_out']).mkdir()
-        with patch.object(builder, 'run') as run:
-            builder.stage(self.data, 'images')
-        self.assertNotIn('root', run.call_args.kwargs)
-
-    def test_target_images_reuse_installer_without_its_kernel_or_runtime(self):
-        with patch.object(builder, 'run') as run:
-            builder.stage(self.data, 'images')
-        env = run.call_args.kwargs['env']
-        self.assertEqual(env['BOOT_IMAGE'], str(self.root / self.data['boot_out'] / 'boot-liuqin-native.img'))
-        self.assertNotIn('KERNEL_SOURCE', env)
-        self.assertEqual(env['CUSTOM_ROOT_OUT'], str(self.root / self.data['root_out']))
-        self.assertEqual(env['INSTALLER_IMAGE'], str(self.root / self.data['installer_image']))
-        self.assertNotIn('INSTALLER_RUNTIME', env)
-        self.assertNotIn('INSTALLER_KERNEL_OUT', env)
-        self.assertNotIn('root', run.call_args.kwargs)
-
-    def test_installer_kernel_does_not_receive_target_zram_fragment_or_suffix(self):
-        self.data['kernel_source_lock']='custom/target.json'
-        with patch.object(builder, 'run') as run:
-            builder.stage(self.data, 'installer-kernel', configure_only=True)
-        argv = run.call_args.args[0]
-        self.assertIn(str(self.root / self.data['installer_kernel_out']), argv)
-        self.assertIn('--localversion=-liuqin-installer', argv)
-        self.assertNotIn('--config-fragment', argv)
-        self.assertNotIn(str(self.root / self.data['kernel_out']), argv)
-        self.assertEqual(argv[argv.index('--source-lock')+1],str(self.root/'build/kernel/source-6.17.json'))
-
-    def test_target_build_needs_no_runtime_root_and_never_rebuilds_installer(self):
-        self.data['runtime_root'] = 'not-prepared'
-        (self.root / self.data['root_out']).rmdir()
-        (self.root / self.data['boot_out']).rmdir()
-        config = self.root / 'build.json'; config.write_text(json.dumps(self.data))
-        with patch.object(sys, 'argv', ['build.py', 'all', '--config', str(config)]), patch.object(builder, 'stage') as stage:
-            builder.main()
-        self.assertEqual([call.args[1] for call in stage.call_args_list], ['kernel', 'modules', 'rootfs', 'boot', 'images'])
-
-    def test_kernel_update_build_does_not_require_rootfs_or_installer(self):
-        self.data.update(usb_manufacturer='测试厂商', usb_product='自定义平板')
-        self.data['root_source'] = self.data['root_out'] = self.data['runtime_root'] = self.data['installer_image'] = 'missing'
-        (self.root / self.data['boot_out']).rmdir()
-        with patch.object(builder, 'run') as run:
-            builder.stage(self.data, 'boot')
-        env = run.call_args.kwargs['env']
-        self.assertEqual(env['LIUQIN_ROOT_PROFILE'], 'native-updatable')
-        self.assertEqual(env['LIUQIN_USB_MANUFACTURER'], '测试厂商')
-        self.assertEqual(env['LIUQIN_USB_PRODUCT'], '自定义平板')
-        self.assertNotIn('NATIVE_ROOT_HASHES', env)
-        (self.root / self.data['boot_out']).mkdir()
-        with patch.object(builder, 'run') as run:
-            builder.stage(self.data, 'kernel-debs')
-        self.assertIn('build/scripts/build-liuqin-kernel-debs.py', run.call_args.args[0])
-        self.assertNotIn(str(self.root / self.data['bundle_out']), run.call_args.args[0])
-
-    def test_installer_can_be_built_without_target_root_or_kernel_outputs(self):
-        self.data.update(usb_manufacturer='测试厂商', usb_product='自定义平板')
-        (self.root / self.data['installer_image']).unlink()
-        self.data['root_source'] = 'absent-target-root'
-        self.data['kernel_out'] = 'absent-target-kernel'
-        records = {'etc/liuqin-storage-mode': b'readonly\n', 'etc/liuqin-installer': b'liuqin\n',
-                   'etc/liuqin-installer-interface': b'liuqin-installer-v2\n',
-                   'etc/liuqin-installer-kernel.release': b'6.17-install\n'}
-        def build(_argv, **kwargs):
-            env = kwargs['env']
-            self.assertEqual(env['INSTALLER_KERNEL_OUT'], str(self.root / self.data['installer_kernel_out']))
-            self.assertEqual(env['LIUQIN_USB_MANUFACTURER'], '测试厂商')
-            self.assertEqual(env['LIUQIN_USB_PRODUCT'], '自定义平板')
-            self.assertNotIn('CUSTOM_ROOT_OUT', env)
-            work = Path(env['OUT_DIR']); work.mkdir(parents=True)
-            (work / 'installer.img').write_bytes(demo_image(records))
-        with patch.object(builder, 'run', side_effect=build):
-            builder.stage(self.data, 'installer')
-        self.assertEqual((self.root / self.data['installer_image']).read_bytes(), demo_image(records))
-
-    def test_full_installer_workflow_uses_only_its_own_inputs(self):
-        (self.root / self.data['installer_image']).unlink()
-        (self.root / self.data['runtime_out']).rmdir()
-        self.data['root_source'] = 'missing-target-root'
-        self.data['kernel_source'] = 'missing-target-source'
-        config = self.root / 'build.json'; config.write_text(json.dumps(self.data))
-        with patch.object(sys, 'argv', ['build.py', 'build-installer', '--config', str(config)]), patch.object(builder, 'stage') as stage:
-            builder.main()
-        self.assertEqual([call.args[1] for call in stage.call_args_list], ['installer-kernel', 'runtime', 'installer'])
-
-    def test_missing_inputs_stop_before_any_stage_runs(self):
-        self.data['inputs']['BUSYBOX'] = 'missing-file'
-        with patch.object(builder, 'run') as run, self.assertRaisesRegex(RuntimeError, 'BUSYBOX'):
-            builder.require_inputs(self.data, 'check-inputs')
         run.assert_not_called()
 
-    def test_existing_output_is_not_deleted_or_overwritten(self):
-        with self.assertRaisesRegex(RuntimeError, '输出已存在'):
-            builder.require_inputs(self.data, 'all')
-        self.assertTrue((self.root / self.data['root_out']).exists())
+    def test_export_option_only_accepts_complete_system_builds(self):
+        config = self.root/'build.json'
+        config.write_text(json.dumps({'rootfs_config':'build/rootfs/fedora-plasma.json'}))
+        for options in ([],['--target','system']):
+            with self.subTest(options=options), \
+                 patch.object(sys,'argv',['build.py','build',*options,'--config',str(config),
+                                          '--export-dir',str(self.root/'export')]), \
+                 patch('source_flow.execute') as execute:
+                builder.main()
+            self.assertEqual(execute.call_args.args[1],'rootfs')
+            self.assertEqual(execute.call_args.kwargs['export_dir'],self.root/'export')
+        with patch.object(sys,'argv',['build.py','outputs','--export-dir','export']), \
+             patch.object(builder,'config') as config,contextlib.redirect_stderr(io.StringIO()), \
+             self.assertRaises(SystemExit):
+            builder.main()
+        config.assert_not_called()
+
+    def export_fixture(self):
+        contract = (b'LIUQIN_ROOT_INTERFACE_V2\nkernel_release=7.3.0-liuqin-test\nimage_sha256='
+                    + b'1' * 64 + b'\nmodules_sha256=' + b'2' * 64 + b'\n')
+        boot = self.output_fixture('boot-selected', 'image/boot-liuqin-native.img', contract)
+        root = self.output_fixture('fedora-rootfs-selected', 'packed/rootfs.tar.gz', contract)
+        return boot, root, contract
+
+    def test_export_selects_exact_pair_and_omits_other_caches_and_private_files(self):
+        boot, root, contract = self.export_fixture()
+        self.output_fixture('boot-other', 'image/boot-liuqin-native.img', contract.replace(b'1'*64, b'3'*64))
+        self.output_fixture('rootfs-other', 'packed/rootfs.tar.gz', contract)
+        (root.parent/'login.txt').write_text('private fixture')
+        (root.parent/'local-config.json').write_text('private configuration')
+        out = export_images(boot, root, self.root/'export')
+        self.assertEqual({p.name for p in out.iterdir()},
+                         {'boot.img', 'rootfs.tar.gz', 'native-root.contract', 'SHA256SUMS'})
+        self.assertEqual((out/'boot.img').read_bytes(), boot.read_bytes())
+        self.assertEqual((out/'rootfs.tar.gz').read_bytes(), root.read_bytes())
+        self.assertEqual((out/'native-root.contract').read_bytes(), contract)
+        for line in (out/'SHA256SUMS').read_text().splitlines():
+            digest, name = line.split('  ')
+            self.assertEqual(hashlib.sha256((out/name).read_bytes()).hexdigest(), digest)
+        # Published files must not be hardlinks to mutable cache files.
+        boot.write_bytes(b'changed cache')
+        self.assertNotEqual((out/'boot.img').read_bytes(), boot.read_bytes())
+        with self.assertRaisesRegex(ValueError, '已存在'):
+            export_images(boot, root, out)
+        self.assertEqual((out/'rootfs.tar.gz').read_bytes(), root.read_bytes())
+
+    def test_export_rejects_damaged_incomplete_or_mismatched_pairs_without_publishing(self):
+        for failure in ('missing-rootfs', 'missing-receipt', 'linked-image', 'changed-image',
+                        'changed-contract', 'mismatched-contract'):
+            with self.subTest(failure=failure):
+                boot, root, contract = self.export_fixture()
+                if failure == 'missing-rootfs': root.unlink()
+                elif failure == 'missing-receipt': (root.parent.parent/'build-receipt.json').unlink()
+                elif failure == 'linked-image':
+                    root.unlink(); root.symlink_to(boot)
+                elif failure == 'changed-image': root.write_bytes(b'corrupt')
+                elif failure == 'changed-contract':
+                    (root.parent/'native-root.contract').write_bytes(contract.replace(b'1'*64, b'3'*64))
+                elif failure == 'mismatched-contract':
+                    self.output_fixture('fedora-rootfs-selected', 'packed/rootfs.tar.gz',
+                                        contract.replace(b'1'*64, b'3'*64))
+                with self.assertRaises(ValueError):
+                    export_images(boot, root, self.root/'export')
+                self.assertFalse((self.root/'export').exists())
+                self.assertEqual(list(self.root.glob('.image-export-*')), [])
+                if root.is_symlink(): root.unlink()
+
+    def test_legacy_configs_cannot_enter_any_build_target(self):
+        for target in ('system','kernel','modules','boot','packages'):
+            with self.subTest(target=target), \
+                 patch.object(sys,'argv',['build.py','build','--target',target,'--config',str(self.root/'legacy.json')]), \
+                 patch('source_flow.execute') as execute,self.assertRaisesRegex(ValueError,'不支持的构建配置项'):
+                builder.main()
+            execute.assert_not_called()
+
+    def test_retired_stages_are_rejected_before_any_build(self):
+        for action in ('all','build-target','kernel','modules','rootfs','boot','kernel-debs','kernel-packages',
+                       'init-build','images','installer','installer-kernel','build-installer','runtime'):
+            with self.subTest(action=action), patch.object(sys,'argv',['build.py',action]), \
+                 patch.object(builder,'config') as config, contextlib.redirect_stderr(io.StringIO()), \
+                 self.assertRaises(SystemExit) as error:
+                builder.main()
+            self.assertEqual(error.exception.code,2)
+            config.assert_not_called()
+        scripts=json.loads((project/'devbox.json').read_text())['shell']['scripts']
+        self.assertEqual(set(scripts), {'help','init','doctor','fetch-rom','plan','build','outputs','test'})
+        self.assertFalse({'images','installer','installer-kernel','build-installer','runtime'} & scripts.keys())
+
+    def test_build_targets_dispatch_to_matching_recipe_stages(self):
+        config = self.root/'official.json'
+        config.write_text(json.dumps({'rootfs_config':'build/rootfs/fedora-plasma.json'}))
+        for target, expected in (('system','rootfs'),('kernel','kernel'),('modules','modules'),
+                                 ('boot','boot'),('packages','kernel-debs')):
+            with self.subTest(target=target), \
+                 patch.object(sys,'argv',['build.py','build','--target',target,'--config',str(config)]), \
+                 patch('source_flow.execute') as execute,patch.object(builder,'run') as run:
+                builder.main()
+            self.assertEqual(execute.call_args.args[1],expected)
+            run.assert_not_called()
+        with patch.object(sys,'argv',['build.py','build','--target','kernel','--configure-only',
+                                     '--config',str(config)]),patch('source_flow.execute') as execute:
+            builder.main()
+        self.assertEqual(execute.call_args.args[1],'kernel')
+        self.assertTrue(execute.call_args.kwargs['configure_only'])
+
+    def test_invalid_build_target_options_stop_before_reading_config(self):
+        for options in (['outputs','--target','kernel'],['build','--target','unknown'],
+                        ['build','--target','boot','--configure-only'],
+                        ['build','--target','packages','--export-dir','export']):
+            with self.subTest(options=options),patch.object(sys,'argv',['build.py',*options]), \
+                 patch.object(builder,'config') as config,contextlib.redirect_stderr(io.StringIO()), \
+                 self.assertRaises(SystemExit):
+                builder.main()
+            config.assert_not_called()
+
+
+
+
+
+
+
+
+
+
 
     def test_init_does_not_overwrite_local_config(self):
-        content = '{"rootfs_config": "my-rootfs.json", "rom_images": "/my/rom", "mine": true}'
+        content = '{"rootfs_config": "my-rootfs.json", "rom_images": "/my/rom", "jobs": 3}'
         config = self.root / 'build.json'; config.write_text(content)
         with patch.object(sys, 'argv', ['build.py', 'init', '--config', str(config)]), \
              contextlib.redirect_stdout(io.StringIO()) as output:
@@ -266,35 +260,24 @@ class BuildTests(unittest.TestCase):
         self.assertIn('已保留全部设置', output.getvalue())
         self.assertIn('无需重复初始化', output.getvalue())
 
-    def test_init_preserves_legacy_config_and_explains_new_entry(self):
-        content = '{"root_source": "my-root"}'
-        config = self.root / 'build.json'; config.write_text(content)
-        with patch.object(sys, 'argv', ['build.py', 'init', '--config', str(config)]), \
-             contextlib.redirect_stdout(io.StringIO()) as output:
+    def test_init_rejects_legacy_config_without_modifying_it(self):
+        config=self.root/'build.json';original='{"root_source":"my-root"}';config.write_text(original)
+        with patch.object(sys,'argv',['build.py','init','--config',str(config)]), \
+             self.assertRaisesRegex(ValueError,'不支持的构建配置项'):
             builder.main()
-        self.assertEqual(config.read_text(), content)
-        self.assertIn('build.new.json', output.getvalue())
+        self.assertEqual(config.read_text(),original)
 
-    def test_default_init_selects_official_root_and_preserves_old_flag(self):
-        for index, flags in enumerate(([], ['--from-source'])):
-            with self.subTest(flags=flags):
-                config = self.root / ('new-' + str(index) + '.json')
-                with patch.object(sys, 'argv', ['build.py', 'init', '--config', str(config), *flags]), \
-                     contextlib.redirect_stdout(io.StringIO()):
-                    builder.main()
-                values = json.loads(config.read_text())
-                self.assertEqual(values['rootfs_config'], 'build/rootfs/fedora-plasma.json')
-                self.assertIn('rom_images', values)
-                self.assertNotIn('root_source', values)
-
-    def test_kernel_command_does_not_read_unrelated_board_manifest(self):
-        manifest = self.root / 'out/image-inputs.local.json'
-        manifest.parent.mkdir(parents=True, exist_ok=True); manifest.write_text('incomplete json')
-        config = self.root / 'minimal.json'; config.write_text(json.dumps({'kernel_source': self.data['kernel_source']}))
-        with patch.object(sys, 'argv', ['build.py', 'kernel', '--config', str(config)]), patch.object(builder, 'run') as run:
+    def test_init_creates_current_config_and_rejects_obsolete_flag(self):
+        config=self.root/'new.json'
+        with patch.object(sys,'argv',['build.py','init','--config',str(config)]), \
+             contextlib.redirect_stdout(io.StringIO()):
             builder.main()
-        self.assertIn('build/scripts/build-liuqin-kernel.py', run.call_args.args[0])
-
+        self.assertEqual(json.loads(config.read_text()),json.loads(builder.EXAMPLE.read_text()))
+        rejected=self.root/'must-not-exist.json'
+        with patch.object(sys,'argv',['build.py','init','--from-source','--config',str(rejected)]), \
+             contextlib.redirect_stderr(io.StringIO()),self.assertRaises(SystemExit):
+            builder.main()
+        self.assertFalse(rejected.exists())
 
 class ConfigTests(unittest.TestCase):
     def setUp(self):
@@ -307,7 +290,7 @@ class ConfigTests(unittest.TestCase):
         self.project.stop(); self.temporary.cleanup()
 
     def load(self, values):
-        self.file.write_text(json.dumps(values)); return builder.config(self.file)
+        self.file.write_text(json.dumps({'rootfs_config':'build/rootfs/fedora-plasma.json',**values})); return builder.config(self.file)
 
     def test_usb_names_have_defaults_and_allow_literal_unicode_and_shell_characters(self):
         defaults = self.load({})
@@ -325,58 +308,48 @@ class ConfigTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, key):
                         self.load({key: value})
 
-    def test_minimal_configuration_keeps_explicit_kernel_choices_and_separate_installer(self):
-        data = self.load({'kernel_source': 'my-kernel', 'root_source': 'my-root',
+    def test_minimal_configuration_keeps_explicit_target_kernel_choices(self):
+        data = self.load({'kernel_source': 'my-kernel',
                           'kernel_fragments': [], 'kernel_localversion': '-liuqin2'})
         self.assertEqual(data['kernel_source'], 'my-kernel')
-        self.assertEqual(data['root_source'], 'my-root')
         self.assertEqual(data['kernel_fragments'], [])
         self.assertEqual(data['kernel_localversion'], '-liuqin2')
-        self.assertNotEqual(data['installer_kernel_source'], 'my-kernel')
-        self.assertNotEqual(data['kernel_out'], data['installer_kernel_out'])
-        self.assertEqual(data['installer_kernel_fragments'], [])
+        for key in ('installer_kernel_source','installer_kernel_out','installer_image','runtime_out','bundle_out','image_work'):
+            self.assertNotIn(key,data)
 
-    def test_prepared_paths_are_reused_and_partial_explicit_paths_take_priority(self):
-        manifest = self.root / 'out/image-inputs.local.json'; manifest.parent.mkdir()
-        manifest.write_text(json.dumps({'FIRMWARE_POOL': '/prepared/firmware',
-                                       'AUDIO_TOPOLOGY': '/prepared/topology.bin',
-                                       'UBUNTU_DESKTOP_ROOT': '/unrelated/root'}))
-        data = self.load({'inputs': {'AUDIO_TOPOLOGY': '/custom/topology.bin'}})
-        self.assertEqual(data['inputs']['FIRMWARE_POOL'], '/prepared/firmware')
-        self.assertEqual(data['inputs']['AUDIO_TOPOLOGY'], '/custom/topology.bin')
-        self.assertIn('BUSYBOX', data['inputs'])
-        self.assertNotIn('UBUNTU_DESKTOP_ROOT', data['inputs'])
-        self.assertNotEqual(data['root_source'], '/unrelated/root')
 
-    def test_old_full_configuration_retains_every_override(self):
-        original = copy.deepcopy(builder.DEFAULTS)
-        original.pop('inputs_file')
-        original.update(kernel_out='out/build/private/kernel', package_version='2.0',
-                        runtime_root='/custom/runtime', jobs=3)
-        original['inputs']['BUSYBOX'] = '/custom/busybox'
-        manifest = self.root / 'out/image-inputs.local.json'; manifest.parent.mkdir()
-        manifest.write_text('unrelated incomplete json')
-        loaded = self.load(original)
-        for key, value in original.items(): self.assertEqual(loaded[key], value, key)
 
-    def test_explicit_missing_manifest_is_reported_and_can_be_disabled(self):
-        with self.assertRaisesRegex(RuntimeError, '素材清单不存在'):
-            self.load({'inputs_file': 'missing.json'})
-        loaded = self.load({'inputs_file': None})
-        self.assertIn('FIRMWARE_POOL', loaded['inputs'])
 
-    def test_old_builtin_fragment_path_is_migrated_without_changing_custom_paths(self):
-        data = self.load({'kernel_fragments': ['kernel/configs/custom-zram.config', '/custom/my.config']})
-        self.assertEqual(data['kernel_fragments'], ['build/kernel/configs/custom-zram.config', '/custom/my.config'])
+
+
+
+
+
+    def test_obsolete_or_unknown_configuration_fields_are_rejected(self):
+        for name in ('root_source','kernel_out','modules_out','root_out','boot_out','kernel_debs_out',
+                     'inputs','inputs_file','installer_kernel_source','installer_image','runtime_out','bundle_out'):
+            with self.subTest(name=name),self.assertRaisesRegex(ValueError,'不支持的构建配置项'):
+                self.load({name:'obsolete'})
+        for value in (None,'',3):
+            with self.subTest(rootfs_config=value),self.assertRaisesRegex(ValueError,'rootfs_config'):
+                self.load({'rootfs_config':value})
+
+    def test_current_overrides_and_literal_paths_are_preserved(self):
+        values={'kernel_source':'custom/source','kernel_source_lock':'custom/lock.json',
+                'kernel_config':'custom/config','kernel_fragments':['custom/fragment.config'],
+                'package_version':'2.0','jobs':3,'rom_images':'custom/rom'}
+        loaded=self.load(values)
+        for key,value in values.items():self.assertEqual(loaded[key],value)
 
     def test_show_config_is_readonly_and_works_before_inputs_exist(self):
-        self.file.write_text('{}')
+        self.file.write_text('{"rootfs_config":"not-yet-prepared.json"}')
         before = set(self.root.rglob('*'))
         with patch.object(sys, 'argv', ['build.py', 'show-config', '--config', str(self.file)]), \
              patch.object(builder, 'run') as run, contextlib.redirect_stdout(io.StringIO()) as output:
             builder.main()
         data = json.loads(output.getvalue())
-        self.assertTrue(data['bundle_out'].startswith('out/releases/'))
+        self.assertEqual(data['rootfs_config'],'not-yet-prepared.json')
+        self.assertNotIn('root_out',data)
         self.assertEqual(set(self.root.rglob('*')), before)
         run.assert_not_called()
 

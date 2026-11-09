@@ -77,6 +77,15 @@ class WorkerTests(unittest.TestCase):
                     confirmation=dict(serial='DEMO-LIUQIN', personal_data_backed_up=True,
                                       erase_userdata=True, allow_experimental=True))
 
+    def test_rom_preview_is_not_an_install_plan(self):
+        events=self.job('rom_preview',serial='DEMO-LIUQIN',source_mode='reference',reference_id='hyperos206',firmware_policy='preserve')
+        preview=next(e['preview'] for e in events if e['type']=='rom_preview')
+        self.assertFalse(preview['executable']);self.assertNotIn('plan_id',preview)
+        self.assertFalse(any(e['type'] in ('wizard_plan','backup_ready','installation_written') for e in events))
+        events=self.job('wizard_install',serial='DEMO-LIUQIN',plan_id=preview['preview_id'])
+        self.assertFalse(any(e['type']=='wizard_complete' for e in events))
+        self.assertTrue(any('预览不能用于刷写' in e.get('message','') for e in events))
+
     def test_invalid_confirmation_preserves_plan_and_cancel_cleans_up(self):
         payload = self.prepare()
         payload['confirmation']['serial'] = 'WRONG'

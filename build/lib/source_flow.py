@@ -20,18 +20,15 @@ def load_module(name, path):
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
 
 
-def kernel_fragments(data, installer=False):
-    prefix='installer_' if installer else ''
-    fragments=list(data.get(prefix+'kernel_fragments',[]))
+def kernel_fragments(data):
+    fragments=list(data.get('kernel_fragments',[]))
     native='build/kernel/configs/native-display.config'
-    if not installer and native not in fragments:
+    if native not in fragments:
         fragments.insert(0,native)
     return fragments
 
 
-def kernel_source_record(data, installer=False):
-    if installer:
-        return 'build/kernel/source-6.17.json'
+def kernel_source_record(data):
     return data.get('kernel_source_lock') or 'build/kernel/source.json'
 
 
@@ -43,7 +40,7 @@ class Flow:
         self.board_builder=load_module('source_board',PROJECT/'build/scripts/prepare-source-board.py')
         self.distribution=distribution
         self.source=json.loads((PROJECT/('build/rootfs/'+distribution+'-source.json')).read_text())
-        self.installer_source=json.loads((PROJECT/'build/rootfs/ubuntu-source.json').read_text())
+        self.runtime_source=json.loads((PROJECT/'build/rootfs/ubuntu-source.json').read_text())
         self.recipe_path=self.path('rootfs_config')
         self.recipe=self.root_builder.recipe(self.recipe_path,distribution)
         self.cache=Cache(PROJECT/'out/build/from-source',run)
@@ -73,15 +70,12 @@ class Flow:
         for name,value in values.items():argv+=['--'+name.replace('_','-'),str(value)]
         self.run(argv,root=True)
 
-    def kernel_source_lock(self,installer=False):
-        return self.resolve(kernel_source_record(self.data,installer))
+    def kernel_source_lock(self):
+        return self.resolve(kernel_source_record(self.data))
 
-    def kernel_source(self,installer=False):
-        record=json.loads(self.kernel_source_lock(installer).read_text())
-        if installer:
-            path=Path(self.data.get('source_installer_kernel','inputs/sources/linux-installer'))
-            path=path.resolve() if path.is_absolute() else PROJECT/path
-        else:path=self.path('kernel_source')
+    def kernel_source(self):
+        record=json.loads(self.kernel_source_lock().read_text())
+        path=self.path('kernel_source')
         if not path.exists():
             path.parent.mkdir(parents=True,exist_ok=True)
             with tempfile.TemporaryDirectory(prefix='.kernel-source-',dir=path.parent) as directory:
@@ -93,12 +87,8 @@ class Flow:
                 os.rename(temporary,path)
         commit=subprocess.check_output(['git','-C',str(path),'rev-parse','HEAD'],text=True).strip()
         if subprocess.check_output(['git','-C',str(path),'status','--porcelain']):raise ValueError('内核源码有未提交修改：'+str(path))
-        if installer and 'source_installer_kernel' not in self.data and commit!=record['commit']:
-            raise ValueError('安装内核源码与独立版本锁不一致。')
-        # The independent RAM installer keeps its original kernel revision.
-        # Apply target board patches only to the pinned base, in a separate
-        # clean snapshot; custom kernel commits remain under the user's control.
-        if not installer and commit==record['commit'] and record.get('target_patches'):
+        # Adapt the pinned base in a separate clean snapshot.
+        if commit==record['commit'] and record.get('target_patches'):
             from kernel_adaptation import assemble
             patches=[self.resolve(name) for name in record['target_patches']]
             for patch in patches:
@@ -119,33 +109,38 @@ class Flow:
                     raise ValueError('目标内核补丁生成的源码树与核验记录不同。')
         return path,commit
 
-    def kernel(self,installer=False):
-        source,commit=self.kernel_source(installer)
-        prefix='installer_' if installer else ''
-        fragments=kernel_fragments(self.data,installer)
-        inputs=dict(commit=commit,config=self.data.get(prefix+'kernel_config'),
+    def kernel(self):
+        source,commit=self.kernel_source()
+        fragments=kernel_fragments(self.data)
+        inputs=dict(commit=commit,config=self.data.get('kernel_config'),
                     fragments={str(p):sha(p) for p in [self.resolve(v) for v in fragments]},
-                    localversion=self.data.get(prefix+'kernel_localversion','-liuqin-installer' if installer else '-liuqin1'),
+                    localversion=self.data.get('kernel_localversion','-liuqin1'),
                     board_configs=tree_identity(PROJECT/'device/configs'),
                     builder=sha(PROJECT/'build/scripts/build-liuqin-kernel.py'))
-        inputs['source_lock']=sha(self.kernel_source_lock(installer))
+        inputs['source_lock']=sha(self.kernel_source_lock())
+        alignment=json.loads(self.kernel_source_lock().read_text()).get('load_alignment')
+        if alignment:
+            import arm64_alignment
+            if alignment!=arm64_alignment.PROTOCOL:raise ValueError('不支持的 ARM64 对齐入口。')
+            inputs['load_alignment']=arm64_alignment.inputs()
         if inputs['config']:inputs['config_sha']=sha(self.resolve(inputs['config']))
         compiler=shutil.which(os.environ.get('CROSS_COMPILE','aarch64-unknown-linux-musl-')+'gcc')
         if not compiler:raise ValueError('请在 Devbox 中构建。')
         inputs['compiler']=sha(Path(compiler).resolve())
         def build(out):
             argv=[sys.executable,'build/scripts/build-liuqin-kernel.py','--custom','--source',str(source),
-                  '--source-lock',str(self.kernel_source_lock(installer)),
+                  '--source-lock',str(self.kernel_source_lock()),
                   '--out',str(out/'kernel'),'--jobs',str(self.data.get('jobs',12)),
                   '--localversion='+inputs['localversion']]
             if inputs['config']:argv+=['--config',str(self.resolve(inputs['config']))]
             for path in fragments:argv+=['--config-fragment',str(self.resolve(path))]
             self.run(argv,env={'NIX_HARDENING_ENABLE_aarch64_unknown_linux_musl':''})
-        cached=self.stage('installer-kernel' if installer else 'kernel',inputs,build,
-            ['kernel/arch/arm64/boot/Image','kernel/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dtb',
+        artifacts=['kernel/arch/arm64/boot/Image','kernel/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dtb',
              'kernel/.config','kernel/build-info.json','kernel/SHA256SUMS','kernel/include/config/kernel.release',
              'kernel/modules','kernel/modules.order','kernel/Module.symvers','kernel/vmlinux','kernel/System.map',
-             'kernel/scripts/dtc/dtc','kernel/scripts/dtc/fdtoverlay'])
+             'kernel/scripts/dtc/dtc','kernel/scripts/dtc/fdtoverlay','kernel/source-lock.json']
+        if alignment:artifacts+=['kernel/arch/arm64/boot/Image.raw','kernel/arm64-alignment.json']
+        cached=self.stage('kernel',inputs,build,artifacts)
         return source,cached/'kernel'
 
     @staticmethod
@@ -153,7 +148,7 @@ class Flow:
         path=Path(value).expanduser();return path.resolve() if path.is_absolute() else PROJECT/path
 
     def base(self):
-        return download(self.installer_source['url'],PROJECT/'inputs/ubuntu-base'/self.installer_source['archive'],self.installer_source['sha256'])
+        return download(self.runtime_source['url'],PROJECT/'inputs/ubuntu-base'/self.runtime_source['archive'],self.runtime_source['sha256'])
 
     def setup_archive(self):
         record=json.loads((PROJECT/'build/rootfs/plasma-setup-source.json').read_text())
@@ -172,7 +167,7 @@ class Flow:
         reference=self.board_builder.verify_rom(images)
         inputs=dict(rom={name:reference['images'][name]['sha256'] for name in ('vendor_boot.img','dtbo.img','super.img')},
                     firmware=tree_identity(PROJECT/'device/firmware'),
-                    parser=sha(PROJECT/'build/lib/android_images.py'),builder=sha(PROJECT/'build/scripts/prepare-source-board.py'),
+                    parser=sha(PROJECT/'build/lib/android_images.py'),parser_shared=sha(PROJECT/'shared/liuqin_android_images.py'),builder=sha(PROJECT/'build/scripts/prepare-source-board.py'),
                     speaker_builder=sha(PROJECT/'build/lib/speaker_firmware.py'))
         def build(out):self.board_builder.prepare(images,out/'board',verified=True)
         return self.stage('board',inputs,build,['board/board.json','board/firmware-pool','board/wlan',
@@ -188,20 +183,11 @@ class Flow:
         def build(out):self.root_action('runtime',archive,out/'assembled')
         return self.stage('runtime-root',inputs,build,['assembled/root.tar.gz','assembled/packages.tsv'])/'assembled/root.tar.gz'
 
-    def runtime(self):
-        archive=self.runtime_root()
-        def build(out):
-            self.root_action('extract',archive,out/'input')
-            self.run([sys.executable,'build/lib/build-installer-runtime.py','--root',str(out/'input/rootfs'),
-                      '--out',str(out/'runtime')])
-        return self.stage('runtime',dict(base=sha(archive),builder=sha(PROJECT/'build/lib/build-installer-runtime.py')),
-                          build,['runtime'])/'runtime'
-
     def boot_splash_runtime(self):
         return None
 
-    def boot(self,installer=False):
-        source,kernel=self.kernel(installer)
+    def boot(self):
+        source,kernel=self.kernel()
         inputs=self.board_inputs()
         dependency=dict(kernel=sha(kernel/'build-info.json'),board=tree_identity(self.board()),
                         builder=sha(PROJECT/'build/scripts/build-liuqin-native-boot.sh'),
@@ -209,21 +195,13 @@ class Flow:
                         usb_strings=self.usb,usb_builder=sha(PROJECT/'build/lib/usb_identity.py'),
                         filesystem_builder=sha(PROJECT/'build/lib/root_filesystems.py'),
                         filesystem_interface=sha(PROJECT/'shared/liuqin_filesystems.py'),
-                        bootargs=sha(PROJECT/'device'/('installer-bootargs.txt' if installer else 'native-bootargs.txt')),
+                        bootargs=sha(PROJECT/'device/native-bootargs.txt'),
                         init=tree_identity(PROJECT/'device/boot'),
-                        dtb_tools=sha(PROJECT/'build/lib/build-bootimg.sh'))
-        if not installer:
-            dependency.update(reclaim_mte=bool(self.data.get('kernel_reclaim_mte',False)),
-                memory_helper=sha(PROJECT/'build/lib/reclaim-memory.py'))
+                        dtb_tools=sha(PROJECT/'build/lib/build-bootimg.sh'),
+                        abl_symbols=sha(PROJECT/'build/lib/abl-symbols.py'))
+        dependency.update(reclaim_mte=bool(self.data.get('kernel_reclaim_mte',False)),
+            memory_helper=sha(PROJECT/'build/lib/reclaim-memory.py'))
         env=dict(inputs,**usb_environment(self.usb),KERNEL_SOURCE=str(source),KERNEL_OUT=str(kernel))
-        if installer:
-            runtime=self.runtime();dependency['runtime']=tree_identity(runtime)
-            def build(out):
-                self.run(['sh','build/scripts/build-liuqin-installer.sh'],env=dict(env,
-                    INSTALLER_KERNEL_SOURCE=str(source),INSTALLER_KERNEL_OUT=str(kernel),
-                    INSTALLER_RUNTIME=str(runtime),OUT_DIR=str(out/'image')))
-            result=self.stage('installer',dependency,build,['image/installer.img'])
-            return result/'image/installer.img'
         modules=self.modules();dependency['modules']=sha(modules/'kernel.build.json')
         splash=self.boot_splash_runtime()
         if splash:
@@ -267,16 +245,19 @@ class Flow:
         return self.stage('sensors',inputs,build,['assembled/sensor-stack.tar'])/'assembled/sensor-stack.tar'
 
     def device_debs(self):
+        from storage_scope import inputs as storage_scope_inputs
+        storage=storage_scope_inputs()
         sensors=self.sensors();tools=self.tools();speaker_firmware=self.board()/'speaker-firmware'
         def build(out):
             env=dict(OUT_DIR=str(out/'debs'),DEVICE_DESKTOP='generic',BUSYBOX=tools['BUSYBOX'],
                      SENSOR_STACK_TAR=str(sensors),SENSOR_STACK_SHA256=sha(sensors),LIUQIN_DEB_VERSION=self.version,
-                     SPEAKER_FIRMWARE_DIR=str(speaker_firmware))
+                     SPEAKER_FIRMWARE_DIR=str(speaker_firmware),STORAGE_SCOPE_CC=storage['compiler'])
             for name in ('firmware','device-support','sensors','meta'):
                 self.run(['sh','build/scripts/build-liuqin-debs.sh',name],env=env)
         return self.stage('device-debs',dict(sensors=sha(sensors),firmware=tree_identity(PROJECT/'device/firmware'),
             board_overlay=tree_identity(PROJECT/'device/board-overlay'),
             overlay_builder=sha(PROJECT/'build/lib/device_overlay.py'),busybox=sha(tools['BUSYBOX']),version=self.version,
+            storage_scope=storage,storage_builder=sha(PROJECT/'build/lib/storage_scope.py'),
             speaker_firmware=tree_identity(speaker_firmware),speaker_builder=sha(PROJECT/'build/lib/speaker_firmware.py'),
             builder=sha(PROJECT/'build/scripts/build-liuqin-debs.sh')),build,['debs'])/'debs'
 
@@ -336,54 +317,28 @@ class Flow:
             builder=sha(PROJECT/'build/scripts/build-liuqin-custom-root.py'),interfaces=tree_identity(PROJECT/'shared')),
             build,['packed/rootfs.tar.gz','packed/native-root.contract'])/'packed'
 
-    def images(self):
-        installer=self.boot(True);boot=self.boot();root=self.rootfs()
-        inputs=dict(installer=sha(installer),boot=sha(boot),root=sha(root/'rootfs.tar.gz'))
-        identity=key(inputs)[:16]
-        destination=PROJECT/'out/releases'/(self.distribution+'-plasma-'+identity)
-        from liuqin_artifacts import inspect_package
-        if destination.exists():
-            inspect_package(destination)
-            if any(sha(destination/name)!=inputs[field] for field,name in
-                   (('installer','installer.img'),('boot','boot.img'),('root','rootfs.tar.gz'))):
-                raise ValueError('已有发行目录内容变化，未覆盖。')
-        else:
-            destination.parent.mkdir(parents=True,exist_ok=True)
-            with tempfile.TemporaryDirectory(prefix='.publish-',dir=destination.parent) as directory:
-                temporary=Path(directory)/'bundle';temporary.mkdir()
-                for path,name in ((installer,'installer.img'),(boot,'boot.img'),(root/'rootfs.tar.gz','rootfs.tar.gz')):
-                    shutil.copyfile(path,temporary/name)
-                inspect_package(temporary);os.rename(temporary,destination)
-        login=None
-        if not self.recipe['first_boot_setup']:
-            login=PROJECT/'out/login'/(self.distribution+'-plasma-'+identity+'.txt');login.parent.mkdir(exist_ok=True)
-            shutil.copyfile(self.apps()/'login.txt',login);login.chmod(0o600)
-        report=dict(status='BUILT_NOT_DEVICE_TESTED',files=inputs,official_base=self.source,
-                    kernel_release=(self.kernel()[1]/'include/config/kernel.release').read_text().strip(),
-                    rootfs_recipe=self.recipe,packages=str(self.apps()/'packages.tsv'),
-                    account_setup='first-boot' if self.recipe['first_boot_setup'] else 'preconfigured',
-                    login_file=str(login) if login else None)
-        reports=PROJECT/'out/reports';reports.mkdir(exist_ok=True)
-        (reports/(identity+'.json')).write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')
-        print('三个安装文件：'+str(destination),flush=True)
-        if login:print('本机登录信息文件（不包含在安装目录）：'+str(login),flush=True)
-        else:print('首次启动将在平板上创建账号和密码；本机不生成登录凭据。',flush=True)
-        return destination
-
     def plan(self):
         images=self.resolve(self.data.get('rom_images','inputs/roms/liuqin/OS2.0.6.0.VMYCNXM/images'))
         return dict(official_base=self.source,recipe=self.recipe,rom_images=str(images),usb_device=self.usb,
                     missing_rom_files=[name for name in ('vendor_boot.img','dtbo.img','super.img') if not (images/name).is_file()],
-                    steps=['官方 Ubuntu Base','原厂板级输入','独立安装内核/runtime/installer',
+                    steps=['官方 Ubuntu Base','原厂板级输入',
                            '自定义内核/模块/boot/更新包','传感器和设备包']+
                           (['登录前初始化组件（独立 ARM64 包）'] if self.recipe['first_boot_setup'] else [])+
-                          ['Plasma 和自定义软件','根归档','三文件发布'],
-                    output='out/releases/ubuntu-plasma-<内容标识>/',tablet_access=False)
+                          ['Plasma 和自定义软件','配套 boot/rootfs'],
+                    output='out/build/from-source/（使用 outputs 查看配套 boot/rootfs）',tablet_access=False)
 
 
-def execute(data,action,run,*,refresh=False,configure_only=False):
+def execute(data,action,run,*,refresh=False,configure_only=False,export_dir=None):
     sys.path.insert(0,str(PROJECT/'shared'))
     recipe_path=Flow.resolve(data['rootfs_config'])
+    if export_dir is not None:
+        if action!='rootfs':raise ValueError('镜像导出只用于完整目标系统构建。')
+        export_dir=Path(export_dir).expanduser()
+        if not export_dir.is_absolute():export_dir=PROJECT/export_dir
+        if export_dir.exists() or export_dir.is_symlink():
+            raise ValueError('导出目录已存在，未覆盖：'+str(export_dir))
+    if action not in ('plan','prepare','check-inputs','kernel','modules','boot','kernel-debs','rootfs'):
+        raise ValueError('该构建阶段已退役；使用 devbox run build -- --target 选择目标，原生 Rec 独立构建。')
     distribution=json.loads(recipe_path.read_text()).get('distribution')
     if distribution=='fedora':
         from fedora_flow import FedoraFlow
@@ -398,9 +353,9 @@ def execute(data,action,run,*,refresh=False,configure_only=False):
     root=PROJECT/'out/build/from-source';root.mkdir(parents=True,exist_ok=True)
     with (root/'lock').open('a') as owner:
         fcntl.flock(owner,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        if action in ('all','prepare','boot','kernel-debs','rootfs','images','installer','build-installer'):
+        if action in ('prepare','boot','kernel-debs','rootfs'):
             # Check model-specific input availability before downloads or compilation.
-            if distribution=='fedora' and action in ('all','prepare','rootfs','images'):
+            if distribution=='fedora' and action in ('prepare','rootfs'):
                 flow.fingerprint_image()
             flow.board()
         if action=='prepare':
@@ -408,26 +363,27 @@ def execute(data,action,run,*,refresh=False,configure_only=False):
             if distribution=='fedora':flow.target_base();flow.stats_archive()
             if flow.recipe['first_boot_setup'] and distribution!='fedora':flow.setup_archive()
             return
-        if action in ('kernel','installer-kernel') and configure_only:
-            installer=action=='installer-kernel';prefix='installer_' if installer else ''
-            source,commit=flow.kernel_source(installer)
-            fragments=kernel_fragments(data,installer)
-            configuration=data.get(prefix+'kernel_config')
-            suffix=data[prefix+'kernel_localversion']
+        if action=='kernel' and configure_only:
+            source,commit=flow.kernel_source()
+            fragments=kernel_fragments(data)
+            configuration=data.get('kernel_config')
+            suffix=data['kernel_localversion']
             identity=key(dict(commit=commit,config=configuration,fragments={v:sha(flow.resolve(v)) for v in fragments},
-                              localversion=suffix,source_lock=sha(flow.kernel_source_lock(installer))))[:16]
+                              localversion=suffix,source_lock=sha(flow.kernel_source_lock())))[:16]
             out=PROJECT/'out/build'/('kernel-config-'+identity)
             argv=[sys.executable,'build/scripts/build-liuqin-kernel.py','--custom','--source',str(source),
-                  '--source-lock',str(flow.kernel_source_lock(installer)),
+                  '--source-lock',str(flow.kernel_source_lock()),
                   '--out',str(out),'--localversion='+suffix,'--configure-only']
             if configuration:argv+=['--config',str(flow.resolve(configuration))]
             for fragment in fragments:argv+=['--config-fragment',str(flow.resolve(fragment))]
             run(argv,env={'NIX_HARDENING_ENABLE_aarch64_unknown_linux_musl':''})
             print('内核配置预览：'+str(out/'.config'));return
-        methods={'all':flow.images,'kernel':flow.kernel,'modules':flow.modules,'boot':flow.boot,
-                 'kernel-debs':flow.kernel_debs,'rootfs':flow.rootfs,'images':flow.images,
-                 'build-installer':lambda:flow.boot(True),'installer':lambda:flow.boot(True),
-                 'installer-kernel':lambda:flow.kernel(True),'runtime':flow.runtime}
+        methods={'kernel':flow.kernel,'modules':flow.modules,'boot':flow.boot,
+                 'kernel-debs':flow.kernel_debs,'rootfs':flow.rootfs}
         if action not in methods:raise ValueError('官方系统工作流不支持此阶段：'+action)
         result=methods[action]()
         if result is not None:print('阶段产物：'+str(result),flush=True)
+        if export_dir is not None:
+            from image_export import export_images
+            exported=export_images(flow.boot(),result/'rootfs.tar.gz',export_dir)
+            print('本次配套镜像：'+str(exported),flush=True)

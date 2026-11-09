@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "lvgl": {
+    "version": "9.6.0",
+    "repository": "https://github.com/lvgl/lvgl.git",
+    "tag": "v9.6.0",
+    "commit": "80ca777e37a2b176770726a02e07a6fb79ef0b39"
+  },
+  "cjson": {
+    "version": "1.7.19",
+    "url": "https://codeload.github.com/DaveGamble/cJSON/tar.gz/refs/tags/v1.7.19",
+    "sha256": "7fa616e3046edfa7a28a32d5f9eacfd23f92900fe1f8ccd988c1662f30454562",
+    "files": {
+      "cJSON.c": "298581a04a36c0165da4b0aade235c23088cb2faa58651d720ea2f3706ed0b0d",
+      "cJSON.h": "25b0145150d500498e4d209cec69c18c42cf818bffcc54690be3b895a2a16dee"
+    }
+  }
+}

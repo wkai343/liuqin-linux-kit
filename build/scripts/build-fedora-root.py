@@ -213,11 +213,29 @@ def chroot(root, command, **kwargs):
 
 
 def dnf(root, *args, weak_deps=False, weak_excludes=()):
+    # Keep build downloads off slow automatically selected mirrors. These
+    # command-line overrides never replace the installed system's repo files
+    # or disable the repositories' package signature checks.
     options=['--setopt=install_weak_deps='+str(weak_deps),
-             '--setopt=localpkg_gpgcheck=False','--setopt=optional_metadata_types=']
+             '--setopt=localpkg_gpgcheck=False','--setopt=optional_metadata_types=',
+             '--setopt=zchunk=False',
+             '--setopt=fedora.metalink=','--setopt=fedora.mirrorlist=',
+             '--setopt=fedora.baseurl=https://dl.fedoraproject.org/pub/fedora/linux/releases/$releasever/Everything/$basearch/os/',
+             '--setopt=updates.metalink=','--setopt=updates.mirrorlist=',
+             '--setopt=updates.baseurl=https://dl.fedoraproject.org/pub/fedora/linux/updates/$releasever/Everything/$basearch/']
     if weak_deps and weak_excludes:
         options.append('--setopt=exclude_from_weak='+','.join(weak_excludes))
     return chroot(root,['dnf','-y',*options,*args])
+
+
+def check_systemd_runtime(root):
+    # Some container bases only contain systemd-libs until the runtime step.
+    if not (root/'usr/bin/systemctl').is_file():return
+    try:
+        chroot(root,['systemctl','--global','--no-pager','--no-legend','list-unit-files'],
+               stdout=subprocess.DEVNULL,timeout=30)
+    except (subprocess.CalledProcessError,subprocess.TimeoutExpired) as error:
+        raise ValueError('ARM64 systemctl 运行检查失败；请运行 devbox run doctor，确认 QEMU 已包含 64 位挂载标识修复。') from error
 
 
 def desktop_dnf(root, data, *args):
@@ -333,6 +351,7 @@ def configure(root, data, output):
         if path.exists() or path.is_symlink():path.unlink()
         path.symlink_to(value)
     link('basic.target.requires/liuqin-gnome-storage-guard.service','../liuqin-gnome-storage-guard.service')
+    common.remove_desktop_rescue_activation(root)
     # Factory data is created by the distro-neutral RAM installer. Label that
     # narrow data set in Fedora before any service consumes it; installer.img
     # remains independent of the target distribution and its SELinux policy.
@@ -344,8 +363,7 @@ def configure(root, data, output):
         'ExecStart=/usr/sbin/setfiles -F /etc/selinux/targeted/contexts/files/file_contexts '
         '/usr/lib/firmware/cirrus /var/lib/liuqin-private /var/lib/liuqin-sensors\n')
     link('basic.target.requires/liuqin-private-labels.service','../liuqin-private-labels.service')
-    for name in ('liuqin-gnome-usb-rescue','liuqin-slpi'):
-        link('multi-user.target.wants/'+name+'.service','../'+name+'.service')
+    link('multi-user.target.wants/liuqin-slpi.service','../liuqin-slpi.service')
     link('multi-user.target.wants/iio-sensor-proxy.service','/usr/lib/systemd/system/iio-sensor-proxy.service')
     link('graphical.target.wants/liuqin-backlight-default.service','../liuqin-backlight-default.service')
     link('multi-user.target.wants/liuqin-display-policy.service','../liuqin-display-policy.service')
@@ -410,6 +428,7 @@ def main():
     if args.action=='runtime':extract_oci(args.archive,args.archive_sha256,root)
     else:common.extract(args.archive,args.archive_sha256,root)
     if args.action=='extract':return
+    with mounted_root(root):check_systemd_runtime(root)
     if args.action=='splash':
         with mounted_root(root):
             enable_documentation(root)
@@ -431,7 +450,9 @@ def main():
         shutil.copyfile(output/'sensors/artifacts/sensor-stack.tar',output/'sensor-stack.tar');return
     with mounted_root(root):
         enable_documentation(root)
-        if args.action=='runtime':dnf(root,'install',*RUNTIME_PACKAGES)
+        if args.action=='runtime':
+            dnf(root,'install',*RUNTIME_PACKAGES)
+            check_systemd_runtime(root)
         elif args.action=='stats':
             if not args.stats_source:parser.error('需要 KSystemStats 源码。')
             from fedora_stats import build

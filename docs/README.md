@@ -2,19 +2,31 @@
 
 [项目首页](../README.md)
 
+## 使用与构建
+
 | 任务 | 文档 |
 | --- | --- |
-| 构建镜像、定制内核与 rootfs | [构建指南](BUILD.md) |
-| 使用 QML 安装器、备份与 USB 网络设置 | [安装助手](INSTALLER-GUI.md) |
-| 设备要求、分区布局和 Android 恢复准备 | [安装指南](FLASHING.md) |
-| CLI 安装与验收 | [安装步骤与验收](INSTALL-TESTING.md) |
-| 更新或回退内核 | [内核更新与恢复](KERNEL-UPDATES.md) |
-| 默认 Linux 7.3 的适配与验证范围 | [7.3 内核说明](KERNEL-7.3.md) |
-| 了解设备支持范围 | [硬件说明](HARDWARE.md) |
-| 调整亮度、CABC 或查看显示恢复日志 | [显示与画质](DISPLAY.md) |
-| 继续未完成的适配与验证 | [待改进与验证](DEVELOPMENT-STATUS.md) |
-| 排查具体功能 | [指纹](FINGERPRINT.md)、[相机](CAMERA.md)、[快充](FASTCHARGE.md)、[RTC 与离线时间](RTC.md) |
-| 了解源码目录与工作流 | [项目结构](STRUCTURE.md)、[CI](CI.md) |
-| 适配其他发行版或内核路线 | [发行版适配](DISTRIBUTIONS.md)、[内核方案](KERNEL-STRATEGY.md) |
-| 开发与回归测试 | [参与贡献](../CONTRIBUTING.md)、[测试说明](../tests/README.md)、[安装器后端协议](../installer/README.md) |
-| 查看作者和许可 | [来源与致谢](../CREDITS.md)、[LICENSE](../LICENSE)、[NOTICE](../NOTICE) |
+| 安装 Android、Linux 或组合 | [安装助手](INSTALLER-GUI.md) |
+| 备份、写入范围与恢复 | [安装要求与恢复](FLASHING.md) |
+| ROM 格式和安装预览 | [Android ROM 安装](FULL-ROM-FLASH.md) |
+| 构建、内核配置和发行版适配 | [构建指南](BUILD.md) |
+| 内核升级与回退 | [内核更新](KERNEL-UPDATES.md) |
+| 硬件支持与待改进 | [硬件说明](HARDWARE.md) |
+
+## 安装器与 Recovery 开发
+
+| 主题 | 文档 |
+| --- | --- |
+| 分区、系统身份与引导存储 | [多系统设计](MULTIBOOT-DESIGN.md) |
+| Rec 架构、镜像角色、构建与功能限制 | [原生 Recovery](NATIVE-RECOVERY.md) |
+| ADB、安装、切换、BCB 与中断恢复 | [Rec 安装后端](NATIVE-RECOVERY-INSTALLER.md) |
+| 平板界面与触屏 | [图形界面](RECOVERY-LVGL.md) |
+| 固件识别、固定启动与 ROM 适配 | [固件匹配](RECOVERY-FIRMWARE-PROFILES.md) |
+| worker、打包和回归 | [安装器开发](../installer/README.md)、[测试说明](../tests/README.md) |
+| 目录与发布 | [项目结构](STRUCTURE.md)、[CI](CI.md)、[贡献要求](../CONTRIBUTING.md) |
+
+## 硬件专题
+
+[显示](DISPLAY.md) · [指纹](FINGERPRINT.md) · [相机](CAMERA.md) · [充电](FASTCHARGE.md) · [RTC](RTC.md)
+
+来源和许可证见 [CREDITS](../CREDITS.md)、[NOTICE](../NOTICE)。

@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "profiles": [],
+  "notes": [
+    "No current paired image has a complete, exact-firmware physical boot qualification record.",
+    "The 2026-11-02 image uses a HyperOS 2.0.6 kernel; MIUI 14.0.3 / Android 13 temporary boot did not establish Recovery ADB.",
+    "Adding a profile requires the actual image SHA256 and build ID, exact vendor fingerprint and kernel, and a recorded successful temporary boot. Android version or ROM marketing name alone is insufficient.",
+    "An already-running matching paired Recovery remains available for inspection. This catalog does not authorize fixed Recovery installation."
+  ]
+}

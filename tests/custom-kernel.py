@@ -24,6 +24,12 @@ class KernelTests(unittest.TestCase):
         self.out = self.root / 'out'
         self.config = self.root / 'custom.config'; self.config.write_text('CONFIG_ZRAM=y\n')
         self.compiler = self.root / 'mock-compiler'; self.compiler.write_bytes(b'MOCK COMPILER ONLY\n')
+        # Mock compiler outputs are not executable ARM64 Images. Real entry
+        # publication is exercised by kernel-common-fixes.py with a toolchain.
+        self.lock=self.root/'mock-source-lock.json'
+        record=json.loads((project/'build/kernel/source.json').read_text())
+        record.pop('load_alignment',None)
+        self.lock.write_text(json.dumps(record))
         self.calls = []
         self.commit = '1' * 40
 
@@ -46,7 +52,8 @@ class KernelTests(unittest.TestCase):
                 path = self.out / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'MOCK ONLY')
 
     def invoke(self, *arguments):
-        with patch.object(sys, 'argv', ['builder', '--source', str(self.source), '--out', str(self.out), *arguments]), \
+        selected=[] if '--source-lock' in arguments else ['--source-lock',str(self.lock)]
+        with patch.object(sys, 'argv', ['builder', '--source', str(self.source), '--out', str(self.out), *selected, *arguments]), \
              patch.object(builder, 'output', side_effect=self.output), \
              patch.object(builder.shutil, 'which', return_value=str(self.compiler)), \
              patch.object(builder.subprocess, 'run', side_effect=self.compiler_run):

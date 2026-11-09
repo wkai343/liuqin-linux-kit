@@ -13,8 +13,10 @@ import math
 import os
 from pathlib import Path
 import re
+import secrets
+import socket
 import stat
-import subprocess
+import struct
 import sys
 import tempfile
 import time
@@ -129,16 +131,61 @@ def synchronised(tracking, now):
         return False
 
 
+def tracking_report(packet, sequence):
+    """Decode only a matching successful chrony v6 TRACKING reply.
+
+    Wire layout: upstream chrony 4.9 candm.h / pktlength.c. This is a
+    read-only monitor query, not an NTP packet or a clock-setting command.
+    Keep the existing synchronised() bounds before accepting an anchor.
+    """
+    if (len(packet) != 104 or packet[:4] != bytes((6, 2, 0, 0))
+            or struct.unpack_from('!HHH', packet, 4) != (33, 5, 0)
+            or struct.unpack_from('!I', packet, 16)[0] != sequence):
+        raise InvalidState('invalid chrony tracking reply')
+    refid, address, family, _pad, stratum, leap, high, low, nsec, *words = \
+        struct.unpack_from('!I16s4H3I9I', packet, 28)
+    if family not in (0, 1, 2, 3) or leap > 3 or nsec >= 1000000000:
+        raise InvalidState('invalid chrony tracking fields')
+    if high == 0x7fffffff:  # chrony's marker for a 32-bit timestamp
+        high = 0
+    reference = (high << 32 | low) + nsec / 1e9
+    if family == 1:
+        address = socket.inet_ntop(socket.AF_INET, address[:4])
+    elif family == 2:
+        address = socket.inet_ntop(socket.AF_INET6, address)
+    else:
+        address = '0.0.0.0'
+
+    def floating(word):
+        # Signed 7-bit exponent and signed 25-bit coefficient, not IEEE754.
+        exponent, coefficient = word >> 25, word & 0x1ffffff
+        if exponent & 0x40:
+            exponent -= 0x80
+        if coefficient & 0x1000000:
+            coefficient -= 0x2000000
+        return math.ldexp(coefficient, exponent - 25)
+
+    values = [f'{refid:08X}', address, str(stratum), str(reference),
+              *(repr(floating(word)) for word in words),
+              ('Normal', 'Insert second', 'Delete second', 'Not synchronised')[leap]]
+    return ','.join(values) + '\n'
+
+
 def tracking():
-    # Use chrony's read-only loopback monitor interface. Fedora's SELinux policy
-    # forbids chronyd replying to a generic service's Unix-domain client socket.
+    # Do not exec chronyc from this NoNewPrivileges service: Fedora tries a
+    # chronyc_t domain transition and emits an AVC on every timer tick. Query
+    # the same existing loopback-only monitor without changing SELinux policy.
+    sequence = secrets.randbits(32)
+    request = struct.pack('!4B2H3I', 6, 1, 0, 0, 33, 0, sequence, 0, 0)
+    request += bytes(104 - len(request))  # protocol v6 anti-amplification pad
     try:
-        result = subprocess.run(['/usr/bin/chronyc', '-h', '127.0.0.1',
-                                 '-c', 'tracking'], capture_output=True, text=True, timeout=5,
-                                env={**os.environ, 'LC_ALL': 'C'})
-    except subprocess.TimeoutExpired:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+            client.settimeout(2)
+            client.connect(('127.0.0.1', 323))
+            client.send(request)
+            return tracking_report(client.recv(105), sequence)
+    except (OSError, ValueError, OverflowError):
         return ''
-    return result.stdout if result.returncode == 0 else ''
 
 
 def write_state(path, anchor):

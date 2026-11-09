@@ -721,11 +721,14 @@ def main():
                     "firmware may expose a stale SVID after detach",
                     file=sys.stderr)
 
+        # Fuel-gauge verification is per battery, not Xiaomi-adapter auth.
+        # A plain PD computer may have no PDO2/UVDM service; skipping its
+        # adapter handshake must not leave both battery flags unverified.
+        enable_battery_auth(root)
+
         if should_skip_pdo2(root):
             raise UnsupportedChargerError("pdo2 reports no source PDO for adapter authentication",
                                           terminal=True)
-
-        enable_battery_auth(root)
 
         send_vdm(root, 1, timeout=args.timeout, settle=ANDROID_CMD_SETTLE[1])
         send_vdm(root, 2, timeout=args.timeout, settle=ANDROID_CMD_SETTLE[2])

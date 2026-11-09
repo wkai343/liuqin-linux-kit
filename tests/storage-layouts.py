@@ -44,7 +44,7 @@ def stock(capacity, offset=0, userdata_number=35):
 
 
 def args(mode, **changes):
-    result = dict(layout=mode, android_size=None, root_size=None, keep_home=False)
+    result = dict(layout=mode, filesystem='ext4')
     result.update(changes)
     return SimpleNamespace(**result)
 
@@ -60,29 +60,14 @@ def refuses(call, fragment):
 
 for capacity in (128, 256, 512):
     disk = stock(capacity, offset=512, userdata_number=63)
-    for requested in (args('linux-only'), args('linux-only', root_size='75%'),
-                      args('dual', android_size='32G', root_size='50%'), args('linux-single')):
+    for filesystem in ('ext4', 'btrfs'):
+        requested = args('linux-single', filesystem=filesystem)
         plan = installer.plan_for_disk(requested, disk)
         installer.confirm_plan(plan, installer.plan_for_disk(requested, copy.deepcopy(disk)))
-        if requested.layout == 'linux-single':
-            assert len(plan.entries) == 1 and plan.entry('userdata').action == 'format'
-            assert plan.entry('userdata').start == disk.by_name('userdata').start
-            assert plan.entry('userdata').end == disk.usable_end
-            assert L.home_partition_name(requested.layout) is None
-            refuses(lambda: L.sgdisk_arguments(plan, '/never-a-device', {}), 'does not modify')
-        else:
-            assert plan.entry('linux_root').start % L.ALIGNMENT == 0
-            assert plan.entry('linux_home').end == disk.usable_end
-    print(f'PASS: {capacity} GB, changed userdata offset/number, absolute and percentage layouts')
-
-refuses(lambda: installer.plan_for_disk(args('dual'), stock(128)), 'linux_home')
-refuses(lambda: installer.plan_for_disk(args('linux-single', keep_home=True), stock(128)), 'no separate')
-damaged = stock(128)
-damaged.partitions[0].number = 36
-plan = installer.plan_for_disk(args('linux-only'), damaged)
-assert plan.entry('linux_root').number == 37 and plan.entry('linux_home').number == 38
-assert all(e.number != 36 for e in plan.entries if e.action == 'create')
-print('PASS: new Linux entries never replace occupied stock partition numbers')
+        assert len(plan.entries) == 1 and plan.entry('userdata').action == 'format'
+        assert plan.entry('userdata').start == disk.by_name('userdata').start
+        assert plan.entry('userdata').end == disk.usable_end
+    print(f'PASS: {capacity} GB, changed userdata offset/number, single-root filesystems')
 
 for mutation in ('size', 'prefix', 'name'):
     disk = stock(128)
@@ -97,13 +82,13 @@ for mutation in ('size', 'prefix', 'name'):
     else:
         altered.partitions[0].name = 'changed-prefix'
     refuses(lambda: installer.confirm_plan(plan, installer.plan_for_disk(args('linux-single'), altered)),
-            'changed after confirmation')
+            'partition names differ' if mutation == 'name' else 'changed after confirmation')
 ambiguous = stock(128)
 ambiguous.partitions[0].number = ambiguous.partitions[1].number
 refuses(lambda: installer.plan_for_disk(args('linux-single'), ambiguous), 'duplicate')
 overlap = stock(128)
 overlap.by_name('userdata').first_sector = overlap.partitions[-2].last_sector
-refuses(lambda: installer.plan_for_disk(args('linux-only'), overlap), 'overlapping')
+refuses(lambda: installer.plan_for_disk(args('linux-single'), overlap), 'overlapping')
 print('PASS: disk changes, duplicate entries and overlapping partitions are refused')
 
 
@@ -212,7 +197,6 @@ def run_host(mode, *, capacity=128, answer='YES', change_after_confirmation=Fals
              patch.object(installer, 'stage_blob', side_effect=lambda *a: operations.append(('stage-contract',))), \
              patch.object(installer.http.server, 'ThreadingHTTPServer', Server), \
              patch.object(installer, 'reference_plan', side_effect=AssertionError('reference used for real install')), \
-             patch.object(installer, 'apply_layout', side_effect=lambda *a: operations.append(('apply-layout',))), \
              patch.object(installer, 'finish_in_fastboot', side_effect=lambda *a: operations.append(('finish', a[1]))), \
              patch.object(installer.sys, 'stdin', SimpleNamespace(isatty=lambda: True)), \
              patch('builtins.input', side_effect=input_answer), redirect_stdout(output):
@@ -258,9 +242,9 @@ print('PASS: cancellation, a changed GPT and a malformed image never reach destr
 
 with tempfile.TemporaryDirectory() as temporary:
     bundle = make_bundle(Path(temporary))
-    for option in ('--keep-home', '--root-size', '--android-size'):
+    for option in ('--keep-home', '--root-size', '--android-size', '--rom-dir', '--android-boot', '--no-backup'):
         argv = ['--bundle', str(bundle), '--check', '--layout', 'linux-single', option]
-        if option != '--keep-home':
+        if option not in ('--keep-home', '--no-backup'):
             argv += ['0' if option == '--android-size' else '100%']
         with patch.object(installer.subprocess, 'run', side_effect=AssertionError('device accessed')):
             try:

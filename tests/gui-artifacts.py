@@ -97,6 +97,40 @@ class ArtifactTests(unittest.TestCase):
                     target.addfile(entry, io.BytesIO(content) if content is not None else None)
         path.write_bytes(stream.getvalue())
 
+    def storage_boot(self, version=1):
+        old=boot_interface(self.bundle/'boot.img')
+        records={'etc/liuqin-storage-mode':b'persistent\n',
+                 'etc/liuqin-root-profile':b'native-updatable\n',
+                 'etc/liuqin-native-root.contract':old['contract']}
+        if version:records['etc/liuqin-storage-policy']=b'LIUQIN_DESKTOP_UFS_ONLY_V1\n'
+        (self.bundle/'boot.img').write_bytes(demo_image(records))
+
+    def storage_root(self):
+        path=self.bundle/'rootfs.tar.gz';stream=io.BytesIO()
+        with tarfile.open(path) as source,tarfile.open(fileobj=stream,mode='w:gz') as target:
+            for entry in source:
+                content=source.extractfile(entry).read() if entry.isfile() else None
+                if entry.name=='usr/local/sbin/liuqin-gnome-storage-guard':
+                    content=b'policy_version=LIUQIN_DESKTOP_UFS_ONLY_V1\n';entry.size=len(content)
+                target.addfile(entry,io.BytesIO(content) if content is not None else None)
+            elf=bytearray(20);elf[:6]=b'\x7fELF\x02\x01';elf[18:20]=(183).to_bytes(2,'little')
+            for name,data,mode in [('etc/liuqin-storage-policy',b'LIUQIN_DESKTOP_UFS_ONLY_V1\n',0o644),
+                    ('usr/libexec/liuqin-storage-seal',bytes(elf),0o755)]:
+                entry=tarfile.TarInfo(name);entry.mode=mode;entry.size=len(data);target.addfile(entry,io.BytesIO(data))
+        path.write_bytes(stream.getvalue())
+
+    def test_new_storage_boot_rejects_legacy_root_before_installation(self):
+        self.storage_boot()
+        with self.assertRaisesRegex(ArtifactError,'存储保护版本不匹配'):inspect_package(self.bundle)
+
+    def test_legacy_storage_boot_rejects_new_root(self):
+        self.storage_root()
+        with self.assertRaisesRegex(ArtifactError,'存储保护版本不匹配'):inspect_package(self.bundle)
+
+    def test_matching_ufs_policy_boot_and_root_are_admitted(self):
+        self.storage_boot();self.storage_root()
+        self.assertEqual(inspect_package(self.bundle)['storage_policy_version'],1)
+
     def test_three_files_without_json_accept_custom_root_without_snap_or_gnome(self):
         (self.bundle / 'bundle.json').unlink()
         self.engine.validate_bundle(self.bundle)

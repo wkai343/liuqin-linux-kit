@@ -8,7 +8,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
 
-from .controller import Controller
+from .wizard import WizardController
 from liuqin_identity import PROJECT_NAME
 
 
@@ -48,7 +48,7 @@ def main(args):
     app.setApplicationDisplayName(PROJECT_NAME)
     state_dir = args.state_dir or Path(QStandardPaths.writableLocation(QStandardPaths.AppLocalDataLocation))
     bundle = args.bundle
-    controller = Controller(args.demo, bundle, state_dir)
+    controller = WizardController(args.demo, bundle, state_dir, installer_image=getattr(args,"installer_image",None) or "")
     controller.quitRequested.connect(app.quit)
     engine = QQmlApplicationEngine()
     engine.rootContext().setContextProperty('backend', controller)
@@ -61,6 +61,9 @@ def main(args):
             raise SystemExit('截图预览仅允许 --demo，避免打开真机流程。')
 
         def screenshot():
+            if controller.data['busy'] or not controller.data['workerReady']:
+                QTimer.singleShot(100,screenshot)
+                return
             args.screenshot.parent.mkdir(parents=True, exist_ok=True)
             image = engine.rootObjects()[0].grabWindow()
             if image.isNull() or not image.save(str(args.screenshot)):

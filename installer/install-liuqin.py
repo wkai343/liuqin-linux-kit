@@ -21,35 +21,24 @@ import uuid
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from liuqin_gui import host
 
-# Slot assignment.  In the dual layout both systems boot from slot A: the
-# project boot image goes to boot_a, Android's boot image is kept in the switch
-# store on the Ubuntu root, and liuqin-switch rotates the two through boot_a.
-# The stock bootloader switches slots only through its own fastboot
-# --set-active, which swaps the type GUIDs of every _a/_b pair and the UFS boot
-# LUN together; nothing on the tablet can do that, so switching never changes
-# the slot.  boot_b receives the same project image as the bootloader's own
-# fallback when boot_a does not load.
-#
-# The Linux-only layout keeps its original assignment, Ubuntu in slot B, so
-# that an emergency Android kept with --android-size stays bootable from the
-# untouched slot A.  It has no switch store.
-DUAL_UBUNTU_SLOT = 'a'
-DUAL_FALLBACK_SLOT = 'b'
-LINUX_ONLY_UBUNTU_SLOT = 'b'
-# Single root does not keep a usable Android system. Use the slot-A chain
-# verified by the current device port instead of inheriting the legacy B path.
-LINUX_SINGLE_UBUNTU_SLOT = 'a'
-# The stock (or --android-boot) boot image is not flashed in the dual layout:
-# it is stored for liuqin-switch and served to the RAM installer under this name.
-ANDROID_BOOT_IMAGE = 'boot.img'
-ANDROID_BOOT_URL = 'android-boot.img'
-# These stock firmware filesystems are required by Android before ADB starts.
-# Back up a mismatching partition before restoring it from the pinned ROM.
-ANDROID_FIRMWARE_PARTITIONS = ('modem_a', 'bluetooth_a', 'dsp_a')
+# The supported single-root layout boots from slot A.
+LINUX_BOOT_SLOT = 'a'
+STOCK_BOOT_IMAGE = 'boot.img'
 # Every layout operation resolves the disk through a partition that exists in
 # every state of this installation: persist is never created, moved or removed.
 ANCHOR = 'persist'
-ZERO_DIGEST = hashlib.sha256(b'').hexdigest()
+
+
+# Retained only for the legacy diagnostic CLI; the GUI uses ADB.
+def check_installer_support(manifest):
+    if host.IS_WINDOWS and manifest.get('installer_usb_network') not in ('rndis','adb'):
+        raise RuntimeError('Windows 需要新版 installer.img 的 RNDIS 安装通道，请先重新构建安装镜像。')
+
+
+def server_address(address):
+    if host.IS_WINDOWS and address != '192.168.7.1':
+        raise RuntimeError('此旧版 CLI 需要手动配置 USB 网卡；推荐改用 GUI 的 ADB Recovery。')
+    return address, 37631 if host.IS_WINDOWS else 0
 
 
 def load_layout():
@@ -95,20 +84,13 @@ def update_zeros(digest, length):
     return digest
 
 
-def zero_digest(length):
-    """sha256 of `length` zero bytes, for the padding check on stock images."""
-    return update_zeros(hashlib.sha256(), length).hexdigest()
-
-
 def boot_partition_bytes(table):
     """The size of boot_a and boot_b.
 
-    The stock boot.img of the pinned ROM fills its partition exactly (the
-    --android-boot override is held to the same length), so the pinned table
-    is the one source of this number; the partitions the bootloader reports
-    are compared with it before anything is written.
+    The pinned stock boot.img fills its partition exactly. Compare the
+    reported boot_a size with this known geometry before writing.
     """
-    return table['images'][ANDROID_BOOT_IMAGE]['bytes']
+    return table['images'][STOCK_BOOT_IMAGE]['bytes']
 
 
 def pad_boot_image(source, expected_sha256, size, directory):
@@ -116,13 +98,9 @@ def pad_boot_image(source, expected_sha256, size, directory):
 
     The bootloader writes only the bytes it is sent, so flashing the bare
     project image would leave the old tail of the partition (the stock
-    image's AVB footer, for one) behind it.  liuqin-switch identifies boot_a
-    by the hash of the whole partition, the image zero-filled to the
-    partition size, so that is exactly what is flashed.  The zeros are a
-    sparse tail (truncate), so the file costs the image's own size on disk.
-
-    Firmware restores also use this helper with their own scratch directory
-    and actual partition size, so an old nonzero tail cannot survive a repair.
+    image's AVB footer, for one) behind it. Hash the entire padded payload
+    so the GUI can compare it with the complete boot_a readback. The zeros
+    are a sparse tail (truncate), so the file costs the image's own size on disk.
 
     Returns the padded file and its sha256.  The source is checked against
     `expected_sha256` while it is copied, so the padded file carries no bytes
@@ -230,186 +208,54 @@ def parse_arguments(argv=None):
     parser.add_argument('--host-address', help='Host IPv4 address on the tablet USB network')
     parser.add_argument('--device-address', default='192.168.7.2')
     parser.add_argument('--backup', type=Path)
-    parser.add_argument('--no-backup', action='store_true',
-                        help='Explicitly skip partition backups for an existing --keep-home reinstall')
     parser.add_argument('--erase-userdata', action='store_true')
     parser.add_argument('--layout', choices=list(layout.MODES),
-                        help='linux-only: Ubuntu is the only system. '
-                             'dual: keep a stock Android alongside it; both boot from slot A. '
-                             'linux-single: use all userdata for / and /home without changing GPT')
-    parser.add_argument('--android-size', help='Android userdata size as NNG or NN%% '
-                                               '(0 deletes the partition; default 96G dual, 0 linux-only)')
-    parser.add_argument('--root-size', help='linux_root size as NNG or NN%% (default 32G); '
-                                            'linux_home takes the remainder')
-    parser.add_argument('--keep-home', action='store_true',
-                        help='Reinstall the system on an existing split layout and keep linux_home')
-    parser.add_argument('--rom-dir', type=Path,
-                        help='Extracted stock Fastboot ROM directory; required by --layout dual')
-    parser.add_argument('--android-boot', type=Path, metavar='IMG',
-                        help='Keep this boot image as Android\'s boot image instead of the stock '
-                             'boot.img; only applies to --layout dual. It is stored on the Ubuntu '
-                             'root and written to boot_a by liuqin-switch. Every other stock '
-                             'image is still verified against the pinned checksums.')
+                        help='Use all userdata for / and /home without changing GPT')
     parser.add_argument('--restore-partition-table', type=Path, metavar='BACKUP_DIR',
                         help='Restore the partition table saved in an earlier backup directory and stop')
     parser.add_argument('--yes', action='store_true', help='Skip the interactive data-erasure confirmation')
     parser.add_argument('--allow-unverified', action='store_true', help='Explicitly test an offline-only bundle')
-    parser.add_argument('--enable-rescue', action='store_true',
-                        help='Enable unauthenticated root rescue access after installation (trusted USB only)')
     return parser, parser.parse_args(argv)
 
 
 def reference_plan(parser, args):
-    """An explicitly labelled 256 GB example for the local-only --check path.
-
-    Installation confirmation uses the actual tablet table, never this example.
-    """
-    disk = layout.reference_stock_disk()
-    region = disk.usable_end - disk.by_name(layout.USERDATA_NAME).start
+    """The local-only example is never used as the actual device's geometry."""
     try:
-        android, root = layout.resolve_sizes(args.layout, args.android_size, args.root_size, region)
-        return layout.plan_layout(disk, args.layout, android, root)
+        return plan_for_disk(args, layout.reference_stock_disk())
     except layout.LayoutError as error:
         parser.error(str(error))
 
 
 def validate_arguments(parser, args, preview=False):
-    """Check the argument combinations.  ``preview`` covers the offline --check
-    path, where no device and no stock ROM are involved."""
-    if args.no_backup and (args.backup or not args.keep_home or args.restore_partition_table):
-        parser.error('--no-backup requires --keep-home and cannot be combined with --backup or restore')
-    if args.keep_home and (args.android_size or args.root_size):
-        parser.error('--keep-home keeps the existing sizes; do not also request new ones'
-                     ' —— 现有分区尺寸不可调整，请勿同时指定尺寸参数')
-    if args.layout == 'linux-single':
-        if args.keep_home or args.android_size is not None or args.root_size is not None:
-            parser.error('linux-single uses all userdata; --keep-home and size options do not apply'
-                         ' —— 单根模式使用整个 userdata，不能保留独立 home 或指定分区尺寸')
     if args.restore_partition_table is not None:
-        for name, value in (('--layout', args.layout), ('--rom-dir', args.rom_dir),
-                            ('--android-boot', args.android_boot),
-                            ('--android-size', args.android_size), ('--root-size', args.root_size)):
-            if value:
-                parser.error('--restore-partition-table is a separate action; ' + name + ' does not apply')
+        if args.layout:
+            parser.error('--restore-partition-table is a separate action; --layout does not apply')
         if not preview and not args.serial:
             parser.error('--restore-partition-table requires --serial')
         return
-    if args.android_boot is not None:
-        # The override decides what Android boots from, so it is checked on the
-        # offline path as well: nothing about it needs a device.
-        if args.layout != 'dual':
-            parser.error('--android-boot only applies to --layout dual'
-                         ' —— 仅双系统模式可替换 Android 侧 boot 镜像')
-        check_android_boot(parser, args.android_boot)
-    if preview:
-        return
-    if not args.layout:
-        parser.error('--layout linux-only|dual|linux-single is required')
-    if args.layout == 'dual' and not args.rom_dir:
-        parser.error('--layout dual needs --rom-dir pointing at an extracted stock Fastboot ROM'
-                     ' —— 双系统模式必须提供原厂 ROM 目录，本项目不分发原厂镜像')
-    if args.layout != 'dual' and args.rom_dir:
-        parser.error('--rom-dir only applies to --layout dual')
+    if not preview and not args.layout:
+        parser.error('--layout linux-single is required')
 
 
 def plan_for_disk(args, disk):
     """Validate and plan from the selected tablet's own partition report."""
-    state = layout.classify(disk)
-    if state == 'unknown':
-        raise layout.LayoutError('partition table is neither factory nor a supported split layout; '
-                                 'restore the saved factory table before changing it')
-    if state == 'split':
-        if not args.keep_home:
-            raise layout.LayoutError('the tablet already has a split layout; --keep-home is required '
-                                     'for a reinstall; restore the factory table to change the layout')
-        if args.layout == 'dual' and disk.by_name(layout.USERDATA_NAME) is None:
-            raise layout.LayoutError('dual reinstall requires an existing Android userdata partition')
-        return layout.reinstall_plan(disk, args.layout)
-    if args.keep_home:
-        raise layout.LayoutError('the factory table has no separate linux_home to keep')
-    layout.check_stock_device(disk, new_partitions=0 if args.layout == 'linux-single' else 2)
-    region = disk.usable_end - disk.by_name(layout.USERDATA_NAME).start
-    sizes = layout.resolve_sizes(args.layout, args.android_size, args.root_size, region)
-    return layout.plan_layout(disk, args.layout, *sizes, filesystem=getattr(args, 'filesystem', 'ext4'))
+    return layout.plan_layout(disk, args.layout, filesystem=getattr(args, 'filesystem', 'ext4'))
 
 
-def confirm_installation(parser, args, plan, rom_images):
+def confirm_installation(parser, args, plan):
     """One destructive confirmation, after reading and backing up the real disk."""
     print('Actual tablet layout (' + args.layout + '):', flush=True)
     print(plan.table(), flush=True)
     slots = boot_slots(args.layout)
     print('Boot image writes: ' + ', '.join('boot_' + slot for slot in slots)
           + '; active slot after installation: ' + slots[0].upper(), flush=True)
-    if args.layout == 'linux-single':
-        print('The partition table is unchanged. All userdata, including /home, will be erased.', flush=True)
-    elif args.keep_home:
-        print('The existing partition sizes and /home are kept; the Ubuntu system is reformatted.', flush=True)
-    else:
-        print('The partition table will be changed and the data partitions above erased.', flush=True)
-    if args.layout == 'dual':
-        print('Slot A stock Android partitions are verified/restored from the supplied ROM. '
-              'Android boot.img is stored on Ubuntu for switching, not flashed now.', flush=True)
-        if args.android_boot is not None:
-            print('Android boot image override: ' + str(args.android_boot.resolve()), flush=True)
-            print('  sha256 ' + rom_images['boot.img']['sha256'], flush=True)
+    print('The partition table is unchanged. All userdata, including /home, will be erased.', flush=True)
     if not args.yes:
         if not sys.stdin.isatty():
             parser.error('data erasure needs an interactive confirmation; pass --yes to confirm it')
         print(f'即将按上表安装并清空平板 {args.serial} 的对应数据。', flush=True)
         if input('Type YES to continue / 输入 YES 继续: ') != 'YES':
             parser.error('data erasure was not confirmed —— 未确认，已取消')
-
-
-def boot_image_kind(header):
-    """The header rule liuqin-switch and the store step apply, in Python.
-
-    'ubuntu': header v2, 4096-byte page, 1660-byte header, a DTB.
-    'android': header v3 (1580-byte header) or v4 (1584-byte header).
-    Both need the ANDROID! magic and a kernel; anything else is 'unknown'.
-    """
-    if len(header) < 1652 or header[:8] != b'ANDROID!':
-        return 'unknown'
-
-    def u32(offset):
-        return int.from_bytes(header[offset:offset + 4], 'little')
-
-    version, kernel = u32(40), u32(8)
-    if kernel == 0:
-        return 'unknown'
-    if version == 2 and u32(36) == 4096 and u32(1644) == 1660 and u32(1648) > 0:
-        return 'ubuntu'
-    if (version, u32(20)) in ((3, 1580), (4, 1584)):
-        return 'android'
-    return 'unknown'
-
-
-def check_android_boot(parser, path):
-    """Accept an Android boot override only if it can occupy the stock partition.
-
-    The image replaces a verified stock image, so it is held to the properties
-    that can be checked without a device: it is exactly as long as the stock
-    boot.img the pinned table describes, and its header identifies it as an
-    Android (v3/v4) boot image, which is what liuqin-switch will require before
-    it writes the image to boot_a.  Its content is the operator's
-    responsibility and its checksum is printed wherever the plan is shown.
-    """
-    table = load_rom_table(parser)
-    expected = table['images']['boot.img']['bytes']
-    if not path.is_file():
-        parser.error('--android-boot is not a file: ' + str(path))
-    if path.stat().st_size != expected:
-        parser.error(f'--android-boot must be exactly {expected} bytes, the size of the stock '
-                     f'boot.img in {table["rom"]}; {path} is {path.stat().st_size} bytes'
-                     ' —— 替换镜像必须与原厂 boot 分区等长')
-    with path.open('rb') as stream:
-        header = stream.read(4096)
-    if header[:8] != b'ANDROID!':
-        parser.error('--android-boot does not start with the Android boot magic: ' + str(path) +
-                     ' —— 该文件不是 Android boot 镜像')
-    if boot_image_kind(header) != 'android':
-        parser.error('--android-boot is not an Android boot image with header version 3 or 4: ' +
-                     str(path) + ' —— 该文件不是 v3/v4 头的 Android boot 镜像')
-    return sha(path)
 
 
 def load_rom_table(parser):
@@ -422,31 +268,6 @@ def load_rom_table(parser):
         parser.error('liuqin-rom-images.json is missing next to this program'
                      ' —— 安装包不完整，请下载同一版本的全部文件')
     return json.loads(pinned.read_text(encoding='utf-8'))
-
-
-def verify_rom(parser, rom_dir, android_boot=None):
-    """Check every stock image this installation writes against the pinned table."""
-    table = load_rom_table(parser)
-    images = rom_dir.resolve()
-    if (images / 'images').is_dir():
-        images = images / 'images'
-    selected = {}
-    for name, entry in sorted(table['images'].items()):
-        path = images / name
-        if not path.is_file():
-            parser.error('the ROM directory does not contain ' + name +
-                         ' —— 请指向解包后的原厂 Fastboot ROM 目录（含 images/）')
-        if path.stat().st_size != entry['bytes'] or sha(path) != entry['sha256']:
-            parser.error('ROM image does not match the pinned ' + table['rom'] + ' release: ' + name +
-                         ' —— 原厂镜像与本项目验证过的版本不一致，请使用 ' + table['rom'])
-        selected[name] = dict(entry, path=path)
-    if android_boot is not None:
-        # Every stock image was verified above; only now is the Android boot
-        # image swapped, so the override can never skip a checksum.
-        override = android_boot.resolve()
-        selected['boot.img'] = dict(selected['boot.img'], path=override, sha256=sha(override),
-                                    override=True)
-    return table, selected
 
 
 def main(argv=None):
@@ -471,11 +292,13 @@ def main(argv=None):
     manifest = dict(device='liuqin', files=files, **interface,
                     installer_layouts=['linux-single'], single_root_boot_slot='a',
                     status='DEVICE_TESTED' if tested else 'CUSTOM_UNVERIFIED')
+    if 'native_recovery_manifest' in manifest and not args.check:
+        parser.error('原生 Recovery 测试版仅供 GUI 只读检查，CLI 不开放安装或分区恢复；未访问设备。')
     if args.filesystem not in manifest['filesystems']:
         parser.error('所选安装包不支持 ' + args.filesystem + '；未访问设备。')
     if not args.check:
         try:
-            host.check_installer_support(manifest)
+            check_installer_support(manifest)
         except RuntimeError as error:
             parser.error(str(error))
     validate_arguments(parser, args, preview=args.check)
@@ -493,22 +316,14 @@ def main(argv=None):
         parser.error('bundle has not passed device testing; use --allow-unverified only for attended tests'
                      ' —— 该包未通过真机验证，请勿用于正式安装')
     restore = args.restore_partition_table
-    if restore is None and not all((args.serial, args.backup or args.no_backup, args.erase_userdata)):
-        parser.error('--serial, --backup (or --no-backup), --erase-userdata and --layout are required')
+    if restore is None and not all((args.serial, args.backup, args.erase_userdata)):
+        parser.error('--serial, --backup, --erase-userdata and --layout are required')
     if restore is None:
-        if not args.no_backup:
-            if args.backup.exists():
-                parser.error('--backup must be a new directory')
-            args.backup = args.backup.resolve()
-            if args.backup == bundle or bundle in args.backup.parents:
-                parser.error('private backups must be outside the served bundle directory')
-        rom_table, rom_images = ({}, {})
-        if args.layout == 'dual':
-            rom_table, rom_images = verify_rom(parser, args.rom_dir, args.android_boot)
-            print('Stock ROM verified against the pinned ' + rom_table['rom'] + ' checksums')
-            if args.android_boot is not None:
-                print('Android boot image override: ' + str(args.android_boot.resolve()))
-                print('  sha256 ' + rom_images['boot.img']['sha256'])
+        if args.backup.exists():
+            parser.error('--backup must be a new directory')
+        args.backup = args.backup.resolve()
+        if args.backup == bundle or bundle in args.backup.parents:
+            parser.error('private backups must be outside the served bundle directory')
     else:
         restore = restore.resolve()
         if not (restore / 'gpt/manifest.json').is_file():
@@ -622,54 +437,23 @@ def main(argv=None):
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
                 route.connect((args.device_address, 2323))
                 args.host_address = route.getsockname()[0]
-        extra = {}
-        if args.layout == 'dual':
-            extra['/' + ANDROID_BOOT_URL] = rom_images[ANDROID_BOOT_IMAGE]['path']
-        server = http.server.ThreadingHTTPServer(host.server_address(args.host_address), bundle_handler(bundle, extra))
+        server = http.server.ThreadingHTTPServer(server_address(args.host_address), bundle_handler(bundle))
         threading.Thread(target=server.serve_forever, daemon=True).start()
         backups = {}
-        saved = None
-        if args.no_backup:
-            print('Partition backups skipped by explicit --no-backup request.', flush=True)
-        else:
-            args.backup.mkdir(mode=0o700, parents=True)
-            for name in ('boot_a', 'boot_b', 'persist'):
-                backups[name + '.img'] = backup_partition(remote, args.backup, name)
-            (args.backup / 'SHA256SUMS').write_text(''.join(f'{h}  {n}\n' for n, h in backups.items()), encoding='utf-8', newline='\n')
-            saved = backup_partition_table(device_layout, args.backup, args.serial)
+        args.backup.mkdir(mode=0o700, parents=True)
+        for name in ('boot_a', 'boot_b', 'persist'):
+            backups[name + '.img'] = backup_partition(remote, args.backup, name)
+        (args.backup / 'SHA256SUMS').write_text(''.join(f'{h}  {n}\n' for n, h in backups.items()), encoding='utf-8', newline='\n')
+        backup_partition_table(device_layout, args.backup, args.serial)
         disk = layout.parse_print(device_layout('report', ANCHOR))
         state = layout.classify(disk)
         print('Partition table state: ' + state)
         plan = plan_for_disk(args, disk)
-        confirm_installation(parser, args, plan, rom_images)
+        confirm_installation(parser, args, plan)
         # Re-read after the user has reviewed the plan. No size is compared to
         # a 256 GB reference; every boundary must still equal the confirmed one.
         current_disk = layout.parse_print(device_layout('report', ANCHOR))
         confirm_plan(plan, plan_for_disk(args, current_disk))
-        if state == 'stock' and args.layout != 'linux-single':
-            apply_layout(device_layout, disk, plan, saved, args.layout)
-        flashes = []
-        if args.layout == 'dual':
-            flashes = stock_images_to_flash(device_layout, {
-                name: entry for name, entry in rom_images.items() if name != ANDROID_BOOT_IMAGE})
-            for index, (image_name, entry) in enumerate(flashes):
-                name = entry['partition']
-                if name in ANDROID_FIRMWARE_PARTITIONS:
-                    if args.no_backup:
-                        firmware_bytes = int(remote('/bin/busybox blockdev --getsize64 ' +
-                                                    shlex.quote('/dev/disk/by-partlabel/' + name)).decode().strip())
-                    else:
-                        backups[name + '.img'] = backup_partition(remote, args.backup, name)
-                        firmware_bytes = (args.backup / (name + '.img')).stat().st_size
-                    firmware_scratch = Path(scratch.name) / name
-                    firmware_scratch.mkdir()
-                    image, digest = pad_boot_image(entry['path'], entry['sha256'],
-                                                   firmware_bytes, firmware_scratch)
-                    flashes[index] = (image_name, dict(entry, path=image,
-                                                      flash_bytes=firmware_bytes,
-                                                      flash_sha256=digest))
-            if not args.no_backup:
-                (args.backup / 'SHA256SUMS').write_text(''.join(f'{h}  {n}\n' for n, h in backups.items()), encoding='utf-8', newline='\n')
         base = f'http://{args.host_address}:{server.server_port}'
         target_contract = None
         contract = artifacts.boot_interface(padded_boot[0])['contract']
@@ -681,9 +465,9 @@ def main(argv=None):
         remote('/bin/busybox base64 -d ' + LAYOUT_WORK + '/liuqin-gpt-target-root.b64 >' + path +
                ' && chmod 0644 ' + path)
         target_contract = (path, digest)
-        install = install_root_command(boot_id, base, bundle, manifest, args, rom_images,
+        install = install_root_command(boot_id, base, bundle, manifest, args,
                                        target_contract=target_contract)
-        print('Installing Linux into ' + layout.root_partition_name(args.layout) + '.', flush=True)
+        print('Installing Linux into userdata.', flush=True)
         result = remote(shlex.join(install), 3600)
         if b'liuqin-install: ROOT_INSTALLED' not in result:
             raise RuntimeError('Device did not confirm root installation')
@@ -696,7 +480,7 @@ def main(argv=None):
             time.sleep(2)
         else:
             raise RuntimeError('Return to Fastboot not observed; boot partition was not flashed')
-        finish_in_fastboot(fastboot, args.layout, flashes, *padded_boot, boot_bytes)
+        finish_in_fastboot(fastboot, args.layout, *padded_boot, boot_bytes)
         print('Installation commands completed. First-boot verification is still required.')
     finally:
         if server:
@@ -707,13 +491,9 @@ def main(argv=None):
 
 
 def boot_slots(mode):
-    """The slots whose boot partition receives the project boot image, the
-    booting slot first."""
-    if mode == 'dual':
-        return (DUAL_UBUNTU_SLOT, DUAL_FALLBACK_SLOT)
-    if mode == 'linux-single':
-        return (LINUX_SINGLE_UBUNTU_SLOT,)
-    return (LINUX_ONLY_UBUNTU_SLOT,)
+    if mode != 'linux-single':
+        raise layout.LayoutError('unknown layout mode: ' + str(mode))
+    return (LINUX_BOOT_SLOT,)
 
 
 def backup_partition(remote, directory, name):
@@ -730,83 +510,31 @@ def backup_partition(remote, directory, name):
     return expected
 
 
-def finish_in_fastboot(fastboot, mode, flashes, padded_image, padded_sha256, partition_bytes):
-    """The fastboot tail of an installation, after the root is in place.
-
-    Stock images go to their _a partitions first, then the project boot image
-    -- zero-filled to the whole partition by pad_boot_image(), and checked
-    again here -- to every slot boot_slots() names, and only then is the
-    booting slot selected -- through the bootloader's own --set-active, the
-    one operation that keeps its slot attributes, type GUIDs and boot LUN
-    consistent.
-    """
+def finish_in_fastboot(fastboot, mode, padded_image, padded_sha256, partition_bytes):
+    """Write the verified, zero-filled single-root image and select slot A."""
+    slots = boot_slots(mode)
     if padded_image.stat().st_size != partition_bytes or sha(padded_image) != padded_sha256:
         raise RuntimeError('the zero-filled boot image changed before it was flashed; boot_a was not written')
-    for name, entry in flashes:
-        if entry['partition'] in ANDROID_FIRMWARE_PARTITIONS:
-            path = Path(entry['path'])
-            if path.stat().st_size != entry['flash_bytes'] or sha(path) != entry['flash_sha256']:
-                raise RuntimeError('the zero-filled firmware image changed before flashing: ' + name)
-    for name, entry in flashes:
-        source = 'supplied' if entry.get('override') else 'stock'
-        print(f'Writing the {source} {name} to {entry["partition"]}...', flush=True)
-        fastboot('flash', entry['partition'], str(entry['path']))
-    slots = boot_slots(mode)
-    for slot in slots:
-        role = 'fallback copy of the ' if slot != slots[0] else ''
-        print(f'Writing the {role}project boot image to boot_{slot} (whole partition)...', flush=True)
-        fastboot('flash', 'boot_' + slot, str(padded_image))
+    fastboot('flash', 'boot_' + slots[0], str(padded_image))
     fastboot('--set-active=' + slots[0])
     fastboot('reboot')
 
 
-def install_root_command(boot_id, base_url, bundle, manifest, args, rom_images, *, target_contract=None):
-    """The install-root.sh command line.
-
-    The seven fixed arguments come first, then the options in this order:
-    optional ROOT-CONTRACT (host-staged target boot contract),
-    ENABLE-USB-RESCUE (--enable-rescue), KEEP-HOME (--keep-home: check and keep
-    the existing LIUQIN_HOME filesystem instead of formatting it), and in the
-    dual layout SWITCH-STORE with its eight fields, which is always last.
-    """
+def install_root_command(boot_id, base_url, bundle, manifest, args, *, target_contract=None):
+    """Build the single-root request for the versioned RAM installer interface."""
     install = ['sh', '/usr/lib/liuqin/install-root.sh', boot_id, base_url + '/rootfs.tar.gz',
                manifest['files']['rootfs.tar.gz'], str((bundle / 'rootfs.tar.gz').stat().st_size),
-               'ERASE-LIUQIN-USERDATA', layout.root_partition_name(args.layout),
-               layout.home_partition_name(args.layout) or '-']
+               'ERASE-LIUQIN-USERDATA', 'userdata', '-']
     if target_contract:
         install += ['ROOT-CONTRACT', *target_contract]
     if getattr(args, 'filesystem', 'ext4') != 'ext4':
         install += ['FILESYSTEM', args.filesystem]
-    if args.enable_rescue:
-        install.append('ENABLE-USB-RESCUE')
-    if args.keep_home:
-        install.append('KEEP-HOME')
-    if args.layout == 'dual':
-        install += switch_store_arguments(base_url, manifest['files']['boot.img'], bundle / 'boot.img',
-                                          rom_images[ANDROID_BOOT_IMAGE])
     return install
 
 
-def switch_store_arguments(base_url, ubuntu_sha256, ubuntu_image, android_entry):
-    """install-root.sh arguments that fill liuqin-switch's store in the dual layout."""
-    return ['SWITCH-STORE',
-            'ubuntu', base_url + '/boot.img', ubuntu_sha256, str(ubuntu_image.stat().st_size),
-            'android', base_url + '/' + ANDROID_BOOT_URL, android_entry['sha256'],
-            str(Path(android_entry['path']).stat().st_size)]
-
-
-def bundle_handler(bundle, extra):
-    """Serve the bundle directory, plus the exact extra paths given (URL path to
-    file), which the dual layout uses for the Android boot image kept outside
-    the bundle.  Nothing else outside the bundle is reachable."""
-    class Handler(http.server.SimpleHTTPRequestHandler):
-        def translate_path(self, path):
-            clean = path.split('?', 1)[0].split('#', 1)[0]
-            if clean in extra:
-                return str(extra[clean])
-            return super().translate_path(path)
-
-    return functools.partial(Handler, directory=str(bundle))
+def bundle_handler(bundle):
+    """Serve the selected bundle directory."""
+    return functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(bundle))
 
 
 def confirm_plan(expected, actual):
@@ -817,7 +545,7 @@ def confirm_plan(expected, actual):
     """
     def signature(plan):
         disk = plan.disk
-        return (plan.mode, plan.keep_home, disk.sector_size, disk.total_sectors,
+        return (plan.mode, disk.sector_size, disk.total_sectors,
                 disk.first_usable, disk.last_usable, disk.entry_count,
                 tuple((p.number, p.first_sector, p.last_sector, p.name) for p in disk.partitions),
                 tuple((e.number, e.name, e.start, e.end, e.action) for e in plan.entries))
@@ -890,74 +618,6 @@ def restore_partition_table(remote, device_layout, directory, serial):
     print('Restoring the saved partition table...', flush=True)
     if 'GPT_RESTORED' not in device_layout('restore-gpt', ANCHOR):
         raise RuntimeError('the device did not confirm the partition-table restore')
-
-
-def apply_layout(device_layout, before, plan, saved, mode):
-    """Wipe stale metadata, write the table once, verify it, restore on failure."""
-    userdata = before.by_name(layout.USERDATA_NAME)
-    info = layout.parse_info(device_layout('info', layout.USERDATA_NAME))
-    if info['first_sector'] != userdata.first_sector or info['name'] != layout.USERDATA_NAME:
-        raise RuntimeError('the userdata partition reports inconsistent geometry')
-    # Android reformats userdata and metadata on first boot, but only if the
-    # stale file-based-encryption keys are gone.  Zeroing the head of userdata
-    # also removes the LIUQIN_ROOT superblock of the old whole-disk root, so no
-    # second filesystem can answer to that label afterwards.
-    print('Wiping stale filesystem and encryption metadata...', flush=True)
-    device_layout('wipe-head', layout.USERDATA_NAME, str(layout.WIPE_BYTES), timeout=300)
-    if mode == 'dual':
-        device_layout('wipe-head', layout.METADATA_NAME, str(layout.WIPE_BYTES), timeout=300)
-    disk_path = json.loads((saved / 'manifest.json').read_text(encoding='utf-8'))['disk']
-    arguments = layout.sgdisk_arguments(plan, disk_path, info)
-    print('Writing the new partition table...', flush=True)
-    try:
-        if 'LAYOUT_APPLIED' not in device_layout('apply', ANCHOR, *arguments, timeout=300):
-            raise RuntimeError('the device did not confirm the partition-table edit')
-        after = layout.parse_print(device_layout('report', ANCHOR))
-        layout.verify_applied(after, plan)
-        if plan.entry(layout.USERDATA_NAME).action != 'delete':
-            layout.verify_preserved(info, layout.parse_info(device_layout('info', layout.USERDATA_NAME)))
-    except (RuntimeError, layout.LayoutError) as error:
-        print('Partition-table edit failed; restoring the saved table.', file=sys.stderr, flush=True)
-        raise RuntimeError(str(error) + ' —— 分区表写入失败，请用 --restore-partition-table '
-                           + str(saved.parent) + ' 恢复出厂分区表后重试')
-    print('New partition table verified.')
-
-
-def stock_images_to_flash(device_layout, images):
-    """Flash only the stock images whose bytes are not already on the tablet.
-
-    A stock image is usually shorter than its partition and the remainder is
-    zero, so the comparison is the image digest over the first N bytes plus a
-    zero check over everything after them.
-    """
-    selected = []
-    for name, entry in sorted(images.items()):
-        if entry.get('override'):
-            # An override is what the operator asked for; it is written whether
-            # or not the partition already carries those bytes.
-            print(f'{name}: supplied override, will be written to {entry["partition"]}')
-            selected.append((name, entry))
-            continue
-        if entry.get('sparse'):
-            # An Android sparse image cannot be compared against the raw
-            # partition, so it is always written when the dual layout asks for it.
-            print(f'{name}: sparse image, will be written to {entry["partition"]}')
-            selected.append((name, entry))
-            continue
-        report = dict(line.split(None, 1) for line in
-                      device_layout('digest', entry['partition'], str(entry['bytes']),
-                                    timeout=900).splitlines() if line)
-        padding = int(report['size']) - entry['bytes']
-        if report['content'] != entry['sha256']:
-            reason = 'content differs'
-        elif report['padding'] != zero_digest(padding):
-            reason = 'the bytes after the image are not zero'
-        else:
-            print(f'{name}: already present on {entry["partition"]}, not written')
-            continue
-        print(f'{name}: {reason}, will be written to {entry["partition"]}')
-        selected.append((name, entry))
-    return selected
 
 
 if __name__ == '__main__':

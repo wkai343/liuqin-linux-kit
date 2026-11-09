@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "device": "liuqin",
+  "roms": [
+    {
+      "id": "stock",
+      "label": "HyperOS 2.0.6.0.VMYCNXM",
+      "profile": "liuqin-android-profile.json",
+      "kind": "stock-images",
+      "write_status": "experimental",
+      "blockers": [],
+      "firmware_policy": "preserve-existing",
+      "hardware_install_verified": false
+    },
+    {
+      "id": "miku-blooming-26101322",
+      "label": "MikuUI Blooming 26101322",
+      "profile": "liuqin-miku-profile.json",
+      "kind": "payload-zip-v2",
+      "write_status": "experimental",
+      "blockers": [],
+      "firmware_policy": "preserve-existing",
+      "hardware_install_verified": false
+    },
+    {
+      "id": "lineage-24-20261022",
+      "label": "LineageOS 24.0 · 20261022",
+      "profile": "liuqin-lineage-profile.json",
+      "kind": "payload-zip-v2",
+      "write_status": "blocked",
+      "blockers": [
+        "此 ROM 含 ABL/XBL、安全固件等启动资源；保留本机现有固件的兼容性尚未验证，安装器不会自动升级这些分区。",
+        "目标 boot、vendor_boot、DTBO、AVB 与 data 初始化组合尚未完成安装准入验证。",
+        "安装后的 Recovery/Fastboot 返回路径、Android 首次启动和失败恢复尚未验收。"
+      ],
+      "firmware_policy": "preserve-existing",
+      "hardware_install_verified": false
+    }
+  ]
+}

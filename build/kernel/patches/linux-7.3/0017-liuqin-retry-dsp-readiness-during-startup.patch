@@ -1,0 +1,82 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] Retry transient liuqin DSP readiness failures
+
+The r3 hardware trial showed one BASIC ADSP_EFAILED immediately after audio
+PDR registration. The same firmware subsequently initialized the LPASS clock
+provider and codec. Retry only this liuqin readiness rejection in a short
+bounded window. A genuine ready reply is still required; other opcodes and
+DSP statuses retain their normal diagnostics, and exhausted retries are
+reported explicitly.
+
+diff --git a/sound/soc/qcom/qdsp6/audioreach.c b/sound/soc/qcom/qdsp6/audioreach.c
+index 9c85182aa..d8da3d2bd 100644
+--- a/sound/soc/qcom/qdsp6/audioreach.c
++++ b/sound/soc/qcom/qdsp6/audioreach.c
+@@ -2,6 +2,7 @@
+ // Copyright (c) 2020, Linaro Limited
+ 
+ #include <linux/kernel.h>
++#include <linux/platform_data/liuqin.h>
+ #include <linux/slab.h>
+ #include <linux/soc/qcom/apr.h>
+ #include <sound/soc.h>
+@@ -11,6 +12,7 @@
+ #include <dt-bindings/soc/qcom,gpr.h>
+ #include "q6apm.h"
+ #include "audioreach.h"
++#include "q6dsp-errno.h"
+ 
+ /* SubGraph Config */
+ struct apm_sub_graph_data {
+@@ -647,6 +649,10 @@ int audioreach_send_cmd_sync(struct device *dev, gpr_device_t *gdev,
+ 	if (!rc) {
+ 		dev_err(dev, "CMD timeout for [%x] opcode\n", hdr->opcode);
+ 		rc = -ETIMEDOUT;
++	} else if (result->status == ADSP_EFAILED &&
++		   hdr->opcode == APM_CMD_GET_SPF_STATE && liuqin_board_quirks()) {
++		/* This firmware can reject the first readiness query while starting. */
++		rc = -EAGAIN;
+ 	} else if (result->status > 0) {
+ 		dev_err(dev, "DSP returned error[%x] %x\n", hdr->opcode, result->status);
+ 		rc = -EINVAL;
+diff --git a/sound/soc/qcom/qdsp6/q6apm.c b/sound/soc/qcom/qdsp6/q6apm.c
+index 4e0442159..06c7b366d 100644
+--- a/sound/soc/qcom/qdsp6/q6apm.c
++++ b/sound/soc/qcom/qdsp6/q6apm.c
+@@ -9,6 +9,8 @@
+ #include <linux/of.h>
+ #include <linux/of_platform.h>
+ #include <linux/sched.h>
++#include <linux/delay.h>
++#include <linux/platform_data/liuqin.h>
+ #include <linux/slab.h>
+ #include <linux/soc/qcom/apr.h>
+ #include <linux/wait.h>
+@@ -154,14 +156,24 @@ static int q6apm_get_apm_state(struct q6apm *apm)
+ {
+ 	struct gpr_pkt *pkt __free(kfree) =
+ 		audioreach_alloc_apm_cmd_pkt(0, APM_CMD_GET_SPF_STATE, 0);
++	bool retry = liuqin_board_quirks();
++	int attempts = 4;
+ 	int ret;
+ 
+-	/* The DSP expects the common APM header even with no command data. */
+ 	if (IS_ERR(pkt))
+ 		return PTR_ERR(pkt);
+ 
+-	WRITE_ONCE(apm->state, APM_SPF_STATE_NOT_READY);
+-	ret = q6apm_send_cmd_sync(apm, pkt, APM_CMD_RSP_GET_SPF_STATE);
++	do {
++		WRITE_ONCE(apm->state, APM_SPF_STATE_NOT_READY);
++		ret = q6apm_send_cmd_sync(apm, pkt, APM_CMD_RSP_GET_SPF_STATE);
++		if (ret != -EAGAIN || !retry)
++			break;
++		if (--attempts)
++			msleep(25);
++	} while (attempts);
++
++	if (!attempts)
++		dev_err_ratelimited(apm->dev, "DSP readiness query retry budget exhausted\n");
+ 	if (ret)
+ 		return ret;
+ 

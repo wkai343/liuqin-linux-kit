@@ -30,10 +30,12 @@ class ReadinessTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.dev = self.root/'dev'; self.dev.mkdir()
-        self.sys = self.root/'class/block'; self.sys.mkdir(parents=True)
-        self.controller = self.root/'soc/1d84000.ufshc'
+        self.sys = self.root/'sys/class/block'; self.sys.mkdir(parents=True)
+        self.controller = self.root/'sys/devices/platform/soc@0/1d84000.ufshc'
         (self.controller/'device_descriptor').mkdir(parents=True)
         (self.controller/'device_descriptor/number_of_luns').write_text('0x02\n')
+        driver=self.root/'sys/bus/platform/drivers/ufshcd-qcom';driver.mkdir(parents=True)
+        (self.controller/'driver').symlink_to(driver)
         self.sector = 4096
         self.disks = {}
         self.disk('sda', 128*1024**3, [(1, 16, 31), (3, 64, 1023)])
@@ -62,7 +64,7 @@ class ReadinessTests(unittest.TestCase):
         self.write_gpt(name)
 
     def write_gpt(self, name, *, bad_header=False, bad_array=False, mirror_diff=False,
-                  overlap=False, oversized=False, empty=False):
+                  overlap=False, oversized=False, empty=False, self_backup=False):
         size, partitions = self.disks[name]
         sector = self.sector; last = size//sector-1
         entries = bytearray(16*128)
@@ -80,7 +82,7 @@ class ReadinessTests(unittest.TestCase):
             struct.pack_into('<QIII',h,72,array,0xffffffff if oversized else 16,128,zlib.crc32(entries))
             struct.pack_into('<I',h,16,zlib.crc32(h[:92]))
             return h
-        primary=header(1,last,2);backup=header(last,1,last-nsectors)
+        primary=header(1,last,2);backup=header(last,last if self_backup else 1,last-nsectors)
         if bad_header: primary[16]^=1
         stored=bytearray(entries)
         if bad_array: stored[0]^=1
@@ -91,10 +93,13 @@ class ReadinessTests(unittest.TestCase):
             for lba,data in [(1,primary),(2,stored),(last-nsectors,mirror),(last,backup)]:
                 f.seek(lba*sector);f.write(data)
 
-    def run_ready(self, passes):
-        result=subprocess.run([self.binary,self.dev,self.sys,self.controller,str(self.sector)],capture_output=True,text=True)
+    def run_ready(self, passes, *, recovery=False, ufs_only=False, expected='2 UFS LUNs; 5 block nodes'):
+        args = [self.binary,self.dev,self.sys,self.controller,str(self.sector)]
+        if recovery: args.append('recovery')
+        if ufs_only: args.append('ufs-only')
+        result = subprocess.run(args,capture_output=True,text=True)
         self.assertEqual(result.returncode,0 if passes else 1,result.stdout+result.stderr)
-        if passes: self.assertIn('2 UFS LUNs; 5 block nodes',result.stdout)
+        if passes: self.assertIn(expected,result.stdout)
         else: self.assertEqual(result.stdout,'')
 
     def test_128_and_256_gib_geometries_and_noncontiguous_gpt_slots(self):
@@ -102,6 +107,21 @@ class ReadinessTests(unittest.TestCase):
         size, parts=self.disks['sda'];self.disks['sda']=(256*1024**3,parts)
         (self.sys/'sda/size').write_text(str(256*1024**3//512)+'\n')
         self.write_gpt('sda');self.run_ready(True)
+
+    def test_desktop_readiness_ignores_external_usb_but_recovery_keeps_legacy_boundary(self):
+        self.run_ready(True,ufs_only=True)
+        node=self.root/'sys/devices/platform/usb1/1-1/block/sdg';node.mkdir(parents=True)
+        (node/'device').symlink_to(node.parent.parent)
+        (self.sys/'sdg').symlink_to(node);(self.dev/'sdg').touch()
+        self.run_ready(True,ufs_only=True)
+        self.run_ready(False,recovery=True)
+        (self.dev/'sdg1').touch();part=node/'sdg1';part.mkdir()
+        (self.sys/'sdg1').symlink_to(part)
+        self.run_ready(True,ufs_only=True)
+
+    def test_desktop_readiness_requires_the_actual_ufs_driver(self):
+        (self.controller/'driver').unlink()
+        self.run_ready(False,ufs_only=True)
 
     def test_512_byte_sectors(self):
         self.sector=512
@@ -131,6 +151,20 @@ class ReadinessTests(unittest.TestCase):
     def test_incomplete_or_invalid_gpt_does_not_finish_wait_early(self):
         for keyword in ['bad_header','bad_array','mirror_diff','overlap','oversized','empty']:
             with self.subTest(keyword=keyword): self.write_gpt('sda',**{keyword:True});self.run_ready(False)
+
+    def test_recovery_accepts_only_the_identical_factory_backups(self):
+        self.disk('sdd',16*1024**2,[(1,16,31)])
+        self.disk('sdf',16*1024**2,[(1,16,31)])
+        (self.controller/'device_descriptor/number_of_luns').write_text('0x04\n')
+        self.write_gpt('sdd',self_backup=True)
+        self.write_gpt('sdf',self_backup=True)
+        self.run_ready(False)
+        self.run_ready(True,recovery=True,expected='4 UFS LUNs; 9 block nodes')
+        self.write_gpt('sdd',self_backup=True,mirror_diff=True)
+        self.run_ready(False,recovery=True)
+        self.write_gpt('sdd',self_backup=True)
+        self.write_gpt('sda',self_backup=True)
+        self.run_ready(False,recovery=True)
 
     def test_partition_geometry_must_match_gpt(self):
         for field in ['partition','start','size']:

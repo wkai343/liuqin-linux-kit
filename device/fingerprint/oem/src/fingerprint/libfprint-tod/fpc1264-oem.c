@@ -1,8 +1,9 @@
 /* SPDX-License-Identifier: LGPL-2.1-or-later
  * Explicit TOD adapter for the OEM FPC1264 match path. No software matching.
- * Each FpPrint contains one opaque, single-finger OEM database (uay), version 1.
- * fprintd owns enrollment authorization and persistence. A root-only provider
- * supplies the OEM credential and returns one opaque enrolled database.
+ * FpPrint version 2 contains an immutable per-finger reference into a
+ * root-private account gallery; old opaque-print formats are rejected.
+ * fprintd owns account authorization and publication. Trusted helpers own the
+ * hardware transaction and durable encrypted-gallery update.
  */
 #include <gio/gio.h>
 #include <gmodule.h>
@@ -16,13 +17,18 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <pwd.h>
+#include "../protocol/fpc_gallery.h"
 
 typedef struct {
   FpDevice parent;
   GSubprocess *child;
+  GPtrArray *gallery;
+  gchar *request;
+  gchar *result;
+  gboolean identifying;
   gchar *directory;
   gchar *database;
-  gchar *updated_database;
   FpPrint *enrolled_print;
   gboolean cancelled;
   GDataInputStream *enrol_output;
@@ -46,12 +52,15 @@ clear_operation (FpiDeviceFpc1264Oem *self)
   g_clear_error (&self->enrol_error);
   if (self->database)
     g_unlink (self->database);
-  if (self->updated_database)
-    g_unlink (self->updated_database);
+  if (self->request) g_unlink (self->request);
+  if (self->result) g_unlink (self->result);
+  g_clear_pointer (&self->request, g_free);
+  g_clear_pointer (&self->result, g_free);
+  g_clear_pointer (&self->gallery, g_ptr_array_unref);
+  self->identifying = FALSE;
   if (self->directory)
     g_rmdir (self->directory);
   g_clear_pointer (&self->database, g_free);
-  g_clear_pointer (&self->updated_database, g_free);
   g_clear_object (&self->enrolled_print);
   g_clear_pointer (&self->directory, g_free);
   self->enrol_stages = 0;
@@ -103,7 +112,7 @@ load_enrolled_database (FpiDeviceFpc1264Oem *self, GError **error)
 
   if (fd < 0 || fstat (fd, &info) || !S_ISREG (info.st_mode) ||
       info.st_uid != 0 || info.st_gid != 0 || (info.st_mode & 0777) != 0600 ||
-      info.st_size <= 0 || info.st_size > 16u * 1024u * 1024u)
+      info.st_size != FPC_REFERENCE_SIZE)
     goto out;
   length = info.st_size;
   database = g_malloc (length);
@@ -115,7 +124,11 @@ load_enrolled_database (FpiDeviceFpc1264Oem *self, GError **error)
       goto out;
     offset += count;
   }
-  data = g_variant_ref_sink (g_variant_new ("(u@ay)", 1u,
+  if (length != FPC_REFERENCE_SIZE || memcmp (database, "FPCREF2", 8)) goto out;
+  struct passwd *owner = getpwnam (fp_print_get_username (self->enrolled_print));
+  if (!owner || !owner->pw_uid || fpc_le32 (database + 8) != owner->pw_uid ||
+      fpc_le32 (database + 12) != (guint32) fp_print_get_finger (self->enrolled_print)) goto out;
+  data = g_variant_ref_sink (g_variant_new ("(u@ay)", 2u,
              g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE, database, length, 1)));
   fpi_print_set_type (self->enrolled_print, FPI_PRINT_RAW);
   g_object_set (self->enrolled_print, "fpi-data", data, NULL);
@@ -155,7 +168,7 @@ enrol_finished (GObject *source, GAsyncResult *result, gpointer user_data)
   } else if (!valid || cancelled) {
     g_clear_error (&error);
     error = fpi_device_error_new_msg (self->enrol_existing ? FP_DEVICE_ERROR_DATA_FULL : FP_DEVICE_ERROR_GENERAL,
-                                      self->enrol_existing ? "Only one enrolled finger per user is supported" :
+                                      self->enrol_existing ? "The selected finger is already enrolled or the hardware gallery is full" :
                                       "OEM enrollment did not finish with confirmed cleanup");
   } else if (load_enrolled_database (self, &error)) {
     print = g_steal_pointer (&self->enrolled_print);
@@ -205,9 +218,11 @@ enrol_status_line (FpDevice *device, const gchar *line)
    * credential-creation runtime's earlier cleanup is deliberately ignored. */
   if (g_str_equal (line, "native_enrol_cleanup=OK"))
     self->enrol_cleaned = TRUE;
-  else if (g_str_equal (line, "native_enrol=OK single_finger_database=1"))
+  else if (g_str_equal (line, "native_enrol=OK finger_reference=2")) {
     self->enrol_succeeded = self->enrol_cleaned;
-  else if (g_str_equal (line, "native_enrol=REFUSED existing_template=1"))
+  }
+  else if (g_str_equal (line, "native_enrol=REFUSED existing_template=1") ||
+           g_str_equal (line, "native_enrol=REFUSED gallery_full=1"))
     self->enrol_existing = TRUE;
   else if (g_str_equal (line, "capture_wait_time=1"))
     g_message ("OEM enroll phase=waiting-for-finger");
@@ -294,6 +309,7 @@ enrol (FpDevice *device)
   const gchar *username;
   struct stat info;
   g_autofree gchar *provider = NULL;
+  g_autofree gchar *finger = NULL;
   g_autoptr(GError) error = NULL;
   g_autoptr(GSubprocessLauncher) launcher = NULL;
 
@@ -316,14 +332,15 @@ enrol (FpDevice *device)
   self->directory = g_dir_make_tmp ("liuqin-fpc-enrol-XXXXXX", &error);
   if (!self->directory)
     goto failed;
-  self->database = g_build_filename (self->directory, "single-finger.db", NULL);
+  self->database = g_build_filename (self->directory, "finger.ref", NULL);
   self->cancelled = FALSE;
   self->enrolled_print = g_object_ref (print);
   fpi_device_set_nr_enroll_stages (device, 20);
   launcher = g_subprocess_launcher_new (G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_MERGE);
   g_subprocess_launcher_setenv (launcher, "PYTHONUNBUFFERED", "1", TRUE);
+  finger = g_strdup_printf ("%u", fp_print_get_finger (print));
   self->child = g_subprocess_launcher_spawn (launcher, &error, "/usr/bin/python3", provider,
-                                            "--enrol", username, self->database, NULL);
+                                            "--enrol", username, finger, self->database, NULL);
   if (!self->child)
     goto failed;
   self->enrol_output = g_data_input_stream_new (g_subprocess_get_stdout_pipe (self->child));
@@ -335,227 +352,167 @@ failed:
   fpi_device_enroll_complete (device, NULL, g_steal_pointer (&error));
 }
 
-/* Hold the unmodified print for fprintd's compare-and-replace storage update.
- * No database or template bytes are reported outside the owning processes. */
-static gboolean
-accept_updated_database (FpiDeviceFpc1264Oem *self, gboolean expected, GError **error)
-{
-  struct stat info;
-  int fd = g_open (self->updated_database, O_RDONLY | O_CLOEXEC | O_NOFOLLOW, 0);
-  g_autofree guint8 *database = NULL;
-  g_autofree guint8 *original_bytes = NULL;
-  g_autoptr(FpPrint) original = NULL;
-  g_autoptr(GVariant) replacement = NULL;
-  gsize original_length;
-
-  if (fd < 0 && errno == ENOENT && !expected)
-    return TRUE;
-  if (fd < 0 || fstat (fd, &info) || !S_ISREG (info.st_mode) ||
-      info.st_uid != 0 || (info.st_mode & 0777) != 0600 ||
-      info.st_size <= 0 || info.st_size > 16u * 1024u * 1024u)
-    goto failed;
-  database = g_malloc (info.st_size);
-  for (gsize offset = 0; offset < (gsize) info.st_size;) {
-    ssize_t count = read (fd, database + offset, info.st_size - offset);
-    if (count < 0 && errno == EINTR)
-      continue;
-    if (count <= 0)
-      goto failed;
-    offset += count;
-  }
-  close (fd);
-  fd = -1;
-  if (!fp_print_serialize (self->enrolled_print, &original_bytes, &original_length, error))
-    return FALSE;
-  original = fp_print_deserialize (original_bytes, original_length, error);
-  if (!original)
-    return FALSE;
-  replacement = g_variant_ref_sink (g_variant_new ("(u@ay)", 1u,
-                    g_variant_new_fixed_array (G_VARIANT_TYPE_BYTE, database, info.st_size, 1)));
-  g_object_set_data_full (G_OBJECT (self->enrolled_print), "liuqin-fpc-oem-original",
-                          g_steal_pointer (&original), g_object_unref);
-  g_object_set (self->enrolled_print, "fpi-data", replacement, NULL);
-  return TRUE;
-
-failed:
-  if (fd >= 0)
-    close (fd);
-  g_set_error_literal (error, FP_DEVICE_ERROR, FP_DEVICE_ERROR_GENERAL,
-                       "OEM adaptive template export is incomplete");
-  return FALSE;
-}
-
-/* Keep diagnostics to known status lines. Never forward raw runtime output,
- * template bytes, credentials or authentication tokens to the journal. */
+/* fprintd supplies only the authorized account's gallery. No template or
+ * secure ID is passed through logs; the helper returns an index into this exact
+ * retained array only after hardware cleanup and durable adaptive storage. */
 static void
-report_runtime_failure (const gchar *output, const gchar *diagnostic,
-                        gint status, gboolean cleaned)
-{
-  const gchar *prefixes[] = {
-    "finger_irq_failed=", "match_incomplete=", "match_unavailable=",
-    "auth_result_invalid=", "db_import_remaining_mismatch ",
-    "template_count_response_invalid=", "oem_runtime_timed_out=",
-    "oem_runtime_cancelled=", "oem_runtime=BUSY",
-    "capture_result_word4=", "capture_note=", "identify_app_status=",
-    "match_result=inconclusive ", "auth_result_available=",
-    "loaded_template_count=", "template_enumerate_app_status=",
-    "authenticator_id_app_status=", "database_update_required=", NULL
-  };
-  g_autofree gchar *messages = g_strconcat (output ? output : "", "\n",
-                                          diagnostic ? diagnostic : "", NULL);
-  g_auto(GStrv) lines = g_strsplit (messages, "\n", -1);
-
-  g_warning ("OEM verify runtime exit=%d cleanup_complete=%d irq_armed=%d irq_received=%d",
-             status, cleaned,
-             !!(output && strstr (output, "READY finger_irq_armed=down press finger now\n")),
-             !!(output && strstr (output, "finger_irq=down\n")));
-  for (gsize i = 0; lines[i]; i++)
-    for (gsize j = 0; prefixes[j]; j++)
-      if (g_str_has_prefix (lines[i], prefixes[j])) {
-        g_warning ("OEM verify diagnostic: %s", lines[i]);
-        break;
-      }
-}
-
-static void
-verify_finished (GObject *source, GAsyncResult *result, gpointer user_data)
+gallery_finished (GObject *source, GAsyncResult *result, gpointer user_data)
 {
   FpDevice *device = user_data;
   FpiDeviceFpc1264Oem *self = (FpiDeviceFpc1264Oem *) device;
+  gboolean identifying = self->identifying;
   g_autoptr(GError) error = NULL;
-  g_autofree gchar *output = NULL;
-  g_autofree gchar *diagnostic = NULL;
-  gboolean communicated = g_subprocess_communicate_utf8_finish (G_SUBPROCESS (source), result,
-                                                               &output, &diagnostic, &error);
-  gboolean exited = communicated && g_subprocess_get_if_exited (G_SUBPROCESS (source));
-  gint status = exited ? g_subprocess_get_exit_status (G_SUBPROCESS (source)) : -1;
-  gboolean cleaned = output && strstr (output, "oem_runtime_cleanup firmware_path_restored=1 sensor_power_off=1 listener_stopped=1\n");
-  gboolean matched = output && strstr (output, "match_result=matched desktop_authentication=disabled\n");
-  gboolean missed = output && strstr (output, "match_result=not_matched desktop_authentication=disabled\n");
+  g_autofree gchar *output = NULL, *diagnostic = NULL;
+  g_autoptr(FpPrint) match = NULL;
+  gboolean done = g_subprocess_communicate_utf8_finish (G_SUBPROCESS (source), result, &output, &diagnostic, &error);
   gboolean cancelled = self->cancelled || fpi_device_action_is_cancelled (device);
-  gboolean valid_result = cleaned && ((status == 0 && matched) || (status == 3 && missed));
-  /* CAPTURE's WAIT_TIME is an ordinary unsuccessful sample, before identify.
-   * The client emits it on stderr. Keep transport/unknown statuses fatal.
-   * Existing inconclusive identify results follow successful DB export.
-   * None authorize a match; let fprintd request a fresh press after cleanup. */
-  /* Additional stderr diagnostics can describe a later TEE/cleanup failure. */
-  gboolean capture_wait = g_strcmp0 (diagnostic,
-    "match_incomplete=capture_rejected app_status=1\n") == 0;
-  gboolean runtime_stopped = diagnostic &&
-    (strstr (diagnostic, "oem_runtime_timed_out=1\n") ||
-     strstr (diagnostic, "oem_runtime_cancelled=1\n"));
-  gboolean retry_scan = cleaned && status == 1 && !runtime_stopped && !matched && !missed && output &&
-    (capture_wait ||
-     strstr (output, "match_result=inconclusive identify_app_status=4\n") ||
-     strstr (output, "match_result=inconclusive identify_app_status=12\n"));
-  if (!cancelled && valid_result && status == 0 &&
-      !accept_updated_database (self, output && strstr (output, "database_update_required=1\n"), &error))
-    valid_result = FALSE;
-  if (!cancelled && communicated && !valid_result)
-    report_runtime_failure (output, diagnostic, status, cleaned);
+  gboolean valid = done && g_subprocess_get_if_exited (G_SUBPROCESS (source)) &&
+    g_subprocess_get_exit_status (G_SUBPROCESS (source)) == 0 && output &&
+    strstr (output, "gallery_match=OK cleanup_complete=1\n");
+  guint32 status = 0, index = G_MAXUINT32;
+  if (valid) {
+    guint8 data[FPC_RESULT_SIZE];
+    struct stat info;
+    int fd = g_open (self->result, O_RDONLY | O_CLOEXEC | O_NOFOLLOW, 0);
+    valid = fd >= 0 && !fstat (fd, &info) && S_ISREG (info.st_mode) && !info.st_uid &&
+            (info.st_mode & 0777) == 0600 && info.st_size == FPC_RESULT_SIZE &&
+            read (fd, data, sizeof data) == sizeof data && !memcmp (data, "FPCRES2", 8);
+    if (fd >= 0) close (fd);
+    if (valid) {
+      status = fpc_le32 (data + 8); index = fpc_le32 (data + 12);
+      valid = (status == 1 && index < self->gallery->len) ||
+              ((status == 0 || status == 2) && index == G_MAXUINT32);
+      if (valid && status == 1) match = g_object_ref (g_ptr_array_index (self->gallery, index));
+    }
+  }
+  if (!valid && !cancelled && !error)
+    error = fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL, "OEM gallery identification did not complete");
   clear_operation (self);
   fpi_device_report_finger_status (device, FP_FINGER_STATUS_NONE);
-  if (cancelled)
-    fpi_device_verify_complete (device, g_error_new_literal (G_IO_ERROR, G_IO_ERROR_CANCELLED,
-                                                            "Fingerprint verification cancelled"));
-  else if (!communicated)
-    fpi_device_verify_complete (device, g_steal_pointer (&error));
-  else if (retry_scan) {
-    g_message ("OEM verify result=retry_scan");
-    fpi_device_verify_report (device, FPI_MATCH_ERROR, NULL,
-                              fpi_device_retry_new (FP_DEVICE_RETRY_GENERAL));
-    fpi_device_verify_complete (device, NULL);
+  if (cancelled) {
+    g_clear_error (&error);
+    error = g_error_new_literal (G_IO_ERROR, G_IO_ERROR_CANCELLED, "Fingerprint identification cancelled");
   }
-  else if (!valid_result)
-    fpi_device_verify_complete (device, error ? g_steal_pointer (&error) :
-                               fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL,
-                                                         "OEM verification did not complete"));
-  else {
-    g_message ("OEM verify result=%s", status == 0 ? "matched" : "not_matched");
-    fpi_device_verify_report (device, status == 0 ? FPI_MATCH_SUCCESS : FPI_MATCH_FAIL, NULL, NULL);
+  if (error) {
+    if (identifying) fpi_device_identify_complete (device, g_steal_pointer (&error));
+    else fpi_device_verify_complete (device, g_steal_pointer (&error));
+  } else if (identifying) {
+    fpi_device_identify_report (device, match, NULL,
+      status == 2 ? fpi_device_retry_new (FP_DEVICE_RETRY_GENERAL) : NULL);
+    fpi_device_identify_complete (device, NULL);
+  } else {
+    fpi_device_verify_report (device, status == 2 ? FPI_MATCH_ERROR : match ? FPI_MATCH_SUCCESS : FPI_MATCH_FAIL,
+      NULL, status == 2 ? fpi_device_retry_new (FP_DEVICE_RETRY_GENERAL) : NULL);
     fpi_device_verify_complete (device, NULL);
   }
   g_object_unref (device);
 }
 
 static void
-verify (FpDevice *device)
+gallery_start (FpDevice *device, GPtrArray *prints, gboolean identifying)
 {
   FpiDeviceFpc1264Oem *self = (FpiDeviceFpc1264Oem *) device;
-  FpPrint *print;
-  g_autoptr(GVariant) data = NULL;
-  g_autoptr(GVariant) bytes = NULL;
   g_autoptr(GError) error = NULL;
-  g_autofree gchar *runtime = NULL;
+  g_autoptr(GByteArray) request = g_byte_array_new ();
   const gchar *bundle = g_getenv ("LIUQIN_FPC_OEM_RUNTIME");
+  const gchar *username = NULL;
+  g_autofree gchar *helper = NULL;
   struct stat info;
-  guint32 version;
-  gsize length;
-  const guint8 *database;
-  int descriptor = -1;
-
-  fpi_device_get_verify_data (device, &print);
-  g_object_get (print, "fpi-data", &data, NULL);
-  if (!data || !g_variant_is_of_type (data, G_VARIANT_TYPE ("(uay)")))
-    goto invalid_print;
-  g_variant_get (data, "(u@ay)", &version, &bytes);
-  database = g_variant_get_fixed_array (bytes, &length, 1);
-  if (version != 1 || !length || length > 16u * 1024u * 1024u)
-    goto invalid_print;
-  if (!bundle || !g_path_is_absolute (bundle) || lstat (bundle, &info) ||
-      !S_ISDIR (info.st_mode) || info.st_uid != 0 || (info.st_mode & 0022)) {
-    error = fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL, "Supply a trusted private OEM runtime directory");
-    goto failed;
+  guint32 uid = 0;
+  guint8 header[20] = "FPCREQ2";
+  if (!prints || prints->len > FPC_GALLERY_MAX) goto invalid;
+  if (!prints->len && identifying) {
+    fpi_device_identify_report (device, NULL, NULL, NULL);
+    fpi_device_identify_complete (device, NULL); return;
   }
-  runtime = g_build_filename (bundle, "oem_runtime.py", NULL);
-  if (lstat (runtime, &info) || !S_ISREG (info.st_mode) || info.st_uid != 0 || (info.st_mode & 0022)) {
-    error = fpi_device_error_new_msg (FP_DEVICE_ERROR_GENERAL, "Trusted OEM runner is missing");
-    goto failed;
+  if (!prints->len || !bundle || !g_path_is_absolute (bundle) || lstat (bundle, &info) ||
+      !S_ISDIR (info.st_mode) || info.st_uid || (info.st_mode & 0022)) goto invalid;
+  helper = g_build_filename (bundle, "gallery_match.py", NULL);
+  if (lstat (helper, &info) || !S_ISREG (info.st_mode) || info.st_uid || (info.st_mode & 0022)) goto invalid;
+  const gchar *dependencies[] = {"gallery_state.py", "native_enrol.py", "oem_runtime.py",
+                                  "fpc-oem-print", "fpc_build_info"};
+  for (guint i = 0; i < G_N_ELEMENTS (dependencies); i++) {
+    g_autofree gchar *path = g_build_filename (bundle, dependencies[i], NULL);
+    if (lstat (path, &info) || !S_ISREG (info.st_mode) || info.st_uid || (info.st_mode & 0022)) goto invalid;
   }
-  self->directory = g_dir_make_tmp ("liuqin-fpc-verify-XXXXXX", &error);
-  if (!self->directory)
-    goto failed;
-  self->database = g_build_filename (self->directory, "single-finger.db", NULL);
-  self->updated_database = g_build_filename (self->directory, "updated-single-finger.db", NULL);
-  descriptor = g_open (self->database, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
-  if (descriptor < 0)
-    goto io_failure;
-  for (gsize offset = 0; offset < length;) {
-    ssize_t count = write (descriptor, database + offset, length - offset);
-    if (count < 0 && errno == EINTR)
-      continue;
-    if (count <= 0)
-      goto io_failure;
+  self->gallery = g_ptr_array_new_with_free_func (g_object_unref);
+  for (guint i = 0; i < prints->len; i++) {
+    FpPrint *print = g_ptr_array_index (prints, i);
+    g_autoptr(GVariant) data = NULL, bytes = NULL;
+    guint32 version;
+    gsize length;
+    const gchar *owner = fp_print_get_username (print);
+    if (!owner || !*owner || !FP_FINGER_IS_VALID (fp_print_get_finger (print))) goto invalid;
+    if (!i) {
+      struct passwd *user = getpwnam (owner);
+      if (!user || !user->pw_uid || user->pw_uid >= 0x10000000) goto invalid;
+      username = owner; uid = user->pw_uid;
+      fpc_put32 (header + 8, uid); fpc_put32 (header + 12, prints->len);
+      fpc_put32 (header + 16, strlen (username));
+      g_byte_array_append (request, header, sizeof header);
+      g_byte_array_append (request, (const guint8 *) username, strlen (username));
+    } else if (g_strcmp0 (username, owner)) goto invalid;
+    if (g_strcmp0 (fp_print_get_driver (print), "fpc1264_oem") ||
+        g_strcmp0 (fp_print_get_device_id (print), "liuqin-fpc1264-oem")) goto invalid;
+    g_object_get (print, "fpi-data", &data, NULL);
+    if (!data || !g_variant_is_of_type (data, G_VARIANT_TYPE ("(uay)"))) goto invalid;
+    g_variant_get (data, "(u@ay)", &version, &bytes);
+    const guint8 *payload = g_variant_get_fixed_array (bytes, &length, 1);
+    if (version != 2 || !length || length > FPC_DATABASE_MAX ||
+        request->len + 12 + length > FPC_DATABASE_MAX + 16384) goto invalid;
+    if (version == 2 && (length != FPC_REFERENCE_SIZE || memcmp (payload, "FPCREF2", 8) ||
+        fpc_le32 (payload + 8) != uid || fpc_le32 (payload + 12) != (guint32) fp_print_get_finger (print))) goto invalid;
+    guint8 item[12]; fpc_put32 (item, fp_print_get_finger (print)); fpc_put32 (item + 4, version);
+    fpc_put32 (item + 8, length); g_byte_array_append (request, item, sizeof item);
+    g_byte_array_append (request, payload, length);
+    g_ptr_array_add (self->gallery, g_object_ref (print));
+  }
+  self->identifying = identifying; self->cancelled = FALSE;
+  self->directory = g_dir_make_tmp ("liuqin-fpc-gallery-XXXXXX", &error);
+  if (!self->directory) goto failed;
+  self->request = g_build_filename (self->directory, "request", NULL);
+  self->result = g_build_filename (self->directory, "result", NULL);
+  int fd = g_open (self->request, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (fd < 0) goto invalid;
+  gboolean written = TRUE;
+  for (gsize offset = 0; offset < request->len;) {
+    ssize_t count = write (fd, request->data + offset, request->len - offset);
+    if (count < 0 && errno == EINTR) continue;
+    if (count <= 0) { written = FALSE; break; }
     offset += count;
   }
-  if (close (descriptor)) {
-    descriptor = -1;
-    goto io_failure;
-  }
-  descriptor = -1;
-  self->cancelled = FALSE;
-  self->enrolled_print = g_object_ref (print);
-  g_object_set_data (G_OBJECT (print), "liuqin-fpc-oem-original", NULL);
+  if (close (fd)) written = FALSE;
+  if (!written) goto invalid;
   self->child = g_subprocess_new (G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE,
-                                 &error, "/usr/bin/python3", runtime, "--ufs-rpmb-authenticated",
-                                 "--match-single", self->database, self->updated_database, NULL);
-  if (!self->child)
-    goto failed;
+      &error, "/usr/bin/python3", helper, "--request", self->request, "--result", self->result, NULL);
+  if (!self->child) goto failed;
   fpi_device_report_finger_status (device, FP_FINGER_STATUS_NEEDED);
-  /* Wait for runtime cleanup even on cancel; GCancellable would finish too soon. */
-  g_subprocess_communicate_utf8_async (self->child, NULL, NULL, verify_finished, g_object_ref (device));
+  g_subprocess_communicate_utf8_async (self->child, NULL, NULL, gallery_finished, g_object_ref (device));
   return;
-
-invalid_print:
-  error = fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID, "A versioned single-finger OEM database is required");
-  goto failed;
-io_failure:
-  error = g_error_new (G_IO_ERROR, g_io_error_from_errno (errno), "Private database staging failed");
+invalid:
+  if (!error) error = fpi_device_error_new_msg (FP_DEVICE_ERROR_DATA_INVALID, "Invalid account fingerprint gallery");
 failed:
-  if (descriptor >= 0)
-    close (descriptor);
   clear_operation (self);
-  fpi_device_verify_complete (device, g_steal_pointer (&error));
+  if (identifying) fpi_device_identify_complete (device, g_steal_pointer (&error));
+  else fpi_device_verify_complete (device, g_steal_pointer (&error));
+}
+
+static void
+identify (FpDevice *device)
+{
+  GPtrArray *prints = NULL;
+  fpi_device_get_identify_data (device, &prints);
+  gallery_start (device, prints, TRUE);
+}
+
+static void
+verify (FpDevice *device)
+{
+  FpPrint *print = NULL;
+  fpi_device_get_verify_data (device, &print);
+  g_autoptr(GPtrArray) prints = g_ptr_array_new ();
+  g_ptr_array_add (prints, print);
+  gallery_start (device, prints, FALSE);
 }
 
 static void
@@ -592,6 +549,7 @@ fpi_device_fpc1264_oem_class_init (FpiDeviceFpc1264OemClass *klass)
   device->close = close_device;
   device->enroll = enrol;
   device->verify = verify;
+  device->identify = identify;
   device->cancel = cancel;
   fpi_device_class_auto_initialize_features (device);
 }

@@ -15,7 +15,7 @@ wlan_tuple=${WLAN_HSP2_TUPLE:?"set WLAN_HSP2_TUPLE to the prepared WLAN tuple"}
 stock_overlay_dir=${STOCK_OVERLAY_DIR:?"set STOCK_OVERLAY_DIR to the extracted stock DTBO entries"}
 stock_base_dir=${STOCK_BASE_DIR:?"set STOCK_BASE_DIR to the extracted stock vendor_boot DTBs"}
 mk_dir=${MKBOOTIMG_DIR:-"$project_root/inputs/aosp-mkbootimg"}
-slot_cc=${SLOT_SUCCESS_GCC:-aarch64-linux-gnu-gcc}
+slot_cc=${SLOT_SUCCESS_GCC:-${CROSS_COMPILE:-aarch64-linux-gnu-}gcc}
 dtc=$kernel_out/scripts/dtc/dtc
 fdtoverlay=$kernel_out/scripts/dtc/fdtoverlay
 image=${KERNEL_IMAGE:-$kernel_out/arch/arm64/boot/Image}
@@ -28,7 +28,7 @@ if [ "$root_profile" = installer ]; then
     [ -n "${INSTALLER_RUNTIME:-}" ] || die 'independent installer requires INSTALLER_RUNTIME'
     cmdline=$(cat "$project_root/device/installer-bootargs.txt")
 elif [ -n "${INSTALLER_RUNTIME:-}" ]; then
-    die 'build the RAM image separately with build-liuqin-installer.sh'
+    die 'build the RAM image separately with build/recovery/build-ram-base.sh'
 else
     cmdline=$(cat "$project_root/device/native-bootargs.txt")
 fi

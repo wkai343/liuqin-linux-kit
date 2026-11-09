@@ -68,7 +68,8 @@ class FedoraTests(unittest.TestCase):
         board=importlib.util.module_from_spec(spec);spec.loader.exec_module(board)
         busybox=self.work/'busybox';busybox.write_bytes(b'fixture');busybox.chmod(0o755)
         root=self.work/'board';root.mkdir()
-        board.board_overlay(root,busybox)
+        storage_fixture=self.work/'storage-helper';storage_fixture.write_bytes(b'fixture');storage_fixture.chmod(0o755)
+        board.board_overlay(root,busybox,storage_fixture)
         unit=root/'etc/systemd/user/liuqin-display-recovery.service'
         link=root/'etc/systemd/user/default.target.wants/liuqin-display-recovery.service'
         helper=root/'usr/local/libexec/liuqin-display-recovery'
@@ -80,10 +81,24 @@ class FedoraTests(unittest.TestCase):
         self.assertTrue(observer.stat().st_mode & 0o111)
         self.assertEqual(observer.read_bytes(),(PROJECT/'device/board-overlay/usr/libexec/liuqin-splash-output-observer').read_bytes())
         self.assertTrue((root/'etc/systemd/system/liuqin-splash-orientation.service').is_file())
+        self.assertEqual((root/'usr/libexec/liuqin-storage-seal').read_bytes(),storage_fixture.read_bytes())
+        self.assertFalse((root/'etc/systemd/system/liuqin-boot-usb-storage.service').exists())
+        for name in ('usr/local/sbin/liuqin-gnome-usb-rescue','usr/local/sbin/liuqin-rescue',
+                     'usr/local/bin/liuqin-shell','etc/systemd/system/liuqin-gnome-usb-rescue.service'):
+            self.assertFalse((root/name).exists(),name)
         self.assertIn('ConditionUser=!root',unit.read_text())
         self.assertIn('NoNewPrivileges=yes',unit.read_text())
 
-    def test_fedora_target_retains_an_independent_ubuntu_installer(self):
+    def test_root_builder_prunes_expected_retired_desktop_rescue_activation(self):
+        root=self.work/'root';path=root/'etc/systemd/system/multi-user.target.wants/liuqin-gnome-usb-rescue.service'
+        path.parent.mkdir(parents=True);path.symlink_to('../liuqin-gnome-usb-rescue.service')
+        root_builder.common.remove_desktop_rescue_activation(root)
+        self.assertFalse(path.is_symlink())
+        path.symlink_to('../custom.service')
+        with self.assertRaisesRegex(ValueError,'modified retired'):
+            root_builder.common.remove_desktop_rescue_activation(root)
+
+    def test_fedora_target_uses_ubuntu_tools_without_legacy_installer(self):
         original=dict(rootfs_config=str(PROJECT/'build/rootfs/fedora-plasma.json'),kernel_fragments=[],
             kernel_localversion='-liuqin-test',kernel_source='sources/test',package_version='0.1.0',jobs=2)
         flow=FedoraFlow(original,lambda *_a,**_k:self.fail('unexpected build'))
@@ -91,13 +106,15 @@ class FedoraTests(unittest.TestCase):
         self.assertIn('build/kernel/configs/fedora.config',flow.data['kernel_fragments'])
         self.assertIn('build/kernel/configs/firmware-splash.config',flow.data['kernel_fragments'])
         from source_flow import kernel_fragments
-        self.assertNotIn('build/kernel/configs/firmware-splash.config',kernel_fragments(flow.data,installer=True))
         self.assertIn('-fedora',flow.data['kernel_localversion'])
-        self.assertEqual(flow.source['release'],'44')
+        self.assertEqual(flow.source['release'],'45')
         with patch('source_flow.download',return_value=self.work/'installer-base') as download:
             self.assertEqual(flow.base(),self.work/'installer-base')
         self.assertIn('ubuntu-base',str(download.call_args.args[1]))
-        self.assertIn('fedora-plasma',flow.plan()['output'])
+        self.assertIn('out/build/from-source',flow.plan()['output'])
+        self.assertEqual(flow.plan()['steps'][0],'官方 Fedora 45 ARM64 基础系统')
+        flow.source=dict(flow.source,release='test-release')
+        self.assertEqual(flow.plan()['steps'][0],'官方 Fedora test-release ARM64 基础系统')
 
     def test_firmware_splash_default_precedes_explicit_custom_fragments(self):
         from source_flow import kernel_fragments

@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "avbtool": {
+    "url": "https://github.com/LineageOS/android_external_avb/blob/lineage-22.2/avbtool.py",
+    "sha256": "59166f4cf5a074023491e4adf20af3bbaff350757f830aace1440e341a7bc0a4",
+    "local_path": "inputs/recovery-avb/avbtool.py",
+    "provenance": "Exact reference source captured and hashed during the 2026-11-03 offline ABL investigation; not an OEM signing tool."
+  }
+}

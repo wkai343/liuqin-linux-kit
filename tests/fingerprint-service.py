@@ -22,16 +22,6 @@ class StartupModeTests(unittest.TestCase):
         self.assertEqual(module.readiness_services({"control_service": "liuqin-codex-wifi.service"})[0],
                          "liuqin-codex-wifi.service")
 
-    def test_installed_loader_and_unit_share_dependencies(self):
-        info = {"deployment_mode": "installed", "control_service": "unavailable-debug.service"}
-        self.assertEqual(module.readiness_services(info), ("gdm", "iio-sensor-proxy"))
-        unit = module.render_module_unit((DEPLOYMENT / "liuqin-fpc-stable-module.service").read_text(), info)
-        self.assertIn("After=gdm.service iio-sensor-proxy.service\n", unit)
-        self.assertIn("Wants=gdm.service iio-sensor-proxy.service\n", unit)
-        self.assertNotIn("NetworkManager", unit)
-        self.assertNotIn("unavailable-debug", unit)
-        self.assertIn("ConditionPathExists=/dev/tee0\n", unit)
-        self.assertIn("ConditionPathExists=/sys/bus/spi/devices/spi1.0/of_node\n", unit)
 
     def test_unknown_mode_does_not_silently_relax_guards(self):
         with self.assertRaises(ValueError):

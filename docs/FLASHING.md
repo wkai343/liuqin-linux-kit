@@ -1,38 +1,55 @@
 # 安装要求与恢复
 
-[项目首页](../README.md) ｜ [安装助手](INSTALLER-GUI.md) ｜ [CLI 与验收](INSTALL-TESTING.md)
+[项目首页](../README.md) ｜ [安装助手](INSTALLER-GUI.md)
 
-## 设备与安装文件
+## 设备与安装材料
 
-仅支持已解锁 Bootloader 的 Xiaomi Pad 6 Pro（liuqin，SM8475）。
-使用接口相容的 `installer.img`、`boot.img`、`rootfs.tar.gz`，电脑端安装器单独提供。
-256GB 单根已实测，128GB / 512GB 仅通过容量规划离线检查。
-本机 256GB 已通过 Linux GUI 单根 Btrfs 安装、桌面启动与正常重启，Windows GUI 安装也已验证成功；Android 恢复仍待验收。
+仅支持已解锁的 Xiaomi Pad 6 Pro（liuqin，SM8475），管理流程使用 A 槽和 4096 字节逻辑扇区。安装器核对内部 UFS、完整 GPT、分区 GUID/边界、文件系统身份和系统登记；不接受其他机型或未知布局的自动接管。
 
-安装器读取真实 GPT，要求 userdata 唯一、位于第一颗 UFS（sda）、至少 16 GiB，
-逻辑块为 4096 字节，并符合原厂 35 分区布局。编号、边界不套用其他容量的数值；
-身份或布局不能确认时停止。其他型号、任意多分区和修改过的原厂布局不在当前支持范围。
+当前 GUI 使用配套原生 Rec，经 USB ADB 操作。Linux 提供匹配的 boot.img 与 rootfs.tar.gz；Android 提供受支持的完整 ROM。
 
-## 单根布局
+Android、ext4/Btrfs Linux 安装及默认引导切换已验证。
 
-`linux-single` 使用整个 userdata，格式可选 ext4 或 Btrfs，系统位于 `native-root`，
-`/home` 位于其中，从 A 槽启动。Btrfs 的 `native-root` 为子卷；不创建独立 home 或额外 GPT 分区。
-userdata 边界保留，Bootloader 切槽仍可能改变 GPT 的启动属性。
+## 分区与清除范围
 
-**首次安装与重装均会格式化 userdata。** 安装前把个人文件备份到平板以外，
-另存本机原 boot、persist 和 GPT。设备备份不含 userdata 文件，也不是完整 Android 恢复包；
-不能使用其他平板的校准或设备地址。备份复用见 [安装助手](INSTALLER-GUI.md#备份复用)。
-日常软件和内核升级无需重装 rootfs，见 [内核更新](KERNEL-UPDATES.md)。
+当前支持一个 Android 与多个 Linux rootfs。新建只使用实际空闲区或明确删除所释放的空间，不保留数据缩容、不移动分区。原厂 userdata 常占满尾部；重新分配会涉及清除原 Android 数据。
+
+重装/格式化所选 rootfs 会清空该系统及其 /home。Android 完整 ROM 初始化 userdata 与 metadata，并按包更新系统、启动资源和固件。未选中的 Linux 根分区与引导文件保留，共享固件更新后的启动兼容性仍须检查。
+
+boot、persist、super 和固件不开放任意删除/格式化；各自的受控刷写按确认清单执行。B 槽物理启动资源保持并不保证 B 槽旧 Android 可启动，因为 super 等资源可能共享。
+
+## 备份能恢复什么
+
+| 材料 | 用途 | 不包含的内容 |
+| --- | --- | --- |
+| 同机 GPT、boot、persist 等基础备份 | 核对布局、原引导与本机校准；供明确的恢复操作使用 | Android 个人数据和 Linux 根文件系统内容 |
+| 当前 boot_a 快照及引导事务 | 恢复本次操作前引导、核对默认登记；重复快照可由已验证等价镜像引用替代 | 已格式化或重装的数据 |
+| ROM 覆盖前分区镜像 | 在明确的身份和启动链条件下，辅助恢复被 ROM 覆盖的分区 | 任意版本一键混刷资格或完整设备快照 |
+| 用户自行备份的文件/系统 | 恢复个人文件、Android 应用数据或 Linux /home 等 | 缺少相应密钥/系统条件时的解密保证 |
+
+基础备份、ROM 镜像快照和本次引导快照的复用规则见[备份复用](INSTALLER-GUI.md#备份复用)。必须使用本机材料，不能把其他平板的 persist、地址或校准写入本机。
 
 ## 数据与恢复
 
-恢复 Android 需要适配本机、满足防回滚要求的原厂 Fastboot ROM，并重新准备 Android userdata。
-仅刷回 boot 不能撤销 Linux 安装或恢复个人文件。若旧系统曾拆分 userdata，
-先按 CLI 分区表恢复流程还原原厂边界；当前单根布局保留边界。
+发生失败时保留 Rec、电脑执行报告、原计划和设备外备份，先核对已完成阶段。新 Rec 的中断检查可恢复可核验的引导事务、补交已完成系统的登记，或续接严格匹配的全新分区初始化；不是对所有失败状态的通用回滚。
 
-保留原厂防回滚检查，不恢复其他平板的 persist；存在非原厂镜像时保持 Bootloader 解锁。
-恢复原厂固件会覆盖 Linux 启动链，相关清刷会清除数据。此恢复路线尚未单独真机验收，
-不提供任意版本 ROM 混刷或自动恢复保证。
+恢复 boot 不能撤销 rootfs 格式化，恢复 GPT 不能恢复原文件内容。没有完整恢复依据时，不自动重放分区或清除操作。原厂恢复通常需要符合设备和防回滚条件的完整 ROM、正确的分区边界及 Android 数据初始化，不能只刷一个 boot.img。
 
-上游双系统与 KernelSU 组件作为适配参考保留，见 [组件说明](../device/android/ksu-boot-ubuntu/README.md)。
-当前安装入口仅接受 `linux-single`；双系统参考代码不代表 Fedora 支持双系统或 A/B 自动回滚。
+固定 Rec 的部署、冷启动和回刷恢复已分别验证；通用 GUI 不提供任意 Rec 固定安装按钮。已验收固定版、只读回刷基线与默认临时镜像具有不同角色，见[原生 Rec](NATIVE-RECOVERY.md)。
+
+## 启动不了系统时
+
+安装环境临时启动成功、系统引导完整回读、目标系统首次进入桌面/Android、冷启动恢复入口是不同检查。安装结束后先保留 Rec，再验证所选系统；不要把系统 Logo 视为已经正常启动。
+
+若仍能进入 Bootloader Fastboot，可按已核验镜像的流程进入临时 Rec 检查。无法进入 Fastboot/Rec 的情况不能由普通 GUI 安装流程保证恢复。不要锁定含非原厂镜像的 Bootloader，也不要为排错随意修改 GPT、AVB、ABL 或其他启动固件。
+
+新安装、内核更新、完整 ROM 和固定 Rec 的验收分别记录。未支持 Android data 解密；个人加密数据的可恢复性不能由“分区还在”推定。
+
+## 安装后检查
+
+1. 保存执行报告、材料/镜像摘要及设备外备份，确认回读、系统登记和只读封存已完成。
+2. 由用户启动目标系统：Android 检查进入系统与数据初始化；Linux 检查桌面、触控、网络、存储和音频。
+3. 分别验证普通重启、拔线冷启动、固定 Rec 入口及默认系统切换，注明未测项目。
+4. 固定 Rec 部署/回刷、中断恢复和新 ROM 分别记录；维护测试通过不能替代完整安装验收。
+
+失败时保存日志并停留在 Rec 检查实际完成阶段，不重复清除。公开报告前移除个人信息，设备校准和备份不上传。

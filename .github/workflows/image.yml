@@ -20,12 +20,7 @@ jobs:
       - name: 准备 Devbox 构建环境
         working-directory: project
         run: devbox install
-      - name: 获取并校验原厂 ROM
-        working-directory: project
-        run: |
-          devbox run fetch-rom -- --out "$RUNNER_TEMP/liuqin-rom/images" \
-            --cache "$RUNNER_TEMP/liuqin-rom/downloads"
-      - name: 创建本次镜像构建配置
+      - name: 创建并校验本次镜像构建配置
         working-directory: project
         env:
           BASE_CONFIG: ${{ vars.LIUQIN_BUILD_CONFIG }}
@@ -46,19 +41,24 @@ jobs:
           output.write_text(json.dumps(data) + '\n')
           output.chmod(0o600)
           PY
+          devbox run -- python3 build/devbox/build.py show-config \
+            --config "$RUNNER_TEMP/liuqin-image-build.json" > /dev/null
           sudo -n true
-      - name: 构建三个安装文件
+      - name: 获取并校验原厂 ROM
+        working-directory: project
+        run: |
+          devbox run fetch-rom -- --out "$RUNNER_TEMP/liuqin-rom/images" \
+            --cache "$RUNNER_TEMP/liuqin-rom/downloads"
+      - name: 构建并导出配套 boot 与 rootfs
         working-directory: project
         run: |
           devbox run plan -- --config "$RUNNER_TEMP/liuqin-image-build.json"
-          devbox run build -- --config "$RUNNER_TEMP/liuqin-image-build.json"
+          devbox run build -- --config "$RUNNER_TEMP/liuqin-image-build.json" \
+            --export-dir "$RUNNER_TEMP/liuqin-system-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
       - uses: actions/upload-artifact@v4
         with:
           name: liuqin-system-${{ github.sha }}
           if-no-files-found: error
           compression-level: 0
-          path: |
-            project/out/releases/*-plasma-*/installer.img
-            project/out/releases/*-plasma-*/boot.img
-            project/out/releases/*-plasma-*/rootfs.tar.gz
+          path: ${{ runner.temp }}/liuqin-system-${{ github.run_id }}-${{ github.run_attempt }}/
           retention-days: 7

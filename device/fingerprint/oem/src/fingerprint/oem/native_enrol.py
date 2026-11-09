@@ -97,7 +97,7 @@ class Runtime:
         self.cleaned = False
         self.creating = finish_creation
         try:
-            self.child = subprocess.Popen(command, pass_fds=(input_fd,), stdin=subprocess.DEVNULL,
+            self.child = subprocess.Popen(command, pass_fds=() if input_fd is None else (input_fd,), stdin=subprocess.DEVNULL,
                                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                           text=True, errors="replace", bufsize=1,
                                           env=dict(os.environ, PYTHONUNBUFFERED="1"))
@@ -134,7 +134,7 @@ class Runtime:
         return result if finish_creation or not self.cancelled else 1
 
 
-def enrol(username, output, runtime):
+def enrol(username, output, runtime, finger=None):
     user = pwd.getpwnam(username)
     if user.pw_name != username or not 0 < user.pw_uid < 0x10000000:
         raise ValueError("unsupported target account")
@@ -145,22 +145,34 @@ def enrol(username, output, runtime):
             raise ValueError("untrusted program bundle")
     candidate = json.loads((here / "CANDIDATE.json").read_text())
     profile = candidate.get("account_profile", "bound-account")
-    if profile == "primary-uid-1000":
-        # Resolve only on authorized enrollment, after initial setup created the
-        # local account. Persistent credential binding below remains unchanged.
-        primary = pwd.getpwuid(1000)
-        if (candidate.get("linux_uid") != 1000 or user.pw_uid != 1000 or
-                primary.pw_name != username):
-            raise ValueError("only the primary local account is supported")
-    elif profile == "bound-account":
-        if (candidate.get("linux_username"), candidate.get("linux_uid")) != (username, user.pw_uid):
-            raise ValueError("target differs from the installed account")
+    if profile == "fprintd-user":
+        # fprintd authorizes the claimed account before invoking this provider.
+        # Resolve it now, not at package/install time, and reject ambiguous UID
+        # aliases. The persisted username/UID binding below protects old state
+        # when an account is renamed or its UID is later reassigned.
+        if candidate.get("enrollment_interface") != "fprintd":
+            raise ValueError("per-user enrollment requires fprintd authorization")
+        if pwd.getpwuid(user.pw_uid).pw_name != username:
+            raise ValueError("ambiguous target account UID")
     else:
-        raise ValueError("unsupported account profile")
-    prints = FPRINT_ROOT / username / "fpc1264_oem" / "liuqin-fpc1264-oem"
-    if any(os.path.lexists(prints / finger) for finger in "123456789a"):
-        print("native_enrol=REFUSED existing_template=1", flush=True)
-        return 2
+        raise ValueError('only the fprintd-user profile is supported')
+    if candidate.get("multi_finger_version") != 1:
+        raise ValueError('multi-finger runtime required')
+    module_info = (here / 'gallery_state.py').lstat()
+    if not stat.S_ISREG(module_info.st_mode) or module_info.st_uid != 0 or module_info.st_mode & 0o022:
+        raise ValueError('untrusted gallery module')
+    import gallery_state as gallery
+    gallery.account(username, user.pw_uid)
+    if type(finger) is not int or not 1 <= finger <= 10:
+        raise ValueError('an explicit finger is required')
+    catalog = gallery.read_catalog(here, username, user.pw_uid, FPRINT_ROOT)
+    if any(item['finger'] == finger for item in catalog):
+        print('native_enrol=REFUSED existing_template=1', flush=True); return 2
+    if len(catalog) >= gallery.MAX_FINGERS:
+        print('native_enrol=REFUSED gallery_full=1', flush=True); return 2
+    existing_account = STATE_ROOT / str(0x60000000 | user.pw_uid)
+    if catalog and not all(os.path.lexists(existing_account/name) for name in ('credential.json','gatekeeper.handle')):
+        raise ValueError('existing prints require their original credential')
     if not output.is_absolute() or output.parent.resolve() != output.parent or os.path.lexists(output):
         raise ValueError("output must be a new private absolute path")
     parent = output.parent.lstat()
@@ -225,45 +237,59 @@ def enrol(username, output, runtime):
             sync_directory(account)
         if runtime.cancelled:
             return 1
-        # The existing FPC exporter uses O_EXCL and checks exactly one template.
-        # Keep its output private until the final enrol runtime has fully cleaned.
-        with tempfile.TemporaryDirectory(prefix=".native-enrol-", dir=output.parent) as temporary:
-            database = Path(temporary) / "database"
-            os.lseek(secret_fd, 0, os.SEEK_SET)
-            status = runtime.run([*command, "--enrol", str(database), str(uid), str(secret_fd)], secret_fd)
-            if status or not runtime.cleaned or runtime.cancelled:
-                print(f"native_enrol_runtime=FAILED operation=enrol status={status} "
-                      f"cleanup_complete={int(runtime.cleaned)}", file=sys.stderr, flush=True)
-                return 1
-            source_fd = os.open(database, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
-            try:
-                info = os.fstat(source_fd)
-                if (not stat.S_ISREG(info.st_mode) or
-                        (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) != (0, 0, 0o600) or
-                        not 0 < info.st_size <= 16 * 1024 * 1024):
-                    raise ValueError("incomplete private database")
-                target_fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
-                try:
-                    with os.fdopen(source_fd, "rb", closefd=False) as source, os.fdopen(target_fd, "wb", closefd=False) as target:
-                        shutil.copyfileobj(source, target)
-                        target.flush()
-                    os.fsync(target_fd)
-                    if runtime.cancelled:
-                        raise InterruptedError("enrolment canceled")
-                except BaseException:
-                    output.unlink()
-                    raise
-                finally:
-                    os.close(target_fd)
-            finally:
-                os.close(source_fd)
-            sync_directory(output.parent)
-        return 0
+        return enrol_gallery(here, account, username, user.pw_uid, finger, output, catalog,
+                             runtime, command, secret_fd)
     finally:
         secret[:] = bytes(len(secret))
         if secret_fd >= 0:
             os.close(secret_fd)
         os.close(lock)
+
+
+def enrol_gallery(here, account, username, uid, finger, output, catalog, runtime, command, secret_fd):
+    import gallery_state as gallery
+    if not gallery.same_catalog(catalog, gallery.read_catalog(here, username, uid, FPRINT_ROOT)):
+        raise ValueError('published prints changed before enrollment')
+    state = gallery.recover_state(account, username, uid, catalog)
+    active = gallery.resolve_bindings(state, catalog, uid)
+    with tempfile.TemporaryDirectory(prefix='.enrol-gallery-', dir=output.parent) as temporary:
+        root = Path(temporary); source = root/'database'; database = root/'updated'
+        active_file = root/'active'; meta = root/'metadata'
+        if catalog:
+            gallery.private_write(source, state['database'])
+        ids = [item['id'] for item in active.values()]
+        import struct
+        wire = struct.pack('<I', len(ids)) + b''.join(struct.pack('<I', i) for i in ids)
+        gallery.private_write(active_file, wire)
+        os.lseek(secret_fd, 0, os.SEEK_SET)
+        status = runtime.run([*command, '--enrol-gallery', str(source) if catalog else '-',
+                              str(database), str(active_file), str(meta),
+                              str(0x60000000 | uid), str(secret_fd)], secret_fd)
+        if status or not runtime.cleaned or runtime.cancelled:
+            print('native_enrol_runtime=FAILED operation=enrol-gallery cleanup_complete='+str(int(runtime.cleaned)), flush=True)
+            return 1
+        before, after, new_id, retry = gallery.metadata(meta)
+        expected = ({item['id'] for item in state['bindings'].values()} if state and catalog else set())
+        if (set(before) != expected or retry or not new_id or new_id in {item['id'] for item in active.values()} or
+                set(after) != {item['id'] for item in active.values()} | {new_id}):
+            raise ValueError('enrollment inventory does not add exactly one template')
+        used = {item['token'] for item in state['bindings'].values()} if state else set()
+        for _ in range(4):
+            token = os.urandom(32).hex()
+            if token not in used: break
+        else:
+            raise ValueError('new finger token is not unique')
+        active[str(finger)] = dict(id=new_id, token=token)
+        data = gallery.private_read(database, gallery.MAX_DATABASE)
+        if not gallery.same_catalog(catalog, gallery.read_catalog(here, username, uid, FPRINT_ROOT)):
+            raise ValueError('published prints changed during enrollment')
+        if runtime.cancelled: return 1
+        gallery.save_state(account, gallery.new_state(username, uid, active, data), state,
+                           cancelled=lambda: runtime.cancelled)
+        if runtime.cancelled: return 1
+        gallery.private_write(output, gallery.reference(uid, finger, active[str(finger)]['token']))
+        sync_directory(output.parent)
+        return 0
 
 
 def main(arguments=None):
@@ -272,14 +298,15 @@ def main(arguments=None):
     result = 2
     handlers = {}
     try:
-        if os.geteuid() != 0 or os.getegid() != 0 or len(arguments) != 3 or arguments[0] != "--enrol":
-            print("usage (root): native_enrol.py --enrol USERNAME OUTPUT_DATABASE", file=sys.stderr)
+        if os.geteuid() != 0 or os.getegid() != 0 or len(arguments) != 4 or arguments[0] != "--enrol":
+            print("usage (root): native_enrol.py --enrol USERNAME FINGER_NUMBER OUTPUT", file=sys.stderr)
             return 2
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         os.umask(0o077)
         for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             handlers[sig] = signal.signal(sig, runtime.cancel)
-        result = enrol(arguments[1], Path(arguments[2]), runtime)
+        result = enrol(arguments[1], Path(arguments[-1]), runtime,
+                       int(arguments[2]))
     except (OSError, ValueError, KeyError, TypeError) as error:
         code = error.errno if isinstance(error, OSError) and isinstance(error.errno, int) else "none"
         print("native_enrol=FAILED phase=private_state_or_runtime existing_identities_preserved=1 "
@@ -294,7 +321,7 @@ def main(arguments=None):
         print("native_enrol=CANCELLED", flush=True)
         return 1
     if result == 0 and runtime.cleaned:
-        print("native_enrol=OK single_finger_database=1", flush=True)
+        print("native_enrol=OK finger_reference=2", flush=True)
     return result
 
 

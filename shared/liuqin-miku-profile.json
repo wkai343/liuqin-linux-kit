@@ -1,0 +1,243 @@
+{
+  "schema_version": 1,
+  "id": "miku-blooming-26101322",
+  "device": "liuqin",
+  "rom": "MikuUI-Blooming-liuqin-26101322-GAPPS-UNOFFICIAL",
+  "slot": "a",
+  "anti_version": 1,
+  "shared_firmware": [],
+  "firmware_policy": "preserve-existing",
+  "install_images": [
+    "super.img",
+    "vendor_boot.img",
+    "dtbo.img",
+    "vbmeta_system.img",
+    "vbmeta.img"
+  ],
+  "material_images": [
+    "boot.img",
+    "dtbo.img",
+    "vendor_boot.img",
+    "vbmeta.img",
+    "vbmeta_system.img",
+    "super.img"
+  ],
+  "images": {
+    "boot.img": {
+      "partition": "boot_a",
+      "bytes": 201326592,
+      "sha256": "f1a40a6addf1ce1b6ec2f9bb8c534a4239823ebd40e47ec4e4ef0a6479fe7b64"
+    },
+    "dtbo.img": {
+      "partition": "dtbo_a",
+      "bytes": 25165824,
+      "sha256": "5b9a9d2f67449d733e3594300b6f96fc816f09ab94c4e38bdbf429694c74d8f7"
+    },
+    "vendor_boot.img": {
+      "partition": "vendor_boot_a",
+      "bytes": 100663296,
+      "sha256": "07d5d57785ee8968746517d1a02896eac7a2e4971e53b1f4a092a283bc69718a"
+    },
+    "vbmeta.img": {
+      "partition": "vbmeta_a",
+      "bytes": 8192,
+      "sha256": "513d71df459fe82c31003b705ad419b20b451db87ce1185906b0eb5bca9291df"
+    },
+    "vbmeta_system.img": {
+      "partition": "vbmeta_system_a",
+      "bytes": 4096,
+      "sha256": "d42f9983a37e43abb9351344bb2bb2a16b7e038329b4c8a44d4a5bf8208c7231"
+    },
+    "super.img": {
+      "partition": "super",
+      "bytes": 9126805504,
+      "sha256": "b02910400aaef43822cc6b5ad2b2bc5cf70a433894b7d767b3ff4b97a584921e"
+    }
+  },
+  "archive": {
+    "format": "payload-zip-v2",
+    "archive": "MikuUI-Blooming-liuqin-26101322-GAPPS-UNOFFICIAL.zip",
+    "bytes": 2172677658,
+    "sha256": "177883dc762cc2ebccf1978d911a1026ef278cef24d18cd302fced1a532b7323"
+  },
+  "ota": {
+    "device": "liuqin",
+    "fingerprint": "Xiaomi/miku_liuqin/liuqin:16/BP4A.251205.006/eng.miku-b:userdebug/test-keys",
+    "sdk": 36,
+    "partitions": {
+      "boot": {
+        "bytes": 201326592,
+        "sha256": "f1a40a6addf1ce1b6ec2f9bb8c534a4239823ebd40e47ec4e4ef0a6479fe7b64"
+      },
+      "dtbo": {
+        "bytes": 25165824,
+        "sha256": "5b9a9d2f67449d733e3594300b6f96fc816f09ab94c4e38bdbf429694c74d8f7"
+      },
+      "odm": {
+        "bytes": 868352,
+        "sha256": "62468d31b8dde27ef23ce0e717ad19ac4110b74f1a0eef2f7a9347d4a6f0299c"
+      },
+      "product": {
+        "bytes": 771784704,
+        "sha256": "dd46cdabb649cdd78c3ae2551f57af46db0102acbe27892290b67e89c183eb10"
+      },
+      "recovery": {
+        "bytes": 104857600,
+        "sha256": "f52352006ced99a632d7a4f7ab57b27f9bc8ef0c01f4a692e2247212b467601f"
+      },
+      "system": {
+        "bytes": 710361088,
+        "sha256": "6b60886142534dc46cbc729b22219d1860fab10a84ab2e3cec49125da47a7141"
+      },
+      "system_ext": {
+        "bytes": 323723264,
+        "sha256": "78a42248d146203494725e2ea15ab2f92316a41fe7bbeb82d46ec5c1156e6c07"
+      },
+      "vbmeta": {
+        "bytes": 8192,
+        "sha256": "513d71df459fe82c31003b705ad419b20b451db87ce1185906b0eb5bca9291df"
+      },
+      "vbmeta_system": {
+        "bytes": 4096,
+        "sha256": "d42f9983a37e43abb9351344bb2bb2a16b7e038329b4c8a44d4a5bf8208c7231"
+      },
+      "vendor": {
+        "bytes": 1148882944,
+        "sha256": "2cb507d661417d6ea84ef11287070dc82e9e2f135481681a6be7026571f79614"
+      },
+      "vendor_boot": {
+        "bytes": 100663296,
+        "sha256": "07d5d57785ee8968746517d1a02896eac7a2e4971e53b1f4a092a283bc69718a"
+      },
+      "vendor_dlkm": {
+        "bytes": 29601792,
+        "sha256": "a8e268eee4cd2353beb556a452b8a4d72c188017f8a07722efd470dd820f8c66"
+      }
+    },
+    "ignored_partitions": [
+      "recovery"
+    ],
+    "optional_postinstall": [
+      "system",
+      "vendor"
+    ]
+  },
+  "super": {
+    "source_sha256": "b02910400aaef43822cc6b5ad2b2bc5cf70a433894b7d767b3ff4b97a584921e",
+    "expanded_bytes": 9126805504,
+    "verification_ranges": [
+      {
+        "offset": 0,
+        "bytes": 405504,
+        "sha256": "cfe2bb1292a496f87ea4969f89896a1bc5084a23b03b1bf9bb2826fe5b834aee"
+      },
+      {
+        "offset": 1048576,
+        "bytes": 868352,
+        "sha256": "62468d31b8dde27ef23ce0e717ad19ac4110b74f1a0eef2f7a9347d4a6f0299c"
+      },
+      {
+        "offset": 2097152,
+        "bytes": 771784704,
+        "sha256": "dd46cdabb649cdd78c3ae2551f57af46db0102acbe27892290b67e89c183eb10"
+      },
+      {
+        "offset": 774897664,
+        "bytes": 710361088,
+        "sha256": "6b60886142534dc46cbc729b22219d1860fab10a84ab2e3cec49125da47a7141"
+      },
+      {
+        "offset": 1485832192,
+        "bytes": 323723264,
+        "sha256": "78a42248d146203494725e2ea15ab2f92316a41fe7bbeb82d46ec5c1156e6c07"
+      },
+      {
+        "offset": 1809842176,
+        "bytes": 1148882944,
+        "sha256": "2cb507d661417d6ea84ef11287070dc82e9e2f135481681a6be7026571f79614"
+      },
+      {
+        "offset": 2959081472,
+        "bytes": 29601792,
+        "sha256": "a8e268eee4cd2353beb556a452b8a4d72c188017f8a07722efd470dd820f8c66"
+      }
+    ],
+    "layout": {
+      "bytes": 9126805504,
+      "group": "qti_dynamic_partitions",
+      "group_bytes": 9122611200,
+      "partitions": [
+        {
+          "name": "odm",
+          "bytes": 868352,
+          "sha256": "62468d31b8dde27ef23ce0e717ad19ac4110b74f1a0eef2f7a9347d4a6f0299c"
+        },
+        {
+          "name": "product",
+          "bytes": 771784704,
+          "sha256": "dd46cdabb649cdd78c3ae2551f57af46db0102acbe27892290b67e89c183eb10"
+        },
+        {
+          "name": "system",
+          "bytes": 710361088,
+          "sha256": "6b60886142534dc46cbc729b22219d1860fab10a84ab2e3cec49125da47a7141"
+        },
+        {
+          "name": "system_ext",
+          "bytes": 323723264,
+          "sha256": "78a42248d146203494725e2ea15ab2f92316a41fe7bbeb82d46ec5c1156e6c07"
+        },
+        {
+          "name": "vendor",
+          "bytes": 1148882944,
+          "sha256": "2cb507d661417d6ea84ef11287070dc82e9e2f135481681a6be7026571f79614"
+        },
+        {
+          "name": "vendor_dlkm",
+          "bytes": 29601792,
+          "sha256": "a8e268eee4cd2353beb556a452b8a4d72c188017f8a07722efd470dd820f8c66"
+        }
+      ]
+    }
+  },
+  "userdata": {
+    "filesystem": "f2fs",
+    "mkfs_args": [
+      "-f",
+      "-t",
+      "0",
+      "-g",
+      "android",
+      "-O",
+      "extra_attr,inode_checksum,sb_checksum,compression",
+      "-w",
+      "4096",
+      "-l",
+      "userdata"
+    ]
+  },
+  "metadata": {
+    "filesystem": "ext4",
+    "mkfs_args": [
+      "-F",
+      "-b",
+      "4096",
+      "-I",
+      "256",
+      "-m",
+      "0",
+      "-O",
+      "none,has_journal,extent,huge_file,flex_bg,metadata_csum,dir_index,extra_isize,uninit_bg",
+      "-L",
+      "metadata"
+    ]
+  },
+  "evidence": [
+    "Admitted exact user-supplied full OTA ZIP; SHA256 is local content identity, not publisher signature verification.",
+    "Payload minor_version=0; operations REPLACE/REPLACE_BZ/REPLACE_XZ; six logical images in qti_dynamic_partitions.",
+    "vendor_boot first_stage_ramdisk/fstab.qcom requires /data f2fs and /metadata ext4 with metadata encryption.",
+    "vbmeta.img has flags=3; original bytes retained. Payload recovery.img and optional postinstall hooks are not installed/executed.",
+    "No low-level firmware images in this OTA. Existing firmware is preserved; hardware compatibility/first boot remains untested.",
+    "anti_version=1 is the existing Liuqin platform admission ceiling, not a firmware rollback value inferred from this OTA."
+  ]
+}

@@ -1,0 +1,83 @@
+{
+  "schema": 1,
+  "id": "liuqin-native-v2-embedded-dtbo-20261103",
+  "device": "liuqin",
+  "partition_name": "recovery",
+  "partition_bytes": 104857600,
+  "boot_header_version": 2,
+  "unlocked_required": true,
+  "inspection_only": true,
+  "required_layout": {
+    "boot": 201326592,
+    "recovery": 104857600
+  },
+  "kernel_sha256": "fbb70170225346809458655ffe3c36b6951141200848298f5a788ad20478619a",
+  "dtb_sha256": "a6d8cf712bb542924b6c4aaacfebc4fe68fc1cb6b4b285baf14032890569374f",
+  "embedded_dtbo": {
+    "bytes": 20633856,
+    "sha256": "8160577305786116453926787053fe3db4cdb9481133cff12fecbb7851a7c050",
+    "entry_count": 38,
+    "liuqin_index": 15,
+    "liuqin_entry_sha256": "cda33f71849205460640f1824aec0cddbb48e5c2530ba97dffe6992a11f864e6",
+    "origin": "Actual device MIUI 14.0.3 DTBO payload; immutable input; external DTBO is not used in the fixed Recovery v2 path"
+  },
+  "baselines": [
+    {
+      "id": "miui-abl-20230422",
+      "label": "MIUI ABL 2023-04-22",
+      "abl_partition_bytes": 8388608,
+      "abl_partition_sha256": "2fbe028f35389df5a9489dc9d436fe7973fd14a257313e7cd731a46d37f7bbb7",
+      "abl_pe_sha256": "6e8336e6de07964862374758047ab10e4866f0d93921916cf42850f3c35e3df5",
+      "requires_verification_disabled": true
+    },
+    {
+      "id": "hyperos-abl-20250318",
+      "label": "HyperOS ABL 2025-03-18",
+      "abl_partition_bytes": 8388608,
+      "abl_partition_sha256": "20c39e78a85941a46d443cd9b3d6e6525d8d7d33ef3f44ea88a93193b3a2a327",
+      "abl_pe_sha256": "149f9466a02b810856d264267945b3822aec4716fb41f10907e68e0f273d4a50",
+      "requires_verification_disabled": false
+    }
+  ],
+  "roms": [
+    {
+      "id": "miui14",
+      "label": "本机 MIUI 14.0.3 / Android 13",
+      "vbmeta": {
+        "metadata_bytes": 5952,
+        "metadata_sha256": "870277d27c94a5fa1e96b44005e4abac22847bd7bc54df13c147b5acfb3aae38",
+        "normalized_flags_sha256": "870277d27c94a5fa1e96b44005e4abac22847bd7bc54df13c147b5acfb3aae38",
+        "observed_flags": 0
+      },
+      "vbmeta_system_metadata_sha256": "445191688446749a86c2bd3e527ec2d4730f374e1030fe01ec04cee03388e4f5",
+      "bundles_abl": true
+    },
+    {
+      "id": "hyperos206",
+      "label": "HyperOS 2.0.6 / Android 15",
+      "vbmeta": {
+        "metadata_bytes": 5824,
+        "metadata_sha256": "ec4475ad5dda3d64930dea0bffd0d1469d8ee9717912c8d983cd2a191445193b",
+        "normalized_flags_sha256": "ec4475ad5dda3d64930dea0bffd0d1469d8ee9717912c8d983cd2a191445193b",
+        "observed_flags": 0
+      },
+      "vbmeta_system_metadata_sha256": "f4d260b4ea2bcecebabc87e7541d59d8f9c4445745b50df6e86c0df79d3c9d24",
+      "bundles_abl": true
+    },
+    {
+      "id": "miku26101322",
+      "label": "MikuUI Blooming 26101322 / Android 16",
+      "vbmeta": {
+        "metadata_bytes": 4992,
+        "metadata_sha256": "c7e4fa8a5f7e5030ac6ca8dd0505b3749590bab504a24ca40685adc908f915cf",
+        "normalized_flags_sha256": "47addfb72d7dc018663f55aba1cde4a38bf080bd0aaed8cae8e907e2d148b11f",
+        "observed_flags": 3
+      },
+      "vbmeta_system_metadata_sha256": "0fc959b63ff81f9a8c06f8914851e0a1f18d79e20afe7dce75c9e7d4403bee3a",
+      "bundles_abl": false
+    }
+  ],
+  "recovery_rollback_index": 1,
+  "validation": "OFFLINE_CANDIDATE_NOT_HARDWARE_BOOT_TESTED",
+  "automatic_avb_changes": false
+}

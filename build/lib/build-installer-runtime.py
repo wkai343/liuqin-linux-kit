@@ -23,11 +23,12 @@ def main():
     pending = [('usr/bin/tar', root / 'usr/bin/tar'),
                ('usr/bin/install', root / 'usr/bin/install'),
                ('usr/sbin/mkfs.ext4', root / 'usr/sbin/mkfs.ext4'),
+               ('usr/sbin/mkfs.f2fs', root / 'usr/sbin/mkfs.f2fs'),
+               ('usr/bin/python3', root / 'usr/bin/python3'),
                ('usr/sbin/mkfs.btrfs', root / 'usr/sbin/mkfs.btrfs'),
                ('usr/bin/btrfs', next((root / name for name in ('usr/bin/btrfs', 'usr/sbin/btrfs')
                                        if (root / name).is_file()), root / 'usr/bin/btrfs')),
                ('usr/sbin/e2fsck', root / 'usr/sbin/e2fsck'),
-               # install-root.sh KEEP-HOME reads the home filesystem's label.
                # e2label is tune2fs under another name; the copy keeps the name.
                ('usr/sbin/e2label', root / 'usr/sbin/e2label'),
                ('usr/sbin/getcap', root / 'usr/sbin/getcap'),
@@ -35,6 +36,21 @@ def main():
                # editor has to be the distribution's, matched with its libuuid.
                ('usr/sbin/sgdisk', root / 'usr/sbin/sgdisk')]
     files = {}
+    # Include Python's standard library and extension-module ELF dependencies.
+    # The Android helper uses only stdlib; no target package manager/site modules.
+    interpreter = (root / 'usr/bin/python3').resolve()
+    version = interpreter.name
+    if not version.startswith('python3.'):
+        parser.error('cannot identify the target Python standard library')
+    standard = root / 'usr/lib' / version
+    if not (standard / 'encodings/__init__.py').is_file():
+        parser.error('target Python standard library is incomplete')
+    for source in standard.rglob('*'):
+        if not source.is_file() or source.is_symlink() or any(part in ('__pycache__', 'test', 'tests', 'site-packages', 'dist-packages') for part in source.relative_to(standard).parts):
+            continue
+        relative = source.relative_to(root).as_posix()
+        if source.suffix == '.so': pending.append((relative, source))
+        elif source.suffix == '.py': files[relative] = source
     while pending:
         relative, source = pending.pop()
         if relative in files:
@@ -60,7 +76,7 @@ def main():
         destination = out / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, destination)
-        destination.chmod(0o644 if relative == 'etc/mke2fs.conf' else 0o755)
+        destination.chmod(0o644 if relative == 'etc/mke2fs.conf' or relative.endswith('.py') else 0o755)
         manifest[relative] = hashlib.sha256(destination.read_bytes()).hexdigest()
     reboot = out / 'usr/sbin/liuqin-reboot'
     source = Path(__file__).resolve().parents[2] / 'device/charger-mode/liuqin-charger-mode-exit.c'

@@ -55,7 +55,6 @@ kernel_modules_dir=${KERNEL_MODULES_DIR:-}
 kernel_image=${KERNEL_IMAGE:-}
 kernel_dtb=${KERNEL_DTB:-}
 kernel_initramfs=${KERNEL_INITRAMFS:-}
-fingerprint_bundle=${FINGERPRINT_BUNDLE:-}
 
 die() { printf 'build-liuqin-debs: %s\n' "$*" >&2; exit 1; }
 
@@ -108,6 +107,7 @@ pack() { # pack <pkg> <arch> <depends> <description> [extra DEBIAN files...]
 	{
 		printf 'Package: %s\nVersion: %s\nArchitecture: %s\n' "$pkg" "$version" "$arch"
 		printf 'Maintainer: %s\n' "$maintainer"
+		if [ "$pkg" = liuqin-device-support ]; then printf 'Provides: liuqin-storage-policy-ufs (= 1)\n'; fi
 		[ -z "$depends" ] || printf 'Depends: %s\n' "$depends"
 		printf 'Section: misc\nPriority: optional\n'
 		printf 'Description: %s\n' "$desc"
@@ -196,10 +196,18 @@ build_generic_device_support() {
 		-e 's|^marker=${LIUQIN_GNOME_GUARD_TEST_MARKER:-/etc/liuqin-gnome-root}$|marker=/etc/liuqin-native-root|' \
 		-e 's|^marker_sha=bd86a359f5b6bf05f09abf544967489e924c251ab7c07684df62b0dbda4c3fca$|marker_sha=4fdae4f7a27af8b0d4a2bbc168c7f01c3c5c6b5e245fcc521389d662f8212c5b|' "$guard"
 	install -D -m 0755 "$busybox" "$root/usr/local/bin/busybox"
-	for required in usr/local/sbin/liuqin-gnome-storage-guard usr/local/sbin/liuqin-gnome-usb-rescue \
+	python3 "$project_root/build/lib/storage_scope.py" --out "$root/usr/libexec/liuqin-storage-seal" \
+		--compiler "${STORAGE_SCOPE_CC:-${CROSS_COMPILE:-aarch64-unknown-linux-musl-}gcc}"
+	for required in usr/local/sbin/liuqin-gnome-storage-guard \
 		usr/local/sbin/liuqin-wlan-mac usr/local/sbin/liuqin-bt-public-addr usr/local/libexec/liuqin-backlight-default; do
 		[ -x "$root/$required" ] || die "generic device package misses $required"
 	done
+	mkdir -p "$root/DEBIAN"
+	{
+		printf '#!/bin/sh\nset -e\nif [ "$1" = configure ]; then\n'
+		PYTHONPATH="$project_root/build/lib" python3 -c 'from storage_scope import legacy_cleanup; print(legacy_cleanup())'
+		printf 'fi\n'
+	} >"$root/DEBIAN/postinst"
 	pack "$pkg" arm64 'systemd, udev, python3, chrony, network-manager, bluez, libglib2.0-bin' \
 		'Xiaomi Pad 6 Pro (liuqin) desktop-neutral board services and storage protection'
 }
@@ -260,6 +268,8 @@ PY
 	grep -qx 'marker=/etc/liuqin-native-root' "$guard" ||
 		die 'storage guard native marker rewrite did not land'
 	# Compiled helpers, same deterministic flags as the device-layer builder.
+	python3 "$project_root/build/lib/storage_scope.py" --out "$root/usr/libexec/liuqin-storage-seal" \
+		--compiler "${STORAGE_SCOPE_CC:-$power_key_cc}"
 	mkdir -p "$root/usr/local/libexec"
 	LC_ALL=C SOURCE_DATE_EPOCH=0 "$power_key_cc" \
 		-std=c11 -O2 -pipe \
@@ -285,31 +295,6 @@ PY
 		"$audio_probe_source" "$audio_probe_libasound" \
 		-o "$root/usr/local/libexec/liuqin-audio-hwparams-probe"
 	chmod 0755 "$root/usr/local/libexec/liuqin-audio-hwparams-probe"
-	# The dual-boot switcher runs as root through pkexec.  The desktop entry,
-	# the polkit action and the script have to name the same program and
-	# argument, or the entry silently asks for the generic pkexec action.
-	# The A/B slot helper is deliberately not shipped here any more: only the
-	# initramfs marks the running slot successful, and nothing in the running
-	# system may change which slot boots.
-	switcher=$root/usr/local/sbin/liuqin-switch
-	if [ ! -f "$switcher" ] || [ ! -x "$switcher" ]; then
-		die 'the overlay carries no liuqin-switch'
-	fi
-	sh -n "$switcher" || die 'liuqin-switch is not valid sh'
-	grep -qx 'Exec=pkexec /usr/local/sbin/liuqin-switch to-android' \
-		"$root/usr/local/share/applications/liuqin-reboot-to-android.desktop" ||
-		die 'the Reboot to Android entry no longer runs liuqin-switch to-android'
-	policy=$root/usr/share/polkit-1/actions/io.github.liuqin.switch.policy
-	for annotation in \
-		'<annotate key="org.freedesktop.policykit.exec.path">/usr/local/sbin/liuqin-switch</annotate>' \
-		'<annotate key="org.freedesktop.policykit.exec.argv1">to-android</annotate>'; do
-		grep -qF "$annotation" "$policy" ||
-			die 'the polkit action no longer matches pkexec liuqin-switch to-android'
-	done
-	for retired in usr/local/bin/liuqin-boot-android usr/local/libexec/liuqin-mark-slot-successful \
-		usr/local/share/applications/liuqin-boot-android.desktop; do
-		[ ! -e "$root/$retired" ] || die "the retired slot-switching path is back: /$retired"
-	done
 	command -v readelf >/dev/null || die 'readelf is required to verify generated executables'
 	[ "$(LC_ALL=C readelf -h "$root/usr/local/libexec/liuqin-power-keyd" |
 		sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')" = AArch64 ] ||
@@ -328,6 +313,7 @@ PY
 		printf '#!/bin/sh\nset -e\nif [ "$1" = configure ]; then\n'
 		printf '\tif [ -d /run/systemd/system ]; then systemctl daemon-reload || :; fi\n'
 		printf '\tif command -v dconf >/dev/null; then dconf update || :; fi\n'
+		PYTHONPATH="$project_root/build/lib" python3 -c 'from storage_scope import legacy_cleanup; print(legacy_cleanup())'
 		printf 'fi\n'
 	} >"$root/DEBIAN/postinst"
 	cp "$work/$pkg.preinst" "$root/DEBIAN/preinst"
@@ -432,13 +418,6 @@ build_kernel() {
 		'Xiaomi Pad 6 Pro (liuqin) kernel modules and boot payload'
 }
 
-build_fingerprint() {
-	[ -n "$fingerprint_bundle" ] && [ -f "$fingerprint_bundle" ] ||
-		die 'liuqin-fingerprint requires a verified FINGERPRINT_BUNDLE input'
-	python3 "$project_root/build/scripts/build-liuqin-fingerprint-deb.py" \
-		--bundle "$fingerprint_bundle" --out "$out_dir" --version "$version"
-}
-
 build_meta() {
 	pkg=liuqin-device
 	if [ "$desktop_profile" = generic ]; then pkg=liuqin-device-base; fi
@@ -448,7 +427,6 @@ build_meta() {
 	if [ "$desktop_profile" = generic ]; then
 		depends="liuqin-firmware (= $version), liuqin-device-support (= $version), liuqin-sensors (= $version)"
 	fi
-	[ -z "$fingerprint_bundle" ] || depends="$depends, liuqin-fingerprint (= $version)"
 	pack "$pkg" arm64 \
 		"$depends" \
 		'Xiaomi Pad 6 Pro (liuqin) device support metapackage'
@@ -459,7 +437,6 @@ firmware) build_firmware ;;
 device-support) build_device_support ;;
 sensors) build_sensors ;;
 kernel) build_kernel ;;
-fingerprint) build_fingerprint ;;
 meta) build_meta ;;
 all)
 	build_firmware
@@ -468,8 +445,7 @@ all)
 	if [ -n "$kernel_modules_dir" ]; then build_kernel; else
 		printf 'build-liuqin-debs: skipping liuqin-kernel (no KERNEL_MODULES_DIR)\n' >&2
 	fi
-	[ -z "$fingerprint_bundle" ] || build_fingerprint
 	build_meta
 	;;
-*) die 'usage: build-liuqin-debs.sh all|firmware|device-support|sensors|kernel|fingerprint|meta' ;;
+*) die 'usage: build-liuqin-debs.sh all|firmware|device-support|sensors|kernel|meta' ;;
 esac

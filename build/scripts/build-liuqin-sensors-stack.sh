@@ -28,7 +28,7 @@ update_apt=${UPDATE_APT:-0}
 distribution=${BUILD_DISTRIBUTION:-ubuntu}
 case $distribution in
 ubuntu) libdir=lib/aarch64-linux-gnu; dependency_record=ubuntu-resolute ;;
-fedora) libdir=lib64; dependency_record=fedora-44 ;;
+fedora) libdir=lib64; dependency_record=fedora ;;
 *) printf '%s\n' 'unsupported sensor build distribution' >&2; exit 1 ;;
 esac
 export SENSOR_LIBDIR=$libdir SENSOR_DISTRIBUTION=$distribution
@@ -242,7 +242,15 @@ case $assemble_only in
 0)
 say "installing isolated $distribution arm64 build dependencies"
 if [ "$distribution" = fedora ]; then
-	JOBS=$jobs run_sensor_chroot "$merged" dnf -y --setopt=install_weak_deps=False install \
+	# Match the desktop builder's transient repository overrides; leave the
+	# Fedora root's installed repository configuration and GPG checks intact.
+	JOBS=$jobs run_sensor_chroot "$merged" dnf -y --setopt=install_weak_deps=False \
+		--setopt=optional_metadata_types= --setopt=zchunk=False \
+		--setopt=fedora.metalink= --setopt=fedora.mirrorlist= \
+		'--setopt=fedora.baseurl=https://dl.fedoraproject.org/pub/fedora/linux/releases/$releasever/Everything/$basearch/os/' \
+		--setopt=updates.metalink= --setopt=updates.mirrorlist= \
+		'--setopt=updates.baseurl=https://dl.fedoraproject.org/pub/fedora/linux/updates/$releasever/Everything/$basearch/' \
+		install \
 		gcc gcc-c++ make meson ninja-build pkgconf-pkg-config \
 		python3-devel python3-gobject-base python3-protobuf python3-dbus python3-dbusmock python3-psutil \
 		qrtr-libs qrtr-devel umockdev umockdev-devel glibc-langpack-fr \
@@ -473,7 +481,7 @@ trap - EXIT HUP INT TERM
 DESTDIR=/build/dest meson install -C /build/work/iio-sensor-proxy
 
 if [ "$SENSOR_DISTRIBUTION" = fedora ]; then
-	rpm -qa --qf '%{NAME}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n' | LC_ALL=C sort >/build/dest/fedora-44-build-deps.tsv
+	rpm -qa --qf '%{NAME}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n' | LC_ALL=C sort >/build/dest/fedora-build-deps.tsv
 else
 dpkg-query -W -f='${binary:Package}\t${Version}\t${Architecture}\n' \
 	build-essential meson ninja-build pkg-config libglib2.0-dev libqmi-glib-dev \

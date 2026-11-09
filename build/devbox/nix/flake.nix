@@ -15,7 +15,7 @@
           # A static musl libc keeps the RAM helpers independent of the host's
           # Nix glibc loader and the target rootfs distribution.
           cross = pkgs.pkgsCross.aarch64-multiplatform-musl;
-          python = pkgs.python311.withPackages (p: [ p.pyelftools p.zstandard ]);
+          python = pkgs.python311.withPackages (p: [ p.pyelftools p.zstandard p.lz4 ]);
           crossTools = pkgs.buildEnv {
             name = "liuqin-arm64-tools";
             paths = [ cross.buildPackages.gcc cross.buildPackages.binutils ];
@@ -25,6 +25,13 @@
             mkdir -p $out/bin
             ln -s ${pkgs.busybox}/bin/busybox $out/bin/busybox
           '';
+          # systemd >= 260 uses 64-bit mount IDs. Backport the QEMU fix
+          # without changing the pinned kernel compiler or target libraries.
+          qemuUser = (pkgs.pkgsStatic.qemu-user.override {
+            hostCpuTargets = [ "aarch64-linux-user" ];
+          }).overrideAttrs (old: {
+            patches = old.patches ++ [ ./patches/0001-linux-user-name-to-handle-mount-id.patch ];
+          });
         in {
           build-tools = pkgs.buildEnv {
             name = "liuqin-build-tools";
@@ -35,9 +42,9 @@
               openssl.dev openssl.out elfutils.dev elfutils.out zlib.dev zlib.out
               ncurses.dev ncurses.out
               crossTools
-              python dtc kmod e2fsprogs btrfs-progs libcap attr acl gptfdisk dpkg rpm gnupg policycoreutils
+              python dtc kmod e2fsprogs btrfs-progs f2fs-tools libcap attr acl gptfdisk dpkg rpm gnupg policycoreutils
               squashfsTools p7zip util-linux busyboxBinary erofs-utils mtools patchelf
-              pkgsStatic.qemu-user meson ninja file
+              qemuUser meson ninja file
             ];
             pathsToLink = [ "/bin" "/sbin" "/include" "/lib" "/share/pkgconfig" ];
             ignoreCollisions = false;

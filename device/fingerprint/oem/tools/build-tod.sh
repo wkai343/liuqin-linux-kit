@@ -7,13 +7,13 @@ out=${OUT_DIR:-"$root/build/tod"}
 cc=${CC:-cc}
 mkdir -p "$out"
 "$cc" -shared -fPIC -O2 -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror \
-    $(pkg-config --cflags libfprint-2-tod-1 gio-2.0) \
+    $(pkg-config --cflags libfprint-2 libfprint-2-tod-1 gio-2.0 gusb) \
     "$root/src/fingerprint/libfprint-tod/fpc1264-oem.c" \
     -o "$out/libfprint-tod-fpc1264-oem.so" \
-    $(pkg-config --libs libfprint-2-tod-1 gio-2.0)
+    $(pkg-config --libs libfprint-2 libfprint-2-tod-1 gio-2.0 gusb)
 "$cc" -O2 -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror \
-    $(pkg-config --cflags libfprint-2 libfprint-2-tod-1) \
+    $(pkg-config --cflags libfprint-2 libfprint-2-tod-1 gusb) \
     "$root/src/fingerprint/libfprint-tod/fpc-oem-print.c" \
     -o "$out/fpc-oem-print" \
-    $(pkg-config --libs libfprint-2 libfprint-2-tod-1)
+    $(pkg-config --libs libfprint-2 libfprint-2-tod-1 gusb)
 (cd "$out" && sha256sum libfprint-tod-fpc1264-oem.so fpc-oem-print > SHA256SUMS)

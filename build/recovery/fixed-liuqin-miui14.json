@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "profile_id": "liuqin-miui-14.0.3-android13-abl-20230422",
+  "device": "liuqin",
+  "firmware": "V14.0.3.0.TMYCNXM",
+  "unlocked_required": true,
+  "partition_name": "recovery",
+  "partition_bytes": 104857600,
+  "boot_header_version": 0,
+  "kernel_encoding": "gzip-with-appended-dtb",
+  "kernel_sha256": "fbb70170225346809458655ffe3c36b6951141200848298f5a788ad20478619a",
+  "dtb_sha256": "a6d8cf712bb542924b6c4aaacfebc4fe68fc1cb6b4b285baf14032890569374f",
+  "abl_partition_sha256": "2fbe028f35389df5a9489dc9d436fe7973fd14a257313e7cd731a46d37f7bbb7",
+  "abl_pe_sha256": "6e8336e6de07964862374758047ab10e4866f0d93921916cf42850f3c35e3df5",
+  "external_dtbo_payload_bytes": 20633856,
+  "external_dtbo_payload_sha256": "8160577305786116453926787053fe3db4cdb9481133cff12fecbb7851a7c050",
+  "expected_dtbo_index": 15,
+  "vbmeta_partition_sha256": "8e278786c7c3f140ba0b3fced5196b0de8911f0cfbf17b39b17554461b5b1591",
+  "vbmeta_system_partition_sha256": "d9b6c69aab4c8756a5e7e996f1eaf05c979d172ce6fd683fa83cddbe46bda1b5",
+  "recovery_rollback_index": 1,
+  "qualification": "OFFLINE_CANDIDATE_NOT_HARDWARE_BOOT_TESTED"
+}

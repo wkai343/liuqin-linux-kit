@@ -1,18 +1,19 @@
 # 内核更新与恢复
 
-[项目首页](../README.md) ｜ [构建指南](BUILD.md) ｜ [方案依据](KERNEL-STRATEGY.md)
+[项目首页](../README.md) ｜ [构建指南](BUILD.md) ｜ [硬件支持](HARDWARE.md)
 
 项目通过版本化 RPM/DEB 交付配套 boot 与模块，允许保留旧内核。
-本机已验证安装软件包、Fastboot 临时启动、固定 A 槽与回读；
+安装软件包、Fastboot 临时启动、A 槽固定与回读已验证；
 **系统内自动写引导尚未真机验收，默认停用，也未提供在线内核仓库。**
 
 ## 配套要求
 
 每组 Image、模块和内核元数据必须匹配，同一 kernel release 不能对应不同载荷。
+目标 Image 由构建流程封装为 2 MiB 对齐入口，以兼容 liuqin 的 ABL。
 元数据放在 `/usr/share/liuqin/kernels/<release>/`，记录 release、Image 和模块清单的 SHA256。
 桌面与普通设备服务可独立更新；安装和升级仍检查根系统身份、运行内核及目标模块。
 
-当前仅支持 userdata 单根 ext4/Btrfs 和 A 槽。新 boot 必须支持当前根文件系统，
+本页的引导更新流程仅支持 userdata 单根 ext4/Btrfs 和 A 槽。实验多系统安装产生的绑定镜像需要另外维护，当前自动更新器不接受该布局。新 boot 必须支持当前根文件系统，
 更新器不切槽、不重分区、不改 Android 固件；B 槽不是已配置的 Linux 救援系统。
 
 ## 构建升级包
@@ -26,7 +27,7 @@
 首次安装执行 `devbox run build`。已有系统仅需生成升级包：
 
 ```sh
-devbox run kernel-packages
+devbox run build -- --target packages
 ```
 
 该命令自动准备目标内核、模块和 boot，不重建桌面或安装环境，并按配方输出：
@@ -45,9 +46,11 @@ devbox run kernel-packages
 | `liuqin-kernel-updates` | 指向推荐版本的元包 |
 | `liuqin-boot-tools` | 计划、升级、确认与恢复工具 |
 
-旧载荷包不会直接替换为空元包，避免删除仍在使用的模块。
-`liuqin-boot-tools` 声明 `python3-zstandard` 依赖，由包管理器安装，以读取 Zstd 引导镜像。
-内核包附带源码提交、配置和许可证；发布者还需提供对应源码与修改。
+设备支持包与启动镜像须一起升级。UFS 保护要求 `liuqin-storage-policy-ufs >= 1`，由 `liuqin-device-support` 提供；安装器和引导更新器会检查配套文件。`liuqin-boot-tools` 依赖 `python3-zstandard` 以读取 Zstd 镜像。
+
+迁移脚本会停用已移除的 USB 服务，只清理与已发布载荷一致的文件；管理员修改过的文件和符号链接保留并提示检查。旧 boot 若依赖这些文件，回退时须恢复对应设备包。回退时使用与目标内核同批的模块和设备包。
+
+完整音频模块、桌面 DRM 和 OTG 配置随目标系统交付，不能套用 Rec 的固定 USB 设备模式。内核包附来源、配置和许可证；发布者须提供对应源码与修改。
 
 ## 已安装系统更新
 
@@ -89,8 +92,10 @@ RPM 与 DEB 使用同一后端；默认构建不启用此入口。
 有未完成事务时先检查 `status` 并执行 `recover`；无法进入系统时使用电脑 Fastboot 与完整备份。
 不承诺自动 A/B 回滚。
 
-若从独立 RAM 环境挂载 Fedora 并通过 chroot 更新 RPM，结束后还需按目标策略补齐所有更新文件的
-SELinux 标签，包括模块与 `/etc/ld.so.cache`。清单须解析 `/usr/sbin` 等父目录别名，保留文件本身链接。
+在独立 RAM 环境中维护已安装的 Fedora 时，可在目标 chroot 内用
+`LIUQIN_OFFLINE_SELINUX_RELABEL=1 rpm -Uvh ...`。内核 RPM 会用目标系统的 `setfiles` 递归补齐
+版本化目录的 SELinux 标签，并跳过引导更新钩子。事务结束后仍需校验共用工具、RPM 数据库及
+`/etc/ld.so.cache` 等更新文件的标签。解析 `/usr/sbin` 等父目录别名时保留文件本身的链接。
 正常使用优先在已启动的 Fedora 中通过 DNF 更新。
 
 离线回归覆盖编包、版本共存、更新/回读、中断恢复、备份损坏和移除保护，

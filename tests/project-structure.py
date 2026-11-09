@@ -24,10 +24,10 @@ class StructureTests(unittest.TestCase):
         packager = importlib.util.module_from_spec(spec); spec.loader.exec_module(packager)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            for name in ('installer', 'shared', 'device/installer'):
+            for name in ('installer', 'shared', 'device/installer','device/recovery','device/boot','docs'):
                 shutil.copytree(PROJECT/name, root/name,
                     ignore=shutil.ignore_patterns('.venv', '__pycache__', '*.pyc'))
-            for name in ('LICENSE', 'NOTICE', 'CREDITS.md', 'docs/INSTALLER-GUI.md'):
+            for name in ('LICENSE', 'NOTICE', 'CREDITS.md'):
                 target = root/name; target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(PROJECT/name, target)
             hidden = root/'installer/.venv/private.txt'; hidden.parent.mkdir()
@@ -40,6 +40,18 @@ class StructureTests(unittest.TestCase):
                 names = files.namelist()
                 self.assertFalse(any('/.venv/' in name or name.endswith('/local-notes.txt') for name in names))
                 self.assertIn('liuqin-linux-kit-installer/installer/install-gui.py', names)
+                self.assertIn('liuqin-linux-kit-installer/docs/assets/installer-multiboot-plan.png', names)
+                self.assertIn('liuqin-linux-kit-installer/shared/liuqin_boot_target.py', names)
+                self.assertIn('liuqin-linux-kit-installer/device/installer/android-device.py', names)
+                self.assertIn('liuqin-linux-kit-installer/shared/liuqin-android-profile.json', names)
+                self.assertIn('liuqin-linux-kit-installer/shared/liuqin-miku-profile.json', names)
+                self.assertIn('liuqin-linux-kit-installer/shared/liuqin_payload.py', names)
+                self.assertIn('liuqin-linux-kit-installer/shared/liuqin_super.py', names)
+                self.assertIn('liuqin-linux-kit-installer/shared/liuqin_managed.py', names)
+                self.assertIn('liuqin-linux-kit-installer/shared/liuqin_partitions.py', names)
+                self.assertIn('liuqin-linux-kit-installer/installer/liuqin_gui/partitioning.py', names)
+                self.assertIn('liuqin-linux-kit-installer/installer/liuqin_gui/managed_linux.py', names)
+                self.assertIn('liuqin-linux-kit-installer/docs/FULL-ROM-FLASH.md', names)
 
     def test_build_root_entry_does_not_require_installer_tree(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -67,76 +79,26 @@ class StructureTests(unittest.TestCase):
             self.assertTrue(any(event['type'] == 'devices' and event['simulation'] for event in events))
             self.assertFalse((standalone / 'build').exists())
 
-    def test_package_output_and_work_directories_are_separate(self):
-        spec = importlib.util.spec_from_file_location('devbox_build', PROJECT / 'build/devbox/build.py')
-        builder = importlib.util.module_from_spec(spec); spec.loader.exec_module(builder)
-        with tempfile.TemporaryDirectory() as directory:
-            previous = builder.PROJECT; builder.PROJECT = Path(directory)
-            try: data = builder.config(PROJECT / 'build/devbox/build.example.json')
-            finally: builder.PROJECT = previous
-        self.assertTrue(data['image_work'].startswith('out/build/'))
-        self.assertTrue(data['bundle_out'].startswith('out/releases/'))
-        self.assertNotEqual(data['image_work'], data['bundle_out'])
 
-    def exercise_image_export(self, corrupt=False):
+    def test_recovery_ram_base_has_no_target_root_dependency(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             demo = DemoEngine(lambda event: None, root / 'demo')
             scripts = root / 'build/scripts'; scripts.mkdir(parents=True)
-            shutil.copyfile(PROJECT / 'build/scripts/build-liuqin-custom-bundle.sh', scripts / 'build-liuqin-custom-bundle.sh')
-            shutil.copytree(PROJECT / 'shared', root / 'shared', ignore=shutil.ignore_patterns('__pycache__'))
-            fake = scripts / 'build-liuqin-native-boot.sh'
-            fake.write_text('set -eu\nmkdir -p "$OUT_DIR"\n'
-                            '[ -z "$INSTALLER_RUNTIME" ]\n'
-                            'cp "$LIUQIN_FIXTURE/boot.img" "$OUT_DIR/boot-liuqin-native.img"\n'
-                            'printf "BUILD REPORT\\n" >"$OUT_DIR/report.txt"\n')
-            assembled = root / 'out/build/root'; assembled.mkdir(parents=True)
-            shutil.copyfile(demo.demo_bundle / 'rootfs.tar.gz', assembled / 'rootfs.tar.gz')
-            from liuqin_gui.artifacts import boot_interface
-            (assembled / 'native-root.contract').write_bytes(boot_interface(demo.demo_bundle/'boot.img')['contract'])
-            if corrupt: (assembled / 'rootfs.tar.gz').write_bytes(b'corrupt archive')
-            final = root / 'out/releases/custom'; work = root / 'out/build/images'
-            installer = demo.demo_bundle / 'installer.img'
-            original = installer.read_bytes()
-            env = dict(os.environ, CUSTOM_ROOT_OUT=str(assembled), INSTALLER_IMAGE=str(installer),
-                       OUT_DIR=str(final), BUILD_WORK_DIR=str(work), LIUQIN_FIXTURE=str(demo.demo_bundle))
-            result = subprocess.run(['sh', scripts / 'build-liuqin-custom-bundle.sh'], env=env, capture_output=True, text=True)
-            if corrupt:
-                self.assertNotEqual(result.returncode, 0)
-                self.assertFalse(final.exists(), 'an invalid package must not be published')
-            else:
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual({path.name for path in final.iterdir()}, {'boot.img', 'installer.img', 'rootfs.tar.gz'})
-                self.assertTrue((work / 'boot/report.txt').is_file())
-                self.assertFalse((work / 'installer').exists())
-                self.assertEqual(installer.read_bytes(), original)
-                self.assertEqual((final / 'installer.img').read_bytes(), original)
-            demo.close()
-
-    def test_export_keeps_build_reports_outside_three_file_package(self):
-        self.exercise_image_export()
-
-    def test_invalid_package_is_not_published(self):
-        self.exercise_image_export(corrupt=True)
-
-    def test_independent_installer_entry_has_no_target_root_dependency(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            demo = DemoEngine(lambda event: None, root / 'demo')
-            scripts = root / 'build/scripts'; scripts.mkdir(parents=True)
-            shutil.copyfile(PROJECT / 'build/scripts/build-liuqin-installer.sh', scripts / 'build-liuqin-installer.sh')
+            (root/'build/recovery').mkdir()
+            shutil.copyfile(PROJECT / 'build/recovery/build-ram-base.sh', root/'build/recovery/build-ram-base.sh')
             shutil.copytree(PROJECT / 'shared', root / 'shared', ignore=shutil.ignore_patterns('__pycache__'))
             fake = scripts / 'build-liuqin-native-boot.sh'
             fake.write_text('set -eu\n[ "$LIUQIN_ROOT_PROFILE" = installer ]\n'
                             '[ -n "$INSTALLER_RUNTIME" ]\n'
                             'mkdir -p "$OUT_DIR"\ncp "$LIUQIN_FIXTURE/installer.img" "$OUT_DIR/boot-liuqin-native.img"\n')
             out = root / 'out/build/installer'
-            env = dict(os.environ, INSTALLER_KERNEL_SOURCE=str(root / 'own-source'),
-                       INSTALLER_KERNEL_OUT=str(root / 'own-kernel'), INSTALLER_RUNTIME=str(root / 'own-runtime'),
+            env = dict(os.environ, RECOVERY_KERNEL_SOURCE=str(root / 'own-source'),
+                       RECOVERY_KERNEL_OUT=str(root / 'own-kernel'), RECOVERY_RUNTIME=str(root / 'own-runtime'),
                        OUT_DIR=str(out), LIUQIN_FIXTURE=str(demo.demo_bundle), NATIVE_ROOT_HASHES='missing-target-manifest')
-            result = subprocess.run(['sh', scripts / 'build-liuqin-installer.sh'], env=env, capture_output=True, text=True)
+            result = subprocess.run(['sh', root/'build/recovery/build-ram-base.sh'], env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual((out / 'installer.img').read_bytes(), (demo.demo_bundle / 'installer.img').read_bytes())
+            self.assertEqual((out / 'recovery-base.img').read_bytes(), (demo.demo_bundle / 'installer.img').read_bytes())
             demo.close()
 
 

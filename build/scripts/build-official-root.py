@@ -16,7 +16,7 @@ PROJECT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT / 'build/lib'))
 from source_build import sha, mounted_root, arm64_execution
 
-RUNTIME_PACKAGES = ['systemd-sysv','udev','dbus','python3','kmod','gdisk','e2fsprogs','btrfs-progs',
+RUNTIME_PACKAGES = ['systemd-sysv','udev','dbus','python3','kmod','gdisk','e2fsprogs','btrfs-progs','f2fs-tools',
                     'libcap2-bin','tar','gzip','coreutils','debianutils','ca-certificates',
                     'libglib2.0-bin','libasound2t64']
 DEVICE_PACKAGES = ['btrfs-progs','network-manager','wpasupplicant','wireless-regdb','iw','bluez','chrony','sudo','locales','systemd-resolved',
@@ -173,7 +173,18 @@ def configure_first_boot(root):
     service.symlink_to('/usr/lib/systemd/system/plasma-setup.service')
 
 
+def remove_desktop_rescue_activation(root):
+    path=Path(root)/'etc/systemd/system/multi-user.target.wants/liuqin-gnome-usb-rescue.service'
+    if path.parent.resolve()!=path.parent:
+        raise ValueError('Retired USB rescue activation has a symlink parent.')
+    if path.is_symlink() and os.readlink(path)=='../liuqin-gnome-usb-rescue.service':
+        path.unlink()
+    elif path.exists() or path.is_symlink():
+        raise ValueError('Review the modified retired desktop USB rescue activation before building.')
+
+
 def configure(root, data, output):
+    remove_desktop_rescue_activation(root)
     configure_locales(root)
     if data['first_boot_setup']:configure_first_boot(root)
     else:configure_account(root,data,output)
@@ -188,8 +199,7 @@ def configure(root, data, output):
         if path.exists() or path.is_symlink():path.unlink()
         path.symlink_to(target)
     link('basic.target.requires/liuqin-gnome-storage-guard.service','../liuqin-gnome-storage-guard.service')
-    for name in ('liuqin-gnome-usb-rescue','liuqin-slpi'):
-        link('multi-user.target.wants/'+name+'.service','../'+name+'.service')
+    link('multi-user.target.wants/liuqin-slpi.service','../liuqin-slpi.service')
     # KWin subscribes to the running proxy. GNOME's repeated owner refresh can
     # cancel KWin's pending accelerometer claim during the first login.
     link('multi-user.target.wants/iio-sensor-proxy.service','/usr/lib/systemd/system/iio-sensor-proxy.service')

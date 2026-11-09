@@ -61,3 +61,51 @@
  }
  
  static void
+@@ -2073,6 +2095,20 @@
+                     rdev);
+ }
+ 
++static GPtrArray *
++load_enroll_prints (FprintDevice *rdev)
++{
++  FprintDevicePrivate *priv = fprint_device_get_instance_private (rdev);
++  if (g_strcmp0 (fp_device_get_driver (priv->dev), "fpc1264_oem") == 0)
++    {
++      g_autoptr(SessionData) session = session_data_get (priv);
++      if (!session || !session->username)
++        return g_ptr_array_new_with_free_func (g_object_unref);
++      return load_user_prints (rdev, session->username);
++    }
++  return load_all_prints (rdev);
++}
++
+ static void
+ enroll_identify_cb (FpDevice *dev, GAsyncResult *res, void *user_data)
+ {
+@@ -2104,7 +2140,7 @@
+         {
+           g_autoptr(GPtrArray) all_prints = NULL;
+ 
+-          all_prints = load_all_prints (rdev);
++          all_prints = load_enroll_prints (rdev);
+           fp_device_identify (priv->dev,
+                               all_prints,
+                               priv->current_cancellable,
+@@ -2169,7 +2205,7 @@
+ is_first_enrollment (FprintDevice * rdev)
+ {
+   g_autoptr(GPtrArray) host_prints = NULL;
+-  host_prints = load_all_prints (rdev);
++  host_prints = load_enroll_prints (rdev);
+ 
+   return host_prints->len == 0;
+ }
+@@ -2238,7 +2274,7 @@
+ 
+   if (fp_device_has_feature (priv->dev, FP_DEVICE_FEATURE_IDENTIFY))
+     {
+-      g_autoptr(GPtrArray) all_prints = load_all_prints (rdev);
++      g_autoptr(GPtrArray) all_prints = load_enroll_prints (rdev);
+ 
+       /* We (now) have the policy that there must be no duplicate prints.
+        * We need to do this for MoC devices, as their "identify" function

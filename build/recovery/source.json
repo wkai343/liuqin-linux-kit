@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "device": "liuqin",
+  "release": "https://github.com/ymdzq/device_xiaomi_liuqin-TWRP/releases/tag/13226064562",
+  "url": "https://github.com/ymdzq/device_xiaomi_liuqin-TWRP/releases/download/13226064562/recovery.img",
+  "device_tree_commit": "3502543342b335a495fabe5efb6c583792cae12c",
+  "bytes": 104857600,
+  "sha256": "e2e9a8bec5f1781c76586515eca9567962d7212540a63fb36a49959b83c897bf",
+  "verification": "Downloaded from the pinned upstream GitHub release; SHA256 recorded locally, not an upstream signature.",
+  "kernel_source": "Pinned OS2.0.6.0.VMYCNXM boot.img from shared/liuqin-rom-images.json",
+  "remove_prefixes": [
+    "customzip/"
+  ],
+  "busybox_sha256": "52151e7f322f926b64049cdaa1410dc3ea6485525e0624b05813791c219ae933",
+  "kernel_ota": {
+    "url": "https://cdnorg.d.miui.com/OS2.0.6.0.VMYCNXM/liuqin-ota_full-OS2.0.6.0.VMYCNXM-user-15.0-ff2b5906a3.zip",
+    "bytes": 6150251163,
+    "verification": "Only boot payload ranges are downloaded; resulting full boot.img must match the existing Fastboot ROM SHA256 and size in shared/liuqin-rom-images.json."
+  }
+}

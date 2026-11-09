@@ -7,6 +7,8 @@ import io
 import json
 import os
 from pathlib import Path
+import socket
+import struct
 import tempfile
 import types
 import unittest
@@ -35,6 +37,17 @@ def report(**changes):
 def anchor(**changes):
     return dict({'schema': 1, 'device': DEVICE.copy(), 'rtc_seconds': RAW,
                  'unix_seconds': NOW, 'source': 'chrony'}, **changes)
+
+
+def tracking_packet(sequence=123):
+    header = struct.pack('!4B6H3I', 6, 2, 0, 0, 33, 5, 0, 0, 0, 0, sequence, 0, 0)
+    # Fixed protocol words independently encode -0.25, 0, and positive powers
+    # of two. In particular these are not IEEE754 bit patterns.
+    payload = struct.pack('!I16s4H3I9I', 0x771CCEC1,
+                          socket.inet_aton('119.28.206.193') + bytes(12),
+                          1, 0, 3, 0, 0, int(NOW - 30), 250000000,
+                          0x01800000, 0, 0, 0, 0, 0, 0xfc800000, 0xfa800000, 0x0c800000)
+    return header + payload
 
 
 class RtcTests(unittest.TestCase):
@@ -95,12 +108,37 @@ class RtcTests(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), b'previous good calibration')
 
     def test_chrony_query_uses_loopback_monitor_and_missing_daemon_is_not_calibration(self):
-        import subprocess
-        with patch.object(rtc.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, report())) as run:
-            self.assertEqual(rtc.tracking(), report())
-        self.assertEqual(run.call_args.args[0][1:3], ['-h', '127.0.0.1'])
-        with patch.object(rtc.subprocess, 'run', side_effect=subprocess.TimeoutExpired('chronyc', 5)):
+        with patch.object(rtc.socket, 'socket') as factory, \
+             patch.object(rtc.secrets, 'randbits', return_value=123):
+            client = factory.return_value.__enter__.return_value
+            client.recv.return_value = tracking_packet()
+            self.assertTrue(rtc.synchronised(rtc.tracking(), NOW))
+            client.connect.assert_called_once_with(('127.0.0.1', 323))
+            request, = client.send.call_args.args
+            self.assertEqual(len(request), 104)
+            self.assertEqual(struct.unpack_from('!H', request, 4)[0], 33)
+            self.assertEqual(request[20:], bytes(84))
+            client.recv.side_effect = TimeoutError('daemon unavailable')
             self.assertEqual(rtc.tracking(), '')
+
+    def test_chrony_tracking_checks_identity_size_timestamp_and_signed_protocol_floats(self):
+        packet = tracking_packet()
+        fields = rtc.tracking_report(packet, 123).strip().split(',')
+        self.assertEqual(fields[:3], ['771CCEC1', '119.28.206.193', '3'])
+        self.assertEqual(float(fields[3]), NOW - 30)
+        self.assertEqual(float(fields[4]), -0.25)
+        self.assertEqual(float(fields[10]), 0.0625)
+        self.assertEqual(float(fields[11]), 0.03125)
+        for changed in (packet[:-1], packet + b'\0', bytes([5]) + packet[1:],
+                        packet[:5] + b'\x22' + packet[6:],
+                        packet[:8] + b'\0\x01' + packet[10:],
+                        packet[:16] + bytes(4) + packet[20:],
+                        packet[:64] + struct.pack('!I', 1000000000) + packet[68:]):
+            with self.subTest(packet=changed.hex()), self.assertRaises(rtc.InvalidState):
+                rtc.tracking_report(changed, 123)
+        # A well-formed, unsynchronised daemon reply is also never calibration.
+        changed = packet[:54] + struct.pack('!H', 3) + packet[56:]
+        self.assertFalse(rtc.synchronised(rtc.tracking_report(changed, 123), NOW))
 
     def test_synced_and_manual_calibration_are_atomic_private_files(self):
         with patch.object(rtc, 'tracking', return_value=report()):
@@ -214,8 +252,10 @@ class RtcTests(unittest.TestCase):
         sys.path.insert(0, str(PROJECT / 'build/lib'))
         spec.loader.exec_module(board)
         busybox = self.root / 'busybox'; busybox.write_bytes(b'fixture'); busybox.chmod(0o755)
+        storage_helper = self.root / 'storage-helper'
+        storage_helper.write_bytes(b'fixture'); storage_helper.chmod(0o755)
         payload = self.root / 'payload'; payload.mkdir()
-        board.board_overlay(payload, busybox)
+        board.board_overlay(payload, busybox, storage_helper)
         units = payload / 'etc/systemd/system'
         self.assertIn('Wants=liuqin-rtc-restore.service', (units / 'sysinit.target.d/20-liuqin-rtc.conf').read_text())
         self.assertIn('Wants=liuqin-rtc-save.timer', (units / 'timers.target.d/20-liuqin-rtc.conf').read_text())

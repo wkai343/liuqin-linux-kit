@@ -1,2 +1,4 @@
 PySide6-Essentials>=6.8,<7
 zstandard>=0.23,<1
+
+lz4>=4.3,<5

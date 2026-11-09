@@ -1,10 +1,10 @@
 {
-  "repo": "https://github.com/torvalds/linux.git",
-  "branch": "v7.3",
-  "upstream_url": "https://github.com/torvalds/linux.git",
-  "upstream_base": "c03c1a14507dfaf8b856c2608f9ac216021fc222",
-  "commit": "c03c1a14507dfaf8b856c2608f9ac216021fc222",
-  "config_sha256": "6cc9b7ced4542e99cadaa87b6c3a9bd8fb2bb373de607b2338916ccd0944b2eb",
+  "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+  "branch": "v7.3.3",
+  "upstream_url": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+  "upstream_base": "d50d994bffa3c7c6db2d8bc4c5f0c55e3f46b0cd",
+  "commit": "d50d994bffa3c7c6db2d8bc4c5f0c55e3f46b0cd",
+  "config_sha256": "6ad4fc62b5bdc03b6e72c2c0eb825acf3fd33646042c62161f68b700b84d9beb",
   "config_fragments": [
     "build/kernel/configs/linux-7.3-preserve.config"
   ],
@@ -22,12 +22,23 @@
     "build/kernel/patches/linux-7.3/0011-liuqin-initial-wake-after-first-frame.patch",
     "build/kernel/patches/0034-liuqin-minimum-brightness.patch",
     "build/kernel/patches/linux-7.3/0012-nanosic-folio-posture.patch",
-    "build/kernel/patches/linux-7.3/0013-liuqin-multiple-refresh-rates.patch"
+    "build/kernel/patches/linux-7.3/0013-liuqin-multiple-refresh-rates.patch",
+    "build/kernel/patches/linux-7.3/0014-liuqin-validated-platform-quirks.patch",
+    "build/kernel/patches/linux-7.3/0015-audio-readiness-and-no-jack-policy.patch",
+    "build/kernel/patches/linux-7.3/0016-liuqin-abl-metadata-and-apm-header.patch",
+    "build/kernel/patches/linux-7.3/0017-liuqin-retry-dsp-readiness-during-startup.patch",
+    "build/kernel/patches/linux-7.3/0018-liuqin-peripheral-probe-lifecycles.patch",
+    "build/kernel/patches/linux-7.3/0021-liuqin-publish-ready-power-supplies.patch",
+    "build/kernel/patches/linux-7.3/0022-ucsi-debugfs-version-and-v1-reads.patch",
+    "build/kernel/patches/linux-7.3/0023-q6dsp-publish-state-before-clocks.patch"
   ],
-  "status": "Linux 7.3 offers corrected OEM 90/120/144 Hz profiles with a fixed DSI link-clock request. The Tianma candidate passed temporary-boot mode switching, three DPMS cycles per rate, and user-confirmed display/touch checks at 90/120/144 Hz; tested_source differs from expected_source_tree only by argument indentation. Long-VFP 30/48/50/60 Hz remain diagnostic-only: 60 Hz still visibly flickers and 60/50 Hz report panel IRQ faults. See docs/DISPLAY.md for scope and pending validation.",
-  "expected_source_tree": "9b50ee5d95d01c10a3fa1d8072a4a6ee94dcc412",
+  "status": "Linux 7.3.3 with 21 Liuqin adaptations; early Q6DSP clock drvdata publication and rootfs-loaded Qualcomm audio. USB charging initialization is isolated from early audio resource requests; hardware evidence is tracked separately.",
+  "expected_source_tree": "4be297a14139b2cc4bb58f1de0151328e094fb3d",
   "tested_source_commit": "f6a2abb77b2005da10c201156cca41e32dff06c3",
   "tested_source_tree": "ba45a3439dcc0d17175ea65b65ca6aed7538a2ad",
   "reference_repository": "https://github.com/Seeker0472/liuqin-nixos",
-  "reference_commit": "73e8071e09880aeb47f0a427b9a65b8cc10927c4"
+  "reference_commit": "73e8071e09880aeb47f0a427b9a65b8cc10927c4",
+  "previous_source_tree": "2c5285895efba987c71887cd57612034eb188056",
+  "load_alignment": "liuqin-arm64-align2m-v1",
+  "validation_status": "NOT_DEVICE_TESTED"
 }

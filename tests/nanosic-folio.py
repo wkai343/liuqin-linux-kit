@@ -65,6 +65,7 @@ typedef uint8_t u8; typedef uint64_t u64; typedef int irqreturn_t;
 #define KOBJ_CHANGE 1
 #define HID_INPUT_REPORT 0
 #define system_wq NULL
+#define system_dfl_wq NULL
 #define msecs_to_jiffies(v) (v)
 #define container_of(p,t,m) ((t*)((char*)(p)-offsetof(t,m)))
 struct work_struct {int unused;};

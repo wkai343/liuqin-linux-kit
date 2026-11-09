@@ -1,9 +1,8 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT
 # Device-side partition-table operations, intended only for the dedicated
-# read-only RAM image.  The host computes every layout decision and every
-# sgdisk argument; this script owns the guards, the privilege window and the
-# read-only posture that must hold before and after each write.
+# read-only RAM image. Read the existing layout, save both GPT copies, or
+# restore an explicitly supplied backup. Installation does not repartition.
 #
 # Every helper below runs under `set -e`, so each one ends on a command whose
 # success status is the status the caller sees, and each resolution is bound to
@@ -16,6 +15,9 @@ die() { printf 'liuqin-layout: %s\n' "$*" >&2; exit 1; }
 [ "$(cat /proc/sys/kernel/random/boot_id)" = "$1" ] || die 'RAM boot identity changed'
 [ "$(cat /etc/liuqin-installer 2>/dev/null)" = liuqin ] || die 'not the installer RAM image'
 verb=$2
+if [ -f /etc/liuqin-native-recovery.json ] && [ "$verb" = restore-gpt ]; then
+    die 'native Recovery requires a separately reviewed recovery procedure for GPT restore'
+fi
 shift 2
 
 BB=/bin/busybox
@@ -79,13 +81,6 @@ sector_count() {
 	printf '%s' "$(( value * 512 / unit ))"
 }
 
-# Size of a block device in bytes, from the same 512-byte-unit counter.
-byte_size() {
-	value=$(cat "/sys/class/block/${1##*/}/size" 2>/dev/null || true)
-	case $value in ''|*[!0-9]*) die 'partition size is unavailable' ;; esac
-	printf '%s' "$(( value * 512 ))"
-}
-
 # True only when nothing on the target disk is mounted.  The awk probe exits
 # non-zero for the ordinary case -- no mount found -- so it is consumed by an
 # `if`, never left as the status of the loop or of the function.
@@ -112,17 +107,6 @@ seal() {
 	done
 	"$BB" blockdev --setro "$1" || die 'cannot restore the read-only flag'
 	return 0
-}
-
-# sha256 of a byte range of a block device, as whole 4096-byte blocks.
-block_digest() {
-	digest=$("$BB" dd if="$1" bs=4096 skip="$2" count="$3" 2>/dev/null |
-		"$BB" sha256sum | "$BB" cut -d' ' -f1)
-	case $digest in
-	*[!0-9a-f]*|'') die 'reading the partition failed' ;;
-	esac
-	[ "${#digest}" = 64 ] || die 'reading the partition failed'
-	printf '%s' "$digest"
 }
 
 case $verb in
@@ -212,70 +196,6 @@ restore-gpt)
 		"$WORK/liuqin-gpt-head.bin" "$WORK/liuqin-gpt-tail.bin" ||
 		die 'cannot remove the staged GPT copies'
 	printf 'liuqin-layout: GPT_RESTORED\n'
-	;;
-wipe-head)
-	# Zero the head of a partition so that no stale filesystem superblock and
-	# no stale file-based-encryption key survives the layout change.  Whole
-	# mebibytes only: the write below counts in 1 MiB blocks, so any other
-	# length would round down and report a wipe that never happened.
-	[ "$#" = 2 ] || die 'usage: wipe-head PARTNAME BYTES'
-	part=$(find_part "$1")
-	case $2 in ''|*[!0-9]*) die 'invalid wipe length' ;; esac
-	[ "$2" -gt 0 ] && [ "$2" -le 67108864 ] || die 'wipe length is out of range'
-	[ "$(( $2 % 1048576 ))" = 0 ] || die 'wipe length must be a whole number of mebibytes'
-	disk=$(parent_disk "$part")
-	assert_idle "$disk"
-	size=$(byte_size "$part")
-	[ "$size" -gt "$2" ] || die 'partition is smaller than the requested wipe'
-	"$BB" blockdev --setrw "$disk" || die 'cannot open the disk for writing'
-	"$BB" blockdev --setrw "$part" || die 'cannot open the partition for writing'
-	"$BB" dd if=/dev/zero of="$part" bs=1048576 count="$(( $2 / 1048576 ))" conv=notrunc 2>/dev/null ||
-		die "wiping $1 failed"
-	sync
-	seal "$disk"
-	printf 'liuqin-layout: WIPED %s\n' "$1"
-	;;
-apply)
-	# Every layout decision was made on the host; this runs exactly one sgdisk
-	# invocation, so the table is written once and never left half-edited.
-	[ "$#" -ge 2 ] || die 'usage: apply PARTNAME SGDISK-ARGUMENT...'
-	name=$1
-	shift
-	part=$(find_part "$name")
-	disk=$(parent_disk "$part")
-	assert_idle "$disk"
-	eval "target=\${$#}"
-	[ "$target" = "$disk" ] ||
-		die 'the sgdisk arguments do not end with the resolved disk'
-	"$BB" blockdev --setrw "$disk" || die 'cannot open the disk for writing'
-	if "$SGDISK" "$@"; then
-		status=0
-	else
-		status=1
-	fi
-	sync
-	"$BB" blockdev --rereadpt "$disk" || true
-	seal "$disk"
-	[ "$status" = 0 ] || die 'sgdisk refused the requested layout'
-	"$SGDISK" -v "$disk" || die 'the new partition table does not verify'
-	printf 'liuqin-layout: LAYOUT_APPLIED\n'
-	;;
-digest)
-	# sha256 of the first BYTES of a partition, and a second digest of
-	# everything after them, so that a stock image padded with zeros compares
-	# equal to the partition that already holds it.  Whole 4096-byte blocks
-	# only: busybox dd byte counts are not portable across builds.
-	[ "$#" = 2 ] || die 'usage: digest PARTNAME BYTES'
-	part=$(find_part "$1")
-	case $2 in ''|*[!0-9]*) die 'invalid length' ;; esac
-	[ "$(( $2 % 4096 ))" = 0 ] || die 'length must be a whole number of 4096-byte blocks'
-	size=$(byte_size "$part")
-	[ "$size" -ge "$2" ] || die "$1 is smaller than the image"
-	content=$(block_digest "$part" 0 "$(( $2 / 4096 ))")
-	padding=$(block_digest "$part" "$(( $2 / 4096 ))" "$(( (size - $2) / 4096 ))")
-	printf 'size %s\n' "$size"
-	printf 'content %s\n' "$content"
-	printf 'padding %s\n' "$padding"
 	;;
 *)
 	die "unknown verb: $verb"

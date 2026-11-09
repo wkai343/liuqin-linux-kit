@@ -15,28 +15,13 @@
     ],
     "scripts": {
       "help": "python3 build/devbox/build.py help \"$@\"",
-      "outputs": "python3 build/devbox/build.py outputs \"$@\"",
+      "init": "python3 build/devbox/build.py init \"$@\"",
       "doctor": "python3 build/devbox/build.py doctor \"$@\"",
-      "init-build": "python3 build/devbox/build.py init \"$@\"",
-      "show-config": "python3 build/devbox/build.py show-config \"$@\"",
+      "fetch-rom": "python3 build/scripts/fetch-stock-rom.py \"$@\"",
       "plan": "python3 build/devbox/build.py plan \"$@\"",
-      "prepare": "python3 build/devbox/build.py prepare \"$@\"",
-      "check-inputs": "python3 build/devbox/build.py check-inputs \"$@\"",
-      "kernel": "python3 build/devbox/build.py kernel \"$@\"",
-      "installer-kernel": "python3 build/devbox/build.py installer-kernel \"$@\"",
-      "installer": "python3 build/devbox/build.py installer \"$@\"",
-      "build-installer": "python3 build/devbox/build.py build-installer \"$@\"",
-      "modules": "python3 build/devbox/build.py modules \"$@\"",
-      "kernel-debs": "python3 build/devbox/build.py kernel-debs \"$@\"",
-      "kernel-packages": "python3 build/devbox/build.py kernel-packages \"$@\"",
-      "boot": "python3 build/devbox/build.py boot \"$@\"",
-      "rootfs": "python3 build/devbox/build.py rootfs \"$@\"",
-      "build-target": "python3 build/devbox/build.py build-target \"$@\"",
-      "runtime": "python3 build/devbox/build.py runtime \"$@\"",
-      "images": "python3 build/devbox/build.py images \"$@\"",
-      "build": "python3 build/devbox/build.py all \"$@\"",
-      "test": "python3 build/devbox/build.py test \"$@\"",
-      "fetch-rom": "python3 build/scripts/fetch-stock-rom.py \"$@\""
+      "build": "python3 build/devbox/build.py build \"$@\"",
+      "outputs": "python3 build/devbox/build.py outputs \"$@\"",
+      "test": "python3 build/devbox/build.py test \"$@\""
     }
   }
 }

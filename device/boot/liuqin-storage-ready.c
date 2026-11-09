@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <unistd.h>
+#include "liuqin-storage-scope.h"
 
 static uint32_t le32(const unsigned char *p)
 {
@@ -94,11 +95,14 @@ static int read_at(int fd, void *buffer, size_t size, uint64_t offset)
     }
     return 0;
 }
-static int header_ok(unsigned char *h, unsigned int sector, uint64_t current, uint64_t other)
+static int header_ok(unsigned char *h, unsigned int sector, uint64_t current, uint64_t other,
+                     int allow_self_alternate)
 {
     uint32_t length = le32(h + 12), stored = le32(h + 16);
+    uint64_t alternate = le64(h + 32);
     if (memcmp(h, "EFI PART", 8) || le32(h + 8) != 0x10000 || length < 92 || length > sector ||
-        le32(h + 20) || le64(h + 24) != current || le64(h + 32) != other) return -1;
+        le32(h + 20) || le64(h + 24) != current ||
+        (alternate != other && !(allow_self_alternate && alternate == current))) return -1;
     memset(h + 16, 0, 4);
     uint32_t actual = crc32_bytes(h, length);
     h[16] = stored; h[17] = stored >> 8; h[18] = stored >> 16; h[19] = stored >> 24;
@@ -122,7 +126,8 @@ static int partition_ok(const char *devroot, const char *sysroot, const char *di
         return -1;
     return 0;
 }
-static int disk_gpt(const char *devroot, const char *sysroot, const char *name, size_t *partitions)
+static int disk_gpt(const char *devroot, const char *sysroot, const char *name,
+                    int allow_self_backup, size_t *partitions)
 {
     char path[PATH_MAX], parent[PATH_MAX];
     unsigned char primary[4096], backup[4096], zero[16] = {0};
@@ -141,7 +146,8 @@ static int disk_gpt(const char *devroot, const char *sysroot, const char *name, 
         goto out;
     uint64_t last = bytes / sector - 1;
     if (read_at(fd, primary, sector, sector) || read_at(fd, backup, sector, last * sector) ||
-        header_ok(primary, sector, 1, last) || header_ok(backup, sector, last, 1)) goto out;
+        header_ok(primary, sector, 1, last, 0) ||
+        header_ok(backup, sector, last, 1, allow_self_backup)) goto out;
     uint64_t first = le64(primary + 40), end = le64(primary + 48);
     uint32_t count = le32(primary + 80), stride = le32(primary + 84);
     if (first < 3 || end < first || end >= last || !memcmp(primary + 56, zero, 16) ||
@@ -188,7 +194,7 @@ out:
     return result;
 }
 
-static int ready_at(const char *devroot, const char *sysroot, const char *controller)
+static int ready_at(const char *devroot, const char *sysroot, const char *controller, int recovery, int ufs_only)
 {
     char path[PATH_MAX], pattern[PATH_MAX], real[PATH_MAX], controller_real[PATH_MAX];
     glob_t before = {0}, after = {0};
@@ -196,11 +202,17 @@ static int ready_at(const char *devroot, const char *sysroot, const char *contro
     unsigned char seen[128] = {0};
     size_t disks = 0, nodes = 0;
     int result = 1;
+    char sysmount[PATH_MAX];
+    if (ufs_only) {
+        size_t n = strlen(sysroot), suffix = strlen("/class/block");
+        if (n <= suffix || strcmp(sysroot + n - suffix, "/class/block")) return 1;
+        memcpy(sysmount, sysroot, n - suffix); sysmount[n - suffix] = '\0';
+    }
     if (!realpath(controller, controller_real) ||
         make_path(path, sizeof(path), controller, "device_descriptor", "/number_of_luns") ||
         read_number(path, &expected) || !expected || expected > sizeof(seen)) return 1;
     if (make_path(pattern, sizeof(pattern), devroot, "sd*", "") ||
-        glob(pattern, GLOB_ERR, NULL, &before) || !before.gl_pathc) goto out;
+        liuqin_storage_glob(pattern, &before, sysmount, ufs_only)) goto out;
     for (size_t i = 0; i < before.gl_pathc; ++i) {
         const char *name = strrchr(before.gl_pathv[i], '/') + 1;
         const char *p = name + 2;
@@ -218,23 +230,29 @@ static int ready_at(const char *devroot, const char *sysroot, const char *contro
         if (make_path(path, sizeof(path), sysroot, name, "/device/unit_descriptor/lu_enable") ||
             read_number(path, &value) || !value) goto out;
         size_t partitions;
-        if (disk_gpt(devroot, sysroot, name, &partitions)) goto out;
+        /* The factory LUN 3 and LUN 5 backup headers on liuqin can point to themselves.
+         * For RAM Recovery enumeration, the checked primary locates that
+         * header at the disk end. Both tables must still be identical and
+         * match sysfs. Keep the native root readiness check strict. */
+        if (disk_gpt(devroot, sysroot, name, recovery && (lun == 3 || lun == 5), &partitions))
+            goto out;
         ++disks; nodes += 1 + partitions;
     }
     if (make_path(path, sizeof(path), controller, "device_descriptor", "/number_of_luns") ||
         read_number(path, &value) || value != expected || disks != expected || nodes != before.gl_pathc ||
-        glob(pattern, GLOB_ERR, NULL, &after) || before.gl_pathc != after.gl_pathc) goto out;
+        liuqin_storage_glob(pattern, &after, sysmount, ufs_only) || before.gl_pathc != after.gl_pathc) goto out;
     for (size_t i = 0; i < before.gl_pathc; ++i)
         if (strcmp(before.gl_pathv[i], after.gl_pathv[i])) goto out;
     printf("%zu UFS LUNs; %zu block nodes\n", disks, nodes);
     result = 0;
 out:
     if (result) ready_error("UFS LUN/GPT/sysfs enumeration");
-    globfree(&before); globfree(&after);
+    liuqin_storage_globfree(&before, ufs_only); liuqin_storage_globfree(&after, ufs_only);
     return result;
 }
 
-int liuqin_storage_ready(void)
+int liuqin_storage_ready(int recovery)
 {
-    return ready_at("/dev", "/sys/class/block", "/sys/devices/platform/soc@0/1d84000.ufshc");
+    return ready_at("/dev", "/sys/class/block", "/sys/devices/platform/soc@0/1d84000.ufshc",
+                    recovery == 1, recovery == 2);
 }
