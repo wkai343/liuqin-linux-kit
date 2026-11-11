@@ -200,6 +200,8 @@ EOF
 reset_base_fixture() {
     TEST_ROOT_FS=ext4
     TEST_UFS_ONLY=false
+    TEST_FAIL_VERIFY_AT=0
+    export TEST_FAIL_VERIFY_AT
     export TEST_ROOT_FS
     unset LIUQIN_STORAGE_FS_SUPPORT
 	rm -rf "$test_root/case"
@@ -933,18 +935,44 @@ cp "$sys/sda35/uevent" "$sys/sda36/uevent"
 ro_nodes="$ro_nodes sda36"
 expect_rejected_before_open bound-duplicate-partition
 
+make_batch_selector() {
+ cat >"$case_root/scoped-selector" <<'SCOPE'
+#!/bin/sh
+set -eu
+case $1 in
+--list-ufs) printf 'sda\nsda1\nsda35\nsdb\n'; exit 0 ;;
+--verify-flags) shift ;;
+*) exit 2 ;;
+esac
+root=$1; scope=$3; writable=$4; shift 4
+[ "$scope" = ufs ] || [ "$scope" = scsi ] || exit 2
+[ "$*" = 'sda sda1 sda35 sdb' ] || exit 1
+count=0
+[ ! -r "$TEST_STATE/verify-count" ] || count=$(cat "$TEST_STATE/verify-count")
+count=$((count + 1)); printf '%s\n' "$count" >"$TEST_STATE/verify-count"
+printf 'verify%d %s %s %s\n' "$count" "$root" "$scope" "$writable" >>"$TEST_COMMAND_LOG"
+for number in $TEST_FAIL_VERIFY_AT; do [ "$count" != "$number" ] || exit 1; done
+for node do
+ [ -f "$root/$node" ] && [ ! -L "$root/$node" ] || exit 1
+ expected=1
+ if [ "$writable" != - ]; then
+  [ "$writable" = sda35 ] || exit 2
+  case $node in sda|sda35) expected=0 ;; esac
+ fi
+ [ "$(cat "$TEST_STATE/$node")" = "$expected" ] || exit 1
+done
+printf '%s\n' "$#"
+SCOPE
+ chmod 0755 "$case_root/scoped-selector"
+}
+
 # Execute the complete persistent-root admission, including the sibling seal
 # after the selected parent/root pair is opened. External nodes never belong
 # to that verified UFS snapshot, regardless of their original RO state.
 for usb_ro in 0 1; do
  reset_fixture
  TEST_UFS_ONLY=true
- cat >"$case_root/scoped-selector" <<'SCOPE'
-#!/bin/sh
-[ "$1" = --list-ufs ] || exit 2
-printf 'sda\nsda1\nsda35\nsdb\n'
-SCOPE
- chmod 0755 "$case_root/scoped-selector"
+ make_batch_selector
  for node in sdg sdg1; do
   : >"$dev/$node"; : >"$newroot/dev/$node"
   printf '%s\n' "$usb_ro" >"$state/$node"
@@ -954,5 +982,25 @@ SCOPE
  [ "$(cat "$state/sdg1")" = "$usb_ro" ] || fail 'complete admission changed external partition RO'
  if grep -E -- '--(setro|setrw|getro) .*sdg' "$command_log"; then fail 'complete admission touched external block flags'; fi
 done
+
+# Every boundary must invoke a fresh verifier. The final one must use the
+# moved /dev. A failed batch cannot fall through to the weaker legacy loop.
+reset_fixture; TEST_UFS_ONLY=true; make_batch_selector
+TEST_STORAGE_PHASE=switch; TEST_SWITCH_ROOT_STATUS=0
+native_expect_success batch-all-four-boundaries
+[ "$(cat "$state/verify-count")" = 4 ] || fail 'batch skipped a recheck boundary'
+grep -qx "verify4 $newroot/dev ufs sda35" "$command_log" || fail 'final batch used old /dev'
+for boundary in 1 2 3 4; do
+ reset_fixture; TEST_UFS_ONLY=true; make_batch_selector
+ TEST_STORAGE_PHASE=switch; TEST_SWITCH_ROOT_STATUS=0; TEST_FAIL_VERIFY_AT=$boundary
+ expect_rejected "batch-boundary-$boundary"
+ if grep -q '^switch_root ' "$command_log"; then fail 'failed batch reached switch_root'; fi
+ [ "$(cat "$state/verify-count")" = "$((boundary + 2))" ] || fail 'abort skipped its independent proofs'
+ grep -q "^verify$((boundary + 1)) .* scsi -$" "$command_log" || fail 'abort did not recheck all SCSI read-only'
+done
+# A second fault during rollback must leave the fallback unsafe.
+reset_fixture; TEST_UFS_ONLY=true; make_batch_selector
+TEST_FAIL_VERIFY_AT='1 2'
+expect_critical batch-rollback-verification-fails
 
 printf '%s\n' 'liuqin persistent-root fail-closed tests: PASS'

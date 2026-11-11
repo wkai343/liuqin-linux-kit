@@ -92,6 +92,89 @@ def elf(machine=183):
     return bytes(data)
 
 
+class StartupOverlapTests(unittest.TestCase):
+    def run_startup(self, *, mode='persistent', profile='native-updatable', splash_status=0,
+                    storage_ok=True):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);events=root/'events'
+            helper=root/'splash'
+            helper.write_text('''#!/bin/sh
+printf 'splash-start\\n' >>"$EVENTS"
+# This can finish only if PID 1 runs the storage wait concurrently.
+attempt=0
+while [ ! -e "$UFS_DONE" ]; do
+    attempt=$((attempt + 1)); [ "$attempt" -lt 150 ] || exit 9
+    sleep 0.01
+done
+sleep 0.05
+printf 'splash-end\\n' >>"$EVENTS"
+: >"$SPLASH_DONE"
+exit "$SPLASH_STATUS"
+''');helper.chmod(0o755)
+            box=root/'bb';box.write_text('#!/bin/sh\n[ "$1" = cat ] && exit 0\nexit 99\n');box.chmod(0o755)
+            source=(PROJECT/'device/boot/initramfs/init').read_text()
+            start=source.index('# A separately packaged, graphics-only runtime')
+            end=source.index('\nif [ "$ufs_safe" != true ]; then',start)
+            body=source[start:end].replace('/etc/liuqin-native-recovery.json',str(root/'no-recovery'))
+            script=root/'init-section'
+            script.write_text('''log() { printf '%s\\n' "$*" >>"$EVENTS"; }
+storage_wait_for_ufs() {
+    printf 'ufs-start\\n' >>"$EVENTS"
+    if [ "$EXPECT_SPLASH" = 1 ]; then
+        attempt=0
+        while ! grep -q '^splash-start$' "$EVENTS"; do
+            attempt=$((attempt + 1)); [ "$attempt" -lt 150 ] || exit 9
+            sleep 0.01
+        done
+    fi
+    : >"$UFS_DONE"
+    found_block=true
+    printf 'ufs-end\\n' >>"$EVENTS"
+}
+storage_lock_all() {
+    if [ "$EXPECT_SPLASH" = 1 ] && [ ! -e "$SPLASH_DONE" ]; then
+        printf 'unjoined-splash\\n' >>"$EVENTS"
+        return 1
+    fi
+    printf 'final-ro-proof\\n' >>"$EVENTS"
+    [ "$STORAGE_OK" = 1 ]
+}
+'''+body+'''\nprintf 'safe=%s\\n' "$ufs_safe" >>"$EVENTS"
+''')
+            expected=mode=='persistent' and profile=='native-updatable'
+            env=dict(os.environ,BB=str(box),storage_mode=mode,storage_profile=profile,
+                     storage_splash_helper=str(helper),storage_ufs_only='false',
+                     EVENTS=str(events),UFS_DONE=str(root/'ufs-done'),SPLASH_DONE=str(root/'splash-done'),
+                     EXPECT_SPLASH=str(int(expected)),SPLASH_STATUS=str(splash_status),
+                     STORAGE_OK=str(int(storage_ok)))
+            result=subprocess.run(['sh',str(script)],env=env,capture_output=True,text=True,timeout=4)
+            self.assertEqual(result.returncode,0,result.stderr)
+            return events.read_text().splitlines()
+
+    def test_storage_wait_overlaps_graphics_and_final_proof_joins_graphics(self):
+        events=self.run_startup()
+        self.assertLess(events.index('splash-start'),events.index('ufs-end'))
+        self.assertLess(events.index('ufs-end'),events.index('splash-end'))
+        self.assertLess(events.index('splash-end'),events.index('final-ro-proof'))
+        self.assertIn('safe=true',events)
+
+    def test_failed_graphics_still_runs_the_independent_storage_proof(self):
+        events=self.run_startup(splash_status=7)
+        self.assertIn('early splash preparation failed; continuing storage checks',events)
+        self.assertIn('final-ro-proof',events);self.assertIn('safe=true',events)
+
+    def test_successful_graphics_cannot_override_failed_storage_proof(self):
+        events=self.run_startup(storage_ok=False)
+        self.assertIn('splash-end',events);self.assertIn('final-ro-proof',events)
+        self.assertIn('safe=false',events)
+
+    def test_readonly_and_non_native_profiles_do_not_spawn_graphics(self):
+        for mode,profile in [('readonly','native-updatable'),('persistent','ram')]:
+            with self.subTest(mode=mode,profile=profile):
+                events=self.run_startup(mode=mode,profile=profile)
+                self.assertNotIn('splash-start',events);self.assertIn('final-ro-proof',events)
+
+
 class SplashTests(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name)

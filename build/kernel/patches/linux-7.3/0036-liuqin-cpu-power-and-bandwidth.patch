@@ -1,0 +1,184 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] arm64: dts: qcom: liuqin: add CPU energy data and bandwidth monitors
+
+Carry the OEM Cape dynamic power coefficients into the board CPU nodes.
+qcom-cpufreq-hw already supplies the frequency/voltage OPPs from EPSS;
+these coefficients allow its register_em callback to construct an Energy
+Model without changing hardware frequency tables or fast switching.
+
+Describe the missing CPU-to-LLCC BWMON v4 and LLCC-to-DDR BWMON v5 using
+mainline icc-bwmon, OPP and RPMh interconnect bindings. The OEM Cape tree
+and the pinned OS2.0.6.0 vendor_boot DTB agree on register addresses,
+IRQs, the 19.2 MHz sampling timer and 64 KiB counters. The existing
+sdm845 CPU and sc7280 LLCC implementations provide those register layouts
+and counter units. Map v4's overlapping global/monitor regions as one
+0x300-byte monitor window; the global IRQ registers land at +0x8/+0xc.
+
+Convert the OEM LLCC/DDR frequency tables using their respective 16-byte
+and 4-byte DCVS bus widths into decimal kB/s OPP votes. Keep the tables
+on Liuqin rather than imposing its memory policy on every SM8475 board.
+Use active-only votes, so the monitors do not impose sleep bandwidth.
+Document the SM8475 compatibles with the existing driver fallbacks.
+
+The OEM memlat policy and L3 DCVS controller are not copied: a memlat
+threshold table is not a complete CPU OPP table, and feeding it to
+qcom-cpufreq-hw would filter the firmware LUT and disable fast switching.
+Existing PSCI domain idle states and regulator settings are retained.
+
+Sources:
+https://github.com/MiCode/kernel_devicetree/blob/1c507816ba8aa6117dcec41f577ef7a66d2091f7/qcom/cape.dtsi
+OS2.0.6.0.VMYCNXM vendor_boot.img SHA256:
+ec4c6543c254873bd6490ca01185c90cd11f01d99e16c70008923c13d73feab7
+
+diff --git a/Documentation/devicetree/bindings/interconnect/qcom,msm8998-bwmon.yaml b/Documentation/devicetree/bindings/interconnect/qcom,msm8998-bwmon.yaml
+--- a/Documentation/devicetree/bindings/interconnect/qcom,msm8998-bwmon.yaml
++++ b/Documentation/devicetree/bindings/interconnect/qcom,msm8998-bwmon.yaml
+@@ -41,6 +41,7 @@
+               - qcom,sm6115-cpu-bwmon
+               - qcom,sm6350-llcc-bwmon
+               - qcom,sm8250-cpu-bwmon
++              - qcom,sm8475-cpu-bwmon
+               - qcom,sm8550-cpu-bwmon
+               - qcom,sm8650-cpu-bwmon
+               - qcom,sm8750-cpu-bwmon
+@@ -58,6 +59,7 @@
+               - qcom,shikra-cpu-bwmon
+               - qcom,sm6350-cpu-bwmon
+               - qcom,sm8250-llcc-bwmon
++              - qcom,sm8475-llcc-bwmon
+               - qcom,sm8550-llcc-bwmon
+               - qcom,sm8650-llcc-bwmon
+               - qcom,x1e80100-llcc-bwmon
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+@@ -438,34 +438,42 @@
+ /* OEM Cape capacities; normalized with each cluster's maximum frequency. */
+ &cpu0 {
+ 	capacity-dmips-mhz = <1024>;
++	dynamic-power-coefficient = <100>;
+ };
+ 
+ &cpu1 {
+ 	capacity-dmips-mhz = <1024>;
++	dynamic-power-coefficient = <100>;
+ };
+ 
+ &cpu2 {
+ 	capacity-dmips-mhz = <1024>;
++	dynamic-power-coefficient = <100>;
+ };
+ 
+ &cpu3 {
+ 	capacity-dmips-mhz = <1024>;
++	dynamic-power-coefficient = <100>;
+ };
+ 
+ &cpu4 {
+ 	capacity-dmips-mhz = <2253>;
++	dynamic-power-coefficient = <257>;
+ };
+ 
+ &cpu5 {
+ 	capacity-dmips-mhz = <2253>;
++	dynamic-power-coefficient = <257>;
+ };
+ 
+ &cpu6 {
+ 	capacity-dmips-mhz = <2253>;
++	dynamic-power-coefficient = <257>;
+ };
+ 
+ &cpu7 {
+ 	capacity-dmips-mhz = <2386>;
++	dynamic-power-coefficient = <509>;
+ };
+ 
+ &iris {
+@@ -1985,3 +1993,86 @@
+ 		};
+ 	};
+ };
++
++/* Cape BWMON v5 (LLCC -> DDR) and v4 (CPU -> LLCC). */
++&soc {
++	llcc_bwmon: pmu@19091000 {
++		compatible = "qcom,sm8475-llcc-bwmon", "qcom,sc7280-llcc-bwmon";
++		reg = <0 0x19091000 0 0x1000>;
++		interrupts = <GIC_SPI 81 IRQ_TYPE_LEVEL_HIGH>;
++		interconnects = <&mc_virt MASTER_LLCC QCOM_ICC_TAG_ACTIVE_ONLY
++				 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ACTIVE_ONLY>;
++		operating-points-v2 = <&llcc_bwmon_opp_table>;
++
++		llcc_bwmon_opp_table: opp-table {
++			compatible = "operating-points-v2";
++
++			/* OEM frequency in kHz * 4-byte bus width = kB/s. */
++			opp-0 {
++				opp-peak-kBps = <(547000 * 4)>;
++			};
++
++			opp-1 {
++				opp-peak-kBps = <(768000 * 4)>;
++			};
++
++			opp-2 {
++				opp-peak-kBps = <(1555000 * 4)>;
++			};
++
++			opp-3 {
++				opp-peak-kBps = <(1708000 * 4)>;
++			};
++
++			opp-4 {
++				opp-peak-kBps = <(2092000 * 4)>;
++			};
++
++			opp-5 {
++				opp-peak-kBps = <(2736000 * 4)>;
++			};
++
++			opp-6 {
++				opp-peak-kBps = <(3196000 * 4)>;
++			};
++		};
++	};
++
++	cpu_bwmon: pmu@190b6400 {
++		compatible = "qcom,sm8475-cpu-bwmon", "qcom,sdm845-bwmon";
++		reg = <0 0x190b6400 0 0x300>;
++		interrupts = <GIC_SPI 581 IRQ_TYPE_LEVEL_HIGH>;
++		interconnects = <&gem_noc MASTER_APPSS_PROC QCOM_ICC_TAG_ACTIVE_ONLY
++				 &gem_noc SLAVE_LLCC QCOM_ICC_TAG_ACTIVE_ONLY>;
++		operating-points-v2 = <&cpu_bwmon_opp_table>;
++
++		cpu_bwmon_opp_table: opp-table {
++			compatible = "operating-points-v2";
++
++			/* OEM frequency in kHz * 16-byte bus width = kB/s. */
++			opp-0 {
++				opp-peak-kBps = <(300000 * 16)>;
++			};
++
++			opp-1 {
++				opp-peak-kBps = <(466000 * 16)>;
++			};
++
++			opp-2 {
++				opp-peak-kBps = <(600000 * 16)>;
++			};
++
++			opp-3 {
++				opp-peak-kBps = <(806000 * 16)>;
++			};
++
++			opp-4 {
++				opp-peak-kBps = <(933000 * 16)>;
++			};
++
++			opp-5 {
++				opp-peak-kBps = <(1066000 * 16)>;
++			};
++		};
++	};
++};

@@ -27,6 +27,6 @@
 
 ## 硬件专题
 
-[显示](DISPLAY.md) · [指纹](FINGERPRINT.md) · [相机](CAMERA.md) · [充电](FASTCHARGE.md) · [RTC](RTC.md)
+[设备树与原厂对照](DEVICE-TREE.md) · [显示](DISPLAY.md) · [指纹](FINGERPRINT.md) · [相机](CAMERA.md) · [充电](FASTCHARGE.md) · [RTC](RTC.md)
 
 来源和许可证见 [CREDITS](../CREDITS.md)、[NOTICE](../NOTICE)。

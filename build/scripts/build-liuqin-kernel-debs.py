@@ -19,7 +19,7 @@ sys.path.insert(0, str(PROJECT / 'shared'))
 from liuqin_kernel import build_contract, parse_contract, digest, extract_modules
 from liuqin_artifacts import boot_interface
 
-TOOLS_VERSION = '0.1.6'
+TOOLS_VERSION = '0.1.7'
 
 
 def put(root, name, content, mode=0o644):
@@ -60,9 +60,10 @@ def build(kernel, modules, boot_image, output, version, kernel_source=None, pack
     with tempfile.TemporaryDirectory(prefix='.kernel-debs-', dir=output.parent) as directory:
         work = Path(directory); packages = work / 'packages'; packages.mkdir()
         tools = work / 'tools'
-        control(tools, 'liuqin-boot-tools', TOOLS_VERSION, 'python3 (>= 3.11), python3-zstandard (>= 0.23)',
+        control(tools, 'liuqin-boot-tools', TOOLS_VERSION, 'python3 (>= 3.11), python3-zstandard (>= 0.23), util-linux, mount',
                 'Liuqin versioned kernel boot update and recovery tools')
         put(tools, 'usr/lib/liuqin/boot-update.py', (PROJECT / 'device/boot/boot-update.py').read_bytes(), 0o755)
+        put(tools, 'usr/lib/liuqin/boot-target-v1.sh', (PROJECT / 'device/boot/boot-target-v1.sh').read_bytes())
         put(tools, 'etc/liuqin-root-interface', b'liuqin-root-v2\n')
         # boot_interface also validates multi-system/Recovery capabilities.
         # Ship the complete shared closure rather than importing from a source checkout.
@@ -162,7 +163,7 @@ def build(kernel, modules, boot_image, output, version, kernel_source=None, pack
                 if root==tools:
                     shutil.rmtree(root/'etc/apt')
                     shutil.rmtree(root/'etc/kernel')
-                    dependencies=['python3 >= 3.11','python3-zstandard >= 0.23'];pre=[]
+                    dependencies=['python3 >= 3.11','python3-zstandard >= 0.23','util-linux-core'];pre=[]
                 elif root==module:
                     dependencies=['kmod'];pre=['liuqin-boot-tools >= '+TOOLS_VERSION]
                     directories = (f'usr/lib/modules/{release}', f'usr/share/liuqin/kernels/{release}',

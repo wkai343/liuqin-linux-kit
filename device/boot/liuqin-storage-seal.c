@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT
  * Batch the initial initramfs BLKROSET pass without spawning per-node tools.
- * This does not admit a root: the independent BusyBox storage gate still does
- * the final seal, namespace snapshots, mount checks and rollback.
+ * The read-only verifier batches flag reads at each independent admission
+ * boundary. The shell still owns all writes, mount checks and rollback.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -102,6 +102,117 @@ static int open_node(const char *path, struct node *node, const char *sysroot)
     return 0;
 }
 
+/* A fresh invocation at every boundary: never cache an earlier proof. This
+ * mode has no BLKROSET path, including on failure, and accepts only the exact
+ * namespace snapshot supplied by the caller. */
+static int verify_flags(int argc, char **argv)
+{
+    const char *devroot = argv[2], *sysroot = argv[3], *rw = argv[5];
+    int ufs_only, failed = 0, parent_seen = 0, root_seen = 0;
+    glob_t before = {0}, after = {0};
+    struct liuqin_ufs_scope scope;
+    struct node *nodes = NULL;
+    char pattern[PATH_MAX], real[PATH_MAX], parent_sysfs[PATH_MAX] = "";
+
+    if (!strcmp(argv[4], "ufs")) ufs_only = 1;
+    else if (!strcmp(argv[4], "scsi")) ufs_only = 0;
+    else return 2;
+    if (strcmp(rw, "-")) {
+        if (strncmp(rw, "sda", 3) || rw[3] < '1' || rw[3] > '9') return 2;
+        for (const char *p = rw + 4; *p; ++p)
+            if (*p < '0' || *p > '9') return 2;
+    }
+    if (devroot[0] != '/' || sysroot[0] != '/' ||
+        !realpath(devroot, real) || strcmp(real, devroot) ||
+        !realpath(sysroot, real) || strcmp(real, sysroot) ||
+        snprintf(pattern, sizeof(pattern), "%s/sd*", devroot) >= (int)sizeof(pattern) ||
+        (ufs_only && liuqin_ufs_scope_init(&scope, sysroot)) ||
+        liuqin_storage_glob(pattern, &before, sysroot, ufs_only)) {
+        reject("--verify-flags", "canonical namespace is unproven"); failed = 1; goto out;
+    }
+    if (before.gl_pathc != (size_t)(argc - 6)) {
+        reject("--verify-flags", "snapshot count changed"); failed = 1; goto out;
+    }
+    for (size_t i = 0; i < before.gl_pathc; ++i) {
+        const char *name = strrchr(before.gl_pathv[i], '/') + 1;
+        if (strcmp(name, argv[i + 6])) {
+            reject("--verify-flags", "snapshot names or order changed"); failed = 1; goto out;
+        }
+        if (!strcmp(name, "sda")) parent_seen = 1;
+        if (!strcmp(name, rw)) root_seen = 1;
+    }
+    if (strcmp(rw, "-") && (!parent_seen || !root_seen)) {
+        reject("--verify-flags", "writable root pair is outside the snapshot"); failed = 1; goto out;
+    }
+    nodes = calloc(before.gl_pathc, sizeof(*nodes));
+    if (!nodes) { failed = 1; goto out; }
+    for (size_t i = 0; i < before.gl_pathc; ++i) nodes[i].fd = -1;
+    for (size_t i = 0; i < before.gl_pathc; ++i) {
+        const char *path = before.gl_pathv[i], *name = strrchr(path, '/') + 1;
+        char sysfs[PATH_MAX];
+        if (!realpath(path, real) || strcmp(path, real) ||
+            open_node(path, &nodes[i], sysroot) ||
+            snprintf(sysfs, sizeof(sysfs), "%s/class/block/%s", sysroot, name) >= (int)sizeof(sysfs) ||
+            !realpath(sysfs, nodes[i].sysfs) ||
+            (ufs_only && liuqin_ufs_node(&scope, sysroot, name, real) != 1)) {
+            reject(path, "snapshot device identity is unproven"); failed = 1; goto out;
+        }
+        if (!strcmp(name, "sda")) strcpy(parent_sysfs, nodes[i].sysfs);
+    }
+    for (size_t i = 0; i < before.gl_pathc; ++i) {
+        const char *path = before.gl_pathv[i], *name = strrchr(path, '/') + 1;
+        int expected = strcmp(rw, "-") && (!strcmp(name, "sda") || !strcmp(name, rw)) ? 0 : 1;
+        int readonly = -1;
+        if (strcmp(rw, "-") && !strcmp(name, rw) &&
+            (snprintf(real, sizeof(real), "%s/%s", parent_sysfs, rw) >= (int)sizeof(real) ||
+             strcmp(real, nodes[i].sysfs))) {
+            reject(path, "writable partition is not a child of sda"); failed = 1; goto out;
+        }
+        if (ioctl(nodes[i].fd, BLKROGET, &readonly) || readonly != expected) {
+            reject(path, "read-only flag differs from the admitted root pair"); failed = 1; goto out;
+        }
+    }
+    /* Pin every descriptor through a second identity and namespace pass. */
+    if (ufs_only) {
+        struct liuqin_ufs_scope current;
+        if (liuqin_ufs_scope_init(&current, sysroot) || strcmp(scope.controller, current.controller) ||
+            strcmp(scope.devices, current.devices)) {
+            reject("--verify-flags", "UFS controller identity changed"); failed = 1; goto out;
+        }
+    }
+    for (size_t i = 0; i < before.gl_pathc; ++i) {
+        const char *path = before.gl_pathv[i], *name = strrchr(path, '/') + 1;
+        char sysfs[PATH_MAX];
+        struct stat current;
+        if (lstat(path, &current) || !same_node(&nodes[i].identity, &current) ||
+            !realpath(path, real) || strcmp(path, real) ||
+            sysfs_matches(path, current.st_rdev, sysroot) ||
+            snprintf(sysfs, sizeof(sysfs), "%s/class/block/%s", sysroot, name) >= (int)sizeof(sysfs) ||
+            !realpath(sysfs, real) || strcmp(real, nodes[i].sysfs) ||
+            (ufs_only && liuqin_ufs_node(&scope, sysroot, name, real) != 1)) {
+            reject(path, "device identity changed during flag verification"); failed = 1; goto out;
+        }
+    }
+    if (liuqin_storage_glob(pattern, &after, sysroot, ufs_only) || before.gl_pathc != after.gl_pathc) {
+        reject("--verify-flags", "namespace changed during flag verification"); failed = 1; goto out;
+    }
+    for (size_t i = 0; i < before.gl_pathc; ++i) {
+        if (strcmp(before.gl_pathv[i], after.gl_pathv[i])) {
+            reject("--verify-flags", "namespace changed during flag verification"); failed = 1; goto out;
+        }
+    }
+out:
+    if (nodes) {
+        for (size_t i = 0; i < before.gl_pathc; ++i)
+            if (nodes[i].fd >= 0) close(nodes[i].fd);
+        free(nodes);
+    }
+    if (!failed) printf("%zu\n", before.gl_pathc);
+    liuqin_storage_globfree(&after, ufs_only);
+    liuqin_storage_globfree(&before, ufs_only);
+    return failed ? 1 : 0;
+}
+
 
 int main(int argc, char **argv)
 {
@@ -120,10 +231,15 @@ int main(int argc, char **argv)
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {
         puts("liuqin-storage-scope-v1"); return 0;
     }
+    if (argc >= 2 && !strcmp(argv[1], "--verify-flags")) {
+        if (argc < 7) return 2;
+        return verify_flags(argc, argv);
+    }
     list = argc >= 2 && strcmp(argv[1], "--list-ufs") == 0;
     if (!((argc == 2 && (!strcmp(argv[1], "--seal") || !strcmp(argv[1], "--seal-ufs") ||
                         !strcmp(argv[1], "--check") || list)) || (argc == 4 && list))) {
-        fprintf(stderr, "usage: liuqin-storage-seal --seal|--seal-ufs|--check|--list-ufs [devroot sysroot]|--ready|--ready-ufs|--ready-recovery|--version\n");
+        fprintf(stderr, "usage: liuqin-storage-seal --seal|--seal-ufs|--check|--list-ufs [devroot sysroot]|--ready|--ready-ufs|--ready-recovery|--version\n"
+                        "       liuqin-storage-seal --verify-flags devroot sysroot ufs|scsi writable-partition|- snapshot-name...\n");
         return 2;
     }
     if (argc == 4) { devroot = argv[2]; sysroot = argv[3]; }

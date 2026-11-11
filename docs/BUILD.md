@@ -60,6 +60,11 @@ devbox run outputs
 
 目标 boot 与 rootfs 模块必须配套。更换内核时可复用已完成的桌面装配，再打包根归档。
 
+对已有系统使用 Fastboot 临时启动前，还需沿用安装时的启动目标绑定：分区与文件系统 UUID、
+`native-root` 路径及 `boot_generation`。构建输出是未绑定的发布镜像；先用
+[`liuqin_boot_target.bind`](../shared/liuqin_boot_target.py) 和已核实的现有绑定生成测试副本，
+并核对新版本模块及启动契约。仅复制新模块不会自动给发布镜像补上目标绑定。
+
 | 命令 | 用途 |
 | --- | --- |
 | `devbox run build -- --target kernel` | 编译 Image 与 DTB |
@@ -122,19 +127,23 @@ Rec 准备、备份与写入范围见[安装助手](INSTALLER-GUI.md)和[安装�
 
 [source.json](../build/kernel/source.json) 固定内核版本、基础提交、配置和 `target_patches`，构建核对 `expected_source_tree`。补丁顺序以清单为准，不按编号补齐空缺。固定基础提交的补丁应用在构建缓存中，不改写用户源码；使用其他提交须自行合入适用补丁。`tested_source_commit` / `tested_source_tree` 仅是历史验收基线，不能证明当前产物已通过实机测试。
 
-Fedora 与 Rec 共用 21 个补丁；TDDI 首帧唤醒与校准恢复集中在 `0011`，DSI 命令调度、四档模式与在线切换集中在 `0024`，笔精度、报文诊断与唤醒故障隔离集中在 `0031`。合并补丁时须保持最终源码树一致，并同步 Rec 锁中的补丁摘要及公共源码锁摘要。补丁文件或顺序改变会更新构建身份；旧产物及其真机记录仍绑定原配方，不能修改清单冒充新构建。
+Fedora 与 Rec 共用 23 个补丁；TDDI 首帧唤醒与校准恢复集中在 `0011`，DSI 命令调度、四档模式与在线切换集中在 `0024`，笔精度、报文诊断与唤醒故障隔离集中在 `0031`，`0035` 使用原厂 Cape 的 CPU 能力描述区分大小核，`0036` 补齐 CPU 功耗系数和两级带宽监测，验证范围见[设备树对照](DEVICE-TREE.md)。合并补丁时须保持最终源码树一致，并同步 Rec 锁中的补丁摘要及公共源码锁摘要。补丁文件或顺序改变会更新构建身份；旧产物及其真机记录仍绑定原配方，不能修改清单冒充新构建。
 
-修改源码后先提交，再更换 `kernel_localversion`。用 `--target kernel --configure-only` 检查自定义片段；zram 选项只提供内核能力，容量和算法由 rootfs 服务配置。Fedora 额外应用 `fedora.config` 启用 SELinux。
+修改源码后先提交，再更换 `kernel_localversion`。用 `--target kernel --configure-only` 检查自定义片段；zram 选项只提供内核能力，容量和算法由 rootfs 服务配置。Fedora 额外应用 `fedora.config` 启用 SELinux，并将 `ath11k` / `ath11k_pci` 编为模块；Rec 保留原有内置配置。
 
 ### 启动与设备适配
 
 目标引导使用 [native-bootargs.txt](../device/native-bootargs.txt) 和 [native-display.config](../build/kernel/configs/native-display.config)，四档刷新率默认配置见[显示文档](DISPLAY.md#默认配置)。原生 Rec 同样使用 Linux 7.3.4 公共源码和补丁，配置、专用补丁与构建产物独立，见 [Rec 内核配方](../build/recovery/kernel/README.md)。
 
-- **图形启动**：Fedora 启用 Plymouth 时装配独立启动运行包，应用 `firmware-splash.config`，使用 `CONFIG_BACKLIGHT_KTZ8866=m`、`CONFIG_FB_SIMPLE=y`、`CONFIG_SM_DISPCC_8450=m`，由固件帧缓冲过渡到原生 DRM；未启用 Plymouth 的目标仍内置 KTZ8866。
+- **图形启动**：Fedora 启用 Plymouth 时装配独立启动运行包，应用 `firmware-splash.config`，使用 `CONFIG_BACKLIGHT_KTZ8866=m`、`CONFIG_FB_SIMPLE=y`、`CONFIG_SM_DISPCC_8450=m`，由固件帧缓冲过渡到原生 DRM；未启用 Plymouth 的目标仍内置 KTZ8866。动画准备与 UFS 校验并行，在最终存储证明前等待准备结束；动画失败不跳过存储检查。
 - **压缩与驱动等待**：目标启用 `CONFIG_RD_ZSTD=y` 时用 Zstd，否则用 gzip；独立安装环境用 gzip。`deferred_probe_timeout=60` 允许等待根系统模块，依赖就绪即继续，不固定等待 60 秒。
-- **存储保护**：核验 UFS、双份 GPT 和分区节点后提前结束等待，否则执行有上限的等待及只读检查。持久化桌面仅封存内部 UFS，外接磁盘保持原权限；安装、充电和失败回退封存全部 SCSI 设备。
+- **存储保护**：两轮 UFS、双份 GPT 和分区节点证明一致后提前结束等待；就绪证明未通过时，保留约 10 秒的有界等待及后续独立只读检查。桌面沿用 Rec 对原厂 LUN 3/5 自指备份头的有限兼容，仍核对 GPT 校验和、主备内容及 sysfs 几何，不写盘修表。持久化桌面仅封存内部 UFS，外接磁盘保持原权限；安装、充电和失败回退封存全部 SCSI 设备。
 - **配套核验**：boot/rootfs 的 `LIUQIN_DESKTOP_UFS_ONLY_V1` 策略与设备支持包须匹配；新根交接前后重验节点身份，失败则拒绝桌面启动，不写盘修表。
-- **网络**：设置本机 Wi-Fi MAC 时只等待目标网卡完成 udev 初始化，再启动 NetworkManager。桌面不启动诊断 USB 网络；RAM 故障救援与 Rec ADB 分开维护。
+- **只读复查**：`liuqin-storage-seal --verify-flags` 在每个原有检查点重新打开完整节点快照，批量读取 `BLKROGET`，核对设备号、节点身份、UFS 归属和前后命名空间。写保护操作、读写挂载前后、移动内核文件系统前及 `switch_root` 前的独立复查均保留，桌面 guard 同样使用批量复查；失败仍进入原有拒绝或回退路径，不沿用先前的校验结果。
+- **网络**：Fedora 由 [早期模块列表](../device/board-overlay/etc/modules-load.d/liuqin-wlan.conf) 加载 WLAN 电源控制和 `ath11k_pci`，与 RTC 采样并行，避免固件启动阻塞进入 `/init`。须提供同版根系统模块；仅依赖稍后的 udev 自动加载会把等待转移到网络准入。设置本机 Wi-Fi MAC 时仍等待目标网卡完成 udev 初始化、核对并设置原厂身份，再启动 NetworkManager；原有失败处理和用户会话顺序保留。桌面不启动诊断 USB 网络；RAM 故障救援与 Rec ADB 分开维护。
+
+登录设备等待、PowerDevil 探测范围和启动耗时对照见[显示与登录](DISPLAY.md#登录与会话启动)；
+引导写入、回退与系统内更新器的验收限制见[内核更新](KERNEL-UPDATES.md)。
 
 ### 根文件系统格式
 
@@ -171,22 +180,6 @@ Fedora 桌面安装推荐依赖，`remove` 清单阻止相应弱依赖引入并�
 - rootless 依赖不足或仅有单 UID 映射时构建停止，不自动转为 sudo。已有 rootful 环境可显式设置 `LIUQIN_ROOTFS_MODE=sudo`；旧缓存所有者不会随模式切换而改变。
 - 构建和离线检查通过不等于新内核完成硬件验收；实机范围与待解决项见[适配清单](HARDWARE.md)。
 
-### 启动停滞（待解决）
-
-曾有临时 `fastboot boot` 停留在启动画面，桌面和 SSH 未上线，**当时未执行刷新率切换，根因仍未定位**。已确认的证据：
-
-| 证据 | 能支持的判断与限制 |
-| --- | --- |
-| 照片中面板为 120 Hz、背光已开；触控固件更新成功、TDDI 达到 A3、首次 follower resume 完成 | 显示与触控初始化已到达这些检查点，不能据此排除后续驱动或时序问题 |
-| 最后可见的 initramfs 进度为等待 SCSI/UFS 并设为只读，未见根系统接管日志 | 尚不能定位阻塞调用；末条进度或延迟探测消息不能单独证明故障来自 UFS 或显示 |
-| 与此前成功镜像相比，内核配置仅 `CONFIG_LOCALVERSION` 不同，DTB、init 脚本和根分区绑定一致 | 这些差异已排查，但不能排除内核代码或运行时序变化 |
-| 临时启动已验证内核后恢复；`/sys/fs/pstore` 与 `/var/lib/systemd/pstore` 为空 | 未取得失败启动的持久日志 |
-| 仅在失败镜像 initramfs 的 `mdev -s`、`storage_seal_scan` 前后加四条日志，内核、DTB、根绑定及存储保护逻辑未改，随后启动成功；后续内核带同样检查点也成功 | 两次记录均完成十轮扫描、UFS 只读核验和根绑定接受；日志可能影响时序，成功启动不足以证明修复 |
-
-复现时先保存完整控制台和检查点，区分设备扫描、只读封存、就绪查询与根系统交接，再针对停顿位置采集进程/内核栈。该问题不能与根系统 `plymouth-read-write.service` 等待归为同一原因，后者见[开关机画面](DISPLAY.md#开关机画面)。
-
-本地证据位于 `out/build/live-refresh-r5/`：`boot-stall-observations.json`、`pstore-list.log`、`inittrace.diff`、`inittrace-verification.json`、`baseline-inittrace-120.json`；另有 `out/build/live-refresh-r6/settled-inittrace-120.json`。这些是本地排查材料，不随源码发布。
-
 ## 排查方法
 
 ### 配置、输入与缓存
@@ -218,4 +211,3 @@ devbox run -- python3 build/devbox/build.py check-inputs --config build.json
 | DNF 找不到包 | 核对 Fedora 包名与配方，如 `plasma-milou`、`elisa-player`、`kde-partitionmanager` |
 | 离线装配中 UPower 无法连接服务 | 用 `upower --help` 检查程序；`--version` 需要运行中的服务 |
 | 屏幕键盘显示但无法输入或收起 | 检查全局 `QT_IM_MODULES` 及 Wayland 输入法变量，避免覆盖 Plasma 键盘自身模块 |
-| 启动画面停滞 | 先按[启动停滞分析](#启动停滞待解决)区分 initramfs 与根系统阶段，保留控制台、pstore 和镜像身份，再恢复已验证引导 |

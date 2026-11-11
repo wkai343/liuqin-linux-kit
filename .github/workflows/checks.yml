@@ -90,6 +90,7 @@ jobs:
           python3 tests/usb-installer-network.py
           python3 tests/custom-kernel.py
           python3 tests/kernel-updates.py
+          python3 tests/boot-update-store.py
           python3 tests/devbox-build.py
           python3 tests/source-build.py
           python3 tests/device-overlays.py
@@ -121,6 +122,7 @@ jobs:
           python3 tests/display-policy.py
           python3 tests/wlan-mac.py
           python3 tests/rtc.py
+          python3 tests/login-ready.py
           python3 tests/mipps-startup.py
           python3 tests/storage-scope.py
           python3 tests/mkbootimg-fetch.py

@@ -35,6 +35,20 @@ RPM 工具和 pyelftools，已接入 Devbox 测试与 CI。
 十个文件进入归档、root/0600 权限、首次启动复用缓存，以及原厂镜像或分段损坏时停止。
 测试不需要原厂固件或平板；与其余 root 文件所有权测试一样，在 root 或映射为 root 的隔离环境执行。
 
+## 内核更新与引导存储
+
+以下测试使用普通临时文件执行真实绑定与事务逻辑，不访问真实块设备。
+`kernel-updates.py` 和 `boot-update-store.py` 已接入 Devbox 与 CI；它们不代替系统内刷写验收。
+
+| 测试 | 检查范围 |
+| --- | --- |
+| `kernel-updates.py` | RPM/DEB 打包、版本共存、旧单根布局、更新/回读、确认、回退、备份损坏与模块保护 |
+| `boot-update-store.py` | 多系统默认项、设备与单设备 Btrfs 身份、绑定镜像、登记提交、中断恢复、重复安装跳过、共享操作锁、校验清单、卸载失败保护与旧内核保留格式 |
+| `multiboot.py`、`boot-store.py`、`boot-retention.py` | 多系统绑定、引导存储结构、默认切换和当前/上一版材料的保留与清理 |
+
+更新器真机 `plan` 只检查计划；Fastboot 固定引导不能替代 `apply`/`rollback` 的验收。
+支持范围和验收限制见[系统内自动更新](../docs/KERNEL-UPDATES.md#系统内自动更新待真机验收)。
+
 ## Rec 用户态
 
 [Rec runtime 验证](../build/runtime/README.md#验证与排查)覆盖真实 Buildroot/musl ARM64 工具执行。`tests/rec-runtime.py --runtime /path/to/runtime` 需要已构建的工具集、QEMU 和用户命名空间，使用临时普通磁盘文件检查 GPT/ext4/Btrfs/F2FS，以及 rootfs 权限、ACL、扩展属性和 capabilities，不访问平板。该测试与默认合成夹具测试分开执行。
@@ -43,20 +57,22 @@ RPM 工具和 pyelftools，已接入 Devbox 测试与 CI。
 
 | 测试 | 检查范围 |
 | --- | --- |
+| `login-ready.py` | 内屏、渲染节点、触摸、电源键和背光的就绪条件；动态编号、缺失设备、错误机型、设备号不符、udev 失败和检查期间设备消失；只等待必要设备完成初始化 |
 | `display-clock.py` | 补丁中的时钟取整、频率边界和 CCF 约束 |
 | `display-refresh-rates.py` | 从默认 7.3 配方重建并执行模式枚举、面板扫描命令与命令扫描行计算。可追加在线切换、主机时钟及固定 ROM 检查 |
 | `display-live-refresh.py` | 执行四档在线切换的实际 C 函数；双面板 24 个有向切换及 57 项故障、范围和回退检查，模拟 DPU/DSI 寄存器、帧边界和字节时钟舍入 |
 | `display-brightness-minimum.py` | 当前 7.3 内核的最低非零亮度、原厂曲线其余档位、直接写零与关屏后的恢复 |
 | `display-oem-backlight.py` | 执行指定源码中的背光初始化与亮灭逻辑：默认亮度、单/双芯片 I2C 故障、失败清理与重试；需候选和基线源码 |
 | `display-policy.py`、`display-recovery.py` | CABC 配置、活动会话、恢复限流、失败与退出处理 |
-| `backlight-default.py`、`boot-splash.py` | 亮度量程、初始化等待、背光/显示时钟装载顺序，以及充电与动画退出路径 |
+| `backlight-default.py`、`boot-splash.py` | 亮度量程、初始化等待、背光/显示时钟装载顺序、充电与动画退出；动画与 UFS 并行、准入前等待完成，以及动画/存储分别失败时的处理 |
 | `splash-handoff.py`、`splash-logo.py`、`splash-orientation.py` | 帧缓冲边界、绘制进程隔离与回退、四向特征识别、关机方向缓存及 systemd 直接入口 |
-| `storage-seal.py`、`storage-ready.py`、`storage-paths.py` | 批量只读设置、UFS/GPT 就绪证明、路径替换及回退 |
+| `storage-seal.py`、`storage-ready.py`、`storage-paths.py` | 批量只读设置、UFS/GPT 就绪证明、原厂 LUN 3/5 备份头兼容边界、路径替换及回退 |
 | `wlan-mac.py` | 目标网卡 udev 初始化、命名竞态与设备身份 |
 | `rtc.py` | 真实 helper 的离线时间推算、计数器重置/停走、过期和损坏校准、chrony 只读协议的响应身份/长度/时间和同步判定、原子保存与 RPM 板级载荷；不改变主机时间，不代替关机/重启验收 |
 | `fedora-startup.py` | 登录界面 Powerdevil 仅在合成器和 Wayland 套接字就绪时启动、退出后拒绝再激活；普通桌面不受该条件限制。检查音频 PCM 探测前以静音状态准备保护 DSP |
 | `mipps-startup.py` | 普通 PD 跳过适配器认证前仍校验电芯；校验失败不会继续 VDM 或 PD 门控 |
-| `storage-scope.py` | 运行真实 C 选择/封存逻辑与 init 交接检查；验证内部控制器及驱动、USB 原权限与晚分区保持、救援时全盘封存、移动 `/dev`/`/sys` 后核验；ARM64 musl/QEMU 覆盖 glob 内存归属，升级清理保留修改文件和符号链接 |
+| `storage-scope.py` | 运行真实 C 选择/封存与批量只读复查；验证完整快照、只读标志、节点替换/消失/别名、设备号与控制器变化、外接盘权限和救援封存、移动 `/dev`/`/sys` 后核验；ARM64 musl/QEMU 覆盖 glob 内存归属和批量复查，升级清理保留修改文件和符号链接 |
+| `persistent-root.sh`、`storage-guard.sh` | 完整根系统准入与桌面存储保护；逐一注入四个独立复查时点和回退复查失败，确认拒绝交接、重新封存或保持不安全回退状态；桌面批处理失败仍尝试根系统只读重挂载 |
 
 ### 刷新率模式
 
@@ -109,6 +125,19 @@ python3 tests/splash-theme.py --width 900 --angle 90
 用 `build/scripts/generate-boot-logo-signature.py --help` 查看从已校验 `imagefv.elf` 重建特征表的方法。
 
 ## 内核源码阶段验证
+
+`oem-device-tree.py` 对照 `0036` 前后使用 `dtc -@` 编译的板级 DTB，
+读取固定 OS2.0.6.0 的 `dtb-02.dtb`、`entry.15` 和小米公开 `cape.dtsi`，
+校验 CPU 能耗参数、PSCI 电源域链、BWMON 带宽表与寄存器区间，以及既有属性未变。
+脚本校验三个原厂输入的固定摘要，不访问设备；需要先准备源码阶段和原厂材料，
+不属于普通离线入口。对照范围见[设备树说明](../docs/DEVICE-TREE.md)。
+
+```sh
+devbox run -- python3 tests/oem-device-tree.py \
+  --before /path/to/before.dtb --after /path/to/after.dtb \
+  --stock-base /path/to/dtb-02.dtb --stock-overlay /path/to/entry.15 \
+  --oem-source /path/to/cape.dtsi --report out/test-reports/oem-device-tree.json
+```
 
 其余 `display-*.py` 多数执行从指定内核源码提取的 C 函数，检查单项补丁前后行为。
 它们需要对应阶段的 `--source`、`--baseline`（部分脚本为 `--baseline-source`），

@@ -230,11 +230,11 @@ static int ready_at(const char *devroot, const char *sysroot, const char *contro
         if (make_path(path, sizeof(path), sysroot, name, "/device/unit_descriptor/lu_enable") ||
             read_number(path, &value) || !value) goto out;
         size_t partitions;
-        /* The factory LUN 3 and LUN 5 backup headers on liuqin can point to themselves.
-         * For RAM Recovery enumeration, the checked primary locates that
-         * header at the disk end. Both tables must still be identical and
-         * match sysfs. Keep the native root readiness check strict. */
-        if (disk_gpt(devroot, sysroot, name, recovery && (lun == 3 || lun == 5), &partitions))
+        /* Liuqin factory LUN 3 and LUN 5 backup headers can point to themselves.
+         * Desktop and Recovery can locate that header at the disk end from
+         * the checked primary. Both tables must still match each other and sysfs. */
+        int allow_self_backup = (recovery || ufs_only) && (lun == 3 || lun == 5);
+        if (disk_gpt(devroot, sysroot, name, allow_self_backup, &partitions))
             goto out;
         ++disks; nodes += 1 + partitions;
     }

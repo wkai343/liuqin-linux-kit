@@ -152,19 +152,22 @@ class ReadinessTests(unittest.TestCase):
         for keyword in ['bad_header','bad_array','mirror_diff','overlap','oversized','empty']:
             with self.subTest(keyword=keyword): self.write_gpt('sda',**{keyword:True});self.run_ready(False)
 
-    def test_recovery_accepts_only_the_identical_factory_backups(self):
+    def test_desktop_and_recovery_accept_only_the_identical_factory_backups(self):
         self.disk('sdd',16*1024**2,[(1,16,31)])
         self.disk('sdf',16*1024**2,[(1,16,31)])
         (self.controller/'device_descriptor/number_of_luns').write_text('0x04\n')
         self.write_gpt('sdd',self_backup=True)
         self.write_gpt('sdf',self_backup=True)
         self.run_ready(False)
-        self.run_ready(True,recovery=True,expected='4 UFS LUNs; 9 block nodes')
-        self.write_gpt('sdd',self_backup=True,mirror_diff=True)
-        self.run_ready(False,recovery=True)
-        self.write_gpt('sdd',self_backup=True)
-        self.write_gpt('sda',self_backup=True)
-        self.run_ready(False,recovery=True)
+        for mode in ({'ufs_only': True}, {'recovery': True}):
+            with self.subTest(mode=mode):
+                self.run_ready(True, expected='4 UFS LUNs; 9 block nodes', **mode)
+                self.write_gpt('sdd', self_backup=True, mirror_diff=True)
+                self.run_ready(False, **mode)
+                self.write_gpt('sdd', self_backup=True)
+                self.write_gpt('sda', self_backup=True)
+                self.run_ready(False, **mode)
+                self.write_gpt('sda')
 
     def test_partition_geometry_must_match_gpt(self):
         for field in ['partition','start','size']:

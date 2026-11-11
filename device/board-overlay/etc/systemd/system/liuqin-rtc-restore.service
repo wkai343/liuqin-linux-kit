@@ -1,7 +1,9 @@
 [Unit]
 Description=Restore Liuqin time from the PMIC RTC and saved calibration
 DefaultDependencies=no
-After=local-fs.target
+# StateDirectory adds the required mount and remount-fs ordering. Sample the
+# RTC while unrelated local filesystems and udev devices are initialising.
+RequiresMountsFor=/var/lib/liuqin-rtc /var
 Before=sysinit.target time-set.target chronyd.service chrony.service systemd-timesyncd.service shutdown.target
 Wants=time-set.target
 Conflicts=shutdown.target
@@ -19,7 +21,8 @@ CapabilityBoundingSet=CAP_SYS_TIME
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
-PrivateTmp=yes
+# Keep private temporary storage without waiting for host tmpfiles setup.
+PrivateTmp=disconnected
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes

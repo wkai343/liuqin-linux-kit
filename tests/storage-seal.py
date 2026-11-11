@@ -156,8 +156,9 @@ class ScanTests(unittest.TestCase):
         self.assertIn('storage_wait_for_ufs', gate)
         self.assertIn('elif storage_lock_all; then', gate)
         lock = re.search(r'^storage_lock_all\(\) \{\n.*?^\}', self.init, re.M | re.S)[0]
-        self.assertNotIn('storage_seal_helper', lock)
+        self.assertNotIn('--seal', lock)
         self.assertIn('"$BB" blockdev --setro', lock)
+        self.assertIn('storage_verify_flags', lock)
         self.assertIn('"$BB" blockdev --getro', lock)
 
 

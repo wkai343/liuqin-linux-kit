@@ -5,10 +5,10 @@
   "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
   "tag": "v7.3.4",
   "commit": "7595a62d45ee1a2297eafa5f2ef5d0a45142d84d",
-  "expected_source_tree": "054e13ad4e24c14a28c46a0550c4be1e5ce16008",
+  "expected_source_tree": "ccef6c353798b84c0ee6054649f0326f5ec9884d",
   "config": {
     "path": "build/recovery/kernel/7.3.4.config",
-    "sha256": "45e3367dd6a5510a4a335c44cd6aa586652e5cb6c1e2945baa42eb5d3050f0c0"
+    "sha256": "84e4eeb8b0004d8f73c7cb956efe53e13bf9a6d580918a1214892bda95469f39"
   },
   "patches": [
     {
@@ -96,6 +96,14 @@
       "sha256": "7946a104d8d3464e055972f5dddc34d5007f50be6eeeb7c37497afaf293ec5a8"
     },
     {
+      "path": "build/kernel/patches/linux-7.3/0035-liuqin-cpu-capacities.patch",
+      "sha256": "f3d212fac06f6e2e0e81ce56384cea6a1076f46a1e6fa91fe480ff4e1181278e"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0036-liuqin-cpu-power-and-bandwidth.patch",
+      "sha256": "6db2252d5bf8a346f176c40ae5d1fd4759b662f7183668af39988de1960734e8"
+    },
+    {
       "path": "build/recovery/kernel/patches/linux-7.3/0001-recovery-peripheral-handoff.patch",
       "sha256": "ccb0f030fb1bed451301961d3d9c67d1b45060f67beb936a9aaf32a9db998f62"
     }
@@ -123,7 +131,7 @@
   "build_timestamp": "2026-11-11T00:00:00+00:00",
   "shared_kernel": {
     "path": "build/kernel/source.json",
-    "sha256": "ac557eb99e01281db8d4439084bef8c16a2d44f9d775bf157f35a9990e419f2c"
+    "sha256": "b0a48b5cdb674ca61c3ec6a02aacfed1a3d09c5f50841cdc4e4f8a99ec1d3aba"
   },
   "touch_patches": [
     {

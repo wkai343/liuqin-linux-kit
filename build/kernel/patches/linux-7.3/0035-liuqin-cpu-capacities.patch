@@ -1,0 +1,58 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] arm64: dts: qcom: liuqin: describe the asymmetric CPU capacities
+
+Without capacity-dmips-mhz the scheduler treats all eight CPUs as equally
+capable. On Liuqin, a user-manager reload takes about 3.1 seconds on an
+A510 but 0.8 seconds on an A710; leaving startup on a little CPU causes
+large variations in Plasma startup time.
+
+Use the per-MHz capacities published for this board in Xiaomi's Cape
+device tree. arch_topology combines these with the discovered maximum
+frequencies to produce capacities of 277, 832 and 1024 on this tablet.
+Keep the frequency policies and task affinities under scheduler control.
+
+Source: https://github.com/MiCode/kernel_devicetree/blob/1c507816ba8aa6117dcec41f577ef7a66d2091f7/qcom/cape.dtsi
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+@@ -435,6 +435,39 @@
+ 	};
+ };
+ 
++/* OEM Cape capacities; normalized with each cluster's maximum frequency. */
++&cpu0 {
++	capacity-dmips-mhz = <1024>;
++};
++
++&cpu1 {
++	capacity-dmips-mhz = <1024>;
++};
++
++&cpu2 {
++	capacity-dmips-mhz = <1024>;
++};
++
++&cpu3 {
++	capacity-dmips-mhz = <1024>;
++};
++
++&cpu4 {
++	capacity-dmips-mhz = <2253>;
++};
++
++&cpu5 {
++	capacity-dmips-mhz = <2253>;
++};
++
++&cpu6 {
++	capacity-dmips-mhz = <2253>;
++};
++
++&cpu7 {
++	capacity-dmips-mhz = <2386>;
++};
++
+ &iris {
+ 	status = "okay";
+ };

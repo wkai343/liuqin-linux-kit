@@ -75,6 +75,14 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(self.update.rollback()['state'], 'rolled-back')
         self.assertEqual(self.block.read_bytes(), self.original)
 
+    def test_single_root_retains_unbound_package_templates(self):
+        for name in ['liuqin-boot-target','liuqin-system-id']:
+            put(self.root/'etc'/name,b'unbound\n')
+        self.update.enable(); self.update.plan(self.new)
+        self.update.apply(self.new);self.device.release=self.new;self.update.confirm()
+        self.update.can_remove('7.9-liuqin-unused')
+        self.update.rollback();self.assertEqual(self.block.read_bytes(),self.original)
+
     def test_btrfs_root_rejects_an_ext4_only_candidate_before_boot_write(self):
         put(self.root/'etc/liuqin-root-filesystem',b'btrfs\n')
         with self.assertRaisesRegex(RuntimeError,'不支持当前根文件系统'):
@@ -285,8 +293,9 @@ class PackageTests(unittest.TestCase):
             self.assertFalse((installed / 'usr/share/liuqin/kernel.release').exists())
             self.assertFalse((installed / 'etc/liuqin/boot-updates.json').exists())
             subprocess.run([sys.executable, '-I', '-c',
-                'import sys; sys.path.insert(0, sys.argv[1]); import liuqin_artifacts, liuqin_boot_target',
-                str(installed / 'usr/lib/liuqin')], check=True)
+                'import sys; sys.path.insert(0, sys.argv[1]); import liuqin_artifacts, liuqin_boot_target, liuqin_boot_update_store; '
+                'from pathlib import Path; assert liuqin_boot_target.current_helper() == Path(sys.argv[2]).read_bytes()',
+                str(installed / 'usr/lib/liuqin'), str(PROJECT/'device/boot/boot-target-v1.sh')], check=True)
 
 
 @unittest.skipUnless(shutil.which('rpmbuild') and shutil.which('rpm'), 'RPM tools unavailable')

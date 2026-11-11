@@ -301,7 +301,8 @@ class BuiltKernelTests(unittest.TestCase):
                     'USB_GADGET','USB_CONFIGFS_F_FS','USB_CONFIGFS_RNDIS',
                     'EXT4_FS','BTRFS_FS','DEVTMPFS','FB_SIMPLE','FRAMEBUFFER_CONSOLE',
                     'BACKLIGHT_KTZ8866','TOUCHSCREEN_NT36523_SPI','HID_NANOSIC',
-                    'QCOM_Q6V5_PAS','QCOM_PMIC_GLINK','BATTERY_QCOM_BATTMGR'):
+                    'QCOM_Q6V5_PAS','QCOM_PMIC_GLINK','BATTERY_QCOM_BATTMGR',
+                    'QCOM_ICC_BWMON'):
             self.assertIn('CONFIG_'+key+'=y\n',config,key)
         self.assertIn('# CONFIG_SND is not set\n',config)
 

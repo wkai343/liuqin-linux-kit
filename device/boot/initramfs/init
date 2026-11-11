@@ -464,6 +464,24 @@ storage_snapshot_sd_nodes() {
 	log 'persistent root canonical node snapshot captured'
 }
 
+storage_verify_flags() {
+	storage_verify_dev=$1
+	storage_verify_ufs=$2
+	storage_verify_rw=$3
+	shift 3
+	[ "$#" -gt 0 ] || return 1
+	storage_verify_sys=${storage_sys_block%/class/block}
+	if [ "$storage_verify_dev" = "$storage_newroot/dev" ]; then
+		storage_verify_sys=$storage_newroot/sys
+	fi
+	storage_verify_scope=scsi
+	[ "$storage_verify_ufs" != true ] || storage_verify_scope=ufs
+	# Each call opens a fresh, exact snapshot. Failure is not retried through
+	# a weaker verifier; the caller takes its original rejection/rollback path.
+	"$storage_seal_helper" --verify-flags "$storage_verify_dev" "$storage_verify_sys" \
+		"$storage_verify_scope" "$storage_verify_rw" "$@" >/dev/null
+}
+
 storage_lock_all() {
 	# Do not treat an empty glob as proof that storage is safe. In particular,
 	# a persistent-root rejection before UFS enumeration must not unlock the RAM
@@ -489,10 +507,14 @@ storage_lock_all() {
 		"$BB" blockdev --setro "$storage_path" 2>/dev/null || storage_lock_ok=false
 	done
 	[ "$storage_lock_seen" = true ] || return 1
-	for storage_path in "$@"; do
-		storage_path_is_block "$storage_path" || continue
-		[ "$("$BB" blockdev --getro "$storage_path" 2>/dev/null || true)" = 1 ] || storage_lock_ok=false
-	done
+	if [ "$storage_lock_namespace_ok" = true ] && [ -x "$storage_seal_helper" ]; then
+		storage_verify_flags "$storage_dev_root" "$storage_ufs_only" - $storage_lock_nodes || storage_lock_ok=false
+	else
+		for storage_path in "$@"; do
+			storage_path_is_block "$storage_path" || continue
+			[ "$("$BB" blockdev --getro "$storage_path" 2>/dev/null || true)" = 1 ] || storage_lock_ok=false
+		done
+	fi
 	if storage_lock_nodes_verified=$(storage_collect_sd_nodes "$storage_dev_root"); then
 		[ "$storage_lock_nodes_verified" = "$storage_lock_nodes" ] || storage_lock_namespace_ok=false
 	else
@@ -501,8 +523,8 @@ storage_lock_all() {
 	[ "$storage_lock_ok" = true ] && [ "$storage_lock_namespace_ok" = true ]
 }
 
-# Optimize only the initial repeated seal. The independent final lock and
-# admission/rollback checks below deliberately retain the pinned BusyBox path.
+# Only initial scans delegate writes. The independent final lock and rollback
+# retain BusyBox writes; their flag verification uses a fresh read-only batch.
 storage_seal_scan() {
 	storage_scan_found=false
 	for storage_path in "$storage_dev_root"/sd*; do
@@ -631,6 +653,10 @@ storage_snapshot_all_ro() {
 	storage_path_is_block "$storage_target" || return 1
 	[ "$("$BB" readlink -f "$storage_parent" 2>/dev/null || true)" = "$storage_parent" ] || return 1
 	[ "$("$BB" readlink -f "$storage_target" 2>/dev/null || true)" = "$storage_target" ] || return 1
+	if [ -x "$storage_seal_helper" ]; then
+		storage_verify_flags "$storage_dev_root" "$storage_snapshot_ufs_only" - $storage_sd_nodes_snapshot
+		return $?
+	fi
 	for storage_block in $storage_sd_nodes_snapshot; do
 		[ "$("$BB" blockdev --getro "$storage_dev_root/$storage_block" 2>/dev/null || true)" = 1 ] || return 1
 	done
@@ -653,6 +679,10 @@ storage_snapshot_persistent_ok() {
 	[ "$("$BB" readlink -f "$storage_check_target" 2>/dev/null || true)" = "$storage_check_target" ] || return 1
 	[ "$("$BB" blockdev --getro "$storage_check_parent" 2>/dev/null || true)" = 0 ] || return 1
 	[ "$("$BB" blockdev --getro "$storage_check_target" 2>/dev/null || true)" = 0 ] || return 1
+	if [ -x "$storage_seal_helper" ]; then
+		storage_verify_flags "$storage_nodes_root" "$storage_ufs_only" "$storage_target_name" $storage_sd_nodes_snapshot
+		return $?
+	fi
 	for storage_block in $storage_sd_nodes_snapshot; do
 		case $storage_block in sda|"$storage_target_name") continue ;; esac
 		[ "$("$BB" blockdev --getro "$storage_nodes_root/$storage_block" 2>/dev/null || true)" = 1 ] || return 1
@@ -903,9 +933,11 @@ mdev -s
 
 # A separately packaged, graphics-only runtime may render while the existing
 # storage guard works. It cannot admit a root or alter its protection checks.
+storage_splash_pid=
 if [ "$storage_mode" = persistent ] && [ "$storage_profile" = native-updatable ] &&
    [ -x "$storage_splash_helper" ]; then
-	"$storage_splash_helper" start
+	"$storage_splash_helper" start &
+	storage_splash_pid=$!
 fi
 
 storage_wait_mode=
@@ -919,6 +951,14 @@ if [ -f /etc/liuqin-native-recovery.json ] && [ -f /etc/liuqin-native-adb ] &&
 fi
 log "waiting for SCSI/UFS block devices and marking them read-only"
 storage_wait_for_ufs "$("$BB" cat /proc/cmdline 2>/dev/null)" "$storage_wait_mode"
+
+# Join graphics preparation before the independent final storage proof. Its
+# module/udev work must finish before root admission or moving /dev and /run.
+# A cosmetic failure still leaves every storage decision to the guard below.
+if [ -n "$storage_splash_pid" ]; then
+	wait "$storage_splash_pid" || log 'early splash preparation failed; continuing storage checks'
+	storage_splash_pid=
+fi
 
 ufs_safe=false
 if [ "$found_block" != true ]; then

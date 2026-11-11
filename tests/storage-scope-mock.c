@@ -4,6 +4,7 @@
  */
 #define _GNU_SOURCE
 #include <assert.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <glob.h>
 #include <linux/fs.h>
@@ -50,7 +51,28 @@ static int fixture_ioctl(int fd,unsigned long request,void *arg)
         assert(*(int*)arg==1);fprintf(stderr,"SET %s\n",name);
         FILE *f=fopen(state,"w");assert(f);fputs("1\n",f);fclose(f);return 0;
     }
-    assert(request==BLKROGET);FILE *f=fopen(state,"r");assert(f&&fscanf(f,"%d",(int*)arg)==1);fclose(f);return 0;
+    assert(request==BLKROGET);fprintf(stderr,"GET %s\n",name);
+    if (!strcmp(name,"sda1") && !strcmp(mutation,"get-error")) { errno=EIO;return -1; }
+    FILE *f=fopen(state,"r");assert(f&&fscanf(f,"%d",(int*)arg)==1);fclose(f);
+    if (!strcmp(name,"sda1")) {
+        if (!strcmp(mutation,"removed-read")) assert(!unlink(path));
+        if (!strcmp(mutation,"replaced-read")) {
+            assert(!unlink(path));f=fopen(path,"w");assert(f);fclose(f);
+        }
+        if (!strcmp(mutation,"alias-read")) {
+            char old[4096];snprintf(old,sizeof(old),"%s/.old-sda1",fixture_dev);
+            assert(!rename(path,old));assert(!symlink(".old-sda1",path));
+        }
+        if (!strcmp(mutation,"sysfs-read")) {
+            snprintf(path,sizeof(path),"%s/class/block/sda1/dev",fixture_sys);
+            f=fopen(path,"w");assert(f);fputs("8:99\n",f);fclose(f);
+        }
+        if (!strcmp(mutation,"driver-read")) {
+            snprintf(path,sizeof(path),"%s/devices/platform/soc@0/1d84000.ufshc/driver",fixture_sys);
+            assert(!unlink(path));
+        }
+    }
+    return 0;
 }
 static int fixture_stat(const char *p,struct stat *s)
 {
@@ -59,7 +81,7 @@ static int fixture_stat(const char *p,struct stat *s)
 static int fixture_statfs(const char *p,struct statfs *s) { assert(!strcmp(p,"/"));memset(s,0,sizeof(*s));s->f_type=TMPFS_MAGIC;return 0; }
 static int fixture_glob(const char *p,int flags,int(*err)(const char*,int),glob_t *g)
 {
-    if(++glob_calls==2 && strcmp(mutation,"none")){
+    if(++glob_calls==2 && (!strcmp(mutation,"usb") || !strcmp(mutation,"ufs"))){
         char a[4096],b[4096];snprintf(a,sizeof(a),"%s/.pending",fixture_dev);
         snprintf(b,sizeof(b),"%s/%s",fixture_dev,!strcmp(mutation,"usb")?"sdg1":"sda2");assert(!rename(a,b));
     }
@@ -82,7 +104,15 @@ int liuqin_storage_ready(int recovery) { (void)recovery;return 1; }
 #undef main
 int main(int argc,char **argv)
 {
-    assert(argc==6||argc==8);fixture_dev=argv[1];fixture_sys=argv[2];fixture_state=argv[3];mutation=argv[5];
+    assert(argc>=6);fixture_dev=argv[1];fixture_sys=argv[2];fixture_state=argv[3];mutation=argv[5];
+    if (!strcmp(argv[4],"--verify-flags")) {
+        assert(argc>=8);
+        char *args[argc];args[0]=argv[0];args[1]=argv[4];args[2]=argv[1];args[3]=argv[2];
+        for(int i=6;i<argc;++i)args[i-2]=argv[i];
+        args[argc-2]=NULL;
+        return storage_scope_main(argc-2,args);
+    }
+    assert(argc==6||argc==8);
     if(argc==8){fixture_dev=argv[6];fixture_sys=argv[7];}
     char *args[]={argv[0],argv[4],argc==8?argv[6]:NULL,argc==8?argv[7]:NULL,NULL};
     return storage_scope_main(argc==8?4:2,args);

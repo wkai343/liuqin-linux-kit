@@ -8,9 +8,11 @@ PMK8350 使用 `rtc-pm8xxx` 驱动。当前设备树不允许直接写 RTC，也
 
 ## 保存与恢复
 
-- `liuqin-rtc-restore.service` 在本地文件系统可用后、`sysinit.target`、
+- `liuqin-rtc-restore.service` 在校准目录所在文件系统可写后、`sysinit.target`、
   `time-set.target` 和 chrony 之前执行一次。校准存在且有效时，恢复值为
   `保存的系统时间 + 当前 RTC 计数 - 保存的 RTC 计数`。
+  1.1 秒的两次计数采样与其他本地文件系统、设备初始化并行；使用独立临时目录，
+  不再等待全局 `local-fs.target` 和主机 tmpfiles。计数和校准校验保持不变。
 - `liuqin-rtc-save.timer` 在开机约 45 秒后开始，每 5 分钟尝试保存一次。
   只接受 chrony 最近一小时内的外部同步，系统剩余校正小于 1 秒且报告的误差界小于 5 秒。
   未联网或仍在调整系统时间时保留之前的校准。计时器不会主动唤醒睡眠中的平板。

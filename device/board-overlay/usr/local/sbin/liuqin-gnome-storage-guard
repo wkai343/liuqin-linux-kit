@@ -79,10 +79,13 @@ for name in $nodes; do
 		;;
 	*)
 		$BB blockdev --setro "$node" 2>/dev/null || fail "cannot lock $node"
-		[ "$($BB blockdev --getro "$node" 2>/dev/null)" = 1 ] || fail "$node did not stay read-only"
 		;;
 	esac
 done
 [ "$total" -ge 2 ] || fail 'no UFS namespace'
+# Keep the same independent desktop gate and all writes above. Verify the
+# entire captured namespace with fresh descriptors in one read-only process.
+"$scope" --verify-flags "$dev_root" /sys ufs "${root_source##*/}" $nodes >/dev/null ||
+    fail 'UFS read-only state or device identity changed'
 [ "$("$scope" --list-ufs)" = "$nodes" ] || fail 'internal UFS namespace changed'
 echo "liuqin-gnome-guard: PASS ($total nodes; root pair rw, all UFS siblings ro)" >>"$kmsg" 2>/dev/null || :

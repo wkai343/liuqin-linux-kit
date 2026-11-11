@@ -99,8 +99,22 @@ reset_fixture() {
 	: >"$command_log"
 	cat >"$scope" <<'SCOPE'
 #!/bin/sh
-[ "$1" = --list-ufs ] || exit 2
-printf 'sda\nsda1\nsda35\nsda36\nsda37\nsdb\n'
+case $1 in
+--list-ufs) printf 'sda\nsda1\nsda35\nsda36\nsda37\nsdb\n' ;;
+--verify-flags)
+ printf 'verify %s\n' "$*" >>"$TEST_COMMAND_LOG"
+ [ "$4" = ufs ] || exit 2
+ root=$5
+ shift 5
+ [ "$*" = 'sda sda1 sda35 sda36 sda37 sdb' ] || exit 1
+ for name do
+  expected=1
+  case $name in sda|"$root") expected=0 ;; esac
+  [ "$(cat "$TEST_STATE/$name")" = "$expected" ] || exit 1
+ done
+ ;;
+*) exit 2 ;;
+esac
 SCOPE
 	chmod 0755 "$scope"
 	: >"$kmsg"
@@ -174,6 +188,14 @@ assert_node sda37 1 single-valid
 assert_node sdb 1 single-valid
 grep -q "bb blockdev --setro $dev/sda1\$" "$command_log" ||
 	fail 'single-valid: the seal loop did no work'
+grep -q '^verify --verify-flags ' "$command_log" || fail 'batch verification was skipped'
+[ "$(grep -c 'bb blockdev --getro ' "$command_log")" = 2 ] || fail 'only the immediate root-pair reads should remain per-node'
+
+# A rejected batch cannot fall through to the previous weaker per-node path.
+reset_fixture
+sed -i '/root=\$5/a\ exit 1' "$scope"
+run_guard
+expect_fail batch-rejected 'UFS read-only state or device identity changed'
 
 # A separately mounted home cannot grant write access to another partition.
 reset_fixture

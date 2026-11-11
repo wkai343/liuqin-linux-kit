@@ -49,6 +49,19 @@ Fedora 图形启动先使用固件帧缓冲，再交给原生 DRM；接管仍需
 根系统对 Plymouth 客户端等待设置上限，超时记录状态并尝试退出已核对身份的动画进程，避免阻塞后续服务。
 此保护未查明动画进程失去响应的内部原因。升级图形启动需包含配套主题、方向服务和插件。
 
+### 登录与会话启动
+
+[liuqin-login-ready](../build/rootfs/plasma-overlay/usr/libexec/liuqin-login-ready)只等待内屏 DRM、
+同一设备的渲染节点、触摸、电源键和背光完成 udev 初始化，代替全局 udev 等待。
+它核对机型、字符设备号、内屏连接状态和模式；必要设备缺失或检查失败时阻止登录启动，
+等待上限为 8 秒。存储保护、logind 和 Plymouth 交接顺序保持不变。
+
+PowerDevil 设置 `POWERDEVIL_NO_DDCUTIL=1`，省去内屏不使用的 DDC/I²C 探测；
+原生背光、电池与电源管理保留，外接显示器的 DDC 亮度控制随之停用。
+initramfs 动画准备与 UFS 校验并行，在根系统准入前等待动画准备结束并独立复查存储。
+[RTC 采样](RTC.md)和 WLAN 模块在根系统早期并行初始化，配套要求见
+[启动与设备适配](BUILD.md#启动与设备适配)。
+
 ## 默认配置
 
 ### 刷新率
@@ -122,7 +135,6 @@ sudo liuqin-display-policy set ui --save
 | 长期运行 | 四档长期往返、反复唤醒、异常恢复、其他面板批次及功耗待验证 |
 | 显示接管与供电 | 尚无连续无黑屏接管、完整五路断电和原生显示状态无缝继承；DSI 时钟门控保持关闭 |
 | 画质与笔 | CABC 观感及节电收益待测；笔适配重点为 60/120 Hz，90/144 Hz 无笔输入暂不排查 |
-| 启动 | initramfs 偶发停滞仍[待解决](BUILD.md#启动停滞待解决)；根系统 Plymouth 失去响应的原因也未定位，两者不能视为同一故障 |
 
 ## 排查方法
 
@@ -186,5 +198,4 @@ sudo journalctl -b -u plymouth-read-write.service
 ```
 
 Plymouth 超时保护记录位于 `/run/liuqin-plymouth-guard/events.jsonl`。
-报告故障时注明发生在 initramfs、登录界面还是桌面，以及是否经历按键、睡眠或恢复；
-启动停滞的证据和后续检查见[构建文档](BUILD.md#启动停滞待解决)。
+报告故障时注明发生在 initramfs、登录界面还是桌面，以及是否经历按键、睡眠或恢复。

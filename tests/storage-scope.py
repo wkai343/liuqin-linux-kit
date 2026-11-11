@@ -33,6 +33,62 @@ class ScopeTests(unittest.TestCase):
     def run_scope(self,mode='--seal-ufs',mutation='none',success=True):
         r=subprocess.run([self.binary,self.dev,self.sys,self.state,mode,mutation],capture_output=True,text=True)
         self.assertEqual(r.returncode,0 if success else 1,r.stdout+r.stderr);return r
+    def run_verify(self, rw='sda1', names=('sda','sda1','sdb'), mutation='none', scope='ufs', status=0):
+        r=subprocess.run([self.binary,self.dev,self.sys,self.state,'--verify-flags',mutation,scope,rw,*names],capture_output=True,text=True)
+        self.assertEqual(r.returncode,status,r.stdout+r.stderr)
+        self.assertNotIn('SET ',r.stderr)
+        return r
+    def ready_flags(self, all_ro=False):
+        for name in ['sda','sda1','sdb']:
+            (self.state/name).write_text(str(int(all_ro or name=='sdb'))+'\n')
+    def test_verify_fresh_root_pair_without_any_write(self):
+        self.ready_flags();r=self.run_verify()
+        self.assertEqual(r.stdout,'3\n')
+        self.assertEqual(re.findall(r'^GET (\w+)$',r.stderr,re.M),['sda','sda1','sdb'])
+        self.assertNotIn('sdg',r.stderr)
+    def test_verify_all_readonly_and_all_scsi_rollback(self):
+        self.ready_flags(all_ro=True);self.run_verify(rw='-')
+        self.run_verify(rw='-',scope='scsi',names=('sda','sda1','sdb','sdg'),status=1)
+        (self.state/'sdg').write_text('1\n')
+        self.run_verify(rw='-',scope='scsi',names=('sda','sda1','sdb','sdg'))
+    def test_verify_wrong_flags_fail_for_every_allowed_and_protected_node(self):
+        for name in ['sda','sda1','sdb']:
+            with self.subTest(node=name):
+                self.ready_flags();p=self.state/name;p.write_text(str(1-int(p.read_text()))+'\n')
+                r=self.run_verify(status=1);self.assertEqual(r.stdout,'')
+    def test_verify_requires_exact_nonempty_ordered_snapshot(self):
+        self.ready_flags()
+        self.run_verify(names=(),status=2)
+        for names in [('sda','sda1'),('sda','sda1','sda1'),('sdb','sda1','sda'),('sda','sda1','sdb','sdg'),('sda','../sda1','sdb')]:
+            with self.subTest(names=names):self.run_verify(names=names,status=1)
+    def test_verify_cannot_expand_the_writable_pair(self):
+        self.ready_flags()
+        for rw in ['sdb','sda','sda0','sda1/../sdb','sda1,sdb']:
+            with self.subTest(root=rw):self.run_verify(rw=rw,status=2)
+        self.run_verify(rw='sda99',status=1)
+    def test_verify_rejects_namespace_change_but_ignores_late_usb(self):
+        self.ready_flags();self.node('sdg1',self.usb/'sdg1','8:97',pending=True)
+        self.run_verify(mutation='usb');self.assertEqual((self.state/'sdg1').read_text(),'0\n')
+        self.node('sda2',self.ufs/'sda2','8:2',ro=1,pending=True)
+        self.run_verify(mutation='ufs',status=1)
+    def test_verify_rejects_mid_read_identity_change_and_io_failure(self):
+        for mutation in ['get-error','removed-read','replaced-read','alias-read','sysfs-read','driver-read']:
+            with self.subTest(mutation=mutation):
+                # Each mutation gets a separate real filesystem fixture.
+                self.setUp();self.ready_flags();r=self.run_verify(mutation=mutation,status=1)
+                self.assertEqual(r.stdout,'')
+    def test_verify_rejects_preexisting_alias_and_wrong_parent(self):
+        self.ready_flags();p=self.dev/'sda1';p.rename(self.dev/'real-sda1');p.symlink_to('real-sda1')
+        self.run_verify(status=1)
+        p.unlink();p.touch()
+        node=self.sys/'class/block/sda1';node.unlink()
+        other=self.controller/'host0/block/sdb/sda1';other.mkdir(parents=True);(other/'dev').write_text('8:1\n')
+        node.symlink_to(os.path.relpath(other,node.parent))
+        self.run_verify(status=1)
+    def test_verify_uses_moved_dev_and_sys(self):
+        self.ready_flags();newroot=self.root/'newroot';newroot.mkdir()
+        self.dev.rename(newroot/'dev');self.sys.rename(newroot/'sys')
+        self.dev=newroot/'dev';self.sys=newroot/'sys';self.run_verify()
     def test_only_internal_ufs_is_sealed(self):
         self.node('sdg1',self.usb/'sdg1','8:97')
         r=self.run_scope();self.assertEqual(r.stdout,'3\n')
@@ -57,6 +113,14 @@ class ScopeTests(unittest.TestCase):
         r=subprocess.run([qemu,binary,self.dev,self.sys,self.state,'--seal-ufs','none'],capture_output=True,text=True)
         self.assertEqual(r.returncode,0,r.stdout+r.stderr);self.assertNotIn('sdg',r.stderr)
         self.assertEqual((self.state/'sdg').read_text(),'0\n')
+        self.ready_flags()
+        r=subprocess.run([qemu,binary,self.dev,self.sys,self.state,'--verify-flags','none','ufs','sda1','sda','sda1','sdb'],capture_output=True,text=True)
+        self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+        self.assertEqual(r.stdout,'3\n');self.assertNotIn('SET ',r.stderr)
+        (self.state/'sdb').write_text('0\n')
+        r=subprocess.run([qemu,binary,self.dev,self.sys,self.state,'--verify-flags','none','ufs','sda1','sda','sda1','sdb'],capture_output=True,text=True)
+        self.assertEqual(r.returncode,1,r.stdout+r.stderr)
+        self.assertNotIn('SET ',r.stderr)
     def test_late_usb_partition_does_not_change_the_ufs_snapshot_or_flags(self):
         self.node('sdg1',self.usb/'sdg1','8:97',pending=True)
         r=self.run_scope(mutation='usb');self.assertEqual(r.stdout,'3\n');self.assertNotIn('sdg',r.stderr)
@@ -84,11 +148,11 @@ class ScopeTests(unittest.TestCase):
 
     def run_init_scope(self, abort=False, add_usb=False):
         source=(PROJECT/'device/boot/initramfs/init').read_text()
-        names=['storage_path_is_block','storage_collect_sd_nodes','storage_snapshot_sd_nodes',
+        names=['storage_path_is_block','storage_collect_sd_nodes','storage_snapshot_sd_nodes','storage_verify_flags',
                'storage_lock_all','storage_snapshot_all_ro','storage_snapshot_persistent_ok','storage_abort']
         functions='\n'.join(re.search(r'^'+name+r'\(\) \{\n.*?^\}',source,re.M|re.S)[0] for name in names)
         scope=self.root/'scope'
-        scope.write_text('#!/bin/sh\nexec '+shlex.join([str(self.binary),str(self.dev),str(self.sys),str(self.state)])+' "$1" none\n')
+        scope.write_text('#!/bin/sh\nmode=$1; shift\nif [ "$mode" = --verify-flags ]; then shift 2; fi\nexec '+shlex.join([str(self.binary),str(self.dev),str(self.sys),str(self.state)])+' "$mode" none "$@"\n')
         scope.chmod(0o755)
         bb=self.root/'bb'
         bb.write_text('#!'+sys.executable+'\n'+'''import os,sys

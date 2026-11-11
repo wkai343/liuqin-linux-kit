@@ -2,7 +2,11 @@
 
 Rec 独立使用 kernel.org 源码和本仓库补丁，不再获取原作者的内核仓库，也不需要从旧 Recovery 镜像提取内核、配置或 DTB。桌面内核配方仍在 `build/kernel/source.json`。
 
-默认配方为 [source.json](source.json)，版本为 **7.3.4**，与 Fedora 使用同一 kernel.org 提交和 `build/kernel/source.json` 中的 21 个公共补丁文件。独立的 [7.3.4.config](7.3.4.config) 从原 Rec 配置迁移；Rec 不使用桌面配置或启动参数。
+默认配方为 [source.json](source.json)，版本为 **7.3.4**，与 Fedora 使用同一 kernel.org 提交和 `build/kernel/source.json` 中的 23 个公共补丁文件。独立的 [7.3.4.config](7.3.4.config) 从原 Rec 配置迁移；Rec 不使用桌面配置或启动参数。
+
+CPU 功耗系数与两级 BWMON 共享桌面的设备树配置；Rec 将 `CONFIG_QCOM_ICC_BWMON` 内置，
+不依赖未打包的带宽监测模块。新增配置在 Rec 侧仅完成源码、配置和 DTB 离线校验；
+Fedora 的实机结果不代表新的 Rec 镜像已通过验收，详见[设备树对照](../../../docs/DEVICE-TREE.md)。
 
 Rec 专用差异集中在 `patches/linux-7.3/`：内核补丁隔离 ABL 占位节点的供应依赖、固定 USB peripheral，并保留 PMIC 电池/充电服务；外部模块补丁仅应用到触控接管模块的构建副本，通知新版 NVT 驱动已有画面就绪。
 

@@ -34,6 +34,10 @@ MCU 连接事件、独立 GPIO 所有权及按键/触点释放处理实现。
 中的 DTBO 与显示模块。ROM 校验值见[四档在线切换补丁](https://github.com/wkai343/liuqin-linux-kit/blob/main/build/kernel/patches/linux-7.3/0024-liuqin-refresh-modes-and-live-switching.patch)。
 主屏标识和笔坐标精度分别对照同版原厂 ROM 的 DTBO 和 `nt36532_touch.ko`，模块校验值见[笔输入与诊断补丁](https://github.com/wkai343/liuqin-linux-kit/blob/main/build/kernel/patches/linux-7.3/0031-liuqin-pen-input-and-diagnostics.patch)。
 磁吸键盘背折防抖对照了[小米公开的 liuqin 设备树](https://github.com/MiCode/kernel_devicetree/blob/1c507816ba8aa6117dcec41f577ef7a66d2091f7/qcom/liuqin-sm8475.dtsi)。
+CPU 容量、动态功耗系数及 CPU/LLCC 带宽监测参数参考同一提交的
+[`qcom/cape.dtsi`](https://github.com/MiCode/kernel_devicetree/blob/1c507816ba8aa6117dcec41f577ef7a66d2091f7/qcom/cape.dtsi)，
+并与固定 OS2.0.6.0 原厂 ROM 核对，按主线 OPP、能耗模型及 interconnect 绑定表达；
+具体移植范围和验证边界见[设备树对照](docs/DEVICE-TREE.md)。
 四档在线刷新率切换的时序双缓冲与主从更新顺序还参考了 [Qualcomm display-drivers](https://android.googlesource.com/kernel/msm-extra/display-drivers/+/e7ab2aa8bd2f6f27b311ccada3722d20dee4bcef/msm/dsi/dsi_display.c)，面板时序与扫描命令继续按固定 M81 ROM 核对。
 这些适配补丁继续遵循所修改内核文件的许可，不由项目根目录的 MIT 许可替代。
 

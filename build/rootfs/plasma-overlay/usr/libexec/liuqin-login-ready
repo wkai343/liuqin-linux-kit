@@ -1,0 +1,123 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: MIT
+"""Wait for Liuqin's local display/input devices, without draining all of udev."""
+import json
+import math
+import os
+from pathlib import Path
+import stat
+import subprocess
+import sys
+import time
+
+SYS = Path('/sys')
+DEV = Path('/dev')
+TIMEOUT = 8
+
+
+class NotReady(ValueError):
+    pass
+
+
+def read(path):
+    return path.read_text().strip()
+
+
+def compatible(path, value):
+    try:
+        return value.encode() in path.read_bytes().split(b'\0')
+    except FileNotFoundError:
+        return False
+
+
+def board_identity():
+    tree = SYS / 'firmware/devicetree/base'
+    if compatible(tree / 'compatible', 'xiaomi,liuqin'):
+        return
+    if ((tree / 'model').read_bytes().rstrip(b'\0') !=
+            b'Liuqin based on Qualcomm Technologies, Inc SM8475'
+            or (tree / 'xiaomi,miboard-id').read_bytes() != bytes.fromhex('0000001000000000')):
+        raise NotReady('not a Xiaomi liuqin board')
+
+
+def one(paths, description):
+    paths = list(paths)
+    if len(paths) != 1:
+        raise NotReady(f'expected one {description}, found {len(paths)}')
+    return paths[0]
+
+
+def char_node(device, node):
+    info = node.lstat()
+    expected = tuple(map(int, read(device / 'dev').split(':')))
+    if (not stat.S_ISCHR(info.st_mode) or node.resolve() != node
+            or (os.major(info.st_rdev), os.minor(info.st_rdev)) != expected):
+        raise NotReady(f'noncanonical or mismatched character device: {node}')
+
+
+def required_devices():
+    drm = SYS / 'class/drm'
+    card = one((p for p in drm.glob('card[0-9]*') if p.name[4:].isdigit()
+                and compatible(p / 'device/of_node/compatible', 'qcom,sm8450-dpu')),
+               'internal DRM card')
+    panel = one(card.parent.glob(card.name + '-DSI-*'), 'internal DSI connector')
+    if read(panel / 'status') != 'connected' or not read(panel / 'modes'):
+        raise NotReady('internal DSI panel has no connected mode')
+    render = one((p for p in drm.glob('renderD*')
+                  if (p / 'device').resolve() == (card / 'device').resolve()),
+                 'render node for the internal DRM card')
+    events = list((SYS / 'class/input').glob('event*'))
+    touch = one((p for p in events
+                 if read(p / 'device/name') == 'NVTCapacitiveTouchScreen'
+                 and read(p / 'device/phys') == 'input/ts'), 'internal touchscreen')
+    power = one((p for p in events if compatible(
+        p / 'device/device/of_node/compatible', 'qcom,pmk8350-pwrkey')),
+        'PMIC power key')
+    backlight = SYS / 'class/backlight/ktz8866-backlight'
+    if (not compatible(backlight / 'device/of_node/compatible', 'kinetic,ktz8866')
+            or int(read(backlight / 'max_brightness')) <= 0):
+        raise NotReady('internal backlight is unavailable')
+    for device, node in [(card, DEV / 'dri' / card.name),
+                         (render, DEV / 'dri' / render.name),
+                         (touch, DEV / 'input' / touch.name),
+                         (power, DEV / 'input' / power.name)]:
+        char_node(device, node)
+    return [card, panel, render, touch, power, backlight]
+
+
+def wait_ready(timeout=TIMEOUT):
+    board_identity()
+    started = time.monotonic()
+    deadline = started + timeout
+    reason = 'devices have not appeared'
+    while time.monotonic() < deadline:
+        try:
+            paths = required_devices()
+        except (OSError, ValueError) as error:
+            reason = str(error)
+            time.sleep(min(.05, max(0, deadline - time.monotonic())))
+            continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        # --initialized waits for these devices' udev rules and permissions.
+        # Deliberately omit --settle: other devices may still be initialising.
+        subprocess.run(['/usr/bin/udevadm', 'wait', '--initialized=yes',
+                        f'--timeout={math.ceil(remaining)}', *map(str, paths)],
+                       check=True, timeout=remaining)
+        if required_devices() != paths:
+            reason = 'display/input device identity changed during udev wait'
+            continue
+        print(json.dumps({'event': 'liuqin-login-ready', 'monotonic': time.monotonic(),
+                          'elapsed': time.monotonic() - started,
+                          'devices': list(map(str, paths))}), flush=True)
+        return
+    raise NotReady(f'timed out waiting for login devices: {reason}')
+
+
+if __name__ == '__main__':
+    try:
+        wait_ready()
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print('liuqin-login-ready: ' + str(error), file=sys.stderr)
+        sys.exit(1)

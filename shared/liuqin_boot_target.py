@@ -16,6 +16,11 @@ KEYS = ('os_id', 'root_partuuid', 'root_fsuuid', 'root_fstype', 'root_path', 'bo
 
 
 def current_helper():
+    installed = Path(__file__).resolve().with_name('boot-target-v1.sh')
+    if installed.exists() or installed.is_symlink():
+        if installed.is_symlink() or not installed.is_file():
+            raise ValueError('已安装的引导绑定解析器不是普通文件。')
+        return installed.read_bytes()
     return (Path(__file__).resolve().parents[1]/'device/boot/boot-target-v1.sh').read_bytes()
 
 

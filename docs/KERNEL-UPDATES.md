@@ -13,7 +13,9 @@
 元数据放在 `/usr/share/liuqin/kernels/<release>/`，记录 release、Image 和模块清单的 SHA256。
 桌面与普通设备服务可独立更新；安装和升级仍检查根系统身份、运行内核及目标模块。
 
-本页的引导更新流程仅支持 userdata 单根 ext4/Btrfs 和 A 槽。实验多系统安装产生的绑定镜像需要另外维护，当前自动更新器不接受该布局。新 boot 必须支持当前根文件系统，
+引导工具从 `0.1.7` 起支持 userdata 单根布局，以及多系统布局中**当前正在运行、已登记为默认项的 Linux**；根系统须为 ext4 或单设备 Btrfs，启动槽须为 A。
+更新器核对系统 ID、根分区 PARTUUID、文件系统 UUID、挂载路径和 `linux_boot` 身份，
+拒绝从临时启动的其他系统覆盖默认项。新 boot 必须支持当前根文件系统，
 更新器不切槽、不重分区、不改 Android 固件；B 槽不是已配置的 Linux 救援系统。
 
 ## 构建升级包
@@ -56,6 +58,12 @@ devbox run build -- --target packages
    保留上一版 boot、模块和恢复材料，且备份到平板之外。
 3. 运行配套内核后，可用 `sudo liuqin-boot-update plan <release>` 只读检查后续更新计划。
 
+多系统更新使用软件包中**尚未绑定系统**的发布镜像。更新器为当前默认项生成新的绑定版本，
+保留旧镜像，并同步 `linux_boot` 中的系统清单、根分区槽位、默认版本和内核更新记录。
+已经绑定的临时启动镜像不能直接作为升级包输入。
+`plan` 中的版本 ID 和镜像校验值用于预览；`apply` 会重新核对现场并生成本次事务的版本 ID。
+重复安装后若绑定镜像与当前 `boot_a` 完全相同，会跳过刷写并保留原有回退版本。
+
 日常 `dnf upgrade` 主要更新用户态。发行版通用内核不能直接替代设备适配内核，
 `update-initramfs` 也不会更新平板的启动分区。
 
@@ -64,8 +72,12 @@ devbox run build -- --target packages
 `sudo liuqin-boot-update enable` 绑定当前设备和布局，启用后软件包事务钩子才会写 boot。
 默认构建不启用此入口。
 
-更新器只接受真实 liuqin、内部 Qualcomm UFS、A 槽及对应单根挂载，拒绝在构建目录/chroot 写入。
+更新器只接受真实 liuqin、内部 Qualcomm UFS、A 槽及对应根挂载，拒绝在构建目录/chroot 写入。
 写入前保存旧 boot 整分区、校验值及事务记录；新镜像补零覆盖整分区，回读后恢复只读保护。
+多系统更新先保存新镜像和回退材料，验证 `boot_a` 完整回读后再提交根绑定与默认登记；
+任一步失败时同时恢复旧 boot、根绑定和登记。恢复前若发现其他操作已修改登记，停止并保留记录，
+不会覆盖后续系统切换。更新与 Recovery 共用操作锁；`linux_boot` 仅在写入期间解除只读，
+只读检查采用不回放日志的挂载方式。卸载失败时保留挂载点和内容，不递归清理。
 
 | 命令 | 作用 |
 | --- | --- |
@@ -75,12 +87,13 @@ devbox run build -- --target packages
 | `liuqin-boot-update disable` | 停用自动写入，保留文件和恢复记录 |
 | `liuqin-boot-update apply <release>` | 对已启用更新的系统写入新引导 |
 | `liuqin-boot-update confirm` | 核对实际启动内核和分区内容 |
-| `liuqin-boot-update rollback` | 校验后恢复最近旧引导，随后需正常重启 |
+| `liuqin-boot-update rollback` | 校验后恢复最近旧引导及对应多系统登记，随后需正常重启 |
 | `liuqin-boot-update recover` | 恢复中断事务，避免将半写入引导作为备份 |
 
 管理命令需要管理员权限。状态在 `/var/lib/liuqin/boot-updates/`，
 设备绑定在 `/etc/liuqin/boot-updates.json`，这些私有数据不能进入通用 rootfs。
 正在运行、当前目标和最近回退所需的内核/模块受移除保护。
+多系统布局还会读取引导存储中的当前与上一版内核记录，避免本地更新记录缺失后误删回退模块。
 
 ## 故障与恢复
 
@@ -93,7 +106,3 @@ devbox run build -- --target packages
 版本化目录的 SELinux 标签，并跳过引导更新钩子。事务结束后仍需校验共用工具、RPM 数据库及
 `/etc/ld.so.cache` 等更新文件的标签。解析 `/usr/sbin` 等父目录别名时保留文件本身的链接。
 正常使用优先在已启动的 Fedora 中通过 DNF 更新。
-
-离线回归覆盖编包、版本共存、更新/回读、中断恢复、备份损坏和移除保护，
-见 `tests/kernel-updates.py`、`tests/persistent-root.sh`、`tests/install-root-single.py`。
-这些测试和 Fastboot 真机记录均不代表系统内自动写 boot 已验收。
