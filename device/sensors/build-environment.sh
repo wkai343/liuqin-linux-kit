@@ -10,14 +10,13 @@ sensor_elf_needed() (
 run_sensor_chroot() (
 	sensor_guest_root=$1
 	shift
-	# Resolve chroot with the host PATH, then start a clean Ubuntu environment.
+	# Resolve chroot with the host PATH, then start a clean Fedora environment.
 	# Keep proxy settings, but discard Nix tool/library/compiler search paths.
 	# Do not set LC_ALL: upstream tests override LC_NUMERIC intentionally.
 	exec chroot "$sensor_guest_root" /usr/bin/env -i \
 		PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-		LANG=C.UTF-8 DEBIAN_FRONTEND=noninteractive JOBS="${JOBS:-12}" \
-		SENSOR_LIBDIR="${SENSOR_LIBDIR:-lib/aarch64-linux-gnu}" \
-		SENSOR_DISTRIBUTION="${SENSOR_DISTRIBUTION:-ubuntu}" \
+		LANG=C.UTF-8 JOBS="${JOBS:-12}" \
+		SENSOR_LIBDIR="${SENSOR_LIBDIR:-lib64}" \
 		http_proxy="${http_proxy:-${HTTP_PROXY:-}}" \
 		https_proxy="${https_proxy:-${HTTPS_PROXY:-}}" \
 		no_proxy="${no_proxy:-${NO_PROXY:-}}" \

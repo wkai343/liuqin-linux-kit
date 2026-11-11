@@ -1,8 +1,8 @@
 # Liuqin Linux Kit
 
-面向 **小米平板 6 Pro（liuqin，SM8475）** 的 Linux 构建、设备适配与 Android/Linux 安装工具。默认从官方 Fedora 45 ARM64 基础系统构建 KDE Plasma，目标内核为 Linux 7.3.3。
+面向 **小米平板 6 Pro（liuqin，SM8475）** 的 Linux 构建、设备适配与 Android/Linux 安装工具。默认从官方 Fedora 45 ARM64 基础系统构建 KDE Plasma，目标内核为 Linux 7.3.4。
 
-[安装助手](docs/INSTALLER-GUI.md) · [构建指南](docs/BUILD.md) · [硬件支持](docs/HARDWARE.md) · [文档索引](docs/README.md)
+[安装助手](docs/INSTALLER-GUI.md) · [构建指南](docs/BUILD.md) · [内核适配清单](docs/HARDWARE.md) · [文档索引](docs/README.md)
 
 本项目衍生自 **[yzddmr6/xiaomipad-6pro-mainline](https://github.com/yzddmr6/xiaomipad-6pro-mainline)**。原作者及第三方来源、署名和许可见 [CREDITS](CREDITS.md)、[LICENSE](LICENSE) 和 [NOTICE](NOTICE)。
 
@@ -12,7 +12,7 @@
 | --- | --- |
 | 设备 | 仅 liuqin |
 | 系统 | 一个 Android 加多个 Linux，可只装其中一种 |
-| 目标内核 | Linux 7.3.3 + 板级适配 |
+| 目标内核 | Linux 7.3.4 + 板级适配 |
 | 安装环境 | 自带内核的原生 Rec，通过 USB ADB 与电脑 GUI 配合 |
 | 安装器 | 先读真实分区，再选系统材料；统一备份、方案确认、限定写入和回读 |
 | 引导管理 | 电脑或具备相应能力的 Rec 切换默认系统；支持中断检查与重复引导快照回收 |
@@ -21,7 +21,7 @@
 
 固定 Rec 的跨 ROM 保护按安装后的启动链检查；已知硬件限制见对应专题。
 
-日常硬件功能、睡眠和显示的已知限制见[硬件说明](docs/HARDWARE.md)。
+内核实现、硬件验证范围、待解决项及用户态依赖见[内核适配总清单](docs/HARDWARE.md)。
 
 ## 使用安装器
 

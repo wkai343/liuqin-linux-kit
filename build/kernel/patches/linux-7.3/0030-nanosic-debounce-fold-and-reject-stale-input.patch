@@ -1,0 +1,111 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Liuqin Linux Kit contributors <build@liuqin.invalid>
+Date: Tue, 10 Nov 2026 02:41:06 +0800
+Subject: [PATCH] HID: nanosic: keep fold debounce separate from lid events
+
+Use the OEM 150 ms GPIO23 debounce. Lid updates should release covered inputs promptly without sampling a bouncing GPIO23. Honor a confirmed MCU detach even when stale HID reports are queued, while preserving input before the first status report.
+
+Reference: MiCode kernel_devicetree liuqin-t-oss at 1c507816ba8aa6117dcec41f577ef7a66d2091f7, hall_key1 and nanosic@4c.
+
+diff --git a/drivers/hid/hid-nanosic.c b/drivers/hid/hid-nanosic.c
+index f70f1f922ac13a57cdd9e5b135345885b8739b3f..a6b4cd7ee4ad10c41d31ea189608bba83d0d8936 100644
+--- a/drivers/hid/hid-nanosic.c
++++ b/drivers/hid/hid-nanosic.c
+@@ -512,6 +512,7 @@ struct nanosic {
+ 
+ 	struct gpio_desc *tablet_mode_gpio;
+ 	struct delayed_work posture_work;
++	struct work_struct lid_work;
+ 	struct input_handler lid_handler;
+ 	struct input_handle lid_handle;
+ 	bool lid_closed;
+@@ -614,13 +615,23 @@ static void nanosic_posture_work(struct work_struct *work)
+ 		nanosic_refresh_posture(nano);
+ }
+ 
++static void nanosic_lid_work(struct work_struct *work)
++{
++	struct nanosic *nano = container_of(work, struct nanosic, lid_work);
++
++	guard(mutex)(&nano->lock);
++	if (!nano->suspended && !nano->posture_stopping)
++		nanosic_report_posture(nano);
++}
++
+ static irqreturn_t nanosic_fold_irq(int irq, void *data)
+ {
+ 	struct nanosic *nano = data;
+ 
+ 	guard(mutex)(&nano->lock);
++	/* Match the 150 ms debounce of the OEM GPIO23 hall switch. */
+ 	if (!nano->posture_stopping && !nano->suspended)
+-		mod_delayed_work(system_dfl_wq, &nano->posture_work, msecs_to_jiffies(40));
++		mod_delayed_work(system_dfl_wq, &nano->posture_work, msecs_to_jiffies(150));
+ 	return IRQ_HANDLED;
+ }
+ 
+@@ -633,7 +644,7 @@ static void nanosic_lid_event(struct input_handle *handle, unsigned int type,
+ 	if (type == EV_SW && code == SW_LID) {
+ 		WRITE_ONCE(nano->lid_closed, !!value);
+ 		if (!READ_ONCE(nano->posture_stopping))
+-			mod_delayed_work(system_dfl_wq, &nano->posture_work, 0);
++			schedule_work(&nano->lid_work);
+ 	}
+ }
+ 
+@@ -661,7 +672,7 @@ static int nanosic_lid_connect(struct input_handler *handler,
+ 	/* Snapshot under the same lock as callbacks, including an already closed lid. */
+ 	scoped_guard(spinlock_irqsave, &dev->event_lock)
+ 		WRITE_ONCE(nano->lid_closed, test_bit(SW_LID, dev->sw));
+-	mod_delayed_work(system_dfl_wq, &nano->posture_work, 0);
++	schedule_work(&nano->lid_work);
+ 	return 0;
+ clear:
+ 	handle->dev = NULL;
+@@ -677,7 +688,7 @@ static void nanosic_lid_disconnect(struct input_handle *handle)
+ 	handle->dev = NULL;
+ 	WRITE_ONCE(nano->lid_closed, false);
+ 	if (!READ_ONCE(nano->posture_stopping))
+-		mod_delayed_work(system_dfl_wq, &nano->posture_work, 0);
++		schedule_work(&nano->lid_work);
+ }
+ 
+ static const struct input_device_id nanosic_lid_ids[] = {
+@@ -698,6 +709,7 @@ static void nanosic_posture_stop(void *data)
+ 	/* Unregister waits for input callbacks before the final work cancellation. */
+ 	input_unregister_handler(&nano->lid_handler);
+ 	cancel_delayed_work_sync(&nano->posture_work);
++	cancel_work_sync(&nano->lid_work);
+ }
+ 
+ static int nanosic_posture_start(struct nanosic *nano)
+@@ -1102,9 +1114,10 @@ static void nanosic_parse_frame(struct nanosic *nano, u8 *frame, size_t len)
+ 			nanosic_parse_connection_status(nano, p, pkt->wire_len);
+ 
+ 		if (pkt->dest >= 0) {
+-			/* Do not let covered or folded keys wake the compositor. */
+ 			nanosic_report_posture(nano);
+-			if (nano->input_muted)
++			/* A detached folio can leave reports queued in the bridge. */
++			if (nano->input_muted ||
++			    (nano->connection_known && !nano->keyboard_connected))
+ 				goto next_packet;
+ 			if (pkt->dest == NANOSIC_HID_TOUCHPAD)
+ 				memcpy(nano->last_touchpad, p, pkt->report_len);
+@@ -1621,6 +1634,7 @@ static int nanosic_probe(struct i2c_client *client)
+ 	INIT_DELAYED_WORK(&nano->status_work, nanosic_status_work);
+ 	INIT_DELAYED_WORK(&nano->led_work, nanosic_led_work);
+ 	INIT_DELAYED_WORK(&nano->posture_work, nanosic_posture_work);
++	INIT_WORK(&nano->lid_work, nanosic_lid_work);
+ 	/* New input devices start with LEDs clear; later HID requests win. */
+ 	nano->caps_lock_known = true;
+ 
+@@ -1743,6 +1757,8 @@ static int nanosic_suspend(struct device *dev)
+ 		gpiod_set_value_cansleep(nano->wake_gpio, 0);
+ 		nano->awake = false;
+ 	}
++	cancel_delayed_work_sync(&nano->posture_work);
++	cancel_work_sync(&nano->lid_work);
+ 	cancel_delayed_work_sync(&nano->idle_work);
+ 	cancel_delayed_work_sync(&nano->status_work);
+ 	cancel_delayed_work_sync(&nano->led_work);

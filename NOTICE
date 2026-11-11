@@ -8,10 +8,10 @@ File-level notices take precedence.
 Kernel
 ------
 
-The kernel is maintained separately in linux-sm8450-liuqin, based on
-https://github.com/sm8450-mainline/linux.git. Its COPYING, LICENSES directory,
-file-level SPDX identifiers and original authorship are retained. The exact
-revision is recorded in build/kernel/source.json.
+The kernel is built from kernel.org sources and local adaptation patches.
+Its COPYING, LICENSES directory, file-level SPDX identifiers and original
+authorship are retained. Exact sources are recorded in build/kernel/source.json
+and build/recovery/kernel/source.json.
 
 Sensor stack
 ------------
@@ -31,7 +31,7 @@ they modify.
 Charger authentication
 ----------------------
 
-* liuqin-mipps-auth (device/gnome-overlay/usr/local/libexec/liuqin-mipps-auth)
+* liuqin-mipps-auth (device/board-overlay/usr/local/libexec/liuqin-mipps-auth)
   is derived from xiaomi-mipps-auth by ianchb,
   https://github.com/ianchb/xiaomi-mipps-auth, GPL-2.0-only; the file-level
   SPDX identifier and authorship notice are retained. The liuqin adaptation
@@ -42,11 +42,6 @@ Charger authentication
 Desktop and build components
 ----------------------------
 
-* GNOME Control Center: Ubuntu source package 1:50.0-0ubuntu6.
-  https://archive.ubuntu.com/ubuntu/pool/main/g/gnome-control-center/
-  See the source package's COPYING, debian/copyright and file-level notices.
-  device/gnome-control-center/patches modifies that program and is not covered
-  by the project's MIT license.
 * AudioReach topology: the board topology source and build script carry
   BSD-3-Clause identifiers. The generated Xiaomi-Pad-6-Pro-tplg.bin is built
   from topology source; it is not classified as proprietary DSP firmware.
@@ -54,8 +49,6 @@ Desktop and build components
   https://android.googlesource.com/platform/system/tools/mkbootimg/
 * BusyBox: GPL-2.0, with file-level exceptions as documented upstream.
   https://busybox.net/
-* Ubuntu packages: each package retains its own license and copyright notices,
-  available in its source package and /usr/share/doc/*/copyright.
 
 Binary releases must identify the corresponding source versions and provide
 the source materials required by the licenses of the distributed components.
@@ -81,7 +74,7 @@ retain upstream BSD licenses. QSEE supplicant is by Dawid Wróbel
 (https://github.com/wrobelda/qsee-supplicant); QCBOR is by Laurence Lundblade
 (https://github.com/laurencelundblade/QCBOR). Exact dependencies are in
 device/fingerprint/oem/SOURCE_LOCK.json.
-The fprintd original source remains external and hash-pinned; distribution of
+The libfprint TOD and fprintd upstream archives remain external and hash-pinned; distribution of
 binaries must include corresponding source/adaptation as required by its license.
 OEM TA firmware, credentials, HATs, templates, raw images and private calibration
 are not included in this source repository.
@@ -104,7 +97,7 @@ Linux 7.3 device adaptation
 --------------------------
 
 The default source record build/kernel/source.json pins Linux stable
-v7.3.3, based on Torvalds Linux v7.3, and a port of the existing Liuqin
+v7.3.4, based on Torvalds Linux v7.3, and a port of the existing Liuqin
 adaptations. The Iris SM8450 platform
 layout references Seeker0472/liuqin-nixos commit
 73e8071e09880aeb47f0a427b9a65b8cc10927c4,
@@ -119,10 +112,3 @@ ownership, the existing MCU connector reports and explicit HID input releases.
 Original file-level authorship, SPDX identifiers and kernel licensing remain
 applicable. This source adaptation does not redistribute device firmware or
 private calibration data.
-
-Overlay source layout
----------------------
-
-The historical charger-authentication path above is now
-device/board-overlay/usr/local/libexec/liuqin-mipps-auth. Moving the common
-board payload out of gnome-overlay does not change its license or authorship.

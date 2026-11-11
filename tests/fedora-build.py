@@ -98,7 +98,7 @@ class FedoraTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'modified retired'):
             root_builder.common.remove_desktop_rescue_activation(root)
 
-    def test_fedora_target_uses_ubuntu_tools_without_legacy_installer(self):
+    def test_fedora_target_uses_fedora_base_and_keeps_kernel_defaults(self):
         original=dict(rootfs_config=str(PROJECT/'build/rootfs/fedora-plasma.json'),kernel_fragments=[],
             kernel_localversion='-liuqin-test',kernel_source='sources/test',package_version='0.1.0',jobs=2)
         flow=FedoraFlow(original,lambda *_a,**_k:self.fail('unexpected build'))
@@ -108,9 +108,11 @@ class FedoraTests(unittest.TestCase):
         from source_flow import kernel_fragments
         self.assertIn('-fedora',flow.data['kernel_localversion'])
         self.assertEqual(flow.source['release'],'45')
-        with patch('source_flow.download',return_value=self.work/'installer-base') as download:
-            self.assertEqual(flow.base(),self.work/'installer-base')
-        self.assertIn('ubuntu-base',str(download.call_args.args[1]))
+        with patch('fedora_flow.download',return_value=self.work/'fedora-base') as download:
+            self.assertEqual(flow.target_base(),self.work/'fedora-base')
+        self.assertEqual(download.call_args.args[0],flow.source['url'])
+        self.assertIn('fedora-base',str(download.call_args.args[1]))
+        self.assertNotIn('runtime_base',flow.plan())
         self.assertIn('out/build/from-source',flow.plan()['output'])
         self.assertEqual(flow.plan()['steps'][0],'官方 Fedora 45 ARM64 基础系统')
         flow.source=dict(flow.source,release='test-release')
@@ -315,8 +317,6 @@ class FedoraTests(unittest.TestCase):
              patch.object(flow,'device_debs',return_value=devices), \
              patch.object(flow,'stats_rpm',return_value=stats), \
              patch.object(flow,'fingerprint_rpm',return_value=fingerprint), \
-             patch.object(flow,'first_boot_deb',side_effect=AssertionError('must not compile setup')), \
-             patch.object(flow,'setup_archive',side_effect=AssertionError('must not download setup source')), \
              patch.object(flow,'stage',side_effect=stage),patch.object(flow,'target_action') as action:
             flow.apps()
         self.assertEqual(action.call_args.args[0],'apps')

@@ -65,7 +65,7 @@ int main(void){
  puts("OEM IRQ sequencing, WAIT_TIME, quality rejection, deadline and cancel: passed");
 }
 '''
-patch=(PROJECT/'build/kernel/patches/0002-fpc-irq-level.patch').read_text()
+patch=(PROJECT/'build/kernel/patches/linux-7.3/0001-preserve-liuqin-adaptation.patch').read_text()
 reconstructed='\n'.join(line[1:] for line in patch.splitlines() if line.startswith((' ', '+')) and not line.startswith('+++'))
 start=reconstructed.index('static __poll_t fpc1020_poll(');end=reconstructed.index('\n}',start)+2
 poll_function=reconstructed[start:end]

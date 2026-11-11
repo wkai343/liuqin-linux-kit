@@ -41,12 +41,12 @@ class EnvironmentTests(unittest.TestCase):
                                'sensor-test',str(HELPER),sys.executable,code],env=env,capture_output=True,text=True,check=True)
         return json.loads(result.stdout)
 
-    def test_guest_gets_ubuntu_paths_and_never_nix_compiler_environment(self):
-        keys=('PATH','JOBS','LANG','DEBIAN_FRONTEND','PKG_CONFIG_PATH','CROSS_COMPILE','CC','HOST_ONLY_SETTING')
+    def test_guest_gets_fedora_paths_and_never_nix_compiler_environment(self):
+        keys=('PATH','JOBS','LANG','DEBIAN_FRONTEND','SENSOR_LIBDIR','PKG_CONFIG_PATH','CROSS_COMPILE','CC','HOST_ONLY_SETTING')
         data=self.guest('import json, os; print(json.dumps({key:os.environ.get(key) for key in '+repr(keys)+'}))')
         self.assertEqual(data['PATH'],'/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')
         self.assertEqual(data['JOBS'],'7');self.assertEqual(data['LANG'],'C.UTF-8')
-        self.assertEqual(data['DEBIAN_FRONTEND'],'noninteractive')
+        self.assertIsNone(data['DEBIAN_FRONTEND']);self.assertEqual(data['SENSOR_LIBDIR'],'lib64')
         for key in ('PKG_CONFIG_PATH','CROSS_COMPILE','CC','HOST_ONLY_SETTING'):self.assertIsNone(data[key])
 
     def test_upstream_numeric_locale_override_is_not_blocked(self):

@@ -1,3 +1,0 @@
-#!/bin/sh
-# Snapshot needs DMA-BUF import; keep the global workaround for other apps.
-exec env GDK_DISABLE= /usr/bin/snapshot "$@"

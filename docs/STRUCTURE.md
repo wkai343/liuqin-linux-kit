@@ -10,7 +10,8 @@ build/
   lib/              镜像、归档和装配工具
   devbox/           主机环境、构建编排与配置示例
   kernel/           内核来源、配置与补丁
-  rootfs/           官方基础系统来源、软件配方与 overlay
+  rootfs/           Fedora 基础系统来源、软件配方与 overlay
+  runtime/          Rec Buildroot/musl 来源、配置与说明
   recovery/         原生 Rec、ADB/LVGL、固定封装与离线启动链验证
   data/             工具与 ROM 版本数据
 installer/          GUI、CLI、备份管理和源码打包
@@ -18,7 +19,6 @@ installer/          GUI、CLI、备份管理和源码打包
   pyproject.toml    uv 环境配置，配合 uv.lock 和 .python-version
 device/
   board-overlay/    公共板级服务、硬件策略与兼容组件
-  gnome-overlay/    GNOME 的 dconf、按键策略、设置面板与 Snapshot 集成
   installer/        安装、分区和校准导入脚本
   recovery/         原生 Rec 状态、UI 服务、受控写入与引导维护
   boot/             系统启动、initramfs、引导更新与恢复
@@ -49,24 +49,12 @@ out/                中间文件、成品和报告
 `device/board-overlay` 保存睡眠、RTC、背光、CABC、显示恢复、启动方向、Wi-Fi MAC、
 蓝牙、充电认证、音频、存储保护和救援等板级文件。显示恢复当前使用 KScreen 后端，
 服务通过 `ConditionPathExists` 检查其是否可用。
-`device/gnome-overlay` 只保存 GNOME 会话集成，包括 dconf/GDM、GNOME 按键动作、
-电源设置 schema 和 Snapshot 启动入口。
-
-| 打包入口 | 读取的 overlay |
-| --- | --- |
-| Fedora RPM | `board-overlay`，通用配置 |
-| Ubuntu Plasma DEB（`DEVICE_DESKTOP=generic`） | `board-overlay`，通用配置 |
-| Ubuntu GNOME DEB（`DEVICE_DESKTOP=gnome`） | `board-overlay` 与 `gnome-overlay` |
-
-两种包格式通过 [device_overlay.py](../build/lib/device_overlay.py) 装配文件，
-同一安装路径出现在两层或出现文件/目录冲突时，会在复制前报错；已有目标文件和异常父路径也会被拒绝。
-历史 Ubuntu 的 Snap 权限检查、flash-kernel、
-GNOME 包所需的旧根标记、Snap 与 flash-kernel 集成保留在板级目录；通用包排除这些组件。
-已有的 apt 更新屏蔽链接保持未打包状态，服务激活链接由相应打包入口处理。
-
-DEB 可分别用 `BOARD_OVERLAY` 和 `GNOME_OVERLAY` 指定两层来源；通用模式不要求 GNOME 层存在。
-Fedora 和 Ubuntu Plasma 的设备包缓存跟踪板级目录及装配代码，GNOME 配置变更不影响通用包缓存。
-服务文件名不决定桌面类型，例如 `liuqin-gnome-storage-guard` 也用于通用设备包。
+默认系统只构建 Fedora RPM；独立 DEB 工具仅保留通用板级包，不提供桌面镜像配方。
+两种包格式通过 [device_overlay.py](../build/lib/device_overlay.py) 装配 `board-overlay`，
+复制前检查已有目标文件与异常父路径。DEB 可用 `BOARD_OVERLAY` 指定来源；
+Fedora 设备包缓存跟踪板级目录及装配代码，服务激活链接由打包入口生成。
+旧 GNOME 设置面板、会话 overlay、Snap 与 flash-kernel 集成已移除。
+服务文件名不决定桌面类型，例如 `liuqin-gnome-storage-guard` 继续用于现有设备包，保护策略不变。
 
 ## 输出与私有数据
 

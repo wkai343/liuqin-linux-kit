@@ -21,13 +21,13 @@ RPM 工具和 pyelftools，已接入 Devbox 测试与 CI。
 `adreno-stats.py` 另用 Qt6Core 编译真实 sysfs 读取函数，并在固定源码归档存在时验证补丁。
 这两项离线检查不代替设备上的插件加载、实际 GPU 负载和睡眠恢复测试。
 
-`device-overlays.py` 检查板级/GNOME 层的组合、缺失层、同名及文件/目录冲突、已有目标文件和父路径保护，
-并使用合成编译输入构建、解包 GNOME DEB，核对两层覆盖变量、schema、依赖和维护脚本。
-它不验证 GNOME 控制中心或 ARM64 辅助程序的编译；`source-build.py` 另覆盖通用 DEB
-无需 GNOME 输入，以及 Fedora/Ubuntu 通用包的板级内容和装配代码缓存失效。
+`device-overlays.py` 检查通用板级文件、缺失来源、已有目标文件与父路径保护。
+`source-build.py` 另覆盖通用 DEB 打包，以及 Fedora 包的板级内容和装配代码缓存失效；补丁合并回归检查最终源码树相同，但生成新来源缓存与派生提交，再次构建可复用新缓存。
+`busybox-runtime.py --busybox /path/to/busybox` 使用 QEMU 执行真实 ARM64 BusyBox，检查静态链接、
+启动所需命令和归档/权限/状态读取行为；仅操作临时普通文件。
 
 `nanosic-folio.py` 按默认构建配方重建驱动并执行实际 C 函数，以模拟 GPIO/HID 检查
-连接、背折与合盖组合、修饰键/鼠标/三触点释放、屏蔽期间的状态报告、恢复采样和异常帧。
+连接、背折与合盖组合、修饰键/鼠标/三触点释放、独立防抖、拆下后的残留报告、恢复采样和异常帧。
 使用 ASan/UBSan；`--source /path/to/kernel` 可检查准备好的内核源码。
 这不替代真实 HID/libinput、霍尔电平和 Plasma 合盖动作的设备验收。
 
@@ -35,13 +35,19 @@ RPM 工具和 pyelftools，已接入 Devbox 测试与 CI。
 十个文件进入归档、root/0600 权限、首次启动复用缓存，以及原厂镜像或分段损坏时停止。
 测试不需要原厂固件或平板；与其余 root 文件所有权测试一样，在 root 或映射为 root 的隔离环境执行。
 
+## Rec 用户态
+
+[Rec runtime 验证](../build/runtime/README.md#验证与排查)覆盖真实 Buildroot/musl ARM64 工具执行。`tests/rec-runtime.py --runtime /path/to/runtime` 需要已构建的工具集、QEMU 和用户命名空间，使用临时普通磁盘文件检查 GPT/ext4/Btrfs/F2FS，以及 rootfs 权限、ACL、扩展属性和 capabilities，不访问平板。该测试与默认合成夹具测试分开执行。
+
 ## 显示与启动回归
 
 | 测试 | 检查范围 |
 | --- | --- |
 | `display-clock.py` | 补丁中的时钟取整、频率边界和 CCF 约束 |
-| `display-refresh-rates.py` | 从默认 7.3 配方重建并执行面板模式枚举；默认 90/120/144 Hz、诊断开关后的七档时序、唯一首选、机型/单链路回退、分配失败、扫描命令失败不重放及命令扫描行边界；可追加主机时钟及固定 ROM 检查 |
-| `display-brightness-minimum.py` | 两个内核配方的最低非零亮度、原厂曲线其余档位、直接写零与关屏后的恢复 |
+| `display-refresh-rates.py` | 从默认 7.3 配方重建并执行模式枚举、面板扫描命令与命令扫描行计算。可追加在线切换、主机时钟及固定 ROM 检查 |
+| `display-live-refresh.py` | 执行四档在线切换的实际 C 函数；双面板 24 个有向切换及 57 项故障、范围和回退检查，模拟 DPU/DSI 寄存器、帧边界和字节时钟舍入 |
+| `display-brightness-minimum.py` | 当前 7.3 内核的最低非零亮度、原厂曲线其余档位、直接写零与关屏后的恢复 |
+| `display-oem-backlight.py` | 执行指定源码中的背光初始化与亮灭逻辑：默认亮度、单/双芯片 I2C 故障、失败清理与重试；需候选和基线源码 |
 | `display-policy.py`、`display-recovery.py` | CABC 配置、活动会话、恢复限流、失败与退出处理 |
 | `backlight-default.py`、`boot-splash.py` | 亮度量程、初始化等待、背光/显示时钟装载顺序，以及充电与动画退出路径 |
 | `splash-handoff.py`、`splash-logo.py`、`splash-orientation.py` | 帧缓冲边界、绘制进程隔离与回退、四向特征识别、关机方向缓存及 systemd 直接入口 |
@@ -54,23 +60,38 @@ RPM 工具和 pyelftools，已接入 Devbox 测试与 CI。
 
 ### 刷新率模式
 
-`display-refresh-rates.py` 已加入 `devbox run test` 和 CI，不依赖内核源码或 ROM。
-默认枚举 90/120/144 Hz；低频实验开关额外枚举 30/48/50/60 Hz，默认拒绝低频扫描命令。
-覆盖回退、双路档位不一致、内存分配失败和部分传输禁止重放；本测试不代替真机验收。
-它执行配方中实际的面板 C 函数及命令调度计算，使用 UBSan 检查边界。
-可追加准备好的完整源码与原厂 `dtbo.img`，执行实际双 DSI/DSC 时钟计算，
-并核对固定 ROM 中两个 M81 面板的模式列表、基准时序和 PHY 字节：
+`display-refresh-rates.py` 已加入 `devbox run test` 和 CI。默认入口无需内核检出或 ROM，直接从补丁重建面板 C 函数，
+使用 UBSan 检查驱动未传参时的 90/120/144 Hz、天马和华星独立启用 60 Hz、全组低频诊断档位、
+双路档位不一致、分配失败和部分传输后禁止重发。还检查显示和触控共用的主屏识别及笔坐标范围。
+默认桌面镜像通过 `device/native-bootargs.txt` 为天马和华星启用四档在线切换，
+两种面板均以 120 Hz 为首选；未传启动参数的驱动默认值与桌面构建策略分别检查。
+
+`--source` 接受应用了当前 `source.json` 全部补丁的源码。该入口还检查双 DSI/DSC 时钟、
+在线切换的双主机能力标记、闲置显示控制器筛选，以及错过帧窗口或读回不一致时的回退。
+可追加原厂 DTBO 和显示模块对照。
 
 ```sh
 devbox run -- python3 tests/display-refresh-rates.py \
-  --source /path/to/kernel-with-0013 \
+  --source /path/to/assembled-kernel-source \
   --rom-dtbo /path/to/OS2.0.6.0.VMYCNXM/images/dtbo.img \
   --oem-module /path/to/msm_drm.ko
 ```
 
 `--oem-module` 需要 pyelftools，核对固定模块内的 M81 专用时序跳转表和常量。
 ROM 校验限定 SHA256 `5e0377c7781e57f65c474f20edf3d7fb61f03f6030ca170e4edc29467a7993dd`。
-离线测试不代表新档位已在面板上显示，也不验证切换期间的触摸、手写笔或功耗。
+真机的帧率、画面、手指和笔输入单独验收，见[四档在线切换](../docs/DISPLAY.md#四档在线切换)。
+
+`display-live-refresh.py` 同样加入默认测试和 CI。无需内核检出时，按补丁行号及已知上下文重建新增及后续修改的函数；合并补丁产生行号偏移时，只接受完整上下文的唯一匹配。
+`--source` 还核对完整源码中的函数与配方一致。覆盖四档全部双向转换、正常 120/60 路径省略扫描命令、
+开关与面板状态准入、双路硬件/缓存不一致、帧或 flush 超时、DSI/DPU 读回错误、部分命令失败禁止重发，
+以及实测重复时钟取整偏差、实际时钟与缓存不一致、亚 ppm 误差边界，拒绝日志包含具体时钟/寄存器数值、所有退出路径释放锁。
+命令发送必须早于锁存等待，发送时保持旧主机缓存；命令失败不得提交新缓存。
+扩展路径的两路 DSI 必须各等待至少 2 ms 才关闭时序双缓冲，已编程的失败清理也须等待。
+此测试不证明硬件双缓冲的实际锁存行为或视觉连续性。
+
+```sh
+devbox run -- python3 tests/display-live-refresh.py --source /path/to/assembled-kernel-source
+```
 
 ### Plymouth 主题运行检查
 
@@ -103,16 +124,14 @@ ROM 证明文件及具体调用记录由开发者保存在本机 `out/`；这些
 ```sh
 mkdir -p out/test-reports
 devbox run -- python3 tests/battery-readings.py \
-  --baseline /path/to/kernel-before-battery-patch \
-  --source /path/to/kernel-with-battery-patch \
+  --source /path/to/assembled-kernel-source \
   --report out/test-reports/battery-readings.json
 ```
 
-该测试在临时目录应用补丁，执行实际 getter，覆盖机型、单位、溢出及错误返回；
+该测试执行当前源码中的 getter，覆盖四种平台、单位、溢出、传输选择及错误返回；
 不修改输入源码。它验证软件换算，不证明电量计刷新及时或待机测量准确。
 
-跨版本迁移到 7.3 时，将上例的 `--source` 换成 `--rebased-source`：执行新版 getter，
-保留原有属性换算和固件传输约束，允许主线新增属性。首帧背光另用
+首帧背光另用
 `tests/kernel73-first-frame.py --source /path/to/kernel-7.3 --report out/test-reports/first-frame.json`，
 检查新版 DRM follower 锁、回调、延迟背光和取消竞态。
 `tests/kernel73-probe.py --source /path/to/kernel-7.3` 执行 GPIO 元数据与相机电源域选择代码，
@@ -137,20 +156,20 @@ devbox run -- python3 tests/battery-readings.py \
 | 测试 | 输入源码阶段 | 覆盖 |
 | --- | --- | --- |
 | `tddi-calibration-recovery.py` | 应用到 `0010` 的快照，不包含 `0011` | 54 项：稳定校准门限、一次恢复、传输错误、关屏取消、锁顺序和已有告警保留 |
-| `tddi-initial-wake.py` | 包含 `0011` 的最终配方 | 70 项：上述恢复保护、首次显示就绪依赖、原厂唤醒报文与等待、部分失败禁止重发、周期内参数切换和恢复开关独立性 |
+| `tddi-initial-wake.py` | 当前最终配方（含 `0011`、合并后的 `0024` 和 `0031`） | 84 项：首次显示就绪、原厂唤醒报文、部分失败禁止重发、笔报文与输入提交计数、笔命令失败后手指继续工作，以及有限重试和关屏/挂起取消、FD/FE 看门狗连续帧识别和输入隔离 |
 
 最终配方的运行示例：
 
 ```sh
 mkdir -p out/test-reports
 devbox run -- python3 tests/tddi-initial-wake.py \
-  --source /path/to/kernel-with-0011 \
+  --source /path/to/assembled-kernel-source \
   --report out/test-reports/initial-wake.json
 ```
 
 脚本自带桩代码，不依赖私有日志、固件或旧诊断脚本，也不修改输入源码。
 这些源码阶段检查不属于普通 `devbox run test` 的自动构建入口；真机结果见
-[显示验证](../docs/DISPLAY.md#首次唤醒顺序)。
+[显示验证](../docs/DISPLAY.md#验证结论)。
 
 真机测试分别记录临时启动、固定引导后的重启、拔线冷启动及睡眠唤醒；
 故障后自动恢复必须单独记录，不能写成“首次显示正常”。
@@ -241,6 +260,8 @@ devbox run -- python3 tests/partition-editor-device.py
 `native-touch-service.py` 检查触控衔接的只读环境、simplefb、模块/固件哈希门槛及模块失败处理。`native-touch-input.c` 覆盖快速点击、非零触点槽、多指隔离、事件丢失、启动时已按住及手写笔悬停；可独立编译或通过 UI 的 `UI_EVENT_TESTS` 运行，不接触真实输入设备。
 
 `recovery-kernel-components.py` 用主机 C 夹具执行内核 GPT 兼容谓词，拒绝其他磁盘和不一致的镜像表；有本地基线镜像及 DTC 时检查电池传输、USB 角色、触控面板及原版显示时钟/电源依赖的保留。有 Unicorn 和 ARM64 工具链时，在四种装载地址执行对齐入口，验证重叠复制及 FDT 参数。缺少可选构建输入时只跳过对应项目，不代替真机启动验收。
+
+`recovery-source.py` 从本地 Git 夹具执行官方基线加补丁的完整装配，检查最终源码树；拒绝非 kernel.org 来源、修改过的补丁/配置/源码、公共补丁顺序分叉、功能配置变化、混用基础镜像和内核组件、遗漏对应源码及组件篡改。默认也核对仓库当前公共补丁清单与 Rec 摘要绑定，拒绝遗漏补丁文件；即使源码树不变，补丁重新打包后也不能沿用旧组件身份。还检查 Rec 触控补丁只修改选定的构建副本，分发包保留完整公共/专用来源记录。设置 `LIUQIN_RECOVERY_COMPONENTS` 可检查真实组件、必要内置驱动及 DTB 的显示/触控、USB peripheral、ADSP 电池依赖；再设置 `LIUQIN_RECOVERY_BASELINE_DTB` 可比较候选与参考 DTB 的全部节点、属性与保留内存范围。构建步骤见[Rec 内核配方](../build/recovery/kernel/README.md)。
 
 `kernel-common-fixes.py` 检查正式内核 Image 对齐封装的完整性、重复发布与无效布局，并模拟执行四种装载地址。传入 `--source <已适配的 7.3 源码>` 时，另外编译执行真实 CPU/GPT/OF/触控/键盘函数，验证板型和元数据边界、活跃设备依赖、有限重试及超时日志；音频夹具覆盖 APM 回调未注册、probe 失败、错误/短回包、保留其他板型耳机检测等情况。时钟夹具在注册过程中同步准备和释放新父时钟，覆盖速率与投票两类回调及注册失败；恢复旧的数据发布顺序会实际触发空指针检查。
 

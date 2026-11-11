@@ -113,11 +113,12 @@ class DeviceTreeTests(unittest.TestCase):
 
 class KernelQuirkTests(unittest.TestCase):
     def test_factory_gpt_exception_rejects_other_disks_and_mismatched_tables(self):
-        patch = (PROJECT/'build/recovery/kernel-log-fixes.patch').read_text()
-        match = re.search(r'^\+static bool liuqin_factory_backup\(.*?^\+}\n', patch, re.M | re.S)
-        self.assertIsNotNone(match)
+        patch = (PROJECT/'build/kernel/patches/linux-7.3/0014-liuqin-validated-platform-quirks.patch').read_text()
+        matches = [re.search(r'^\+static bool '+name+r'\(.*?^\+}\n', patch, re.M | re.S)
+                   for name in ('liuqin_factory_disk', 'liuqin_factory_backup')]
+        self.assertTrue(all(matches))
         # Compile the actual added kernel predicate with small host-side types.
-        function = '\n'.join(line[1:] for line in match[0].splitlines())
+        function = '\n'.join(line[1:] for match in matches for line in match[0].splitlines())
         fixture = r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -130,19 +131,22 @@ typedef struct {
     uint32_t num_partition_entries, sizeof_partition_entry, partition_entry_array_crc32;
     uint8_t disk_guid[16];
 } gpt_header;
-struct disk { const char *disk_name; };
+struct device {struct device *parent;void *of_node;};
+struct disk { const char *disk_name; struct device dev; };
 struct parsed_partitions { struct disk *disk; };
-static bool compatible=true, recovery=true, abl_model=false;
-static void *of_root;
+static bool compatible=true, internal_ufs=true;
 #define le64_to_cpu(x) (x)
 #define le32_to_cpu(x) (x)
 #define efi_guidcmp(a,b) memcmp((a),(b),16)
-static bool of_machine_is_compatible(const char *name) { return compatible; }
-static int of_property_match_string(void *root,const char *key,const char *value) { return abl_model?0:-1; }
-static bool of_property_read_bool(void *root,const char *name) { return recovery; }
+static bool liuqin_board_quirks(void) { return compatible; }
+static struct device *disk_to_dev(struct disk *disk) { return &disk->dev; }
+static bool of_device_is_compatible(void *node,const char *name) {
+    assert(!strcmp(name,"qcom,sm8450-ufshc"));return internal_ufs;
+}
 '''+function+r'''
 int main(void) {
-    struct disk disk={"sdd"};
+    struct device controller={.of_node=&controller};
+    struct disk disk={.disk_name="sdd",.dev={.parent=&controller}};
     struct parsed_partitions state={&disk};
     gpt_header primary={.my_lba=1,.alternate_lba=8191,.first_usable_lba=6,
         .last_usable_lba=8186,.num_partition_entries=4,.sizeof_partition_entry=128,
@@ -152,9 +156,10 @@ int main(void) {
 #define ACCEPT() liuqin_factory_backup(&state,&primary,&backup,entries,mirror,8191)
     assert(ACCEPT()); disk.disk_name="sdf"; assert(ACCEPT());
     disk.disk_name="sda"; assert(!ACCEPT()); disk.disk_name="sdd";
-    recovery=false; assert(!ACCEPT()); recovery=true;
-    compatible=false; assert(!ACCEPT()); abl_model=true; assert(ACCEPT());
-    abl_model=false; compatible=true;
+    internal_ufs=false; assert(!ACCEPT()); internal_ufs=true;
+    compatible=false; assert(!ACCEPT()); compatible=true;
+    controller.of_node=NULL; assert(!ACCEPT()); controller.of_node=&controller;
+    disk.dev.parent=NULL; assert(!ACCEPT()); disk.dev.parent=&controller;
     backup.alternate_lba=1; assert(!ACCEPT()); backup.alternate_lba=8191;
     backup.disk_guid[0]=1; assert(!ACCEPT()); backup.disk_guid[0]=0;
     backup.first_usable_lba++; assert(!ACCEPT()); backup.first_usable_lba--;

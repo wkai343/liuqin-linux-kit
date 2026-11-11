@@ -13,7 +13,7 @@ import tempfile
 import unittest
 
 PROJECT = Path(__file__).resolve().parents[1]
-PATCH = PROJECT / 'build/kernel/patches/0034-liuqin-minimum-brightness.patch'
+PATCH = PROJECT / 'build/kernel/patches/linux-7.3/0034-liuqin-minimum-brightness.patch'
 DRIVER = Path('drivers/video/backlight/ktz8866.c')
 HEADER = DRIVER.with_name('ktz8866-liuqin-curve.h')
 CURVE_SHA256 = 'c24e55fd830fc5774abae7d572a939773eed3b1b706a7eb2b66b1a254a1224cf'
@@ -152,7 +152,6 @@ class MinimumBrightnessTests(unittest.TestCase):
         cls.addClassCleanup(cls.work.cleanup)
         cls.before, cls.after = {}, {}
         for version, manifest, curve_patch, backlight_patch in (
-            ('6.17', 'source-6.17.json', '0024-liuqin-oem-brightness-curve.patch', '0020-liuqin-oem-backlight-control.patch'),
             ('7.3', 'source.json', 'linux-7.3/0001-preserve-liuqin-adaptation.patch', 'linux-7.3/0001-preserve-liuqin-adaptation.patch'),
         ):
             config = json.loads((PROJECT / 'build/kernel' / manifest).read_text())

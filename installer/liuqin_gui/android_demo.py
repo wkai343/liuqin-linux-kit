@@ -24,7 +24,7 @@ def initialize(engine, layout):
     generation='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
     ids=['11111111-1111-4111-8111-111111111111','22222222-2222-4222-8222-222222222222']
     config=dict(schema_version=1,userdata_gib=32,boot_gib=2,boot_action='set-default',default_id=ids[0],roots=[
-        dict(id=id,name=name,size_gib=32,filesystem=fs) for id,name,fs in zip(ids,('Fedora Plasma','Ubuntu Plasma'),('ext4','btrfs'))])
+        dict(id=id,name=name,size_gib=32,filesystem=fs) for id,name,fs in zip(ids,('Fedora Plasma','Linux Btrfs'),('ext4','btrfs'))])
     planned=plan(disk,config,generation)
     inventory={}
     for p in planned['prefix']+planned['partitions']:

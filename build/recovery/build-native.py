@@ -21,6 +21,8 @@ sys.path.insert(0,str(PROJECT/'shared'))
 from liuqin_artifacts import boot_interface,bounded_initramfs
 from liuqin_recovery_image import records,pack,add
 from liuqin_native_recovery import MARKER,AGENT,BOARD_HELPER,UI_FILES,TOUCH_FILES
+sys.path.insert(0, str(PROJECT/'build/recovery'))
+from kernel_recipe import DEFAULT_LOCK, load, prepare_touch, verify_build
 
 
 def sha(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -46,12 +48,20 @@ def build(args):
     out=args.out.resolve()
     if out.exists():raise ValueError('output already exists: '+str(out))
     if not out.is_relative_to(PROJECT/'out'):raise ValueError('output must be below project/out')
+    recovery_source = verify_build(args.kernel_source, args.kernel_out, args.source_lock)
     config=(args.kernel_out/'.config').read_text()
     for key in ('BLK_DEV_SD','SCSI_UFSHCD','SCSI_UFS_QCOM','USB_DWC3','USB_GADGET','USB_CONFIGFS_RNDIS','EXT4_FS','DEVTMPFS','FB_SIMPLE','FRAMEBUFFER_CONSOLE','BACKLIGHT_KTZ8866'):
         if 'CONFIG_'+key+'=y\n' not in config:raise ValueError('native Recovery needs builtin '+key)
     source_manifest=json.loads((args.runtime/'runtime-files.json').read_text())
     for name,digest in source_manifest.items():
         if sha(args.runtime/name)!=digest:raise ValueError('runtime input changed: '+name)
+    runtime_info=json.loads((args.runtime/'etc/liuqin-runtime.json').read_text())
+    if runtime_info.get('libc')!='musl' or runtime_info.get('architecture')!='aarch64':
+        raise ValueError('native Rec requires the Buildroot ARM64 musl runtime')
+    for name,digest in runtime_info['sources'].items():
+        if sha(PROJECT/name)!=digest:raise ValueError('runtime was built from stale source: '+name)
+    for name in ('bin/busybox','lib/ld-musl-aarch64.so.1','etc/liuqin-runtime.json'):
+        if name not in source_manifest:raise ValueError('runtime manifest is incomplete: '+name)
     out.mkdir(parents=True)
     work=out/'work';work.mkdir()
     runtime=work/'runtime';shutil.copytree(args.runtime,runtime,symlinks=True)
@@ -74,22 +84,21 @@ def build(args):
     if ui:
         # This module follows the already lit panel; it never binds the real
         # panel's pinctrl or invokes its DSI/reset/power functions.
-        commit=subprocess.check_output(['git','-C',str(args.kernel_source),'rev-parse','HEAD'],text=True).strip()
-        if commit!='fe81794b5e1b8a3f11a165f3acbfdb8fa671dbb3':
-            raise ValueError('touch handoff requires the qualified NVT no-engineering-reset kernel')
-        module_build=work/'touch-build';module_build.mkdir()
+        module_build=prepare_touch(work/'touch-build', args.source_lock)
         for source in sorted((PROJECT/'device/recovery/touch').glob('*')):
             if source.is_file():
-                shutil.copy2(source,module_build/source.name);touch_sources[source.relative_to(PROJECT).as_posix()]=sha(source)
+                touch_sources[source.relative_to(PROJECT).as_posix()]=sha(source)
+        for entry in load(args.source_lock).get('touch_patches', []):
+            touch_sources[entry['path']]=entry['sha256']
         subprocess.run(['make','-C',str(args.kernel_source.resolve()),'O='+str(args.kernel_out.resolve()),
             'ARCH=arm64','CROSS_COMPILE='+os.environ.get('CROSS_COMPILE','aarch64-unknown-linux-musl-'),
-            'M='+str(module_build),'modules'],check=True)
+            'RUSTC=false','M='+str(module_build),'modules'],check=True)
         shutil.copy2(module_build/'liuqin_bootloader_panel.ko',runtime/TOUCH_FILES[0])
         shutil.copy2(PROJECT/'device/recovery/native-touch.py',runtime/TOUCH_FILES[1])
         touch_sources['device/recovery/native-touch.py']=sha(PROJECT/'device/recovery/native-touch.py')
     # The marker is added only after the final ABL-compatible DTB is hashed.
     # Its presence at boot starts the console without changing other images.
-    env=dict(os.environ,RECOVERY_KERNEL_SOURCE=str(args.kernel_source.resolve()),
+    env=dict(os.environ,BUSYBOX=str(runtime/'bin/busybox'),RECOVERY_KERNEL_SOURCE=str(args.kernel_source.resolve()),
         RECOVERY_KERNEL_OUT=str(args.kernel_out.resolve()),RECOVERY_RUNTIME=str(runtime),OUT_DIR=str(work/'assembled'),
         FIRMWARE_POOL=str(args.board.resolve()/'firmware-pool'),WLAN_HSP2_TUPLE=str(args.board.resolve()/'wlan'),
         STOCK_BASE_DIR=str(args.board.resolve()/'dtbs'),STOCK_OVERLAY_DIR=str(args.board.resolve()/'dtbo'),
@@ -118,7 +127,9 @@ def build(args):
         if sha(PROJECT/name)!=digest:raise ValueError('touch source changed during build: '+name)
     sources.update(touch_sources)
     identity=dict(kernel_sha256=kernel_sha,dtb_sha256=hashlib.sha256(dtb).hexdigest(),
-        payload_sha256=payload,sources=sources,rootfs_archive_sha256=hashlib.sha256(data[ramstart:ramstart+rs]).hexdigest())
+        payload_sha256=payload,sources=sources,rootfs_archive_sha256=hashlib.sha256(data[ramstart:ramstart+rs]).hexdigest(),
+        recovery_source=recovery_source)
+    identity['tool_runtime']=runtime_info
     if ui:identity['ui_build']=ui
     manifest=dict(schema=1,interface='liuqin-native-recovery-v1',device='liuqin',
         build_id=hashlib.sha256(encoded(identity)).hexdigest(),usage='temporary-boot-only',status='DEVICE_UNTESTED',inspection_only=True,
@@ -155,4 +166,5 @@ if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__)
     for name in ('kernel-source','kernel-out','runtime','board','out'):p.add_argument('--'+name,type=Path,required=True)
     p.add_argument('--ui-runtime',type=Path,help='Static ARM64 LVGL runtime produced by build-ui.py')
+    p.add_argument('--source-lock',type=Path,default=DEFAULT_LOCK)
     build(p.parse_args())

@@ -7,12 +7,12 @@ export LC_ALL=C
 
 project_root=$(CDPATH= cd -- "$(dirname -- "$(realpath -- "$0")")/../.." && pwd)
 python3 "$project_root/build/lib/usb_identity.py"
-busybox=${BUSYBOX:-"$project_root/inputs/busybox-arm64/usr/bin/busybox"}
+busybox=${BUSYBOX:?"set BUSYBOX to the source-built static ARM64 binary"}
 # Explicitly select a stage-2 image, or ROOTFS=none for a native persistent root.
 if [ -z "${ROOTFS+isset}" ]; then
 	echo "error: ROOTFS is not set, and it has no default." >&2
 	echo "       ROOTFS=out/rootfs/rootfs.squashfs" >&2
-	echo "           the two-stage image: initramfs + Ubuntu Base in RAM" >&2
+	echo "           the two-stage image: initramfs + ARM64 tool runtime in RAM" >&2
 	echo "       ROOTFS=none" >&2
 	echo "           no embedded stage-2 image" >&2
 	exit 1
@@ -41,10 +41,8 @@ touch_firmware_sha256="\
 # hci_dev_open() straight away, which runs hdev->setup -- qca_setup() -- which
 # is where the two request_firmware() calls live. Nothing waits for a user: by
 # the time /init has finished counting block devices the requests have already
-# been made and answered, or already failed. Ubuntu Base ships no BlueZ, so
-# there is no second chance from userspace either: no hciconfig, no btmgmt,
-# nothing that could re-open hci0 once the rootfs is up. One megabyte, and it
-# is the difference between the driver having a chance and not.
+# been made and answered, or already failed. Include the firmware early so
+# Bluetooth initialization does not depend on a later userspace retry.
 #
 # Selection rule and pinning are shared with build/scripts/build-liuqin-firmware-prep.sh;
 # the two scripts ship the identical set, from the identical directory, and both
@@ -473,11 +471,7 @@ if [ -n "$rootfs" ] && [ "$embed_rootfs" = 1 ]; then
 	chmod 0644 "$staging/rootfs.squashfs"
 fi
 
-# `ln` and `udhcpd` were used by the init script long before they were linked
-# here: the Ubuntu BusyBox is built with the standalone shell, so its own `sh`
-# dispatches applets it cannot find in PATH. That is a property of one vendor's
-# build, not of BusyBox, and nothing outside `sh` gets it -- so link every applet
-# the init script names.
+# Link init's commands explicitly so callers do not need ash applet dispatch.
 for applet in basename blockdev cat chmod chroot cp cttyhack cut dmesg findfs \
 	hostname ip kill killall ln losetup ls mkdir mount poweroff readlink reboot \
 	setsid sh sha256sum sleep stat switch_root sync telnetd udhcpd umount; do

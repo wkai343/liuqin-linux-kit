@@ -157,7 +157,7 @@ class WorkflowTests(unittest.TestCase):
 
     def combined_request(self,android=True):
         request=self.linux_request();second=str(uuid.uuid4());name='lqr_'+second.replace('-','')[:12]
-        request['partition_config']['roots'].append(dict(id=second,name='Ubuntu',size_gib=32,filesystem='ext4'))
+        request['partition_config']['roots'].append(dict(id=second,name='Linux Btrfs',size_gib=32,filesystem='ext4'))
         roots=[request['target'],name]
         request.update(install_targets=(['userdata'] if android else [])+roots,rom_path='DEMO',
             linux_bundles={n:str(self.engine.demo_bundle) for n in roots},default_target=roots[-1])

@@ -10,6 +10,7 @@ out=${OUT_DIR:-$project/out/build/recovery-base}
 # The runtime and firmware are installation tools, independent of the target
 # kernel, modules, desktop and native-root manifest.
 KERNEL_SOURCE="$kernel_source" KERNEL_OUT="$kernel_out" \
+    BUSYBOX="$runtime/bin/busybox" \
     KERNEL_IMAGE="$kernel_out/arch/arm64/boot/Image" \
     KERNEL_DTB="$kernel_out/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dtb" \
     LIUQIN_ROOT_PROFILE=installer INSTALLER_RUNTIME="$runtime" \

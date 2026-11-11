@@ -1,29 +1,18 @@
 # SPDX-License-Identifier: MIT
-"""Compose board files and optional GNOME integration for device packages."""
+"""Stage desktop-neutral board files for device packages."""
 import argparse
 from pathlib import Path
 import shutil
 
 PROJECT = Path(__file__).resolve().parents[2]
 
-# These legacy Ubuntu integrations are still shipped by the GNOME DEB profile.
-# They do not depend on GNOME, but the current generic profiles do not enable
-# Snap or flash-kernel.
-LEGACY_UBUNTU_FILES = (
-    'etc/flash-kernel',
-    'etc/liuqin-gnome-root',
-    'etc/systemd/system/liuqin-snap-root-admission.service',
-    'usr/local/sbin/liuqin-snap-root-admission',
-)
 
-
-def overlay_files(source, excluded=()):
+def overlay_files(source):
     source = Path(source)
     if not source.is_dir():
         raise ValueError(f'overlay directory is unavailable: {source}')
     for path in sorted(source.rglob('*')):
         # Keep package activation unchanged: builders add any required links.
-        # In particular, dormant legacy apt masks are not package payloads.
         if path.is_symlink() or not path.is_file():
             continue
         relative = path.relative_to(source)
@@ -32,32 +21,20 @@ def overlay_files(source, excluded=()):
             continue
         name = relative.as_posix()
         if any(name == prefix or name.startswith(prefix + '/')
-               for prefix in ('usr/lib/firmware', *excluded)):
+               for prefix in ('usr/lib/firmware',)):
             continue
         yield name, path
 
 
-def stage_overlay(root, *, board_overlay, gnome_overlay=None, desktop='generic'):
-    if desktop not in ('generic', 'gnome'):
-        raise ValueError(f'unsupported desktop profile: {desktop}')
-    layers = [(board_overlay, LEGACY_UBUNTU_FILES if desktop == 'generic' else ())]
-    if desktop == 'gnome':
-        if gnome_overlay is None:
-            raise ValueError('GNOME overlay is required for the GNOME profile')
-        layers.append((gnome_overlay, ('etc/gdm3/custom.conf',)))
-
+def stage_overlay(root, *, board_overlay):
     root = Path(root)
     files = {}
-    # Validate the entire composition before copying: one layer must not
-    # silently replace a board policy supplied by another layer.
-    for source, excluded in layers:
-        for name, path in overlay_files(source, excluded):
-            if name in files:
-                raise ValueError(f'overlapping overlay path: {name}')
-            target = root / name
-            if target.exists() or target.is_symlink():
-                raise ValueError(f'overlay target already exists: {target}')
-            files[name] = path
+    # Validate the complete payload before copying any files.
+    for name, path in overlay_files(board_overlay):
+        target = root / name
+        if target.exists() or target.is_symlink():
+            raise ValueError(f'overlay target already exists: {target}')
+        files[name] = path
 
     for name in files:
         for parent in Path(name).parents:
@@ -80,13 +57,10 @@ def stage_overlay(root, *, board_overlay, gnome_overlay=None, desktop='generic')
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--board', type=Path, default=PROJECT / 'device/board-overlay')
-    parser.add_argument('--gnome', type=Path, default=PROJECT / 'device/gnome-overlay')
-    parser.add_argument('--desktop', choices=('generic', 'gnome'), default='generic')
     parser.add_argument('--out', type=Path, required=True)
     args = parser.parse_args()
     try:
-        stage_overlay(args.out, board_overlay=args.board,
-                      gnome_overlay=args.gnome, desktop=args.desktop)
+        stage_overlay(args.out, board_overlay=args.board)
     except (OSError, ValueError) as error:
         parser.exit(1, f'device overlay: {error}\n')
 

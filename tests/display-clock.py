@@ -19,6 +19,9 @@ def new_side(patch):
     for line in patch.read_text().splitlines():
         if line.startswith('@@ '):
             in_hunk = True
+            declaration = line.split('@@', 2)[-1].strip()
+            if declaration.startswith('static int dsi_pll_7nm_clk_determine_rate('):
+                lines.append(declaration)
         elif line.startswith('diff --git'):
             in_hunk = False
         elif in_hunk and line[:1] in (' ', '+'):
@@ -27,7 +30,7 @@ def new_side(patch):
 
 
 def round_function(source):
-    start = source.index('static long dsi_pll_7nm_clk_round_rate(')
+    start = source.index('static int dsi_pll_7nm_clk_determine_rate(')
     end = source.index('{', start) + 1
     depth = 1
     while depth:
@@ -50,6 +53,7 @@ static u64 div64_u64(u64 x,u64 y){return x/y;}
 struct cfg {unsigned long min_pll_rate,max_pll_rate;};
 struct phy {struct cfg *cfg;};
 struct clk_hw {struct phy *phy;};
+struct clk_rate_request {unsigned long rate;};
 #define dsi_pll_7nm clk_hw
 #define to_pll_7nm(x) (x)
 static struct cfg config={600000000UL,5000000000UL};
@@ -58,7 +62,9 @@ static struct clk_hw pll={&phy};
 '''
 WRAPPER = r'''
 unsigned long tested_round(unsigned long rate) {
-    return dsi_pll_7nm_clk_round_rate(&pll,rate,0);
+    struct clk_rate_request request={.rate=rate};
+    assert(dsi_pll_7nm_clk_determine_rate(&pll,&request)==0);
+    return request.rate;
 }
 static unsigned long hardware_readback(unsigned long rate) {
     u64 pll_freq=rate, multiplier=1ULL<<FRAC_BITS, divider=38400000;
@@ -172,7 +178,7 @@ class DisplayClockTests(unittest.TestCase):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--patch', type=Path, default=PROJECT/'build/kernel/patches/0008-dsi7nm-clock-precision.patch')
+    parser.add_argument('--patch', type=Path, default=PROJECT/'build/kernel/patches/linux-7.3/0001-preserve-liuqin-adaptation.patch')
     args, remaining = parser.parse_known_args()
     PATCH = args.patch
     unittest.main(argv=[__file__, *remaining])

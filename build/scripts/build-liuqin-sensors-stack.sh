@@ -2,15 +2,15 @@
 # SPDX-License-Identifier: MIT
 #
 # Reproducibly build the liuqin SSC userspace as an arm64 extension layer.
-# The stock Ubuntu 26.04 root is mounted as a read-only overlay lowerdir; apt
-# and compilation can never mutate the release root.  Exact ROM configuration
+# The Fedora root is mounted as a read-only overlay lowerdir; package setup
+# and compilation cannot mutate the release root. Exact ROM configuration
 # is copied into the output, while per-device registry/calibration is excluded.
 set -eu
 export LC_ALL=C
 
 project_root=$(CDPATH= cd -- "$(dirname -- "$(realpath -- "$0")")/../.." && pwd)
 . "$project_root/device/sensors/build-environment.sh"
-rootfs=${ROOTFS:-$project_root/inputs/ubuntu-desktop-26.04-arm64/rootfs}
+rootfs=${ROOTFS:?"set ROOTFS to the prepared Fedora ARM64 build root"}
 source_manifest=${SOURCE_MANIFEST:-$project_root/device/sensors/sources.manifest}
 source_cache=${SOURCE_CACHE:-$project_root/inputs/sensor-stack-src}
 rom_sensors=${ROM_SENSORS:-$project_root/inputs/roms/liuqin/OS2.0.6.0.VMYCNXM/extracted/super-work/vendor-extract/etc/sensors}
@@ -24,14 +24,9 @@ iio_release_patch=${IIO_RELEASE_PATCH:-$project_root/device/sensors/patches/0005
 iio_availability_patch=${IIO_AVAILABILITY_PATCH:-$project_root/device/sensors/patches/0006-iio-sensor-proxy-broadcast-sensor-availability.patch}
 out_dir=${OUT_DIR:-$project_root/out/liuqin-sensors-stack}
 jobs=${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf 12)}
-update_apt=${UPDATE_APT:-0}
-distribution=${BUILD_DISTRIBUTION:-ubuntu}
-case $distribution in
-ubuntu) libdir=lib/aarch64-linux-gnu; dependency_record=ubuntu-resolute ;;
-fedora) libdir=lib64; dependency_record=fedora ;;
-*) printf '%s\n' 'unsupported sensor build distribution' >&2; exit 1 ;;
-esac
-export SENSOR_LIBDIR=$libdir SENSOR_DISTRIBUTION=$distribution
+libdir=lib64
+dependency_record=fedora
+export SENSOR_LIBDIR=$libdir
 resume=${RESUME:-0}
 assemble_only=${ASSEMBLE_ONLY:-0}
 caller_uid=${SUDO_UID:-$(id -u)}
@@ -215,7 +210,7 @@ mounted_source=1
 mount -o remount,bind,ro "$merged/build/source"
 mount -t proc proc "$merged/proc"
 mounted_proc=1
-# Ubuntu Base has an empty /dev. Provide only private character devices,
+# Provide only private character devices in the build root,
 # never a bind mount of the host's device tree.
 mount -t tmpfs -o mode=755,nosuid tmpfs "$merged/dev"
 mounted_dev=1
@@ -240,8 +235,7 @@ mounted_resolv=1
 
 case $assemble_only in
 0)
-say "installing isolated $distribution arm64 build dependencies"
-if [ "$distribution" = fedora ]; then
+say "installing isolated Fedora arm64 build dependencies"
 	# Match the desktop builder's transient repository overrides; leave the
 	# Fedora root's installed repository configuration and GPG checks intact.
 	JOBS=$jobs run_sensor_chroot "$merged" dnf -y --setopt=install_weak_deps=False \
@@ -256,50 +250,6 @@ if [ "$distribution" = fedora ]; then
 		qrtr-libs qrtr-devel umockdev umockdev-devel glibc-langpack-fr \
 		glib2-devel libqmi-devel protobuf-c-devel protobuf-c-compiler protobuf-compiler \
 		libgudev-devel polkit-devel systemd-devel json-c-devel
-else
-# appstreamcli's catalogue refresh is a desktop convenience and takes several
-# minutes under QEMU.  Removing its apt hook only in this disposable upperdir
-# makes no package-selection difference and leaves the stock root untouched.
-rm -f "$merged/etc/apt/apt.conf.d/50appstream" \
-	"$merged/etc/apt/apt.conf.d/50command-not-found" \
-	"$merged/etc/apt/apt.conf.d/99update-notifier" \
-	"$merged/etc/apt/sources.list.d/cdrom.sources"
-# Development-library upgrades can trigger dracut to rebuild the base root's
-# unrelated generic-kernel initramfs.  That output is never copied into the
-# sensor layer and takes many minutes under QEMU, so replace only the
-# disposable upperdir's update-initramfs entry point with a successful no-op.
-# The immutable release root below the overlay remains byte-for-byte intact.
-cat >"$merged/usr/sbin/update-initramfs" <<'EOF'
-#!/bin/sh
-printf '%s\n' 'liuqin sensor build: skipped unrelated initramfs regeneration'
-exit 0
-EOF
-chmod 0755 "$merged/usr/sbin/update-initramfs"
-# Package installation must not start services inside the build namespace.
-cat >"$merged/usr/sbin/policy-rc.d" <<'EOF'
-#!/bin/sh
-exit 101
-EOF
-chmod 0755 "$merged/usr/sbin/policy-rc.d"
-# RESUME may follow an interrupted package trigger.  Complete only the
-# disposable upperdir's pending dpkg configuration before asking apt to solve
-# the declared dependency set again.
-JOBS=$jobs run_sensor_chroot "$merged" dpkg --configure --pending
-if [ "$update_apt" = 1 ]; then
-	JOBS=$jobs run_sensor_chroot "$merged" apt-get -o Acquire::Retries=3 update
-elif [ "$update_apt" != 0 ]; then
-	die 'UPDATE_APT must be 0 or 1'
-else
-	say 'using the Ubuntu rootfs pinned package indexes (UPDATE_APT=0)'
-fi
-JOBS=$jobs run_sensor_chroot "$merged" apt-get -o Acquire::Retries=3 -o DPkg::Options::=--no-triggers \
-	--no-install-recommends install -y \
-	build-essential meson ninja-build pkg-config \
-	python3-dev python3-gi python3-protobuf python3-dbus python3-dbusmock python3-psutil libqrtr1 \
-	gir1.2-umockdev-1.0 umockdev locales-all \
-	libglib2.0-dev libqmi-glib-dev libprotobuf-c-dev protobuf-c-compiler protobuf-compiler \
-	libgudev-1.0-dev libpolkit-gobject-1-dev libsystemd-dev libjson-c-dev
-fi
 
 # Test dependencies belong in the ARM64 environment, checked before compiling
 # any component rather than discovering missing modules in a later Meson setup.
@@ -480,17 +430,7 @@ cleanup_ssc_server
 trap - EXIT HUP INT TERM
 DESTDIR=/build/dest meson install -C /build/work/iio-sensor-proxy
 
-if [ "$SENSOR_DISTRIBUTION" = fedora ]; then
-	rpm -qa --qf '%{NAME}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n' | LC_ALL=C sort >/build/dest/fedora-build-deps.tsv
-else
-dpkg-query -W -f='${binary:Package}\t${Version}\t${Architecture}\n' \
-	build-essential meson ninja-build pkg-config libglib2.0-dev libqmi-glib-dev \
-	python3-dev python3-gi python3-protobuf python3-dbus python3-dbusmock python3-psutil libqrtr1 \
-	gir1.2-umockdev-1.0 umockdev locales-all \
-	libprotobuf-c-dev protobuf-c-compiler protobuf-compiler libgudev-1.0-dev \
-	libpolkit-gobject-1-dev libsystemd-dev libjson-c-dev |
-	LC_ALL=C sort >/build/dest/ubuntu-resolute-build-deps.tsv
-fi
+rpm -qa --qf '%{NAME}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n' | LC_ALL=C sort >/build/dest/fedora-build-deps.tsv
 EOF
 chmod 0755 "$merged/build/build.sh"
 JOBS=$jobs run_sensor_chroot "$merged" /build/build.sh
@@ -528,7 +468,7 @@ cp "$ssc_accel_log" "$out_dir/artifacts/iio-ssc-accel-unskipped.log"
 # the SONAME symlink, rather than letting success depend on the build upperdir.
 mkdir -p "$dest/usr/$libdir"
 for qrtr_lib in "$merged"/usr/$libdir/libqrtr.so.1*; do
-	[ -e "$qrtr_lib" ] || die 'Ubuntu libqrtr1 installed no libqrtr.so.1 runtime'
+	[ -e "$qrtr_lib" ] || die 'qrtr-libs installed no libqrtr.so.1 runtime'
 	cp -a "$qrtr_lib" "$dest/usr/$libdir/"
 done
 
@@ -546,9 +486,8 @@ rm -rf "$dest/usr/include/libssc" \
 rm -f "$dest/usr/$libdir/libhexagonrpc.so" \
 	"$dest/usr/$libdir/libssc.so" \
 	"$dest/usr/$libdir/pkgconfig/libssc.pc"
-# Ubuntu owns the 3.8 SensorProxy binary/unit/data paths.  Keep those package
-# files intact and install only our verified 3.9+SSC executable under
-# /usr/local; the drop-in above replaces ExecStart without fighting dpkg.
+# Keep distribution-owned SensorProxy files intact and install the verified
+# SSC executable under /usr/local; the drop-in selects it through ExecStart.
 install -D -m 0755 "$dest/usr/libexec/iio-sensor-proxy" \
 	"$dest/usr/local/libexec/liuqin-iio-sensor-proxy"
 rm -f "$dest/usr/libexec/iio-sensor-proxy" "$dest/usr/bin/monitor-sensor" \
@@ -590,7 +529,7 @@ mv "$dest/${dependency_record}-build-deps.tsv" \
 find "$dest" -type f -perm /022 -exec chmod go-w {} +
 find "$dest/usr/libexec" "$dest/usr/local/sbin" -type f -exec chmod 0755 {} +
 
-# Close runtime libraries against the unmodified Ubuntu root, not the apt-rich
+# Close runtime libraries against the unmodified Fedora root, not the dependency-rich
 # build upper.  Copy only a SONAME that is absent from both the base and the
 # extension, plus its symlink target, then iterate because that object may add
 # another dependency.  This is how libprotobuf-c.so.1 was caught offline.
@@ -653,7 +592,7 @@ qrtr_target=$(readlink "$dest/usr/$libdir/libqrtr.so.1")
 	die 'per-device calibration leaked into the release layer'
 
 # Resolve every DT_NEEDED against the stock release root plus this extension,
-# not against the apt-populated build upperdir.  This catches the classic
+# not against the dependency-populated build upperdir.  This catches the classic
 # "works in the build chroot, missing on the tablet" packaging error.
 needed_audit=$out_dir/artifacts/runtime-needed.tsv
 : >"$needed_audit"

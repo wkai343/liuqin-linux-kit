@@ -1,0 +1,2316 @@
+From: Liuqin Linux Kit contributors <build@liuqin.invalid>
+Subject: [PATCH] drm/input: coordinate M81 refresh modes and live switching
+
+Use the OEM M81 HFP/VFP tables, with 120 Hz preferred and the same qualified
+DSC-adjusted link-clock request for every mode. Schedule DSI command DMA
+against the running video timing with guarded scanline margins. Match the
+panel B3/B2 scan commands to both host rates before declaring display ready
+for touch; reject mismatches and partial-command replay.
+
+Use the exact ABL primary-panel identity for both display and touch firmware
+selection. Support guarded Tianma and CSOT 60/90/120/144 Hz transitions
+without restarting the panel or reloading touch firmware on success.
+Admit only one active CRTC with unchanged resources, both bonded SM8450
+DSI hosts, matching hardware timings and common running clocks. Ignore
+disabled CRTCs. Check running clocks against the M81 target and cache
+without depending on a repeated clk_round_rate().
+
+Use the VFP-only path for 120/60 Hz. Other pairs stage both DSI video
+timings and the corresponding DPU registers, then send OEM B3/B2 scan
+commands before waiting for frame and flush completion. Retain old host
+caches while scheduling commands. Serialize against blanking and TDDI
+recovery, check readback, and publish caches only after confirmation.
+Keep a 2000-2010 us panel-vsync margin and write barrier before disabling
+each host's timing double buffer, including programmed failure cleanup.
+Log rejection reasons and fall back to full modesetting on failure.
+
+Retain separate liuqin_live_60, liuqin_live_60_csot and liuqin_live_all
+controls, all enabled by desktop boot arguments. Preserve diagnostic
+low-refresh modes and panel-specific wake behavior. CSOT support still
+lacks hardware validation; this consolidation changes no source behavior.
+
+Combines the local command-DMA scheduling, refresh-mode table and guarded
+four-rate live-switching patches. References:
+- MiCode kernel_devicetree liuqin-t-oss at
+  1c507816ba8aa6117dcec41f577ef7a66d2091f7, primary-panel identity.
+- OS2.0.6.0.VMYCNXM dtbo.img entry 15 and msm_drm.ko, M81 timings and commands.
+  DTBO SHA256:
+  5e0377c7781e57f65c474f20edf3d7fb61f03f6030ca170e4edc29467a7993dd
+  msm_drm.ko SHA256:
+  3079f8d315440d34d58a57de82d31e42b8bc4ff01b5cd64bf141a4c5dfb1d7ba
+- lineage-24.0-20261022-UNOFFICIAL-liuqin.zip, SHA256
+  f2b79cdf443e41300fef26b2d497ae40376a0d32a68e4d32e6baecb810cf36a8;
+  DTBO entry 32 and vendor_dlkm msm_drm.ko, SHA256
+  d5ac950c380361a7ab3b63fcc4e46b6d436deb64af49cad1b7329e52105fb8e1.
+- Qualcomm display-drivers at
+  e7ab2aa8bd2f6f27b311ccada3722d20dee4bcef, DFPS and timing updates;
+  LineageOS SM8450 modules at 3b30ba7df6608c97c0ba2d55d679a6b5987c4c66,
+  per-host timing-buffer exit wait, cross-checked against the M81 module.
+
+diff --git a/drivers/gpu/drm/bridge/panel.c b/drivers/gpu/drm/bridge/panel.c
+index c815a045f..aff28942f 100644
+--- a/drivers/gpu/drm/bridge/panel.c
++++ b/drivers/gpu/drm/bridge/panel.c
+@@ -262,6 +262,75 @@ void drm_panel_bridge_complete_first_frame(struct drm_bridge *bridge,
+ }
+ EXPORT_SYMBOL(drm_panel_bridge_complete_first_frame);
+ 
++/**
++ * drm_panel_bridge_live_refresh_begin - lock and validate an active panel
++ * @bridge: panel bridge
++ * @old: current mode
++ * @new: requested mode
++ *
++ * Return: Zero with backlight_lock held, or an error without any lock held.
++ * Every success must be paired with drm_panel_bridge_live_refresh_end().
++ */
++int drm_panel_bridge_live_refresh_begin(struct drm_bridge *bridge,
++				       const struct drm_display_mode *old,
++				       const struct drm_display_mode *new)
++{
++	struct drm_panel *panel;
++	int ret = -EOPNOTSUPP;
++
++	if (!drm_bridge_is_panel(bridge))
++		return ret;
++	panel = drm_bridge_to_panel_bridge(bridge)->panel;
++	if (!panel->funcs || !panel->funcs->prepare_live_refresh ||
++	    !panel->funcs->apply_live_refresh) {
++		dev_info(panel->dev, "Liuqin live reject: stage=bridge reason=missing-callback\n");
++		return ret;
++	}
++
++	mutex_lock(&panel->backlight_lock);
++	if (panel->prepared && panel->enabled && !panel->backlight_pending)
++		ret = panel->funcs->prepare_live_refresh(panel, old, new);
++	else
++		dev_info(panel->dev, "Liuqin live reject: stage=bridge prepared=%d enabled=%d pending=%d\n",
++			 panel->prepared, panel->enabled, panel->backlight_pending);
++	if (ret)
++		mutex_unlock(&panel->backlight_lock);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(drm_panel_bridge_live_refresh_begin);
++
++/**
++ * drm_panel_bridge_live_refresh_apply - send scan commands before timing latch
++ * @bridge: bridge successfully locked by live_refresh_begin
++ * @old: previous mode
++ * @new: pending mode whose host timing has been submitted
++ *
++ * Keeps backlight_lock held. The host command lock must be released.
++ */
++int drm_panel_bridge_live_refresh_apply(struct drm_bridge *bridge,
++				       const struct drm_display_mode *old,
++				       const struct drm_display_mode *new)
++{
++	struct drm_panel *panel = drm_bridge_to_panel_bridge(bridge)->panel;
++
++	lockdep_assert_held(&panel->backlight_lock);
++	return panel->funcs->apply_live_refresh(panel, old, new);
++}
++EXPORT_SYMBOL_GPL(drm_panel_bridge_live_refresh_apply);
++
++/**
++ * drm_panel_bridge_live_refresh_end - release the running-panel transaction
++ * @bridge: bridge successfully locked by live_refresh_begin
++ */
++void drm_panel_bridge_live_refresh_end(struct drm_bridge *bridge)
++{
++	struct drm_panel *panel = drm_bridge_to_panel_bridge(bridge)->panel;
++
++	lockdep_assert_held(&panel->backlight_lock);
++	mutex_unlock(&panel->backlight_lock);
++}
++EXPORT_SYMBOL_GPL(drm_panel_bridge_live_refresh_end);
++
+ /**
+  * drm_panel_bridge_add - Creates a &drm_bridge and &drm_connector that
+  * just calls the appropriate functions from &drm_panel.
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
+index 1f20695f8..7eba350d9 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
+@@ -10,9 +10,12 @@
+ #define pr_fmt(fmt)	"[drm:%s:%d] " fmt, __func__, __LINE__
+ #include <linux/debugfs.h>
+ #include <linux/kthread.h>
++#include <linux/iopoll.h>
+ #include <linux/seq_file.h>
+ 
++#include <drm/drm_liuqin.h>
+ #include <drm/drm_atomic.h>
++#include <drm/drm_bridge.h>
+ #include <drm/drm_crtc.h>
+ #include <drm/drm_file.h>
+ #include <drm/drm_probe_helper.h>
+@@ -540,6 +543,30 @@ int dpu_encoder_get_vsync_count(struct drm_encoder *drm_enc)
+ 	return phys ? atomic_read(&phys->vsync_cnt) : 0;
+ }
+ 
++/* Read both existing INTF mappings; never map physical addresses from DSI. */
++int dpu_encoder_get_cmd_linecounts(struct drm_encoder *encoder, u32 lines[2])
++{
++	struct dpu_encoder_virt *enc;
++	struct dpu_encoder_phys *phys;
++	int i;
++
++	if (!encoder || !lines)
++		return -EINVAL;
++	enc = to_dpu_encoder_virt(encoder);
++	if (enc->num_phys_encs != 2)
++		return -EOPNOTSUPP;
++	for (i = 0; i < 2; i++) {
++		phys = enc->phys_encs[i];
++		if (!phys || phys->intf_mode != INTF_MODE_VIDEO ||
++		    !phys->hw_intf || !phys->hw_intf->ops.get_line_count)
++			return -EOPNOTSUPP;
++		if (phys->enable_state != DPU_ENC_ENABLED)
++			return -EAGAIN;
++		lines[i] = phys->hw_intf->ops.get_line_count(phys->hw_intf);
++	}
++	return 0;
++}
++
+ /**
+  * dpu_encoder_get_linecount - get interface line count for the encoder.
+  * @drm_enc:    Pointer to previously created drm encoder structure
+@@ -1148,6 +1175,247 @@ void dpu_encoder_cleanup_wb_job(struct drm_encoder *drm_enc,
+ 	}
+ }
+ 
++/* Both links must be near the start of the same frame. */
++static bool dpu_live_vfp_in_window(struct dpu_hw_intf *left, struct dpu_hw_intf *right)
++{
++	u32 a = left->ops.get_line_count(left);
++	u32 b = right->ops.get_line_count(right);
++
++	return a > 30 && a < 180 && b > 30 && b < 180;
++}
++
++bool dpu_encoder_live_vfp(struct drm_encoder *encoder,
++			  const struct drm_display_mode *old,
++			  const struct drm_display_mode *new)
++{
++	const u32 line_clocks = 448;
++	const u32 intf_mask = BIT(INTF_1 - INTF_0) | BIT(INTF_2 - INTF_0);
++	struct dpu_encoder_virt *enc = to_dpu_encoder_virt(encoder);
++	struct dpu_encoder_phys *left, *right;
++	struct dpu_hw_intf *intf0, *intf1;
++	struct dpu_hw_ctl *ctl;
++	unsigned long flags;
++	bool ready;
++	int ret;
++
++	if (!enc->enabled || enc->num_phys_encs != 2 || enc->intfs_swapped ||
++	    enc->disp_info.intf_type != INTF_DSI || enc->disp_info.is_cmd_mode ||
++	    !enc->dsc) {
++		drm_info(encoder->dev, "Liuqin: live refresh skipped: encoder topology\n");
++		return false;
++	}
++
++	left = enc->phys_encs[0];
++	right = enc->phys_encs[1];
++	ctl = left->hw_ctl;
++	intf0 = left->hw_intf;
++	intf1 = right->hw_intf;
++	if (!ctl || ctl != right->hw_ctl || !intf0 || !intf1 ||
++	    intf0->idx != INTF_1 || intf1->idx != INTF_2 ||
++	    left->enable_state != DPU_ENC_ENABLED || right->enable_state != DPU_ENC_ENABLED ||
++	    !drm_mode_equal(&left->cached_mode, old) ||
++	    !drm_mode_equal(&right->cached_mode, old) ||
++	    dpu_hw_intf_read_vperiod(intf0) != old->vtotal * line_clocks ||
++	    dpu_hw_intf_read_vperiod(intf1) != old->vtotal * line_clocks ||
++	    !dpu_hw_ctl_can_flush_intfs(ctl, intf_mask)) {
++		drm_info(encoder->dev, "Liuqin: live refresh skipped: DPU hardware not ready\n");
++		return false;
++	}
++
++	if (!msm_dsi_live_vfp_begin(left->dpu_kms->base.dsi[0], old)) {
++		drm_info(encoder->dev, "Liuqin: live refresh skipped: DSI hosts not ready\n");
++		return false;
++	}
++
++	ret = read_poll_timeout(dpu_live_vfp_in_window, ready, ready,
++				20, 22000, false, intf0, intf1);
++	spin_lock_irqsave(&enc->enc_spinlock, flags);
++	if (ret || !dpu_live_vfp_in_window(intf0, intf1) ||
++	    !dpu_hw_ctl_can_flush_intfs(ctl, intf_mask)) {
++		spin_unlock_irqrestore(&enc->enc_spinlock, flags);
++		msm_dsi_live_vfp_end(false, NULL);
++		drm_info(encoder->dev, "Liuqin: live refresh skipped: missed frame window\n");
++		return false;
++	}
++
++	msm_dsi_live_vfp_write(new->vtotal);
++	dpu_hw_intf_write_vperiod(intf0, new->vtotal * line_clocks);
++	dpu_hw_intf_write_vperiod(intf1, new->vtotal * line_clocks);
++	dpu_hw_ctl_flush_intfs(ctl, intf_mask);
++	spin_unlock_irqrestore(&enc->enc_spinlock, flags);
++
++	ret = read_poll_timeout(dpu_hw_ctl_can_flush_intfs, ready, ready,
++				100, 24000, false, ctl, intf_mask);
++	if (ret || dpu_hw_intf_read_vperiod(intf0) != new->vtotal * line_clocks ||
++	    dpu_hw_intf_read_vperiod(intf1) != new->vtotal * line_clocks)
++		new = NULL;
++	if (!msm_dsi_live_vfp_end(true, new)) {
++		drm_warn(encoder->dev, "Liuqin: live timing not confirmed, using full modeset\n");
++		return false;
++	}
++
++	drm_mode_copy(&left->cached_mode, new);
++	drm_mode_copy(&right->cached_mode, new);
++	return true;
++}
++
++/* Require both links to have crossed the latch boundary before using new caches. */
++static bool dpu_live_refresh_latched(struct dpu_hw_ctl *ctl, u32 mask,
++				     struct dpu_hw_intf *left, struct dpu_hw_intf *right,
++				     u32 frame0, u32 frame1)
++{
++	return dpu_hw_ctl_can_flush_intfs(ctl, mask) &&
++	       dpu_hw_intf_frame_count(left) != frame0 &&
++	       dpu_hw_intf_frame_count(right) != frame1;
++}
++
++static bool dpu_encoder_live_hfp(struct drm_encoder *encoder,
++				 struct drm_bridge *panel_bridge,
++				 const struct drm_display_mode *old,
++				 const struct drm_display_mode *new)
++{
++	const u32 intf_mask = BIT(INTF_1 - INTF_0) | BIT(INTF_2 - INTF_0);
++	struct dpu_encoder_virt *enc = to_dpu_encoder_virt(encoder);
++	struct dpu_encoder_phys *left, *right;
++	struct dpu_hw_intf *intf0, *intf1;
++	struct dpu_hw_ctl *ctl;
++	unsigned long flags;
++	u32 frame0, frame1;
++	bool ready;
++	int ret;
++
++	if (!enc->enabled || enc->num_phys_encs != 2 || enc->intfs_swapped ||
++	    enc->disp_info.intf_type != INTF_DSI || enc->disp_info.is_cmd_mode ||
++	    !enc->dsc || enc->dsc->bits_per_component != 8 ||
++	    enc->dsc->bits_per_pixel != (8 << 4)) {
++		drm_info(encoder->dev, "Liuqin live reject: stage=encoder enabled=%d phys=%u swapped=%d intf=%d cmd=%d bpc=%u bpp=%u\n",
++			 enc->enabled, enc->num_phys_encs, enc->intfs_swapped,
++			 enc->disp_info.intf_type, enc->disp_info.is_cmd_mode,
++			 enc->dsc ? enc->dsc->bits_per_component : 0,
++			 enc->dsc ? enc->dsc->bits_per_pixel : 0);
++		return false;
++	}
++
++	left = enc->phys_encs[0];
++	right = enc->phys_encs[1];
++	ctl = left->hw_ctl;
++	intf0 = left->hw_intf;
++	intf1 = right->hw_intf;
++	if (!ctl || ctl != right->hw_ctl || !intf0 || !intf1 ||
++	    intf0->idx != INTF_1 || intf1->idx != INTF_2 ||
++	    left->enable_state != DPU_ENC_ENABLED || right->enable_state != DPU_ENC_ENABLED ||
++	    !drm_mode_equal(&left->cached_mode, old) ||
++	    !drm_mode_equal(&right->cached_mode, old) ||
++	    !dpu_hw_intf_live_timing_matches(intf0, old) ||
++	    !dpu_hw_intf_live_timing_matches(intf1, old) ||
++	    !dpu_hw_ctl_can_flush_intfs(ctl, intf_mask)) {
++		drm_info(encoder->dev, "Liuqin live reject: stage=dpu-state ctl=%d pair=%d intfs=%d/%d states=%d/%d cached=%d/%d\n",
++			 !!ctl, ctl == right->hw_ctl, intf0 ? intf0->idx : -1,
++			 intf1 ? intf1->idx : -1, left->enable_state, right->enable_state,
++			 drm_mode_equal(&left->cached_mode, old),
++			 drm_mode_equal(&right->cached_mode, old));
++		return false;
++	}
++
++	if (!msm_dsi_live_hfp_begin(left->dpu_kms->base.dsi[0], old)) {
++		drm_info(encoder->dev, "Liuqin live reject: stage=encoder reason=dsi-not-ready\n");
++		return false;
++	}
++
++	/* The active raster starts at line 216 in every admitted profile. */
++	ret = read_poll_timeout(dpu_live_vfp_in_window, ready, ready,
++				20, 22000, false, intf0, intf1);
++	spin_lock_irqsave(&enc->enc_spinlock, flags);
++	if (ret || !dpu_live_vfp_in_window(intf0, intf1) ||
++	    !dpu_hw_ctl_can_flush_intfs(ctl, intf_mask)) {
++		spin_unlock_irqrestore(&enc->enc_spinlock, flags);
++		msm_dsi_live_hfp_release();
++		msm_dsi_live_hfp_end(false, NULL);
++		drm_info(encoder->dev, "Liuqin live reject: stage=window ret=%d lines=%u/%u\n",
++			 ret, intf0->ops.get_line_count(intf0), intf1->ops.get_line_count(intf1));
++		return false;
++	}
++	frame0 = dpu_hw_intf_frame_count(intf0);
++	frame1 = dpu_hw_intf_frame_count(intf1);
++	msm_dsi_live_hfp_write(new);
++	dpu_hw_intf_live_timing_write(intf0, new);
++	dpu_hw_intf_live_timing_write(intf1, new);
++	dpu_hw_ctl_flush_intfs(ctl, intf_mask);
++	spin_unlock_irqrestore(&enc->enc_spinlock, flags);
++
++	msm_dsi_live_hfp_release();
++	/* Downstream M81 sends its FPS scan group at kickoff, before waiting
++	 * for a new frame. Keep the old host cache for that frame's DMA slot.
++	 */
++	ret = drm_panel_bridge_live_refresh_apply(panel_bridge, old, new);
++	if (ret) {
++		msm_dsi_live_hfp_end(true, NULL);
++		drm_warn(encoder->dev, "Liuqin live reject: stage=scan-before-latch ret=%d\n", ret);
++		return false;
++	}
++
++	ret = read_poll_timeout(dpu_live_refresh_latched, ready, ready,
++				100, 40000, false, ctl, intf_mask, intf0, intf1,
++				frame0, frame1);
++	if (ret || !dpu_hw_intf_live_timing_matches(intf0, new) ||
++	    !dpu_hw_intf_live_timing_matches(intf1, new)) {
++		drm_info(encoder->dev, "Liuqin live reject: stage=latch ret=%d frames=%u/%u old=%u/%u\n",
++			 ret, dpu_hw_intf_frame_count(intf0), dpu_hw_intf_frame_count(intf1),
++			 frame0, frame1);
++		new = NULL;
++	}
++	if (!msm_dsi_live_hfp_end(true, new)) {
++		drm_warn(encoder->dev, "Liuqin: live HFP timing not confirmed, using full modeset\n");
++		return false;
++	}
++
++	drm_mode_copy(&left->cached_mode, new);
++	drm_mode_copy(&right->cached_mode, new);
++	return true;
++}
++
++bool dpu_encoder_live_refresh(struct drm_encoder *encoder,
++			      const struct drm_display_mode *old,
++			      const struct drm_display_mode *new)
++{
++	struct drm_bridge *panel_bridge = NULL;
++	bool updated;
++	int ret;
++
++	if (!liuqin_live_refresh_mode(old) || !liuqin_live_refresh_mode(new) ||
++	    drm_mode_equal(old, new)) {
++		drm_info(encoder->dev, "Liuqin live reject: stage=mode old=%d new=%d clocks=%d/%d totals=%dx%d/%dx%d\n",
++			 drm_mode_vrefresh(old), drm_mode_vrefresh(new), old->clock, new->clock,
++			 old->htotal, old->vtotal, new->htotal, new->vtotal);
++		return false;
++	}
++	drm_for_each_bridge_in_chain(encoder, bridge) {
++		if (drm_bridge_is_panel(bridge)) {
++			panel_bridge = bridge;
++			break;
++		}
++	}
++	if (!panel_bridge) {
++		drm_info(encoder->dev, "Liuqin live reject: stage=bridge reason=missing-panel\n");
++		return false;
++	}
++	ret = drm_panel_bridge_live_refresh_begin(panel_bridge, old, new);
++	if (ret) {
++		drm_info(encoder->dev, "Liuqin live reject: stage=panel ret=%d old=%d new=%d\n",
++			 ret, drm_mode_vrefresh(old), drm_mode_vrefresh(new));
++		return false;
++	}
++
++	/* Lock order: panel backlight -> DSI command -> encoder spinlock. */
++	if (old->htotal == new->htotal)
++		updated = dpu_encoder_live_vfp(encoder, old, new);
++	else
++		updated = dpu_encoder_live_hfp(encoder, panel_bridge, old, new);
++
++	drm_panel_bridge_live_refresh_end(panel_bridge);
++	return updated;
++}
++
+ static void dpu_encoder_virt_atomic_mode_set(struct drm_encoder *drm_enc,
+ 					     struct drm_crtc_state *crtc_state,
+ 					     struct drm_connector_state *conn_state)
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.h b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.h
+index 4942097e7..345a0594c 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.h
+@@ -67,6 +67,7 @@ struct drm_encoder *dpu_encoder_init(struct drm_device *dev,
+ 		struct msm_display_info *disp_info);
+ 
+ int dpu_encoder_get_linecount(struct drm_encoder *drm_enc);
++int dpu_encoder_get_cmd_linecounts(struct drm_encoder *encoder, u32 lines[2]);
+ 
+ int dpu_encoder_get_vsync_count(struct drm_encoder *drm_enc);
+ 
+@@ -96,6 +97,13 @@ void dpu_encoder_cleanup_wb_job(struct drm_encoder *drm_enc,
+ 		struct drm_writeback_job *job);
+ 
+ bool dpu_encoder_is_valid_for_commit(struct drm_encoder *drm_enc);
++bool dpu_encoder_live_refresh(struct drm_encoder *encoder,
++			      const struct drm_display_mode *old,
++			      const struct drm_display_mode *new);
++
++bool dpu_encoder_live_vfp(struct drm_encoder *encoder,
++			  const struct drm_display_mode *old,
++			  const struct drm_display_mode *new);
+ 
+ void dpu_encoder_start_frame_done_timer(struct drm_encoder *drm_enc);
+ #endif /* __DPU_ENCODER_H__ */
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_ctl.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_ctl.c
+index e8729fe1c..ff54992bb 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_ctl.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_ctl.c
+@@ -140,6 +140,21 @@ static u32 dpu_hw_ctl_get_pending_flush(struct dpu_hw_ctl *ctx)
+ 	return ctx->pending_flush_mask;
+ }
+ 
++bool dpu_hw_ctl_can_flush_intfs(struct dpu_hw_ctl *ctx, u32 mask)
++{
++	return DPU_REG_READ(&ctx->hw, CTL_INTF_ACTIVE) == mask &&
++	       !DPU_REG_READ(&ctx->hw, CTL_FLUSH);
++}
++
++void dpu_hw_ctl_flush_intfs(struct dpu_hw_ctl *ctx, u32 mask)
++{
++	/* Leave the pending plane flush bitmap to the normal atomic kickoff. */
++	wmb(); /* Order both interface timing writes before the latch. */
++	DPU_REG_WRITE(&ctx->hw, CTL_INTF_FLUSH, mask);
++	wmb();
++	DPU_REG_WRITE(&ctx->hw, CTL_FLUSH, BIT(INTF_IDX));
++}
++
+ static inline void dpu_hw_ctl_trigger_flush_v1(struct dpu_hw_ctl *ctx)
+ {
+ 	int dspp;
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_ctl.h b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_ctl.h
+index e535bf013..11714e3f1 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_ctl.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_ctl.h
+@@ -358,4 +358,7 @@ struct dpu_hw_ctl *dpu_hw_ctl_init(struct drm_device *dev,
+ 				   u32 mixer_count,
+ 				   const struct dpu_lm_cfg *mixer);
+ 
++bool dpu_hw_ctl_can_flush_intfs(struct dpu_hw_ctl *ctx, u32 mask);
++void dpu_hw_ctl_flush_intfs(struct dpu_hw_ctl *ctx, u32 mask);
++
+ #endif /*_DPU_HW_CTL_H */
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.c
+index ac82b69ae..50d792e9c 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.c
+@@ -12,6 +12,7 @@
+ 
+ #include <linux/iopoll.h>
+ 
++#include <drm/drm_liuqin.h>
+ #include <drm/drm_managed.h>
+ 
+ #define INTF_TIMING_ENGINE_EN           0x000
+@@ -344,6 +345,63 @@ static void dpu_hw_intf_get_status(
+ 	}
+ }
+ 
++bool dpu_hw_intf_live_timing_matches(struct dpu_hw_intf *intf,
++				   const struct drm_display_mode *mode)
++{
++	u32 line = liuqin_line_clocks(mode);
++	const struct { u32 reg, mask, expected; } checks[] = {
++		{ INTF_TIMING_ENGINE_EN, ~0U, 1 },
++		{ INTF_CONFIG, BIT(31) | INTF_CFG_ACTIVE_H_EN | INTF_CFG_ACTIVE_V_EN, 0 },
++		{ INTF_HSYNC_SKEW, ~0U, 0 },
++		{ INTF_HSYNC_CTL, ~0U, (line << 16) | 2 },
++		{ INTF_VSYNC_PERIOD_F0, ~0U, line * mode->vtotal },
++		{ INTF_VSYNC_PULSE_WIDTH_F0, ~0U, line * 2 },
++		{ INTF_DISPLAY_V_START_F0, ~0U, line * 216 },
++		{ INTF_DISPLAY_V_END_F0, ~0U, line * 3096 - 1 },
++		{ INTF_DISPLAY_HCTL, ~0U, (347 << 16) | 48 },
++	};
++	unsigned int i;
++	u32 value;
++
++	for (i = 0; i < ARRAY_SIZE(checks); i++) {
++		value = DPU_REG_READ(&intf->hw, checks[i].reg);
++		if ((value & checks[i].mask) != checks[i].expected) {
++			pr_info("Liuqin live reject: stage=intf intf=%d reg=%#x actual=%#x mask=%#x expected=%#x rate=%d\n",
++				intf->idx - INTF_0, checks[i].reg, value,
++				checks[i].mask, checks[i].expected, drm_mode_vrefresh(mode));
++			return false;
++		}
++	}
++	return true;
++}
++
++void dpu_hw_intf_live_timing_write(struct dpu_hw_intf *intf,
++				 const struct drm_display_mode *mode)
++{
++	u32 line = liuqin_line_clocks(mode);
++
++	DPU_REG_WRITE(&intf->hw, INTF_HSYNC_CTL, (line << 16) | 2);
++	DPU_REG_WRITE(&intf->hw, INTF_VSYNC_PERIOD_F0, line * mode->vtotal);
++	DPU_REG_WRITE(&intf->hw, INTF_VSYNC_PULSE_WIDTH_F0, line * 2);
++	DPU_REG_WRITE(&intf->hw, INTF_DISPLAY_V_START_F0, line * 216);
++	DPU_REG_WRITE(&intf->hw, INTF_DISPLAY_V_END_F0, line * 3096 - 1);
++}
++
++u32 dpu_hw_intf_frame_count(struct dpu_hw_intf *intf)
++{
++	return DPU_REG_READ(&intf->hw, INTF_FRAME_COUNT);
++}
++
++u32 dpu_hw_intf_read_vperiod(struct dpu_hw_intf *intf)
++{
++	return DPU_REG_READ(&intf->hw, INTF_VSYNC_PERIOD_F0);
++}
++
++void dpu_hw_intf_write_vperiod(struct dpu_hw_intf *intf, u32 period)
++{
++	DPU_REG_WRITE(&intf->hw, INTF_VSYNC_PERIOD_F0, period);
++}
++
+ static u32 dpu_hw_intf_get_line_count(struct dpu_hw_intf *intf)
+ {
+ 	struct dpu_hw_blk_reg_map *c;
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.h b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.h
+index badd26305..261c9126a 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_hw_intf.h
+@@ -132,4 +132,14 @@ struct dpu_hw_intf *dpu_hw_intf_init(struct drm_device *dev,
+ 				     void __iomem *addr,
+ 				     const struct dpu_mdss_version *mdss_rev);
+ 
++struct drm_display_mode;
++bool dpu_hw_intf_live_timing_matches(struct dpu_hw_intf *intf,
++				   const struct drm_display_mode *mode);
++void dpu_hw_intf_live_timing_write(struct dpu_hw_intf *intf,
++				 const struct drm_display_mode *mode);
++u32 dpu_hw_intf_frame_count(struct dpu_hw_intf *intf);
++
++u32 dpu_hw_intf_read_vperiod(struct dpu_hw_intf *intf);
++void dpu_hw_intf_write_vperiod(struct dpu_hw_intf *intf, u32 period);
++
+ #endif /*_DPU_HW_INTF_H */
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
+index 86341cac9..0a9f1f7bd 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
+@@ -14,6 +14,7 @@
+ #include <linux/of_irq.h>
+ #include <linux/pm_opp.h>
+ 
++#include <drm/drm_liuqin.h>
+ #include <drm/drm_bridge.h>
+ #include <drm/drm_crtc.h>
+ #include <drm/drm_file.h>
+@@ -463,6 +464,93 @@ static int dpu_kms_check_mode_changed(struct msm_kms *kms, struct drm_atomic_com
+ 	return 0;
+ }
+ 
++static void dpu_kms_try_live_modeset(struct msm_kms *kms, struct drm_atomic_commit *state)
++{
++	struct dpu_kms *dpu_kms = to_dpu_kms(kms);
++	struct drm_private_state *old_resources, *new_resources;
++	struct dpu_global_state *old_dpu, *new_dpu;
++	struct drm_crtc_state *old, *new;
++	struct drm_crtc *crtc;
++	struct drm_encoder *encoder;
++	struct drm_connector *connector;
++	struct drm_connector_state *old_conn, *new_conn;
++	int i;
++
++	/* ABL may rewrite the root compatible. The panel opts both hosts in. */
++	if (!msm_dsi_live_vfp_supported(kms->dsi[0]))
++		return;
++
++	for_each_oldnew_crtc_in_state(state, crtc, old, new, i) {
++		if (!new->mode_changed || !old->active || !new->active)
++			continue;
++		drm_info(crtc->dev, "Liuqin live attempt: old=%d new=%d clocks=%d/%d totals=%dx%d/%dx%d\n",
++			 drm_mode_vrefresh(&old->adjusted_mode), drm_mode_vrefresh(&new->adjusted_mode),
++			 old->adjusted_mode.clock, new->adjusted_mode.clock,
++			 old->adjusted_mode.htotal, old->adjusted_mode.vtotal,
++			 new->adjusted_mode.htotal, new->adjusted_mode.vtotal);
++		if (!liuqin_live_refresh_mode(&old->adjusted_mode) ||
++		    !liuqin_live_refresh_mode(&new->adjusted_mode) ||
++		    drm_mode_equal(&old->adjusted_mode, &new->adjusted_mode)) {
++			drm_info(crtc->dev, "Liuqin live reject: stage=kms reason=mode-profile\n");
++			continue;
++		}
++
++		if (!old->enable || !new->enable ||
++		    !old->active || !new->active ||
++		    old->self_refresh_active || new->self_refresh_active ||
++		    new->active_changed || new->connectors_changed ||
++		    new->color_mgmt_changed ||
++		    old->connector_mask != new->connector_mask ||
++		    hweight32(new->connector_mask) != 1 ||
++		    old->encoder_mask != new->encoder_mask ||
++		    hweight32(new->encoder_mask) != 1) {
++			drm_info(crtc->dev, "Liuqin live reject: stage=kms reason=crtc-state enable=%d/%d self_refresh=%d/%d changes=%d/%d/%d connectors=%#x/%#x encoders=%#x/%#x\n",
++				 old->enable, new->enable, old->self_refresh_active, new->self_refresh_active,
++				 new->active_changed, new->connectors_changed, new->color_mgmt_changed,
++				 old->connector_mask, new->connector_mask, old->encoder_mask, new->encoder_mask);
++			continue;
++		}
++
++		old_resources = drm_atomic_get_old_private_obj_state(state, &dpu_kms->global_state);
++		new_resources = drm_atomic_get_new_private_obj_state(state, &dpu_kms->global_state);
++		if (!old_resources || !new_resources) {
++			drm_info(crtc->dev, "Liuqin live reject: stage=kms reason=missing-dpu-state\n");
++			continue;
++		}
++		old_dpu = to_dpu_global_state(old_resources);
++		new_dpu = to_dpu_global_state(new_resources);
++		if (memcmp(&old_dpu->pingpong_to_crtc_id, &new_dpu->pingpong_to_crtc_id,
++			   sizeof(*old_dpu) - offsetof(struct dpu_global_state, pingpong_to_crtc_id))) {
++			drm_info(crtc->dev, "Liuqin live reject: stage=kms reason=dpu-resources\n");
++			continue;
++		}
++
++		drm_for_each_encoder_mask(encoder, crtc->dev, new->encoder_mask) {
++			if (encoder->encoder_type != DRM_MODE_ENCODER_DSI)
++				continue;
++			connector = drm_atomic_get_new_connector_for_encoder(state, encoder);
++			if (!connector) {
++				drm_info(crtc->dev, "Liuqin live reject: stage=kms reason=missing-connector\n");
++				continue;
++			}
++			old_conn = drm_atomic_get_old_connector_state(state, connector);
++			new_conn = drm_atomic_get_new_connector_state(state, connector);
++			if (!old_conn || !new_conn || old_conn->crtc != crtc ||
++			    new_conn->crtc != crtc ||
++			    old_conn->best_encoder != new_conn->best_encoder) {
++				drm_info(crtc->dev, "Liuqin live reject: stage=kms reason=connector-state\n");
++				continue;
++			}
++			if (dpu_encoder_live_refresh(encoder, &old->adjusted_mode,
++					     &new->adjusted_mode)) {
++				new->mode_changed = false;
++				drm_info(crtc->dev, "Liuqin: live refresh %d Hz\n",
++					 drm_mode_vrefresh(&new->adjusted_mode));
++			}
++		}
++	}
++}
++
+ static void dpu_kms_flush_commit(struct msm_kms *kms, unsigned crtc_mask)
+ {
+ 	struct dpu_kms *dpu_kms = to_dpu_kms(kms);
+@@ -1100,6 +1188,7 @@ static const struct msm_kms_funcs kms_funcs = {
+ 	.enable_commit   = dpu_kms_enable_commit,
+ 	.disable_commit  = dpu_kms_disable_commit,
+ 	.check_mode_changed = dpu_kms_check_mode_changed,
++	.try_live_modeset = dpu_kms_try_live_modeset,
+ 	.flush_commit    = dpu_kms_flush_commit,
+ 	.wait_flush      = dpu_kms_wait_flush,
+ 	.complete_commit = dpu_kms_complete_commit,
+diff --git a/drivers/gpu/drm/msm/dsi/dsi.h b/drivers/gpu/drm/msm/dsi/dsi.h
+index e9c11935c..7674ea5d9 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi.h
++++ b/drivers/gpu/drm/msm/dsi/dsi.h
+@@ -53,13 +53,38 @@ int msm_dsi_manager_connector_init(struct msm_dsi *msm_dsi,
+ int msm_dsi_manager_cmd_xfer(int id, const struct mipi_dsi_msg *msg);
+ int msm_dsi_manager_cmd_xfer_batch(int id, const struct mipi_dsi_msg *msgs,
+ 				   size_t count);
+-bool msm_dsi_manager_cmd_xfer_trigger(int id, u32 dma_base, u32 len);
++int msm_dsi_manager_cmd_xfer_trigger(int id, u32 dma_base, u32 len);
++bool msm_dsi_host_live_hfp_matches(struct mipi_dsi_host *host,
++				   const struct drm_display_mode *mode);
++bool msm_dsi_host_live_hfp_ready(struct mipi_dsi_host *host,
++				 const struct drm_display_mode *old);
++void msm_dsi_host_live_hfp_write(struct mipi_dsi_host *host,
++				 const struct drm_display_mode *mode);
++
++bool msm_dsi_host_live_vfp_matches(struct mipi_dsi_host *host, unsigned int vtotal);
++bool msm_dsi_host_live_vfp_ready(struct mipi_dsi_host *host,
++				const struct drm_display_mode *old);
++void msm_dsi_host_live_vfp_write(struct mipi_dsi_host *host, unsigned int vtotal);
++void msm_dsi_host_live_vfp_finish(struct mipi_dsi_host *host,
++				 const struct drm_display_mode *mode);
++
+ int msm_dsi_manager_register(struct msm_dsi *msm_dsi);
+ void msm_dsi_manager_unregister(struct msm_dsi *msm_dsi);
+ void msm_dsi_manager_tpg_enable(void);
+ 
+ int msm_dsi_manager_panel_stage(int id, enum mipi_dsi_panel_stage stage);
+ 
++/* Per-transfer snapshot; the manager owns it under dsi_cmd_lock. */
++struct msm_dsi_cmd_schedule {
++	u32 saved, line, guard, total;
++	bool active;
++};
++
++int msm_dsi_host_cmd_schedule_prepare(struct mipi_dsi_host *host,
++				      struct msm_dsi_cmd_schedule *state);
++int msm_dsi_host_cmd_schedule_finish(struct mipi_dsi_host *host,
++				     struct msm_dsi_cmd_schedule *state);
++
+ /* dsi host */
+ struct msm_dsi_host;
+ int msm_dsi_host_xfer_prepare(struct mipi_dsi_host *host,
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_cmd_schedule.h b/drivers/gpu/drm/msm/dsi/dsi_cmd_schedule.h
+new file mode 100644
+index 000000000..3694c28e0
+--- /dev/null
++++ b/drivers/gpu/drm/msm/dsi/dsi_cmd_schedule.h
+@@ -0,0 +1,34 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef __DSI_CMD_SCHEDULE_H__
++#define __DSI_CMD_SCHEDULE_H__
++
++/* Pure policy shared by the paired-host driver and its boundary tests. */
++static inline int dsi_cmd_schedule_calculate(const struct drm_display_mode *m,
++					     u32 *line, u32 *guard)
++{
++	u32 front, back, sync;
++
++	if (!m || m->clock <= 0 || m->htotal <= 0 || m->vdisplay <= 0 ||
++	    m->vsync_start <= m->vdisplay || m->vsync_end <= m->vsync_start ||
++	    m->vtotal <= m->vsync_end || m->vtotal > 65535)
++		return -EINVAL;
++	front = m->vsync_start - m->vdisplay;
++	back = m->vtotal - m->vsync_end;
++	sync = m->vsync_end - m->vsync_start;
++	if (front < 2)
++		return -EINVAL;
++	*line = m->vdisplay + back + sync + 1;
++	/* Vendor allowance: 100 us of memory/trigger latency before the slot. */
++	*guard = DIV_ROUND_UP_ULL(100ULL * m->clock, 1000ULL * m->htotal);
++	if (!*guard || *guard >= *line)
++		return -EINVAL;
++	return 0;
++}
++
++static inline bool dsi_cmd_schedule_line_safe(u32 current_line, u32 line,
++					      u32 guard, u32 total)
++{
++	return current_line <= total &&
++	       (current_line < line - guard || current_line > line + 1);
++}
++#endif
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_host.c b/drivers/gpu/drm/msm/dsi/dsi_host.c
+index 2d22e359c..bbeca7b0f 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -21,11 +21,13 @@
+ 
+ #include <video/mipi_display.h>
+ 
++#include <drm/drm_liuqin.h>
+ #include <drm/display/drm_dsc_helper.h>
+ #include <drm/drm_of.h>
+ 
+ #include "dsi.h"
+ #include "dsi_cmd_batch.h"
++#include "dsi_cmd_schedule.h"
+ #include "dsi.xml.h"
+ #include "sfpb.xml.h"
+ #include "dsi_cfg.h"
+@@ -167,6 +169,7 @@ struct msm_dsi_host {
+ 	struct regmap *sfpb;
+ 
+ 	struct drm_display_mode *mode;
++	unsigned int refresh_rate;
+ 	struct drm_dsc_config *dsc;
+ 	unsigned int dsc_slice_per_pkt;
+ 
+@@ -184,6 +187,7 @@ struct msm_dsi_host {
+ 	bool cphy_mode;
+ 
+ 	u32 dma_cmd_ctrl_restore;
++	bool cmd_dma_scheduled;
+ 
+ 	bool registered;
+ 	bool power_on;
+@@ -652,13 +656,35 @@ static unsigned long dsi_get_pclk_rate(const struct drm_display_mode *mode,
+ 	return pclk_rate;
+ }
+ 
++/* The qualified M81 modes all use the existing 120 Hz link frequency.
++ * Integer-kHz DRM clocks introduce sub-kHz differences after DSC scaling.
++ * Do not retune the bonded PLL for these: a different VCO/post-divider pair
++ * has produced a doubled hardware scan rate despite the same CCF rate.
++ */
++static unsigned long dsi_host_pclk_rate(struct msm_dsi_host *host,
++					bool bonded,
++					const struct drm_display_mode *mode)
++{
++	unsigned long rate = dsi_get_pclk_rate(mode, host->dsc, bonded);
++
++	if (bonded && (host->mode_flags & MIPI_DSI_MODE_PANEL_STAGES) &&
++	    (host->mode_flags & MIPI_DSI_MODE_VIDEO_BURST) &&
++	    host->lanes == 4 && host->dsc &&
++	    host->dsc->bits_per_component == 8 &&
++	    host->dsc->bits_per_pixel == (8 << 4) &&
++	    mode->hdisplay == 1800 && mode->vdisplay == 2880 &&
++	    rate >= 167838200UL && rate <= 167839100UL)
++		return 167838626UL;
++	return rate;
++}
++
+ unsigned long dsi_byte_clk_get_rate(struct mipi_dsi_host *host, bool is_bonded_dsi,
+ 				    const struct drm_display_mode *mode)
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+ 	u8 lanes = msm_host->lanes;
+ 	u32 bpp = mipi_dsi_pixel_format_to_bpp(msm_host->format);
+-	unsigned long pclk_rate = dsi_get_pclk_rate(mode, msm_host->dsc, is_bonded_dsi);
++	unsigned long pclk_rate = dsi_host_pclk_rate(msm_host, is_bonded_dsi, mode);
+ 	unsigned long pclk_bpp;
+ 
+ 	if (lanes == 0) {
+@@ -677,7 +703,7 @@ unsigned long dsi_byte_clk_get_rate(struct mipi_dsi_host *host, bool is_bonded_d
+ 
+ static void dsi_calc_pclk(struct msm_dsi_host *msm_host, bool is_bonded_dsi)
+ {
+-	msm_host->pixel_clk_rate = dsi_get_pclk_rate(msm_host->mode, msm_host->dsc, is_bonded_dsi);
++	msm_host->pixel_clk_rate = dsi_host_pclk_rate(msm_host, is_bonded_dsi, msm_host->mode);
+ 	msm_host->byte_clk_rate = dsi_byte_clk_get_rate(&msm_host->base, is_bonded_dsi,
+ 							msm_host->mode);
+ 
+@@ -1461,7 +1487,7 @@ static int dsi_cmd_dma_tx(struct msm_dsi_host *msm_host, int len)
+ 	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
+ 	int ret;
+ 	uint64_t dma_base;
+-	bool triggered;
++	int triggered;
+ 
+ 	ret = cfg_hnd->ops->dma_base_get(msm_host, &dma_base);
+ 	if (ret) {
+@@ -1471,10 +1497,13 @@ static int dsi_cmd_dma_tx(struct msm_dsi_host *msm_host, int len)
+ 
+ 	reinit_completion(&msm_host->dma_comp);
+ 
+-	dsi_wait4video_eng_busy(msm_host);
++	if (!msm_host->cmd_dma_scheduled)
++		dsi_wait4video_eng_busy(msm_host);
+ 
+ 	triggered = msm_dsi_manager_cmd_xfer_trigger(
+ 						msm_host->id, dma_base, len);
++	if (triggered < 0)
++		return triggered;
+ 	if (triggered) {
+ 		ret = wait_for_completion_timeout(&msm_host->dma_comp,
+ 					msecs_to_jiffies(200));
+@@ -1831,7 +1860,168 @@ static int dsi_host_panel_stage(struct mipi_dsi_host *host,
+ 	return msm_dsi_manager_panel_stage(msm_host->id, stage);
+ }
+ 
++/*
++ * The SM8450 6G host's resource starts four bytes before the register
++ * base used by dsi_read/write. Vendor resource offsets are 0x1e8/0x1e4.
++ */
++#define DSI_VIDEO_TIMING_DB_MODE	0x1e4
++#define DSI_VIDEO_TIMING_FLUSH		0x1e0
++#define LIUQIN_DSI_LINE_CLOCKS		448
++
++bool msm_dsi_host_live_hfp_matches(struct mipi_dsi_host *host,
++				   const struct drm_display_mode *mode)
++{
++	struct msm_dsi_host *h = to_msm_dsi_host(host);
++	const struct { u32 reg, expected; } checks[] = {
++		{ REG_DSI_TOTAL, DSI_TOTAL_H_TOTAL(liuqin_line_clocks(mode) - 1) |
++				 DSI_TOTAL_V_TOTAL(mode->vtotal - 1) },
++		{ REG_DSI_ACTIVE_H, DSI_ACTIVE_H_START(48) | DSI_ACTIVE_H_END(348) },
++		{ REG_DSI_ACTIVE_V, DSI_ACTIVE_V_START(216) | DSI_ACTIVE_V_END(3096) },
++		{ REG_DSI_ACTIVE_HSYNC, DSI_ACTIVE_HSYNC_END(2) },
++		{ REG_DSI_ACTIVE_VSYNC_HPOS, 0 },
++		{ REG_DSI_ACTIVE_VSYNC_VPOS, DSI_ACTIVE_VSYNC_VPOS_END(2) },
++	};
++	unsigned int i;
++	u32 value;
++
++	for (i = 0; i < ARRAY_SIZE(checks); i++) {
++		value = dsi_read(h, checks[i].reg);
++		if (value != checks[i].expected) {
++			pr_info("Liuqin live reject: stage=dsi-timing host=%d reg=%#x actual=%#x expected=%#x rate=%d\n",
++				h->id, checks[i].reg, value, checks[i].expected,
++				drm_mode_vrefresh(mode));
++			return false;
++		}
++	}
++	return true;
++}
++
++bool msm_dsi_host_live_hfp_ready(struct mipi_dsi_host *host,
++				 const struct drm_display_mode *old)
++{
++	struct msm_dsi_host *h = to_msm_dsi_host(host);
++	const unsigned long target_pixel = 167838626UL, target_byte = 125878969UL;
++	const unsigned long tolerance = 100; /* Less than one ppm; PLL rounding only. */
++	unsigned long actual_pixel, actual_byte;
++	u32 ctrl, db;
++
++	if (!h->power_on || !h->enabled || !h->mode ||
++	    !(h->mode_flags & MIPI_DSI_MODE_LIVE_VFP) ||
++	    !drm_mode_equal(h->mode, old) || h->lanes != 4 || !h->dsc ||
++	    h->dsc->bits_per_component != 8 || h->dsc->bits_per_pixel != (8 << 4)) {
++		pr_info("Liuqin live reject: stage=dsi-state host=%d power=%d enabled=%d mode=%d flags=%#lx lanes=%u bpc=%u bpp=%u\n",
++			h->id, h->power_on, h->enabled,
++			h->mode && drm_mode_equal(h->mode, old), h->mode_flags,
++			h->lanes, h->dsc ? h->dsc->bits_per_component : 0,
++			h->dsc ? h->dsc->bits_per_pixel : 0);
++		return false;
++	}
++
++	/*
++	 * A new round_rate query depends on the current parent/divider state;
++	 * it need not reproduce the rate chosen when enabling the bonded PLL.
++	 * Validate the running clocks, retaining an exact stored/actual byte
++	 * match and a sub-ppm bound around the qualified M81 link frequency.
++	 */
++	actual_pixel = clk_get_rate(h->pixel_clk);
++	actual_byte = clk_get_rate(h->byte_clk);
++	if (h->pixel_clk_rate != target_pixel ||
++	    h->byte_clk_rate < target_byte - tolerance ||
++	    h->byte_clk_rate > target_byte + tolerance ||
++	    actual_byte != h->byte_clk_rate ||
++	    actual_pixel < target_pixel - tolerance ||
++	    actual_pixel > target_pixel + tolerance) {
++		pr_info("Liuqin live reject: stage=dsi-clock host=%d pixel=%lu byte=%lu actual_pixel=%lu actual_byte=%lu target_pixel=%lu target_byte=%lu tolerance=%lu\n",
++			h->id, h->pixel_clk_rate, h->byte_clk_rate, actual_pixel, actual_byte,
++			target_pixel, target_byte, tolerance);
++		return false;
++	}
++	ctrl = dsi_read(h, REG_DSI_CTRL);
++	db = dsi_read(h, DSI_VIDEO_TIMING_DB_MODE);
++	if ((ctrl & (DSI_CTRL_ENABLE | DSI_CTRL_VID_MODE_EN)) !=
++	    (DSI_CTRL_ENABLE | DSI_CTRL_VID_MODE_EN) || db) {
++		pr_info("Liuqin live reject: stage=dsi-engine host=%d ctrl=%#x db=%#x\n",
++			h->id, ctrl, db);
++		return false;
++	}
++	return msm_dsi_host_live_hfp_matches(host, old);
++}
++
++void msm_dsi_host_live_hfp_write(struct mipi_dsi_host *host,
++				 const struct drm_display_mode *mode)
++{
++	struct msm_dsi_host *h = to_msm_dsi_host(host);
++
++	dsi_write(h, DSI_VIDEO_TIMING_DB_MODE, 1);
++	wmb(); /* Enable shadow timing before the complete video timing group. */
++	/* Match downstream set_video_timing(), including unchanged active/sync fields. */
++	dsi_write(h, REG_DSI_ACTIVE_H, DSI_ACTIVE_H_START(48) | DSI_ACTIVE_H_END(348));
++	dsi_write(h, REG_DSI_ACTIVE_V, DSI_ACTIVE_V_START(216) | DSI_ACTIVE_V_END(3096));
++	dsi_write(h, REG_DSI_TOTAL, DSI_TOTAL_H_TOTAL(liuqin_line_clocks(mode) - 1) |
++		  DSI_TOTAL_V_TOTAL(mode->vtotal - 1));
++	dsi_write(h, REG_DSI_ACTIVE_HSYNC, DSI_ACTIVE_HSYNC_END(2));
++	dsi_write(h, REG_DSI_ACTIVE_VSYNC_HPOS, 0);
++	dsi_write(h, REG_DSI_ACTIVE_VSYNC_VPOS, DSI_ACTIVE_VSYNC_VPOS_END(2));
++	wmb(); /* Publish all shadow timing registers before requesting their latch. */
++	dsi_write(h, DSI_VIDEO_TIMING_FLUSH, 1);
++}
++
++bool msm_dsi_host_live_vfp_matches(struct mipi_dsi_host *host, unsigned int vtotal)
++{
++	struct msm_dsi_host *h = to_msm_dsi_host(host);
++	u32 total = DSI_TOTAL_H_TOTAL(LIUQIN_DSI_LINE_CLOCKS - 1) |
++		    DSI_TOTAL_V_TOTAL(vtotal - 1);
++
++	return dsi_read(h, REG_DSI_TOTAL) == total;
++}
++
++bool msm_dsi_host_live_vfp_ready(struct mipi_dsi_host *host,
++				const struct drm_display_mode *old)
++{
++	struct msm_dsi_host *h = to_msm_dsi_host(host);
++	u32 ctrl;
++
++	if (!h->power_on || !h->enabled || !h->mode ||
++	    !(h->mode_flags & MIPI_DSI_MODE_LIVE_VFP) ||
++	    !drm_mode_equal(h->mode, old))
++		return false;
++
++	ctrl = dsi_read(h, REG_DSI_CTRL);
++	return (ctrl & (DSI_CTRL_ENABLE | DSI_CTRL_VID_MODE_EN)) ==
++		       (DSI_CTRL_ENABLE | DSI_CTRL_VID_MODE_EN) &&
++	       msm_dsi_host_live_vfp_matches(host, old->vtotal) &&
++	       !dsi_read(h, DSI_VIDEO_TIMING_DB_MODE);
++}
++
++void msm_dsi_host_live_vfp_write(struct mipi_dsi_host *host, unsigned int vtotal)
++{
++	struct msm_dsi_host *h = to_msm_dsi_host(host);
++
++	dsi_write(h, DSI_VIDEO_TIMING_DB_MODE, 1);
++	dsi_write(h, REG_DSI_TOTAL, DSI_TOTAL_H_TOTAL(LIUQIN_DSI_LINE_CLOCKS - 1) |
++		  DSI_TOTAL_V_TOTAL(vtotal - 1));
++	dsi_write(h, DSI_VIDEO_TIMING_FLUSH, 1);
++}
++
++void msm_dsi_host_live_vfp_finish(struct mipi_dsi_host *host,
++				 const struct drm_display_mode *mode)
++{
++	struct msm_dsi_host *h = to_msm_dsi_host(host);
++
++	dsi_write(h, DSI_VIDEO_TIMING_DB_MODE, 0);
++	if (mode) {
++		drm_mode_copy(h->mode, mode);
++		WRITE_ONCE(h->refresh_rate, drm_mode_vrefresh(mode));
++	}
++}
++
++static int dsi_host_get_refresh_rate(struct mipi_dsi_host *host)
++{
++	return READ_ONCE(to_msm_dsi_host(host)->refresh_rate);
++}
++
+ static const struct mipi_dsi_host_ops dsi_host_ops = {
++	.get_refresh_rate = dsi_host_get_refresh_rate,
+ 	.attach = dsi_host_attach,
+ 	.detach = dsi_host_detach,
+ 	.transfer = dsi_host_transfer,
+@@ -2261,6 +2451,69 @@ void msm_dsi_host_xfer_restore(struct mipi_dsi_host *host,
+ 	pm_runtime_put(&msm_host->pdev->dev);
+ }
+ 
++/* Raw 6G offset 0x100, after the host's +4-byte base adjustment. */
++#define LIUQIN_DMA_SCHEDULE_CTRL 0xfc
++#define LIUQIN_DMA_SCHEDULE_MASK (BIT(28) | GENMASK(15, 0))
++
++int msm_dsi_host_cmd_schedule_prepare(struct mipi_dsi_host *host,
++				      struct msm_dsi_cmd_schedule *state)
++{
++	struct msm_dsi_host *h = to_msm_dsi_host(host);
++	int ret;
++
++	if (!h->power_on || !h->enabled ||
++	    !(h->mode_flags & MIPI_DSI_MODE_VIDEO))
++		return 0;
++	ret = dsi_cmd_schedule_calculate(h->mode, &state->line, &state->guard);
++	if (ret)
++		return ret;
++	state->total = h->mode->vtotal;
++	state->saved = dsi_read(h, LIUQIN_DMA_SCHEDULE_CTRL);
++	state->active = true;
++	h->cmd_dma_scheduled = true;
++	dsi_write(h, LIUQIN_DMA_SCHEDULE_CTRL,
++		  (state->saved & ~LIUQIN_DMA_SCHEDULE_MASK) | BIT(28) |
++			  state->line);
++	/* Read back before either DMA can be armed. Preserve unrelated bits. */
++	if (dsi_read(h, LIUQIN_DMA_SCHEDULE_CTRL) !=
++	    ((state->saved & ~LIUQIN_DMA_SCHEDULE_MASK) | BIT(28) |
++	     state->line))
++		return -EIO;
++	dev_info_once(&h->pdev->dev,
++		      "Liuqin command schedule: line %u guard %u total %u\n",
++		      state->line, state->guard, state->total);
++	return 1;
++}
++
++int msm_dsi_host_cmd_schedule_finish(struct mipi_dsi_host *host,
++				     struct msm_dsi_cmd_schedule *state)
++{
++	struct msm_dsi_host *h = to_msm_dsi_host(host);
++	u32 status, ctrl;
++	int ret;
++
++	if (!state->active)
++		return 0;
++	/* Check the non-trigger link too; do not remove scheduling while busy. */
++	ret = readl_poll_timeout(h->ctrl_base + REG_DSI_STATUS0, status,
++				 !(status & DSI_STATUS0_CMD_MODE_DMA_BUSY), 50,
++				 20000);
++	if (ret) {
++		/* Abort only the command engine; keep video, PHY and rails intact. */
++		ctrl = dsi_read(h, REG_DSI_CTRL);
++		dsi_write(h, REG_DSI_CTRL, ctrl & ~DSI_CTRL_CMD_MODE_EN);
++		/* Complete command-engine abort before removing scheduling. */
++		wmb();
++		dev_err_ratelimited(
++			&h->pdev->dev,
++			"Liuqin command schedule DMA busy timeout\n");
++	}
++	dsi_write(h, LIUQIN_DMA_SCHEDULE_CTRL, state->saved);
++	h->cmd_dma_scheduled = false;
++	state->active = false;
++	return ret;
++}
++
+ int msm_dsi_host_cmd_tx(struct mipi_dsi_host *host,
+ 				const struct mipi_dsi_msg *msg)
+ {
+@@ -2687,6 +2940,7 @@ int msm_dsi_host_set_display_mode(struct mipi_dsi_host *host,
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+ 
++	WRITE_ONCE(msm_host->refresh_rate, 0);
+ 	if (msm_host->mode) {
+ 		drm_mode_destroy(msm_host->dev, msm_host->mode);
+ 		msm_host->mode = NULL;
+@@ -2698,6 +2952,7 @@ int msm_dsi_host_set_display_mode(struct mipi_dsi_host *host,
+ 		return -ENOMEM;
+ 	}
+ 
++	WRITE_ONCE(msm_host->refresh_rate, drm_mode_vrefresh(mode));
+ 	return 0;
+ }
+ 
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_manager.c b/drivers/gpu/drm/msm/dsi/dsi_manager.c
+index 206f0ba38..ffc5398f2 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi_manager.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_manager.c
+@@ -4,6 +4,9 @@
+  */
+ 
+ #include <linux/module.h>
++#include <linux/delay.h>
++#include <linux/ktime.h>
++#include <linux/irqflags.h>
+ #include <linux/of_address.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/regmap.h>
+@@ -12,6 +15,10 @@
+ 
+ #include "msm_kms.h"
+ #include "dsi.h"
++#include "dsi_cmd_schedule.h"
++#ifdef CONFIG_DRM_MSM_DPU
++#include "disp/dpu1/dpu_encoder.h"
++#endif
+ 
+ #define DSI_CLOCK_MASTER	DSI_0
+ #define DSI_CLOCK_SLAVE		DSI_1
+@@ -31,11 +38,18 @@ struct msm_dsi_manager {
+ 	bool is_bonded_dsi;
+ 	bool is_sync_needed;
+ 	int master_dsi_link_id;
++	struct drm_encoder *encoder;
+ };
+ 
+ static struct msm_dsi_manager msm_dsim_glb;
+ /* Serialize both hosts, so a read cannot disturb a bonded write group. */
+ static DEFINE_MUTEX(dsi_cmd_lock);
++static bool liuqin_cmd_dma_schedule;
++module_param(liuqin_cmd_dma_schedule, bool, 0400);
++MODULE_PARM_DESC(liuqin_cmd_dma_schedule,
++		 "Schedule running-video command DMA on the Liuqin bonded pair");
++/* Only set inside a synchronous write transfer, under dsi_cmd_lock. */
++static struct msm_dsi_cmd_schedule *liuqin_active_schedule;
+ 
+ #define IS_BONDED_DSI()		(msm_dsim_glb.is_bonded_dsi)
+ #define IS_SYNC_NEEDED()	(msm_dsim_glb.is_sync_needed)
+@@ -328,6 +342,156 @@ static bool liuqin_dsi_requested(void)
+ 	return true;
+ }
+ 
++bool msm_dsi_live_vfp_supported(struct msm_dsi *master)
++{
++	int i;
++
++	if (!master || master != dsi_mgr_get_dsi(DSI_CLOCK_MASTER) ||
++	    !liuqin_dsi_requested())
++		return false;
++
++	for (i = 0; i < DSI_MAX; i++) {
++		struct mipi_dsi_host *host = dsi_mgr_get_dsi(i)->host;
++
++		if (!(msm_dsi_host_get_mode_flags(host) & MIPI_DSI_MODE_LIVE_VFP))
++			return false;
++	}
++
++	return true;
++}
++
++/* Serialize both timing updates with commands to either panel link. */
++bool msm_dsi_live_vfp_begin(struct msm_dsi *master, const struct drm_display_mode *old)
++{
++	int i;
++
++	if (!msm_dsi_live_vfp_supported(master))
++		return false;
++
++	mutex_lock(&dsi_cmd_lock);
++	if (!liuqin_dsi.active || !liuqin_dsi.powered || liuqin_dsi.gated ||
++	    liuqin_dsi.video != (BIT(DSI_0) | BIT(DSI_1)))
++		goto fail;
++	for (i = 0; i < DSI_MAX; i++) {
++		if (!msm_dsi_host_live_vfp_ready(dsi_mgr_get_dsi(i)->host, old))
++			goto fail;
++	}
++	return true;
++
++fail:
++	mutex_unlock(&dsi_cmd_lock);
++	return false;
++}
++
++void msm_dsi_live_vfp_write(unsigned int vtotal)
++{
++	int i;
++
++	lockdep_assert_held(&dsi_cmd_lock);
++	/* Clock master first, followed by the other bonded host. */
++	for (i = 0; i < DSI_MAX; i++)
++		msm_dsi_host_live_vfp_write(dsi_mgr_get_dsi(i)->host, vtotal);
++}
++
++bool msm_dsi_live_vfp_end(bool programmed, const struct drm_display_mode *mode)
++{
++	int i;
++
++	lockdep_assert_held(&dsi_cmd_lock);
++	if (mode) {
++		for (i = 0; i < DSI_MAX; i++) {
++			if (!msm_dsi_host_live_vfp_matches(dsi_mgr_get_dsi(i)->host,
++							  mode->vtotal)) {
++				mode = NULL;
++				break;
++			}
++		}
++	}
++	if (programmed)
++		for (i = 0; i < DSI_MAX; i++)
++			msm_dsi_host_live_vfp_finish(dsi_mgr_get_dsi(i)->host, mode);
++	mutex_unlock(&dsi_cmd_lock);
++	return mode != NULL;
++}
++
++/* Serialize both timing updates with commands to either panel link. */
++bool msm_dsi_live_hfp_begin(struct msm_dsi *master, const struct drm_display_mode *old)
++{
++	int i;
++
++	if (!msm_dsi_live_vfp_supported(master)) {
++		pr_info("Liuqin live reject: stage=dsi-manager reason=unsupported\n");
++		return false;
++	}
++
++	mutex_lock(&dsi_cmd_lock);
++	if (!liuqin_dsi.active || !liuqin_dsi.powered || liuqin_dsi.gated ||
++	    liuqin_dsi.video != (BIT(DSI_0) | BIT(DSI_1))) {
++		pr_info("Liuqin live reject: stage=dsi-manager active=%d powered=%d gated=%d video=%#x\n",
++			liuqin_dsi.active, liuqin_dsi.powered, liuqin_dsi.gated, liuqin_dsi.video);
++		goto fail;
++	}
++	for (i = 0; i < DSI_MAX; i++) {
++		if (!msm_dsi_host_live_hfp_ready(dsi_mgr_get_dsi(i)->host, old))
++			goto fail;
++	}
++	return true;
++
++fail:
++	mutex_unlock(&dsi_cmd_lock);
++	return false;
++}
++
++void msm_dsi_live_hfp_write(const struct drm_display_mode *mode)
++{
++	int i;
++
++	lockdep_assert_held(&dsi_cmd_lock);
++	/* Clock master first, followed by the other bonded host. */
++	for (i = 0; i < DSI_MAX; i++)
++		msm_dsi_host_live_hfp_write(dsi_mgr_get_dsi(i)->host, mode);
++}
++
++/* The panel lock spans this gap, allowing its scan group to acquire the
++ * command lock without waiting an extra frame for timing confirmation.
++ */
++void msm_dsi_live_hfp_release(void)
++{
++	lockdep_assert_held(&dsi_cmd_lock);
++	mutex_unlock(&dsi_cmd_lock);
++}
++
++bool msm_dsi_live_hfp_end(bool programmed, const struct drm_display_mode *mode)
++{
++	int i;
++
++	mutex_lock(&dsi_cmd_lock);
++	if (mode) {
++		for (i = 0; i < DSI_MAX; i++) {
++			if (!msm_dsi_host_live_hfp_matches(dsi_mgr_get_dsi(i)->host,
++							  mode)) {
++				mode = NULL;
++				break;
++			}
++		}
++	}
++	if (programmed) {
++		for (i = 0; i < DSI_MAX; i++) {
++			/* Downstream dsi_ctrl_timing_db_update() waits after MDP
++			 * completion: that boundary can precede panel vsync.
++			 * Keep its per-host margin before disabling timing DB,
++			 * including cleanup of a partially programmed change.
++			 */
++			usleep_range(2000, 2010);
++			msm_dsi_host_live_vfp_finish(dsi_mgr_get_dsi(i)->host, mode);
++			wmb();
++			pr_info("Liuqin live settle: host=%d guard_us=2000\n", i);
++		}
++	}
++	mutex_unlock(&dsi_cmd_lock);
++	return mode != NULL;
++}
++
+ static int liuqin_dsi_set_gating(bool on)
+ {
+ 	struct device *dev = &dsi_mgr_get_dsi(DSI_CLOCK_MASTER)->pdev->dev;
+@@ -746,6 +910,9 @@ int msm_dsi_manager_connector_init(struct msm_dsi *msm_dsi,
+ 	if (ret)
+ 		return ret;
+ 
++	if (IS_MASTER_DSI_LINK(msm_dsi->id))
++		msm_dsim_glb.encoder = encoder;
++
+ 	connector = drm_bridge_connector_init(dev, encoder);
+ 	if (IS_ERR(connector)) {
+ 		DRM_ERROR("Unable to create bridge connector\n");
+@@ -763,7 +930,8 @@ static int dsi_mgr_cmd_xfer(int id, const struct mipi_dsi_msg *msg,
+ 	struct mipi_dsi_host *host = msm_dsi->host;
+ 	bool is_read = (msg->rx_buf && msg->rx_len);
+ 	bool need_sync = (IS_SYNC_NEEDED() && !is_read);
+-	int ret;
++	struct msm_dsi_cmd_schedule schedule[DSI_MAX] = {};
++	int ret, next, i;
+ 
+ 	if (!msg->tx_buf || !msg->tx_len)
+ 		return 0;
+@@ -798,12 +966,43 @@ static int dsi_mgr_cmd_xfer(int id, const struct mipi_dsi_msg *msg,
+ 		goto restore_host0;
+ 	}
+ 
++	if (liuqin_cmd_dma_schedule && need_sync && id == DSI_1 &&
++	    liuqin_dsi_requested() && liuqin_dsi.powered &&
++	    liuqin_dsi.video == (BIT(DSI_0) | BIT(DSI_1))) {
++		for (i = 0; i < DSI_MAX; i++) {
++			ret = msm_dsi_host_cmd_schedule_prepare(
++				dsi_mgr_get_dsi(i)->host, &schedule[i]);
++			if (ret < 0)
++				goto finish_schedule;
++		}
++		if (schedule[0].active != schedule[1].active ||
++		    (schedule[0].active &&
++		     (schedule[0].line != schedule[1].line ||
++		      schedule[0].guard != schedule[1].guard ||
++		      schedule[0].total != schedule[1].total))) {
++			ret = -EINVAL;
++			goto finish_schedule;
++		}
++		if (schedule[0].active)
++			liuqin_active_schedule = schedule;
++	}
++
+ 	if (batch)
+ 		ret = msm_dsi_host_cmd_tx_batch(host, batch, count);
+ 	else
+ 		ret = is_read ? msm_dsi_host_cmd_rx(host, msg) :
+ 				msm_dsi_host_cmd_tx(host, msg);
+ 
++finish_schedule:
++	liuqin_active_schedule = NULL;
++	for (i = DSI_MAX - 1; i >= 0; i--) {
++		if (!schedule[i].active)
++			continue;
++		next = msm_dsi_host_cmd_schedule_finish(
++			dsi_mgr_get_dsi(i)->host, &schedule[i]);
++		if (ret >= 0 && next < 0)
++			ret = next;
++	}
+ 	msm_dsi_host_xfer_restore(host, msg);
+ 
+ restore_host0:
+@@ -836,7 +1035,7 @@ int msm_dsi_manager_cmd_xfer_batch(int id, const struct mipi_dsi_msg *msgs,
+ 	return ret;
+ }
+ 
+-bool msm_dsi_manager_cmd_xfer_trigger(int id, u32 dma_base, u32 len)
++int msm_dsi_manager_cmd_xfer_trigger(int id, u32 dma_base, u32 len)
+ {
+ 	struct msm_dsi *msm_dsi = dsi_mgr_get_dsi(id);
+ 	struct msm_dsi *msm_dsi0 = dsi_mgr_get_dsi(DSI_0);
+@@ -845,6 +1044,46 @@ bool msm_dsi_manager_cmd_xfer_trigger(int id, u32 dma_base, u32 len)
+ 	if (IS_SYNC_NEEDED() && (id == DSI_0))
+ 		return false;
+ 
++	if (liuqin_active_schedule) {
++#ifdef CONFIG_DRM_MSM_DPU
++		struct msm_dsi_cmd_schedule *s = liuqin_active_schedule;
++		ktime_t deadline = ktime_add_ms(ktime_get(), 50);
++		unsigned long flags;
++		u32 lines[DSI_MAX];
++		int ret;
++
++		if (id != DSI_1 || !msm_dsi0 || !msm_dsim_glb.encoder)
++			return -EINVAL;
++		do {
++			/* Keep the final line check and both SW triggers together. */
++			local_irq_save(flags);
++			ret = dpu_encoder_get_cmd_linecounts(
++				msm_dsim_glb.encoder, lines);
++			if (!ret &&
++			    dsi_cmd_schedule_line_safe(lines[0], s[0].line,
++						       s[0].guard,
++						       s[0].total) &&
++			    dsi_cmd_schedule_line_safe(lines[1], s[1].line,
++						       s[1].guard,
++						       s[1].total)) {
++				msm_dsi_host_cmd_xfer_commit(msm_dsi0->host,
++							     dma_base, len);
++				msm_dsi_host_cmd_xfer_commit(host, dma_base,
++							     len);
++				local_irq_restore(flags);
++				return 1;
++			}
++			local_irq_restore(flags);
++			if (ret && ret != -EAGAIN)
++				return ret;
++			usleep_range(50, 100);
++		} while (ktime_before(ktime_get(), deadline));
++		return -ETIMEDOUT;
++#else
++		return -EOPNOTSUPP;
++#endif
++	}
++
+ 	if (IS_SYNC_NEEDED() && msm_dsi0)
+ 		msm_dsi_host_cmd_xfer_commit(msm_dsi0->host, dma_base, len);
+ 
+@@ -898,6 +1137,8 @@ void msm_dsi_manager_unregister(struct msm_dsi *msm_dsi)
+ 	if (msm_dsi->host)
+ 		msm_dsi_host_unregister(msm_dsi->host);
+ 
++	if (IS_MASTER_DSI_LINK(msm_dsi->id))
++		msm_dsim->encoder = NULL;
+ 	if (msm_dsi->id >= 0)
+ 		msm_dsim->dsi[msm_dsi->id] = NULL;
+ }
+diff --git a/drivers/gpu/drm/msm/msm_atomic.c b/drivers/gpu/drm/msm/msm_atomic.c
+index a8babf1db..a84e6a53f 100644
+--- a/drivers/gpu/drm/msm/msm_atomic.c
++++ b/drivers/gpu/drm/msm/msm_atomic.c
+@@ -169,14 +169,22 @@ static bool can_do_async(struct drm_atomic_commit *state,
+  * can be used with for_each_crtc_mask() iterator, to iterate
+  * effected crtcs without needing to preserve the atomic state.
+  */
+-static unsigned get_crtc_mask(struct drm_atomic_commit *state)
++static unsigned get_crtc_mask(struct drm_atomic_commit *state, bool enabled_only)
+ {
+-	struct drm_crtc_state *crtc_state;
++	struct drm_crtc_state *old, *new;
+ 	struct drm_crtc *crtc;
+ 	unsigned i, mask = 0;
+ 
+-	for_each_new_crtc_in_state(state, crtc, crtc_state, i)
++	for_each_oldnew_crtc_in_state(state, crtc, old, new, i) {
++		/*
++		 * KWin includes disabled, unused CRTCs in a modeset. Only
++		 * ignore them for the live-update admission check. The
++		 * ordinary commit still locks and processes the full state.
++		 */
++		if (enabled_only && !old->enable && !new->enable)
++			continue;
+ 		mask |= drm_crtc_mask(crtc);
++	}
+ 
+ 	return mask;
+ }
+@@ -216,7 +224,7 @@ void msm_atomic_commit_tail(struct drm_atomic_commit *state)
+ 	struct msm_drm_private *priv = dev->dev_private;
+ 	struct msm_kms *kms = priv->kms;
+ 	struct drm_crtc *async_crtc = NULL;
+-	unsigned crtc_mask = get_crtc_mask(state);
++	unsigned crtc_mask = get_crtc_mask(state, false);
+ 	bool async = can_do_async(state, &async_crtc);
+ 
+ 	trace_msm_atomic_commit_tail_start(async, crtc_mask);
+@@ -240,6 +248,13 @@ void msm_atomic_commit_tail(struct drm_atomic_commit *state)
+ 	 */
+ 	if (kms->funcs->prepare_commit)
+ 		kms->funcs->prepare_commit(kms, state);
++	if (kms->funcs->try_live_modeset) {
++		unsigned live_mask = get_crtc_mask(state, true);
++
++		if (hweight32(live_mask) == 1 &&
++		    !(kms->pending_crtc_mask & live_mask))
++			kms->funcs->try_live_modeset(kms, state);
++	}
+ 
+ 	/*
+ 	 * Push atomic updates down to hardware:
+diff --git a/drivers/gpu/drm/msm/msm_drv.h b/drivers/gpu/drm/msm/msm_drv.h
+index eb4bbae85..a7a257704 100644
+--- a/drivers/gpu/drm/msm/msm_drv.h
++++ b/drivers/gpu/drm/msm/msm_drv.h
+@@ -298,6 +298,15 @@ int msm_dsi_modeset_init(struct msm_dsi *msm_dsi, struct drm_device *dev,
+ 			 struct drm_encoder *encoder);
+ void msm_dsi_snapshot(struct msm_disp_state *disp_state, struct msm_dsi *msm_dsi);
+ bool msm_dsi_is_cmd_mode(struct msm_dsi *msm_dsi);
++bool msm_dsi_live_hfp_begin(struct msm_dsi *master, const struct drm_display_mode *old);
++void msm_dsi_live_hfp_write(const struct drm_display_mode *mode);
++void msm_dsi_live_hfp_release(void);
++bool msm_dsi_live_hfp_end(bool programmed, const struct drm_display_mode *mode);
++
++bool msm_dsi_live_vfp_supported(struct msm_dsi *master);
++bool msm_dsi_live_vfp_begin(struct msm_dsi *master, const struct drm_display_mode *old);
++void msm_dsi_live_vfp_write(unsigned int vtotal);
++bool msm_dsi_live_vfp_end(bool programmed, const struct drm_display_mode *mode);
+ bool msm_dsi_is_bonded_dsi(struct msm_dsi *msm_dsi);
+ bool msm_dsi_is_master_dsi(struct msm_dsi *msm_dsi);
+ bool msm_dsi_wide_bus_enabled(struct msm_dsi *msm_dsi);
+@@ -319,6 +328,34 @@ static inline int msm_dsi_modeset_init(struct msm_dsi *msm_dsi,
+ static inline void msm_dsi_snapshot(struct msm_disp_state *disp_state, struct msm_dsi *msm_dsi)
+ {
+ }
++static inline bool msm_dsi_live_hfp_begin(struct msm_dsi *master,
++					const struct drm_display_mode *old)
++{
++	return false;
++}
++static inline void msm_dsi_live_hfp_write(const struct drm_display_mode *mode) {}
++static inline void msm_dsi_live_hfp_release(void) {}
++static inline bool msm_dsi_live_hfp_end(bool programmed, const struct drm_display_mode *mode)
++{
++	return false;
++}
++
++static inline bool msm_dsi_live_vfp_supported(struct msm_dsi *master)
++{
++	return false;
++}
++
++static inline bool msm_dsi_live_vfp_begin(struct msm_dsi *master,
++					  const struct drm_display_mode *old)
++{
++	return false;
++}
++static inline void msm_dsi_live_vfp_write(unsigned int vtotal) {}
++static inline bool msm_dsi_live_vfp_end(bool programmed, const struct drm_display_mode *mode)
++{
++	return false;
++}
++
+ static inline bool msm_dsi_is_cmd_mode(struct msm_dsi *msm_dsi)
+ {
+ 	return false;
+diff --git a/drivers/gpu/drm/msm/msm_kms.h b/drivers/gpu/drm/msm/msm_kms.h
+index f25b31e50..bb90f743b 100644
+--- a/drivers/gpu/drm/msm/msm_kms.h
++++ b/drivers/gpu/drm/msm/msm_kms.h
+@@ -74,6 +74,9 @@ struct msm_kms_funcs {
+ 	 */
+ 	void (*prepare_commit)(struct msm_kms *kms, struct drm_atomic_commit *state);
+ 
++	/* Optional live timing update. Keep the full modeset on failure. */
++	void (*try_live_modeset)(struct msm_kms *kms, struct drm_atomic_commit *state);
++
+ 	/**
+ 	 * Flush an atomic commit.  This is called after the hardware
+ 	 * updates have already been pushed down to effected planes/
+diff --git a/drivers/gpu/drm/panel/panel-novatek-nt36532.c b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+index 073bcfd65..7c09bf63c 100644
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -2,11 +2,11 @@
+ // Copyright (c) 2024 Luka Panio <lukapanio@gmail.com>
+ 
+ #include <linux/backlight.h>
+-#include <linux/ctype.h>
+ #include <linux/string.h>
+ #include <linux/delay.h>
+ #include <linux/gpio/consumer.h>
+ #include <linux/module.h>
++#include <linux/math64.h>
+ #include <linux/interrupt.h>
+ #include <linux/jiffies.h>
+ #include <linux/mutex.h>
+@@ -15,10 +15,12 @@
+ #include <linux/of.h>
+ #include <linux/of_device.h>
+ #include <linux/of_graph.h>
++#include <linux/platform_data/liuqin.h>
+ #include <linux/regulator/consumer.h>
+ 
+ #include <video/mipi_display.h>
+ 
++#include <drm/drm_liuqin.h>
+ #include <drm/drm_mipi_dsi.h>
+ #include <drm/drm_modes.h>
+ #include <drm/drm_panel.h>
+@@ -26,6 +28,31 @@
+ #include <drm/display/drm_dsc.h>
+ #include <drm/display/drm_dsc_helper.h>
+ 
++static bool liuqin_multi_refresh = true;
++module_param(liuqin_multi_refresh, bool, 0444);
++MODULE_PARM_DESC(liuqin_multi_refresh,
++		 "Enable OEM 90/120/144 Hz modes on known Liuqin panels");
++
++static bool liuqin_live_60;
++module_param(liuqin_live_60, bool, 0444);
++MODULE_PARM_DESC(liuqin_live_60,
++		 "Expose experimental live 60 Hz on the Liuqin Tianma panel");
++
++static bool liuqin_live_60_csot;
++module_param(liuqin_live_60_csot, bool, 0444);
++MODULE_PARM_DESC(liuqin_live_60_csot,
++		 "Enable live 60 Hz on the Liuqin CSOT panel for hardware testing");
++
++static bool liuqin_live_all;
++module_param(liuqin_live_all, bool, 0644);
++MODULE_PARM_DESC(liuqin_live_all,
++		 "Enable experimental live switching among 60/90/120/144 Hz");
++
++static bool liuqin_low_refresh;
++module_param(liuqin_low_refresh, bool, 0444);
++MODULE_PARM_DESC(liuqin_low_refresh,
++		 "Expose unqualified 30/48/50/60 Hz modes for Liuqin diagnostics");
++
+ static bool first_frame_backlight = true;
+ module_param(first_frame_backlight, bool, 0444);
+ MODULE_PARM_DESC(first_frame_backlight,
+@@ -58,6 +85,7 @@ MODULE_PARM_DESC(liuqin_late_wake,
+ 	"Send initial Tianma Sleep Out/Display On once, after first frame");
+ 
+ struct nt36532 {
++	int refresh_status;
+ 	/* 0: original ON table; 1: pending; 2: sent; negative: transfer failed. */
+ 	int late_wake_status;
+ 	bool off_deferred;
+@@ -514,7 +542,6 @@ struct liuqin_oem_cmd {
+ };
+ 
+ struct liuqin_oem_panel {
+-	const char *boot_name;
+ 	const char *label;
+ 	const struct liuqin_oem_cmd *on;
+ 	size_t on_count;
+@@ -948,15 +975,14 @@ static const struct liuqin_oem_cmd liuqin_oem_off[] = {
+ };
+ 
+ static const struct liuqin_oem_panel liuqin_oem_panels[] = {
+-	{
+-		.boot_name = "qcom,mdss_dsi_m81_36_02_0a_dualdsi_dsc_lcd_video",
++	[LIUQIN_PANEL_TIANMA] = {
+ 		.label = "m81_36_02_0a (Tianma)",
+ 		.on = liuqin_tm_on,
+ 		.on_count = ARRAY_SIZE(liuqin_tm_on),
+ 		/* The shipped parser falls back to 0 for the misspelled TM key. */
+ 		.dimming_delay_ms = 0,
+-	}, {
+-		.boot_name = "qcom,mdss_dsi_m81_42_02_0b_dualdsi_dsc_lcd_video",
++	},
++	[LIUQIN_PANEL_CSOT] = {
+ 		.label = "m81_42_02_0b (CSOT)",
+ 		.on = liuqin_csot_on,
+ 		.on_count = ARRAY_SIZE(liuqin_csot_on),
+@@ -964,61 +990,12 @@ static const struct liuqin_oem_panel liuqin_oem_panels[] = {
+ 	},
+ };
+ 
+-static const struct liuqin_oem_panel *
+-liuqin_oem_from_bootargs(const char *args)
+-{
+-	static const char key[] = "msm_drm.dsi_display0=";
+-	const struct liuqin_oem_panel *selected = NULL;
+-
+-	if (!args)
+-		return NULL;
+-	while (*args) {
+-		const struct liuqin_oem_panel *candidate = NULL;
+-		const char *end, *name, *colon;
+-		size_t length, i;
+-
+-		while (isspace((unsigned char)*args))
+-			args++;
+-		if (!*args)
+-			break;
+-		end = args;
+-		while (*end && !isspace((unsigned char)*end))
+-			end++;
+-		if ((size_t)(end - args) < sizeof(key) - 1 ||
+-		    strncmp(args, key, sizeof(key) - 1)) {
+-			args = end;
+-			continue;
+-		}
+-
+-		name = args + sizeof(key) - 1;
+-		colon = memchr(name, ':', end - name);
+-		length = (colon ? colon : end) - name;
+-		for (i = 0; i < ARRAY_SIZE(liuqin_oem_panels); i++) {
+-			const struct liuqin_oem_panel *panel = &liuqin_oem_panels[i];
+-
+-			if (strlen(panel->boot_name) == length &&
+-			    !strncmp(name, panel->boot_name, length)) {
+-				candidate = panel;
+-				break;
+-			}
+-		}
+-		/* Unknown or conflicting primary selectors keep the legacy path. */
+-		if (!candidate || (selected && selected != candidate))
+-			return NULL;
+-		selected = candidate;
+-		args = end;
+-	}
+-	return selected;
+-}
+-
+ static void liuqin_select_oem_panel(struct nt36532 *ctx)
+ {
+-	struct device_node *chosen = of_find_node_by_path("/chosen");
+-	const char *args;
++	enum liuqin_panel panel = liuqin_boot_panel();
+ 
+-	if (chosen && !of_property_read_string(chosen, "bootargs", &args))
+-		ctx->oem_panel = liuqin_oem_from_bootargs(args);
+-	of_node_put(chosen);
++	if (panel != LIUQIN_PANEL_UNKNOWN)
++		ctx->oem_panel = &liuqin_oem_panels[panel];
+ 
+ 	if (ctx->oem_panel)
+ 		dev_info(ctx->panel.dev, "Liuqin OEM commands: %s\n",
+@@ -1100,12 +1077,13 @@ static int liuqin_init_sequence(struct nt36532 *ctx)
+ 	bool defer;
+ 	int ret;
+ 
++	ctx->refresh_status = 0;
+ 	ctx->late_wake_status = 0;
+ 	if (!ctx->oem_panel)
+ 		return pipa_init_sequence(ctx);
+ 	count = ctx->oem_panel->on_count;
+ 	defer = READ_ONCE(liuqin_late_wake) &&
+-		ctx->oem_panel == &liuqin_oem_panels[0] &&
++		ctx->oem_panel == &liuqin_oem_panels[LIUQIN_PANEL_TIANMA] &&
+ 		ctx->panel.backlight_after_first_frame && ctx->panel.backlight;
+ 	/* The exact TM table ends in separate long 11/29 packets with waits. */
+ 	if (defer)
+@@ -2088,15 +2066,209 @@ static int nt36532_unprepare(struct drm_panel *panel)
+ 	return 0;
+ }
+ 
++/* M81-specific branch in OS2.0.6.0 msm_drm.ko, not generic VFP DFPS.
++ * Horizontal porches are for the complete bonded mode. DSC compresses only
++ * the 1800 active pixels to 600; blanking remains uncompressed. Keep the
++ * 1.007032320 GHz lane rate by deriving the DRM pixel clock from that line.
++ */
++struct liuqin_refresh_mode {
++	u16 rate, hfp, vfp;
++	u8 b3, b2;
++};
++
++static const struct liuqin_refresh_mode liuqin_refresh_modes[] = {
++	{ 120, 200,   26, 0x40, 0x91 },
++	{ 144,  52,   26, 0x00, 0x00 },
++	{  90, 500,   26, 0x80, 0x00 },
++	{  60, 200, 3148, 0x40, 0x91 },
++	{  50, 498, 2524, 0x80, 0x00 },
++	{  48, 498, 2758, 0x80, 0x00 },
++	{  30, 498, 6270, 0x80, 0x00 },
++};
++
++static bool liuqin_can_multi_refresh(struct nt36532 *ctx)
++{
++	unsigned int i;
++
++	if (!liuqin_multi_refresh || ctx->desc != &liuqin_desc || !ctx->oem_panel)
++		return false;
++	for (i = 0; i < ARRAY_SIZE(ctx->dsi); i++) {
++		if (!ctx->dsi[i] || !ctx->dsi[i]->host || !ctx->dsi[i]->host->ops ||
++		    !ctx->dsi[i]->host->ops->get_refresh_rate)
++			return false;
++	}
++	return true;
++}
++
++static bool liuqin_live_60_allowed(const struct nt36532 *ctx)
++{
++	if (ctx->desc != &liuqin_desc)
++		return false;
++
++	return (liuqin_live_60 && ctx->oem_panel == &liuqin_oem_panels[LIUQIN_PANEL_TIANMA]) ||
++	       (liuqin_live_60_csot && ctx->oem_panel == &liuqin_oem_panels[LIUQIN_PANEL_CSOT]);
++}
++
++static bool liuqin_refresh_allowed(const struct nt36532 *ctx, int rate)
++{
++	return rate >= 90 || liuqin_low_refresh ||
++	       (rate == 60 && liuqin_live_60_allowed(ctx));
++}
++
++static int liuqin_get_modes(struct nt36532 *ctx, struct drm_connector *connector)
++{
++	const struct drm_display_mode *base = &liuqin_mode_120;
++	struct drm_display_mode *mode;
++	unsigned int i, compressed_total;
++
++	for (i = 0; i < ARRAY_SIZE(liuqin_refresh_modes); i++) {
++		/* Long-VFP modes still show flicker and panel faults on hardware. */
++		if (!liuqin_refresh_allowed(ctx, liuqin_refresh_modes[i].rate))
++			break;
++		mode = drm_mode_duplicate(connector->dev, base);
++		if (!mode)
++			break;
++		mode->hsync_start = mode->hdisplay + liuqin_refresh_modes[i].hfp;
++		mode->hsync_end = mode->hsync_start + 4;
++		mode->htotal = mode->hsync_end + 92;
++		mode->vsync_start = mode->vdisplay + liuqin_refresh_modes[i].vfp;
++		mode->vsync_end = mode->vsync_start + 2;
++		mode->vtotal = mode->vsync_end + 214;
++		compressed_total = mode->htotal - mode->hdisplay + 600;
++		mode->clock = DIV_ROUND_CLOSEST_ULL(1007032320ULL * mode->htotal,
++						    3000ULL * compressed_total);
++		if (!i)
++			mode->type |= DRM_MODE_TYPE_PREFERRED;
++		drm_mode_set_name(mode);
++		drm_mode_probed_add(connector, mode);
++	}
++	if (i) {
++		connector->display_info.width_mm = base->width_mm;
++		connector->display_info.height_mm = base->height_mm;
++	}
++	return i;
++}
++
+ static int nt36532_get_modes(struct drm_panel *panel,
+-					struct drm_connector *connector)
++			     struct drm_connector *connector)
++{
++	struct nt36532 *ctx = to_nt36532(panel);
++
++	if (liuqin_can_multi_refresh(ctx))
++		return liuqin_get_modes(ctx, connector);
++	return drm_connector_helper_get_modes_fixed(connector, &ctx->desc->drm_mode);
++}
++
++/* The ROM post-enable path matches these scan settings to the selected FPS.
++ * Preserve packet types, batch boundaries and both-link broadcast. Complete
++ * this before publishing display readiness to the touch firmware follower.
++ */
++static int liuqin_set_refresh(struct nt36532 *ctx, int rate)
++{
++	struct liuqin_oem_cmd cmds[] = {
++		{ 0x39, 0x40, 0, 2, { 0xff, 0x10 } },
++		{ 0x39, 0x40, 0, 2, { 0xb3, 0x00 } },
++		{ 0x39, 0x00, 0, 2, { 0xb2, 0x00 } },
++	};
++	int ret;
++	unsigned int i;
++
++	if (!liuqin_can_multi_refresh(ctx))
++		return 0;
++	if (ctx->refresh_status)
++		return ctx->refresh_status > 0 ? 0 : ctx->refresh_status;
++	ctx->refresh_status = -EINVAL;
++	if (rate <= 0 || !liuqin_refresh_allowed(ctx, rate))
++		return ctx->refresh_status;
++	for (i = 0; i < ARRAY_SIZE(liuqin_refresh_modes); i++) {
++		if (liuqin_refresh_modes[i].rate == rate)
++			break;
++	}
++	if (i == ARRAY_SIZE(liuqin_refresh_modes))
++		return ctx->refresh_status;
++	cmds[1].data[1] = liuqin_refresh_modes[i].b3;
++	cmds[2].data[1] = liuqin_refresh_modes[i].b2;
++	/* Fail closed after a partial transfer; never replay this group. */
++	ctx->refresh_status = -EIO;
++	ret = liuqin_send_oem_cmds(ctx, cmds, ARRAY_SIZE(cmds));
++	if (ret) {
++		ctx->refresh_status = ret;
++		return ret;
++	}
++	ctx->refresh_status = 1;
++	dev_info(ctx->panel.dev, "Liuqin refresh scan configured: %d Hz\n", rate);
++	return 0;
++}
++
++static int liuqin_apply_refresh(struct nt36532 *ctx)
++{
++	int rate, other;
++
++	if (!liuqin_can_multi_refresh(ctx))
++		return 0;
++	if (ctx->refresh_status)
++		return ctx->refresh_status > 0 ? 0 : ctx->refresh_status;
++	rate = ctx->dsi[0]->host->ops->get_refresh_rate(ctx->dsi[0]->host);
++	other = ctx->dsi[1]->host->ops->get_refresh_rate(ctx->dsi[1]->host);
++	if (rate != other) {
++		ctx->refresh_status = -EINVAL;
++		return -EINVAL;
++	}
++	return liuqin_set_refresh(ctx, rate);
++}
++
++static int nt36532_prepare_live_refresh(struct drm_panel *panel,
++					const struct drm_display_mode *old,
++					const struct drm_display_mode *new)
+ {
+ 	struct nt36532 *ctx = to_nt36532(panel);
+-	const struct drm_display_mode *mode;
+-	mode = &(ctx->desc->drm_mode);
+-	return drm_connector_helper_get_modes_fixed(connector, mode);
++	int rate = drm_mode_vrefresh(old);
++	int left, right;
++	bool fault;
++
++	lockdep_assert_held(&panel->backlight_lock);
++	if (!liuqin_can_multi_refresh(ctx) || !liuqin_live_60_allowed(ctx) ||
++	    !liuqin_live_refresh_mode(old) || !liuqin_live_refresh_mode(new) ||
++	    (old->htotal != new->htotal && !READ_ONCE(liuqin_live_all))) {
++		dev_info(panel->dev, "Liuqin live reject: stage=panel-policy old=%d new=%d multi=%d live60=%d all=%d\n",
++			 rate, drm_mode_vrefresh(new), liuqin_can_multi_refresh(ctx),
++			 liuqin_live_60_allowed(ctx), READ_ONCE(liuqin_live_all));
++		return -EOPNOTSUPP;
++	}
++	left = ctx->dsi[0]->host->ops->get_refresh_rate(ctx->dsi[0]->host);
++	right = ctx->dsi[1]->host->ops->get_refresh_rate(ctx->dsi[1]->host);
++	if (ctx->refresh_status != 1 || ctx->tddi_recovering ||
++	    ctx->dimming_stopping || ctx->off_deferred ||
++	    (ctx->supply_votes & LIUQIN_ALL_VOTES) != LIUQIN_ALL_VOTES ||
++	    left != rate || right != rate) {
++		dev_info(panel->dev, "Liuqin live reject: stage=panel-state refresh=%d tddi=%d stopping=%d off=%d votes=%#x host_rates=%d/%d expected=%d\n",
++			 ctx->refresh_status, ctx->tddi_recovering, ctx->dimming_stopping,
++			 ctx->off_deferred, ctx->supply_votes, left, right, rate);
++		return -EHOSTDOWN;
++	}
++	mutex_lock(&ctx->esd_lock);
++	fault = ctx->esd_pending;
++	mutex_unlock(&ctx->esd_lock);
++	if (fault)
++		dev_info(panel->dev, "Liuqin live reject: stage=panel-esd pending=1\n");
++	return fault ? -EIO : 0;
+ }
+ 
++static int nt36532_apply_live_refresh(struct drm_panel *panel,
++				       const struct drm_display_mode *old,
++				       const struct drm_display_mode *new)
++{
++	struct nt36532 *ctx = to_nt36532(panel);
++
++	lockdep_assert_held(&panel->backlight_lock);
++	/* The qualified 120/60 pair has identical B3/B2 bytes. */
++	if (old->htotal == new->htotal)
++		return 0;
++	ctx->refresh_status = 0;
++	return liuqin_set_refresh(ctx, drm_mode_vrefresh(new));
++}
++
++
+ /* Exact M81 ROM post-backlight sequence: select DCS page, exit black mode.
+  * Keep the short 0x15 page-select and long 0x39 NORMAL_MODE packets intact.
+  * This does not introduce the separate OEM enter-black/dimming policies.
+@@ -2122,6 +2294,9 @@ static int nt36532_post_backlight_enable(struct drm_panel *panel)
+ 	if (!ctx->oem_panel)
+ 		return 0;
+ 	ret = liuqin_complete_late_wake(ctx);
++	if (ret)
++		return ret;
++	ret = liuqin_apply_refresh(ctx);
+ 	if (ret)
+ 		return ret;
+ 	dsi = nt36532_cmd_dsi(ctx);
+@@ -2169,7 +2344,7 @@ static int nt36532_recover_touch(struct drm_panel *panel)
+ 	lockdep_assert_held(&panel->backlight_lock);
+ 	/* Only the Tianma M81 sequence has a qualified touch-recovery trace. */
+ 	if (ctx->desc != &liuqin_desc ||
+-	    ctx->oem_panel != &liuqin_oem_panels[0])
++	    ctx->oem_panel != &liuqin_oem_panels[LIUQIN_PANEL_TIANMA])
+ 		return -EOPNOTSUPP;
+ 	if (!ctx->dsi[1])
+ 		return -ENODEV;
+@@ -2242,6 +2417,8 @@ static void nt36532_finish_touch_recovery(struct drm_panel *panel, bool ready)
+ }
+ 
+ static const struct drm_panel_funcs nt36532_panel_funcs = {
++	.prepare_live_refresh = nt36532_prepare_live_refresh,
++	.apply_live_refresh = nt36532_apply_live_refresh,
+ 	.prepare = nt36532_prepare,
+ 	.enable = nt36532_enable,
+ 	.disable = nt36532_disable,
+@@ -2368,6 +2545,8 @@ static int nt36532_probe(struct mipi_dsi_device *dsi)
+ 		ctx->dsi[i]->mode_flags = ctx->desc->mode_flags;
+ 		if (ctx->desc == &liuqin_desc && ctx->oem_panel)
+ 			ctx->dsi[i]->mode_flags |= MIPI_DSI_MODE_PANEL_STAGES;
++		if (liuqin_live_60_allowed(ctx))
++			ctx->dsi[i]->mode_flags |= MIPI_DSI_MODE_LIVE_VFP;
+ 
+ 		ret = devm_mipi_dsi_attach(dev, ctx->dsi[i]);
+ 
+diff --git a/drivers/input/touchscreen/nt36523/nt36xxx.c b/drivers/input/touchscreen/nt36523/nt36xxx.c
+index 19cbbc505..55b72c593 100644
+--- a/drivers/input/touchscreen/nt36523/nt36xxx.c
++++ b/drivers/input/touchscreen/nt36523/nt36xxx.c
+@@ -25,6 +25,7 @@
+ #include <linux/input/mt.h>
+ #include <linux/debugfs.h>
+ #include <linux/of_irq.h>
++#include <linux/platform_data/liuqin.h>
+ #include <linux/init.h>
+ #include <linux/string.h>
+ 
+@@ -772,20 +773,23 @@ static int32_t nvt_parse_dt(struct device *dev)
+ 	}
+ 
+ 	/*
+-	 * liuqin (Xiaomi Pad 6 Pro) fits one of two NT36532 panel modules and
+-	 * the touch firmware is not interchangeable: loading the other
+-	 * module's firmware mirrors one half of the touchscreen.  The
+-	 * bootloader names the fitted display module on the kernel command
+-	 * line, so choose the firmware from there:
+-	 *   m81_36_02_0a -> Tianma (tm)
+-	 *   m81_42_02_0b -> CSOT   (csot)
+-	 * An unrecognised module keeps the firmware-name from the DT.
++	 * A mismatched M81 image can mirror half of the touch surface.
++	 * Use the same primary selector as the display and keep the DT
++	 * firmware on an unknown or conflicting selection.
+ 	 */
+-	if (saved_command_line) {
+-		if (strstr(saved_command_line, "mdss_dsi_m81_36_02_0a"))
++	if (liuqin_board_quirks() ||
++	    !strcmp(ts->fw_name, LIUQIN_TOUCH_FW_TM) ||
++	    !strcmp(ts->fw_name, LIUQIN_TOUCH_FW_CSOT)) {
++		switch (liuqin_boot_panel()) {
++		case LIUQIN_PANEL_TIANMA:
+ 			ts->fw_name = LIUQIN_TOUCH_FW_TM;
+-		else if (strstr(saved_command_line, "mdss_dsi_m81_42_02_0b"))
++			break;
++		case LIUQIN_PANEL_CSOT:
+ 			ts->fw_name = LIUQIN_TOUCH_FW_CSOT;
++			break;
++		case LIUQIN_PANEL_UNKNOWN:
++			break;
++		}
+ 	}
+ 
+ 	ret = of_property_read_u32(np, "spi-max-frequency", &ts->spi_max_freq);
+diff --git a/include/drm/drm_bridge.h b/include/drm/drm_bridge.h
+index e28124666..9ea4eee7d 100644
+--- a/include/drm/drm_bridge.h
++++ b/include/drm/drm_bridge.h
+@@ -1475,6 +1475,15 @@ void drm_bridge_hpd_notify(struct drm_bridge *bridge,
+ 
+ #ifdef CONFIG_DRM_PANEL_BRIDGE
+ bool drm_bridge_is_panel(const struct drm_bridge *bridge);
++int drm_panel_bridge_live_refresh_begin(struct drm_bridge *bridge,
++				       const struct drm_display_mode *old,
++				       const struct drm_display_mode *new);
++int drm_panel_bridge_live_refresh_apply(struct drm_bridge *bridge,
++				     const struct drm_display_mode *old,
++				     const struct drm_display_mode *new);
++
++void drm_panel_bridge_live_refresh_end(struct drm_bridge *bridge);
++
+ unsigned int drm_panel_bridge_get_first_frame_cookie(struct drm_bridge *bridge);
+ void drm_panel_bridge_complete_first_frame(struct drm_bridge *bridge,
+ 					 unsigned int cookie);
+@@ -1493,6 +1502,21 @@ struct drm_bridge *drmm_panel_bridge_add(struct drm_device *drm,
+ 					     struct drm_panel *panel);
+ struct drm_connector *drm_panel_bridge_connector(struct drm_bridge *bridge);
+ #else
++static inline int drm_panel_bridge_live_refresh_begin(struct drm_bridge *bridge,
++					     const struct drm_display_mode *old,
++					     const struct drm_display_mode *new)
++{
++	return -EOPNOTSUPP;
++}
++static inline int drm_panel_bridge_live_refresh_apply(struct drm_bridge *bridge,
++					   const struct drm_display_mode *old,
++					   const struct drm_display_mode *new)
++{
++	return -EOPNOTSUPP;
++}
++
++static inline void drm_panel_bridge_live_refresh_end(struct drm_bridge *bridge) {}
++
+ static inline unsigned int
+ drm_panel_bridge_get_first_frame_cookie(struct drm_bridge *bridge)
+ {
+diff --git a/include/drm/drm_liuqin.h b/include/drm/drm_liuqin.h
+new file mode 100644
+index 000000000..e749babaf
+--- /dev/null
++++ b/include/drm/drm_liuqin.h
+@@ -0,0 +1,47 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef __DRM_LIUQIN_H__
++#define __DRM_LIUQIN_H__
++
++#include <drm/drm_modes.h>
++
++/* Exact M81 profiles from the pinned ROM, at one fixed DSC link clock. */
++static inline bool liuqin_live_refresh_mode(const struct drm_display_mode *m)
++{
++	int hfp, vfp;
++
++	switch (m->clock) {
++	case 785245:
++		hfp = 200;
++		if (m->vtotal == 3122)
++			vfp = 26;
++		else if (m->vtotal == 6244)
++			vfp = 3148;
++		else
++			return false;
++		break;
++	case 874197:
++		hfp = 52;
++		vfp = 26;
++		break;
++	case 672478:
++		hfp = 500;
++		vfp = 26;
++		break;
++	default:
++		return false;
++	}
++
++	return m->hdisplay == 1800 && m->hsync_start == 1800 + hfp &&
++	       m->hsync_end == 1804 + hfp && m->htotal == 1896 + hfp &&
++	       m->vdisplay == 2880 && m->vsync_start == 2880 + vfp &&
++	       m->vsync_end == 2882 + vfp && m->vtotal == 3096 + vfp &&
++	       !m->flags && !m->hskew && !m->vscan;
++}
++
++/* Bonded link, 900 active pixels compressed to 300 pixel clocks. */
++static inline unsigned int liuqin_line_clocks(const struct drm_display_mode *m)
++{
++	return (m->htotal - m->hdisplay) / 2 + 300;
++}
++
++#endif
+diff --git a/include/drm/drm_mipi_dsi.h b/include/drm/drm_mipi_dsi.h
+index 9bf163a0e..0b8c4b8e2 100644
+--- a/include/drm/drm_mipi_dsi.h
++++ b/include/drm/drm_mipi_dsi.h
+@@ -87,6 +87,9 @@ enum mipi_dsi_panel_stage {
+  *     of payload lengths, or a negative error; a failed group must not be
+  *     replayed because a prefix may already have reached the peripheral.
+  *
++ * @get_refresh_rate: optional query of the host mode selected before panel
++ *     prepare; returns its rounded refresh rate in Hz, or zero if unset.
++ *
+  * DSI packets transmitted by .transfer() are passed in as mipi_dsi_msg
+  * structures. This structure contains information about the type of packet
+  * being transmitted as well as the transmit and receive buffers. When an
+@@ -105,6 +108,7 @@ enum mipi_dsi_panel_stage {
+  * properly enabled.
+  */
+ struct mipi_dsi_host_ops {
++	int (*get_refresh_rate)(struct mipi_dsi_host *host);
+ 	int (*attach)(struct mipi_dsi_host *host,
+ 		      struct mipi_dsi_device *dsi);
+ 	int (*detach)(struct mipi_dsi_host *host,
+@@ -164,6 +168,8 @@ struct mipi_dsi_host *of_find_mipi_dsi_host_by_node(struct device_node *node);
+ 
+ /* Panel coordinates commands and rails with an optional host callback. */
+ #define MIPI_DSI_MODE_PANEL_STAGES	BIT(14)
++/* Panel permits the experimental fixed-clock 120/60 Hz transition. */
++#define MIPI_DSI_MODE_LIVE_VFP		BIT(15)
+ 
+ enum mipi_dsi_pixel_format {
+ 	MIPI_DSI_FMT_RGB888,
+diff --git a/include/drm/drm_panel.h b/include/drm/drm_panel.h
+index 03bc149fc..98bc56847 100644
+--- a/include/drm/drm_panel.h
++++ b/include/drm/drm_panel.h
+@@ -36,6 +36,7 @@ struct device_node;
+ struct drm_connector;
+ struct drm_panel_follower;
+ struct drm_panel;
++struct drm_display_mode;
+ struct display_timing;
+ 
+ enum drm_panel_orientation;
+@@ -176,6 +177,27 @@ struct drm_panel_funcs {
+ 	 * in that case only discard recovery bookkeeping, without hardware I/O.
+ 	 */
+ 	void (*finish_touch_recovery)(struct drm_panel *panel, bool ready);
++
++	/**
++	 * @prepare_live_refresh:
++	 * Validate a running-panel refresh change without hardware I/O. Called
++	 * with backlight_lock held; a successful call is paired with bridge
++	 * completion while retaining that lock across the host timing update.
++	 */
++	int (*prepare_live_refresh)(struct drm_panel *panel,
++				    const struct drm_display_mode *old,
++				    const struct drm_display_mode *new);
++	/**
++	 * @apply_live_refresh:
++	 * Program scan commands after host timing submission, before waiting
++	 * for its latch. Host mode caches still describe the old mode. No
++	 * follower or power-state changes. Return errors for a full modeset;
++	 * the caller must not retry a partially transferred command group.
++	 */
++	int (*apply_live_refresh)(struct drm_panel *panel,
++				   const struct drm_display_mode *old,
++				   const struct drm_display_mode *new);
++
+ };
+ 
+ struct drm_panel_follower_funcs {
+diff --git a/include/linux/platform_data/liuqin.h b/include/linux/platform_data/liuqin.h
+index 2a629b4e4..8c67af0e8 100644
+--- a/include/linux/platform_data/liuqin.h
++++ b/include/linux/platform_data/liuqin.h
+@@ -1,7 +1,10 @@
+ /* SPDX-License-Identifier: GPL-2.0-only */
+ #ifndef _LINUX_PLATFORM_DATA_LIUQIN_H
+ #define _LINUX_PLATFORM_DATA_LIUQIN_H
++#include <linux/array_size.h>
++#include <linux/ctype.h>
+ #include <linux/of.h>
++#include <linux/string.h>
+ 
+ /* ABL may replace compatible with generic cape identifiers. */
+ static inline bool liuqin_board_quirks(void)
+@@ -15,4 +18,66 @@ static inline bool liuqin_board_quirks(void)
+ 		!of_property_read_u32_array(of_root, "xiaomi,miboard-id", id, 2) &&
+ 		id[0] == 0x10 && id[1] == 0;
+ }
++
++enum liuqin_panel {
++	LIUQIN_PANEL_UNKNOWN = -1,
++	LIUQIN_PANEL_TIANMA,
++	LIUQIN_PANEL_CSOT,
++};
++
++/* Only ABL's primary-display token identifies the fitted panel. */
++static inline enum liuqin_panel liuqin_panel_from_bootargs(const char *args)
++{
++	static const char key[] = "msm_drm.dsi_display0=";
++	static const char * const names[] = {
++		[LIUQIN_PANEL_TIANMA] = "qcom,mdss_dsi_m81_36_02_0a_dualdsi_dsc_lcd_video",
++		[LIUQIN_PANEL_CSOT] = "qcom,mdss_dsi_m81_42_02_0b_dualdsi_dsc_lcd_video",
++	};
++	enum liuqin_panel selected = LIUQIN_PANEL_UNKNOWN;
++
++	if (!args)
++		return selected;
++
++	while (*args) {
++		const char *end, *name, *colon;
++		size_t length, i;
++
++		while (isspace((unsigned char)*args))
++			args++;
++		if (!*args)
++			break;
++		end = args;
++		while (*end && !isspace((unsigned char)*end))
++			end++;
++		if ((size_t)(end - args) < sizeof(key) - 1 ||
++		    strncmp(args, key, sizeof(key) - 1)) {
++			args = end;
++			continue;
++		}
++
++		name = args + sizeof(key) - 1;
++		colon = memchr(name, ':', end - name);
++		length = (colon ? colon : end) - name;
++		for (i = 0; i < ARRAY_SIZE(names); i++) {
++			if (strlen(names[i]) == length && !strncmp(name, names[i], length))
++				break;
++		}
++		if (i == ARRAY_SIZE(names) ||
++		    (selected != LIUQIN_PANEL_UNKNOWN && selected != (enum liuqin_panel)i))
++			return LIUQIN_PANEL_UNKNOWN;
++		selected = i;
++		args = end;
++	}
++	return selected;
++}
++
++static inline enum liuqin_panel liuqin_boot_panel(void)
++{
++	const char *args;
++
++	if (of_property_read_string(of_chosen, "bootargs", &args))
++		return LIUQIN_PANEL_UNKNOWN;
++
++	return liuqin_panel_from_bootargs(args);
++}
+ #endif

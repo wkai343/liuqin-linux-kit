@@ -21,7 +21,7 @@ def checked(path,record):
 
 def runtime_tree(source,busybox,dest,kernel_release):
     for name in ('usr/bin/python3','usr/bin/tar','usr/bin/install','usr/sbin/mkfs.ext4',
-                 'usr/sbin/mkfs.f2fs','usr/sbin/sgdisk','usr/sbin/e2fsck','lib/aarch64-linux-gnu/ld-linux-aarch64.so.1'):
+                 'usr/sbin/mkfs.f2fs','usr/sbin/sgdisk','usr/sbin/e2fsck','lib/ld-musl-aarch64.so.1'):
         data=(source/name).read_bytes()
         if data[:6]!=b'\x7fELF\x02\x01' or struct.unpack_from('<H',data,18)[0]!=183:
             raise ValueError('required runtime tool is not ARM64: '+name)
@@ -71,7 +71,14 @@ def runtime_tree(source,busybox,dest,kernel_release):
 def build(base,boot,runtime,busybox,output):
     if output.exists():raise ValueError('output already exists: '+str(output))
     pin=json.loads((PROJECT/'build/recovery/source.json').read_text());checked(base,pin)
-    if digest(busybox.read_bytes())!=pin['busybox_sha256']:raise ValueError('BusyBox differs from pinned ARM64 static binary')
+    runtime_files=json.loads((runtime/'runtime-files.json').read_text())
+    if digest(busybox.read_bytes())!=runtime_files.get('bin/busybox'):
+        raise ValueError('BusyBox differs from the source-built runtime manifest')
+    header=busybox.read_bytes()[:20]
+    if header[:6]!=b'\x7fELF\x02\x01' or header[18:20]!=b'\xb7\x00':
+        raise ValueError('BusyBox is not ARM64')
+    if 'INTERP' in subprocess.check_output(['readelf','-l',str(busybox)],text=True):
+        raise ValueError('BusyBox must be static')
     boot_pin=json.loads((PROJECT/'shared/liuqin-rom-images.json').read_text())['images']['boot.img']
     stock=checked(boot,boot_pin)
     if stock[:8]!=b'ANDROID!' or struct.unpack_from('<I',stock,40)[0] not in (3,4):raise ValueError('invalid stock boot header')
@@ -145,8 +152,8 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--base',type=Path,default=PROJECT/'inputs/recovery/liuqin/twrp-20250209.img')
     parser.add_argument('--boot',type=Path,default=PROJECT/'inputs/roms/liuqin/OS2.0.6.0.VMYCNXM/images/boot.img')
-    parser.add_argument('--runtime',type=Path,required=True,help='ARM64 tools directory produced by devbox run runtime; not an image')
-    parser.add_argument('--busybox',type=Path,default=PROJECT/'inputs/busybox-arm64/usr/bin/busybox')
+    parser.add_argument('--runtime',type=Path,required=True,help='ARM64 tools directory produced by build/recovery/build-runtime.py')
+    parser.add_argument('--busybox',type=Path,help='Defaults to the supplied runtime/bin/busybox')
     parser.add_argument('--out',type=Path,default=PROJECT/'out/releases/recovery')
     args=parser.parse_args()
     if not args.boot.exists():
@@ -156,6 +163,6 @@ def main():
         with urllib.request.urlopen(pin['url'],timeout=60) as response:data=response.read(LIMIT+1)
         if len(data)!=pin['bytes'] or digest(data)!=pin['sha256']:raise ValueError('downloaded TWRP does not match pin')
         args.base.write_bytes(data)
-    build(args.base,args.boot,args.runtime,args.busybox,args.out)
+    build(args.base,args.boot,args.runtime,args.busybox or args.runtime/'bin/busybox',args.out)
 
 if __name__=='__main__':main()

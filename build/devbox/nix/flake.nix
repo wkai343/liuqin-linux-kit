@@ -37,14 +37,14 @@
             name = "liuqin-build-tools";
             paths = with pkgs; [
               bash coreutils findutils gnugrep gnused gawk diffutils which
-              git curl cacert gnutar gzip pigz xz zstd bzip2 cpio rsync
+              git curl wget cacert gnutar gzip pigz xz zstd bzip2 cpio rsync unzip
               gnumake gcc binutils ccache bc bison flex perl pkg-config patch
               openssl.dev openssl.out elfutils.dev elfutils.out zlib.dev zlib.out
               ncurses.dev ncurses.out
               crossTools
               python dtc kmod e2fsprogs btrfs-progs f2fs-tools libcap attr acl gptfdisk dpkg rpm gnupg policycoreutils
               squashfsTools p7zip util-linux busyboxBinary erofs-utils mtools patchelf
-              qemuUser meson ninja file
+              qemuUser cmake meson ninja file
             ];
             pathsToLink = [ "/bin" "/sbin" "/include" "/lib" "/share/pkgconfig" ];
             ignoreCollisions = false;

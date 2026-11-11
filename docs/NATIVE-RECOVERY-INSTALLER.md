@@ -101,7 +101,7 @@ OTA/清除数据参数、阶段标记、Virtual A/B 合并、启动后新增或�
 
 当前安装版由 `build/recovery/build-native-installer.py` 组合专用内核、UI 和 adbd；固定封装由 `build-universal.py --installer` 等流程生成。原生基线、内核组件、DTB、触屏模块和全部运行文件均有哈希，构建步骤不访问平板。
 
-专用维护内核基于 6.17 和 `build/recovery/kernel-log-fixes.patch`，保留显示时钟/电源依赖与 ADSP 电池通信，使用独立的 USB peripheral 和触控衔接路径。其内核配置、补丁、对齐入口及组件摘要附在镜像和分发包中，不与桌面 Fedora 的完整 DRM/音频/OTG 配置混用。
+专用维护内核默认使用 kernel.org 7.3.4 和 Fedora 公共补丁，另加 Rec 配置与专用补丁，见[Rec 内核配方](../build/recovery/kernel/README.md)。保留显示时钟/电源依赖与 ADSP 电池通信，使用 USB peripheral 和触控衔接路径。Rec/公共来源锁、内核配置、全部补丁、对齐入口及组件摘要附在镜像和分发包中，不与桌面 Fedora 的完整 DRM/音频/OTG 配置混用。
 
 `recovery_fast_start_version=1` 在确认 UFS LUN、两份有效 GPT、分区项和内核几何一致后结束固定等待，再封存分区；缺少完整证明时走有上限的等待，不写盘修表。不能为清除 sync_state 日志随意裁掉显示时钟和电源消费者。
 

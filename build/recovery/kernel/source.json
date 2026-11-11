@@ -1,0 +1,134 @@
+{
+  "schema": 1,
+  "device": "liuqin",
+  "version": "7.3.4",
+  "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+  "tag": "v7.3.4",
+  "commit": "7595a62d45ee1a2297eafa5f2ef5d0a45142d84d",
+  "expected_source_tree": "054e13ad4e24c14a28c46a0550c4be1e5ce16008",
+  "config": {
+    "path": "build/recovery/kernel/7.3.4.config",
+    "sha256": "45e3367dd6a5510a4a335c44cd6aa586652e5cb6c1e2945baa42eb5d3050f0c0"
+  },
+  "patches": [
+    {
+      "path": "build/kernel/patches/linux-7.3/0001-preserve-liuqin-adaptation.patch",
+      "sha256": "5ae16b3b3daeb74eb7d1dbb546ed120dd7e279d5b625e7d28a34b9bf15e1e1ff"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0002-fix-gpio-and-camcc-probe.patch",
+      "sha256": "8f4373d0e2346532d4c98f091d877f151d156162cbe0f39cf05f2f792c724cd2"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0003-align-initial-phy-bias-mux-vote.patch",
+      "sha256": "136e5540315e96db35e7408f131a356898367c2f465d7cca8b6f72c949932104"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0004-preserve-audio-and-usb-resume-lifecycles.patch",
+      "sha256": "5edeb15a03c22d183fbf53d345903a494d266c3cd4ca1df66baf2354bbab8653"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0005-fix-dp-detection-lifecycle.patch",
+      "sha256": "cdec99a48d06958d845c076815b2dd907ace2c570e8b849d77ed4d741c9b42b7"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0006-nanosic-caps-lock-led.patch",
+      "sha256": "4731e6b4a0772759884c70d294bee10b9e063695cff02aea19c7965cc8e7e98d"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0008-liuqin-prepare-margin-controls.patch",
+      "sha256": "d81dd6a31efeaa038c4f351593969aa282a315bb6421971440bece395eaaf3bf"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0011-liuqin-tddi-wake-and-calibration-recovery.patch",
+      "sha256": "cef4e917ed58e9a05a0be2a70859eb16452550555a3a45ca51a90952540980cf"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0034-liuqin-minimum-brightness.patch",
+      "sha256": "1d90685b3dbe3ba3bb0d9511923b6b397657e010716cd433b1f9163f0c390341"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0012-nanosic-folio-posture.patch",
+      "sha256": "2e7373228e24c51329032efc13b48143058f2698485037f4915640673711c95f"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0014-liuqin-validated-platform-quirks.patch",
+      "sha256": "492b474fefe9364e89165752176b89e75935fe6481ced10376ba544915ada7df"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0015-audio-readiness-and-no-jack-policy.patch",
+      "sha256": "f371dd380dfdb73c988b39521d6e91cf0870f5a552d390dea725db3c353cff83"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0016-liuqin-abl-metadata-and-apm-header.patch",
+      "sha256": "28b6ec98f98f996f008ab8497255d72dc17a51295449638c09604d17303e00e4"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0017-liuqin-retry-dsp-readiness-during-startup.patch",
+      "sha256": "75ec89d0c4ab1cca8daac7ee8099568bf65787e73246d2ca8246603730628bb3"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0018-liuqin-peripheral-probe-lifecycles.patch",
+      "sha256": "0222df227e7ffe98adc8357a03337f45520753f3ee62ddbef7ee4dd55d03d57c"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0021-liuqin-publish-ready-power-supplies.patch",
+      "sha256": "a43dfd4d16e4b51b6880e4d433fdc5487325339bd5df78723fa3c21f3e63c00b"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0022-ucsi-debugfs-version-and-v1-reads.patch",
+      "sha256": "5b7aacedcb8f4dfe1f1e1447ae3db4133ad511e2fcd508600cb8f85dda40b93c"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0023-q6dsp-publish-state-before-clocks.patch",
+      "sha256": "905971c706d26771ed1dd911147e60126444e28ce93901f5ecff40d6318a30a7"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0024-liuqin-refresh-modes-and-live-switching.patch",
+      "sha256": "87f58749696c5a57913e06c27171215d958e6b7c9888fa570f60bfb715fc2c5a"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0030-nanosic-debounce-fold-and-reject-stale-input.patch",
+      "sha256": "356677e14982b8b4bef91a2816149af47a7924f86d7b9ead8b8a7879a648605d"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0031-liuqin-pen-input-and-diagnostics.patch",
+      "sha256": "7946a104d8d3464e055972f5dddc34d5007f50be6eeeb7c37497afaf293ec5a8"
+    },
+    {
+      "path": "build/recovery/kernel/patches/linux-7.3/0001-recovery-peripheral-handoff.patch",
+      "sha256": "ccb0f030fb1bed451301961d3d9c67d1b45060f67beb936a9aaf32a9db998f62"
+    }
+  ],
+  "dtb": "qcom/sm8475-xiaomi-liuqin.dtb",
+  "dtb_inputs": [
+    {
+      "path": "device/liuqin-abl-boot-overlay.dts",
+      "sha256": "8cc43ede20eddc3e8efaf069acdc5e423d04d510246fec44cb3789f7e5880cd3"
+    },
+    {
+      "path": "device/recovery/native-display-overlay.dts",
+      "sha256": "7c7c55b7dcca0c0cac303df670e5353744608caf77d5e0b43498ee67fee33d4b"
+    },
+    {
+      "path": "build/lib/abl-symbols.py",
+      "sha256": "be5f5e04445517785deae80860571e3c9c35729f125327cbb8003ee365c534d9"
+    },
+    {
+      "path": "shared/liuqin-rom-images.json",
+      "sha256": "275eb4741ed29b806bac14c65ce5dac1239c9535e5d442ebe00d47f01a8c2a89"
+    }
+  ],
+  "bootargs": "earlycon=simplefb console=tty0 clk_ignore_unused pd_ignore_unused rootwait mtdoops.dump_oops=1 panic=0 qcom_q6v5_pas.slpi_auto_boot=0 consoleblank=0",
+  "build_timestamp": "2026-11-11T00:00:00+00:00",
+  "shared_kernel": {
+    "path": "build/kernel/source.json",
+    "sha256": "ac557eb99e01281db8d4439084bef8c16a2d44f9d775bf157f35a9990e419f2c"
+  },
+  "touch_patches": [
+    {
+      "path": "build/recovery/kernel/patches/linux-7.3/0002-bootloader-panel-ready.patch",
+      "sha256": "63ac34cbac5c83839e057417359320b6af99a21a183974507a916d9d9ff9981f"
+    }
+  ]
+}

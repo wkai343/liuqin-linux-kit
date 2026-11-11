@@ -57,7 +57,7 @@ static void poll_job(lv_timer_t *timer);
 
 static cJSON *fake_rpc(const char *op,const cJSON *request){
     if (!strcmp(op, "status")) {
-        cJSON *value = cJSON_Parse("{\"device\":\"liuqin\",\"serial\":\"DEMO-LIUQIN\",\"slot\":\"a\",\"kernel\":\"6.17.0-liuqin-recovery\",\"build_id\":\"offline-preview\",\"brightness\":70,\"partition_count\":132,\"uptime_seconds\":420,\"memory_available_kib\":6200000,\"sealed\":true,\"phase\":\"complete\",\"installer_version\":1,\"usb_transport\":\"adb\",\"tablet_boot_switch\":true}");
+        cJSON *value = cJSON_Parse("{\"device\":\"liuqin\",\"serial\":\"DEMO-LIUQIN\",\"slot\":\"a\",\"kernel\":\"7.3.4-liuqin-recovery\",\"build_id\":\"offline-preview\",\"brightness\":70,\"partition_count\":132,\"uptime_seconds\":420,\"memory_available_kib\":6200000,\"sealed\":true,\"phase\":\"complete\",\"installer_version\":1,\"usb_transport\":\"adb\",\"tablet_boot_switch\":true}");
         cJSON_AddStringToObject(value, "battery", demo_battery);
         cJSON_AddStringToObject(value, "usb_state", demo_usb_state);
         return value;

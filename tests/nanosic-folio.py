@@ -68,7 +68,7 @@ typedef uint8_t u8; typedef uint64_t u64; typedef int irqreturn_t;
 #define system_dfl_wq NULL
 #define msecs_to_jiffies(v) (v)
 #define container_of(p,t,m) ((t*)((char*)(p)-offsetof(t,m)))
-struct work_struct {int unused;};
+struct work_struct {bool pending;};
 struct delayed_work {struct work_struct work;bool pending;unsigned long delay;};
 #define to_delayed_work(p) container_of(p,struct delayed_work,work)
 static int held;
@@ -88,13 +88,14 @@ static bool pressed[4], contacts[256];
 static u8 received[4][21];
 struct nanosic {
  struct i2c_client *client;struct hid_device *hid[4];void *tablet_mode_input;
- struct delayed_work posture_work;int lock,*tablet_mode_gpio;
+ struct delayed_work posture_work;struct work_struct lid_work;int lock,*tablet_mode_gpio;
  bool suspended,posture_stopping,lid_closed,folio_folded,input_muted,tablet_mode;
  bool connection_known,keyboard_connected;u8 keyboard_status;u64 connection_reports;
  u8 last_touchpad[21];unsigned int bad_magic_count,valid_report_count;
 };
 static int gpiod_get_value_cansleep(int *p){assert(held);return *p;}
 static void mod_delayed_work(void *q,struct delayed_work *w,unsigned long delay){(void)q;w->pending=true;w->delay=delay;}
+static void schedule_work(struct work_struct *w){w->pending=true;}
 static void input_report_switch(void *p,int code,int v){(void)p;assert(held&&code==SW_TABLET_MODE);switch_value=v;switches++;}
 static void input_sync(void *p){(void)p;}
 static void kobject_uevent(void *p,int action){(void)p;assert(action==KOBJ_CHANGE);events++;}
@@ -124,13 +125,14 @@ static void init(void){
  held=0;switch_value=1;switches=events=led_updates=0;
 }
 static void work(void){nano.posture_work.pending=false;nanosic_posture_work(&nano.posture_work.work);assert(!held);}
+static void run_lid_work(void){nano.lid_work.pending=false;nanosic_lid_work(&nano.lid_work);assert(!held);}
 static void packet(const u8 *p,int len){
  u8 frame[68]={0x57,0,0x39};assert(len<=65);memcpy(frame+3,p,len);
  scoped_guard(mutex,&nano.lock){nanosic_parse_frame(&nano,frame,len+3);}assert(!held);
 }
 static void connection(bool attached){u8 p[16]={0x22,0,0x38,0x80,0xa2,0,0,0,0,attached?3:0};packet(p,16);}
-static void lid(bool closed){struct input_handle h={&nano};nanosic_lid_event(&h,EV_SW,SW_LID,closed);work();}
-static void fold(bool back){folded=back;assert(nanosic_fold_irq(1,&nano)==IRQ_HANDLED);assert(nano.posture_work.delay==40);work();}
+static void lid(bool closed){struct input_handle h={&nano};nanosic_lid_event(&h,EV_SW,SW_LID,closed);run_lid_work();}
+static void fold(bool back){folded=back;assert(nanosic_fold_irq(1,&nano)==IRQ_HANDLED);assert(nano.posture_work.delay==150);work();}
 static void all_down(void){
  const u8 key[9]={5,3,0,4};const u8 media[5]={6,0xe9,0};const u8 mouse[8]={2,1,1};
  u8 touch[21]={25,1};for(int i=0;i<3;i++){touch[2+i*6]=7;touch[3+i*6]=(u8)(4+71*i);}touch[20]=3;
@@ -147,7 +149,7 @@ int main(void){
  for(int c=0;c<2;c++)for(int l=0;l<2;l++)for(int f=0;f<2;f++){
   init();connection(c);lid(l);fold(f);
   assert(switch_value==(f||!c));assert(nano.input_muted==(f||l));
-  int before=total();all_down();assert((total()==before)==(f||l));cases++;
+  int before=total();all_down();assert((total()==before)==(f||l||!c));cases++;
  }
  init();connection(true);all_down();for(int i=0;i<4;i++)assert(pressed[i]);
  fold(true);released();assert(switch_value==1);int before=total();all_down();assert(total()==before);cases++;
@@ -166,8 +168,19 @@ int main(void){
  u8 truncated[9]={0x22,0,0x38,0x80,0xa2};packet(truncated,9);
  assert(nano.keyboard_connected&&pressed[0]);cases++;
  /* A lid event is gated even before its deferred work gets CPU time. */
- struct input_handle h={&nano};nanosic_lid_event(&h,EV_SW,SW_LID,1);assert(nano.posture_work.pending);
+ struct input_handle h={&nano};nanosic_lid_event(&h,EV_SW,SW_LID,1);assert(nano.lid_work.pending);
  all_down();released();before=total();all_down();assert(total()==before);cases++;
+ /* Lid work releases keys without pulling a bouncing fold GPIO forward. */
+ init();connection(true);all_down();folded=1;nanosic_fold_irq(1,&nano);
+ lid(true);released();assert(!nano.folio_folded&&switch_value==0);
+ assert(nano.posture_work.pending&&nano.posture_work.delay==150);
+ folded=0;nanosic_fold_irq(1,&nano);lid(false);
+ assert(nano.posture_work.pending&&nano.posture_work.delay==150);
+ work();assert(!nano.folio_folded&&switch_value==0);cases++;
+ /* Keep pre-status input and suppress stale reports after a confirmed detach. */
+ init();all_down();assert(pressed[0]);connection(false);released();
+ before=total();all_down();assert(total()==before);connection(true);
+ all_down();assert(pressed[0]);cases++;
  /* An unreadable hall retains the previous safe state. */
  lid(false);fold(true);folded=-EIO;work();assert(nano.folio_folded&&nano.input_muted);cases++;
  /* Old DTs without the optional folded line continue to support connector/lid. */
@@ -176,8 +189,9 @@ int main(void){
  init();connection(true);nano.suspended=true;folded=1;
  nanosic_fold_irq(1,&nano);assert(!nano.posture_work.pending);work();assert(!nano.folio_folded);
  nano.suspended=false;scoped_guard(mutex,&nano.lock){nanosic_refresh_posture(&nano);}assert(switch_value==1);cases++;
- nano.posture_stopping=true;nano.posture_work.pending=false;
- nanosic_lid_event(&h,EV_SW,SW_LID,1);nanosic_fold_irq(1,&nano);assert(!nano.posture_work.pending);cases++;
+ nano.posture_stopping=true;nano.posture_work.pending=nano.lid_work.pending=false;
+ nanosic_lid_event(&h,EV_SW,SW_LID,1);nanosic_fold_irq(1,&nano);
+ assert(!nano.posture_work.pending&&!nano.lid_work.pending);cases++;
  printf("PASS: %d actual-driver folio scenarios (hardware not exercised)\n",cases);return 0;
 }
 '''
@@ -195,7 +209,7 @@ def main():
         constants += '\n' + re.search(r'struct nanosic_packet \{.*?\n};', code, re.S)[0]
         constants += '\n' + re.search(r'static const struct nanosic_packet nanosic_packets\[\] = \{.*?\n};', code, re.S)[0]
         names = ('nanosic_packet_by_id', 'nanosic_release_inputs', 'nanosic_report_posture',
-                 'nanosic_refresh_posture', 'nanosic_posture_work', 'nanosic_fold_irq',
+                 'nanosic_refresh_posture', 'nanosic_posture_work', 'nanosic_lid_work', 'nanosic_fold_irq',
                  'nanosic_lid_event', 'nanosic_parse_connection_status', 'nanosic_parse_frame')
         program = STUBS + constants + '\n' + '\n'.join(function(code, name) for name in names) + CASES
         source = root / 'folio.c'; source.write_text(program)

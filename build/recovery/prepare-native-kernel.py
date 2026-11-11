@@ -16,9 +16,8 @@ import tempfile
 PROJECT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT/'shared'))
 from liuqin_artifacts import boot_interface
-
-BASE_COMMIT = 'fe81794b5e1b8a3f11a165f3acbfdb8fa671dbb3'
-BASE_IMAGE_SHA = 'dcc287f5a8273260613fdcf26447e35e28fd40cec36358615d32c0e9c7abe569'
+sys.path.insert(0, str(PROJECT/'build/recovery'))
+from kernel_recipe import DEFAULT_LOCK, load, prepare_touch, project_file, verify_build
 
 
 def sha(path):
@@ -60,11 +59,16 @@ def aligned_kernel(image, output):
 
 
 def recovery_dtb(base_image, output):
+    """Read a historical image for comparison; new builds use kernel_dtb.py."""
     blob = base_image.read_bytes()
     kernel_size, ramdisk_size = struct.unpack_from('<I', blob, 8)[0], struct.unpack_from('<I', blob, 16)[0]
     offset = 4096+(kernel_size+4095)//4096*4096+(ramdisk_size+4095)//4096*4096
     length = struct.unpack_from('<I', blob, 1648)[0]
     output.write_bytes(blob[offset:offset+length])
+    return configure_recovery_dtb(output)
+
+
+def configure_recovery_dtb(output):
     get, put = tool('fdtget'), tool('fdtput')
 
     def children(node):
@@ -101,12 +105,20 @@ def recovery_dtb(base_image, output):
         if result.returncode == 0:
             disable(node)
 
-    usb = '/soc@0/usb@a6f8800/usb@a600000'
+    # New Qualcomm bindings flatten the legacy wrapper and DWC3 child.
+    candidates = ('/soc@0/usb@a600000', '/soc@0/usb@a6f8800/usb@a600000')
+    controllers = [node for node in candidates if subprocess.run(
+        [get, '-p', str(output), node], capture_output=True).returncode == 0]
+    if len(controllers) != 1:
+        raise ValueError('expected exactly one Liuqin USB controller')
+    usb = controllers[0]
     # MDSS stays disabled as in the qualified base. Its unbound panel node
     # must remain available to the RAM-only touch follower handoff module.
     run([put, output, '/soc@0/phy@88e8000', 'liuqin,recovery'])
     run([put, '-t', 's', output, usb, 'dr_mode', 'peripheral'])
     remove_property(usb, 'usb-role-switch')
+    if usb == '/soc@0/usb@a600000':
+        remove_property(usb, 'role-switch-default-mode')
     for node in ('/pmic-glink/connector@0', usb+'/ports', '/soc@0/phy@88e8000/ports'):
         run([put, '-r', output, node])
     for name in ('orientation-switch', 'mode-switch'):
@@ -123,14 +135,8 @@ def prepare(args):
     out = args.out.resolve()
     if out.exists() or not out.is_relative_to(PROJECT/'out'):
         raise ValueError('use a new output directory below project/out')
-    if subprocess.check_output(['git', '-C', source, 'rev-parse', 'HEAD'], text=True).strip() != BASE_COMMIT:
-        raise ValueError('unsupported kernel base')
-    patch = PROJECT/'build/recovery/kernel-log-fixes.patch'
-    if subprocess.check_output(['git', '-C', source, 'diff', '--binary']) != patch.read_bytes():
-        raise ValueError('kernel source changes differ from the Recovery patch')
-    if sha(args.base_image) != BASE_IMAGE_SHA:
-        raise ValueError('qualified native base image required')
-    boot_interface(args.base_image, installer=True)
+    source_identity = verify_build(source, kernel, args.source_lock)
+    recipe = load(args.source_lock)
     config = (kernel/'.config').read_text()
     if '# CONFIG_SND is not set' not in config:
         raise ValueError('the maintenance kernel must exclude audio')
@@ -138,31 +144,46 @@ def prepare(args):
     raw = kernel/'arch/arm64/boot/Image'
     wrapped = aligned_kernel(raw, out/'Image')
     (out/'Image.gz').write_bytes(gzip.compress(wrapped, compresslevel=9, mtime=0))
-    recovery_dtb(args.base_image, out/'recovery.dtb')
+    from kernel_dtb import build as build_dtb
+    build_dtb(kernel/'arch/arm64/boot/dts'/recipe['dtb'], args.rom_images,
+              out/'recovery.dtb', out/'dtb-work', args.source_lock)
 
     # modpost needs the built-in symbol versions for this exact kernel build.
     builtins = kernel/'vmlinux.symvers'
     if builtins.is_file():
         shutil.copyfile(builtins, kernel/'Module.symvers')
-    module_dir = out/'touch-build'
-    module_dir.mkdir()
-    for path in (PROJECT/'device/recovery/touch').iterdir():
-        if path.is_file():
-            shutil.copy2(path, module_dir/path.name)
+    module_dir = prepare_touch(out/'touch-build', args.source_lock)
     env = dict(os.environ, PATH=str(PROJECT/'.devbox/nix/profile/default/bin')+os.pathsep+os.environ.get('PATH', ''))
     run(['make', '-C', source, 'O='+str(kernel), 'ARCH=arm64',
-         'CROSS_COMPILE=aarch64-unknown-linux-musl-', 'M='+str(module_dir), 'modules'], env=env)
+         'CROSS_COMPILE=aarch64-unknown-linux-musl-', 'RUSTC=false', 'modules_prepare'], env=env)
+    run(['make', '-C', source, 'O='+str(kernel), 'ARCH=arm64',
+         'CROSS_COMPILE=aarch64-unknown-linux-musl-', 'RUSTC=false', 'M='+str(module_dir), 'modules'], env=env)
     shutil.copy2(module_dir/'liuqin_bootloader_panel.ko', out/'liuqin_bootloader_panel.ko')
     shutil.copy2(kernel/'.config', out/'kernel.config')
-    shutil.copy2(patch, out/patch.name)
-    inputs = [Path(__file__), PROJECT/'device/recovery/aligned-entry.S', patch]
+    shutil.copy2(args.source_lock, out/'source-lock.json')
+    inputs = [Path(__file__), PROJECT/'device/recovery/aligned-entry.S',
+              PROJECT/'build/recovery/kernel_recipe.py', PROJECT/'build/recovery/kernel_dtb.py',
+              PROJECT/'build/recovery/build-kernel.py', Path(args.source_lock)]
+    patches = [*recipe['patches'], *recipe.get('touch_patches', [])]
+    inputs += [project_file(p['path']) for p in [recipe['config'], *patches, *recipe['dtb_inputs']]]
     inputs += sorted((PROJECT/'device/recovery/touch').glob('*'))
-    manifest = dict(schema=1, device='liuqin', base_image_sha256=BASE_IMAGE_SHA,
-                    kernel_base_commit=BASE_COMMIT, kernel_release=(kernel/'include/config/kernel.release').read_text().strip(),
+    artifacts = ['Image.gz', 'recovery.dtb', 'liuqin_bootloader_panel.ko', 'kernel.config', 'source-lock.json']
+    if recipe.get('shared_kernel'):
+        shared = project_file(recipe['shared_kernel']['path'])
+        inputs.append(shared)
+        shutil.copy2(shared, out/'shared-source-lock.json')
+        artifacts.append('shared-source-lock.json')
+    for entry in patches:
+        patch = project_file(entry['path'])
+        if patch.name in artifacts:
+            raise ValueError('duplicate patch filename in Recovery source bundle')
+        shutil.copy2(patch, out/patch.name)
+        artifacts.append(patch.name)
+    manifest = dict(schema=2, device='liuqin', source=source_identity,
+                    kernel_base_commit=recipe['commit'], kernel_release=(kernel/'include/config/kernel.release').read_text().strip(),
                     raw_kernel_sha256=sha(raw), kernel_sha256=hashlib.sha256(wrapped).hexdigest(),
                     dtb_sha256=sha(out/'recovery.dtb'), config_sha256=sha(kernel/'.config'),
-                    files={name:sha(out/name) for name in ('Image.gz','recovery.dtb','liuqin_bootloader_panel.ko',
-                                                         'kernel.config','kernel-log-fixes.patch')},
+                    files={name:sha(out/name) for name in artifacts},
                     source_files={str(path.relative_to(PROJECT)):sha(path) for path in inputs if path.is_file()},
                     hardware_boot_tested=False)
     (out/'kernel-manifest.json').write_text(json.dumps(manifest, indent=2)+'\n')
@@ -173,6 +194,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--kernel-source', type=Path, required=True)
     parser.add_argument('--kernel-out', type=Path, required=True)
-    parser.add_argument('--base-image', type=Path, default=PROJECT/'out/releases/native-recovery/recovery.img')
+    parser.add_argument('--source-lock', type=Path, default=DEFAULT_LOCK)
+    parser.add_argument('--rom-images', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
     prepare(parser.parse_args())

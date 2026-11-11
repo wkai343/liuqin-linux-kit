@@ -1,0 +1,62 @@
+From: Yegor Yefremov <yegorslists@googlemail.com>
+Subject: [PATCH] libmisc: don't rely on kernel headers for struct xattr_args
+
+Backport the upstream fixed-layout xattr ABI definition for musl with
+Linux headers older than 6.13. Original file copyright and LGPL-2.1-or-later
+license remain unchanged. Diff whitespace restored against acl 2.4.0, which carries the same libmisc implementation.
+
+Upstream: https://lists.nongnu.org/archive/html/acl-devel/2026-08/msg00000.html
+Assisted-by: Claude:claude-opus-5
+Signed-off-by: Yegor Yefremov <yegorslists@googlemail.com>
+
+--- a/libmisc/xattrat.c
++++ b/libmisc/xattrat.c
+@@ -18,7 +18,7 @@
+ */
+ 
+ #include "config.h"
+-#include <linux/xattr.h>
++#include <stdint.h>
+ #include <sys/syscall.h>
+ #include <unistd.h>
+ #include <errno.h>
+@@ -29,13 +29,26 @@
+ 
+ #include "xattrat.h"
+ 
++/*
++ * struct xattr_args was added to <linux/xattr.h> in Linux 6.13, but the
++ * syscall numbers can be defined independently of the kernel headers (musl
++ * libc defines them in <bits/syscall.h>, for example), so we cannot rely on
++ * the kernel headers to define the struct.  Use our own definition of this
++ * fixed part of the kernel ABI instead.
++ */
++struct attr_xattr_args {
++	uint64_t value __attribute__((aligned(8)));
++	uint32_t size;
++	uint32_t flags;
++};
++
+ ssize_t
+ getxattrat(int dirfd, const char *path, int at_flags, const char *name,
+ 	   void *value, size_t size)
+ {
+ #ifdef __NR_getxattrat
+-	struct xattr_args uargs = {
+-		.value = (unsigned long)value,
++	struct attr_xattr_args uargs = {
++		.value = (uintptr_t)value,
+ 		.size = size,
+ 	};
+ 
+@@ -52,8 +65,8 @@
+ 	   const void *value, size_t size, int flags)
+ {
+ #ifdef __NR_setxattrat
+-	struct xattr_args uargs = {
+-		.value = (unsigned long)value,
++	struct attr_xattr_args uargs = {
++		.value = (uintptr_t)value,
+ 		.size = size,
+ 		.flags = flags,
+ 	};

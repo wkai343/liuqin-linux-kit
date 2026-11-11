@@ -164,7 +164,8 @@ typedef uint8_t u8;
 struct i2c_eusb2_repeater {void *regmap,*dev;};
 static int attempts,waits,errors,failures,code=-ENXIO;
 static int regmap_read(void *map,unsigned int reg,unsigned int *out){
- attempts++;if(attempts<=failures)return code;*out=0x42;return 0;
+ /* Failed bus reads may clobber their buffer; never publish that value. */
+ attempts++;*out=0xcc;if(attempts<=failures)return code;*out=0x42;return 0;
 }
 static void usleep_range(int low,int high){assert(low==1000&&high==2000);waits++;}
 #define dev_err(...) do{errors++;}while(0)

@@ -5,7 +5,7 @@ from pathlib import Path
 import argparse,json,re,subprocess,tempfile
 
 def function(text, name):
-    match = re.search(r'^(?:static )?(?:int32_t|int|void|bool)\s+' + name +
+    match = re.search(r'^(?:static )?(?:int32_t|int|void|bool|unsigned int|irqreturn_t)\s+' + name +
                       r'\([^;{]*\)\s*\{', text, re.M)
     if not match:
         raise ValueError('Missing function: ' + name)
@@ -33,12 +33,25 @@ s = r"""
 #include <stdatomic.h>
 #define NVT_TOUCH_ESD_PROTECT 0
 #define READ_ONCE(x) (x)
+#define WRITE_ONCE(x,v) ((x)=(v))
 #define likely(x) (x)
 #define unlikely(x) (x)
 #define NVT_LOG(...) ((void)0)
 #define NVT_ERR(...) ((void)0)
+#define NVT_ERR_ONCE(...) ((void)0)
+#define dev_warn_ratelimited(...) ((void)0)
 #define container_of(p,t,m) ((t *)((char *)(p)-offsetof(t,m)))
+#define msecs_to_jiffies(ms) (ms)
+#define min_t(type,a,b) ((type)(a)<(type)(b)?(type)(a):(type)(b))
+#define MT_PROTOCOL_B 1
+#define DUMMY_BYTES 1
+#define TOUCH_MAX_FINGER_NUM 10
+#define TOUCH_KEY_NUM 0
+#define NVT_COORD_SCALE 10
+#define IRQ_HANDLED 1
+typedef int irqreturn_t;
 typedef uint8_t u8;
+typedef uint64_t u64;
 typedef enum {RESET_STATE_INIT=0xa0,RESET_STATE_REK,
  RESET_STATE_REK_FINISH,RESET_STATE_NORMAL_RUN,RESET_STATE_MAX=0xaf} RST_COMPLETE_STATE;
 enum {NVT_IC_SUSPEND_OUT,NVT_IC_RESUME_IN,NVT_IC_RESUME_OUT};
@@ -46,17 +59,37 @@ enum {NVT_IC_SUSPEND_OUT,NVT_IC_RESUME_IN,NVT_IC_RESUME_OUT};
 struct mutex {pthread_mutex_t value;};
 static void mutex_lock(struct mutex *m){assert(!pthread_mutex_lock(&m->value));}
 static void mutex_unlock(struct mutex *m){assert(!pthread_mutex_unlock(&m->value));}
+#define lockdep_assert_held(m) assert(pthread_mutex_trylock(&(m)->value)==EBUSY)
 struct device {void *of_node;};
-struct client {struct device dev;};
+struct client {struct device dev;int irq;};
 struct work_struct {int unused;};
+struct delayed_work {struct work_struct work;bool pending;};
+#define to_delayed_work(p) container_of(p,struct delayed_work,work)
+struct input_dev {unsigned int syncs;bool touch;};
+enum {ABS_MT_POSITION_X,ABS_MT_POSITION_Y,ABS_MT_TOUCH_MAJOR,ABS_MT_PRESSURE,
+ ABS_X,ABS_Y,ABS_PRESSURE,ABS_TILT_X,ABS_TILT_Y,ABS_DISTANCE};
+enum {BTN_TOUCH,BTN_TOOL_PEN,BTN_STYLUS,BTN_STYLUS2};
+#define MT_TOOL_FINGER 0
+static void input_report_abs(struct input_dev *d,int code,int val){(void)d;(void)code;(void)val;}
+static void input_report_key(struct input_dev *d,int code,int val){if(code==BTN_TOUCH)d->touch=val;}
+static void input_mt_slot(struct input_dev *d,int slot){(void)d;(void)slot;}
+static void input_mt_report_slot_state(struct input_dev *d,int tool,bool on){(void)d;(void)tool;(void)on;}
+static void input_sync(struct input_dev *d){d->syncs++;}
 struct drm_panel {struct device *dev;struct mutex backlight_lock;bool enabled,backlight_pending;unsigned int backlight_cookie;};
 struct drm_panel_follower {struct drm_panel *panel;};
 struct memory_map {unsigned int EVENT_BUF_ADDR;};
+/* PEN_STATS */
 struct nvt_ts_data {
  struct client *client;struct memory_map *mmap;struct drm_panel_follower panel_follower;
  struct mutex lock;struct work_struct resume_work;bool is_panel_follower,touch_awake;
  bool dev_pm_suspend,irq_requested,panel_on,resources_ready,stopping;int lifecycle_lock;
+ struct delayed_work pen_retry_work;struct nvt_pen_stats pen_stats;
+ bool pen_support,pen_input_dev_enable,pen_is_charge,pen_subpixel;
+ unsigned int pen_coord_scale,max_touch_num,abs_x_max,abs_y_max;
+ struct input_dev *input_dev,*pen_input_dev;
+ int dev_pm_suspend_completion;
  unsigned int resume_count;int ic_state,gesture_command_delayed,db_wakeup;
+ u64 wdt_frames,wdt_events;unsigned int wdt_streak;u8 wdt_pattern;
  void *event_wq;
 };
 static struct client client;
@@ -68,6 +101,9 @@ static bool commit_fail,concurrent,async_cancel;
 static int page_error,read_error,firmware_error,pen_error;
 static unsigned int reads,ready_at,display_sleeps,firmware_calls,pen_calls;
 static unsigned int irq_enables,irq_disables,cancel_calls,suspend_calls;
+static struct input_dev finger,pen;
+static bool report_recovery;
+static u8 pen_format;
 static atomic_bool firmware_entered,dimmer_attempted;
 static atomic_bool cancellation_waiting;
 static pthread_t resume_thread;
@@ -83,6 +119,10 @@ static bool nvt_commit_follower_awake(struct nvt_ts_data *t){
 }
 static void pm_stay_awake(struct device *d){(void)d;}
 static void pm_relax(struct device *d){(void)d;}
+static bool device_may_wakeup(struct device *d){(void)d;return false;}
+static int enable_irq_wake(int irq){(void)irq;return 0;}
+static void reinit_completion(int *completion){*completion=0;}
+static unsigned int wait_for_completion_timeout(int *c,unsigned int ms){(void)ms;return *c;}
 static void nvt_irq_enable(bool b){irq_on=b;if(b)irq_enables++;else irq_disables++;}
 static int nvt_set_page(unsigned int p){(void)p;return page_error;}
 static int CTP_SPI_READ(struct client *c,u8 *b,unsigned int n){
@@ -116,6 +156,12 @@ static int nvt_update_firmware_no_eng_reset(const char *s){
  return firmware_error;
 }
 static int __nvt_set_pen_state(bool disable){(void)disable;pen_calls++;return pen_error;}
+static void queue_delayed_work(void *q,struct delayed_work *w,unsigned int delay){
+ assert(q==ts->event_wq&&w==&ts->pen_retry_work&&delay==100&&irq_on&&ts->touch_awake);
+ assert(!w->pending);w->pending=true;
+}
+static void cancel_delayed_work_sync(struct delayed_work *w){w->pending=false;}
+static bool nvt_fw_recovery(const u8 *b){(void)b;return report_recovery;}
 #define spin_lock_irqsave(lock,flags) do{(void)(lock);(flags)=0;}while(0)
 #define spin_unlock_irqrestore(lock,flags) do{(void)(lock);(void)(flags);}while(0)
 static void cancel_work_sync(struct work_struct *w){
@@ -125,12 +171,24 @@ static void cancel_work_sync(struct work_struct *w){
 static int nvt_ts_suspend(struct device *d){(void)d;suspend_calls++;ts->touch_awake=false;irq_on=false;return 0;}
 """
 src=(args.source/'drivers/input/touchscreen/nt36523/nt36xxx.c').read_text()
+header=(args.source/'drivers/input/touchscreen/nt36523/nt36xxx.h').read_text()
 core=(args.source/'drivers/gpu/drm/drm_panel.c').read_text()
+s=s.replace('/* PEN_STATS */',re.search(r'struct nvt_pen_stats \{.*?\n\};',header,re.S)[0])
+s='\n'.join(re.findall(r'^#define (?:NVT_PEN_\w+|PEN_DATA_LEN|POINT_DATA_LEN) [^\n]+',src,re.M))+'\n'+s
 s=s.replace('struct drm_panel {','struct drm_panel;\nstruct drm_panel_funcs {int (*recover_touch)(struct drm_panel *);void (*finish_touch_recovery)(struct drm_panel *,bool);};\nstruct drm_panel {const struct drm_panel_funcs *funcs;bool prepared;struct mutex follower_lock;')
 s=s.replace('void *event_wq;','void *event_wq;const char *fw_name;unsigned int firmware_update_count;')
+s=s.replace('static struct client client;', 'static u8 watchdog_pattern;static bool partial_watchdog;\nstatic struct client client;')
 s=s.replace('static struct client client;','static bool liuqin_tddi_recovery;\n#define LIUQIN_TOUCH_FW_TM "tm.bin"\n#define EVENT_MAP_HOST_CMD 0x50\nstatic unsigned int recovery_calls,finish_calls,sleep_calls;static bool finish_ready,cancel_recovery,wait_recovery;static int read_mode,panel_error,second_fw_error;\nstatic atomic_bool recovery_entered,recovery_release;\nstatic struct client client;')
 a=fn(s,'CTP_SPI_READ');b='''static int CTP_SPI_READ(struct client *c,u8 *b,unsigned int n){
- (void)c;assert(n==6);reads++;if(read_error)return read_error;
+ (void)c;if(read_error)return read_error;
+ if(n!=6){
+  assert(n==POINT_DATA_LEN+1+(ts->pen_support?PEN_DATA_LEN:0));
+  if(watchdog_pattern){memset(b+1,watchdog_pattern,6);if(partial_watchdog)b[6]=0;return 0;}
+  b[1]=9;b[3]=10;b[5]=10;
+  if(ts->pen_support){b[POINT_DATA_LEN+1]=pen_format;b[72]=42;}
+  return 0;
+ }
+ reads++;
  if(read_mode==2)b[1]=reads%7==0?RESET_STATE_NORMAL_RUN:RESET_STATE_REK;
  else if(read_mode==1||read_mode==3)b[1]=firmware_calls>=2?RESET_STATE_NORMAL_RUN:(read_mode==3?RESET_STATE_INIT:RESET_STATE_REK);
  else b[1]=reads>=ready_at?RESET_STATE_NORMAL_RUN:RESET_STATE_REK;
@@ -153,11 +211,19 @@ static void fake_finish(struct drm_panel *p,bool ready){
 static const struct drm_panel_funcs ops={fake_recover,fake_finish};
 '''
 s+='\n'.join(fn(core,n) for n in ['drm_panel_recover_touch','drm_panel_finish_touch_recovery'])
-s+='\n'.join(fn(src,n) for n in ['nvt_read_event_bytes','nvt_check_fw_reset_state','nvt_tddi_panel_supported','nvt_tddi_recovery_enabled','nvt_wait_initial_display','nvt_wait_tddi_normal','nvt_recover_tddi','nvt_quiesce_failed_tddi','nvt_ts_resume','nvt_resume_work'])
+s+='\n'.join(fn(src,n) for n in [
+ 'nvt_read_event_bytes','nvt_check_fw_reset_state','nvt_tddi_panel_supported',
+ 'nvt_tddi_recovery_enabled','nvt_wait_initial_display','nvt_wait_tddi_normal',
+ 'nvt_recover_tddi','nvt_quiesce_failed_tddi','nvt_try_enable_pen','nvt_pen_retry_work',
+ 'nvt_ts_resume','nvt_resume_work','panel_unpreparing','nvt_pm_suspend',
+ 'nvt_count_pen_frame','nvt_pen_axis_max','nvt_pen_position','release_pen_event','nvt_watchdog_frame','nvt_ts_work_func'])
 s += r"""static void base_setup(void){
  data=(struct nvt_ts_data){.client=&client,.mmap=&memory_map,.panel_follower={&panel},
   .is_panel_follower=true,.irq_requested=true,.panel_on=true,.resources_ready=true,.event_wq=&client,
-  .gesture_command_delayed=-1};
+  .gesture_command_delayed=-1,.pen_support=true,.pen_input_dev_enable=true,
+  .pen_subpixel=true,.pen_coord_scale=10,.abs_x_max=1800,.abs_y_max=2880,.max_touch_num=1,
+  .input_dev=&finger,.pen_input_dev=&pen};
+ finger=(struct input_dev){0};pen=(struct input_dev){0};pen_format=NVT_PEN_ABSENT;report_recovery=false;
  assert(!pthread_mutex_init(&data.lock.value,NULL));
  assert(!pthread_mutex_init(&panel.backlight_lock.value,NULL));
  panel.dev=&client.dev;client.dev.of_node=&memory_map;
@@ -178,7 +244,32 @@ static void setup(void){base_setup();data.fw_name=LIUQIN_TOUCH_FW_TM;panel.funcs
 static void finish(void){base_finish();assert(!pthread_mutex_trylock(&panel.follower_lock.value));assert(!pthread_mutex_unlock(&panel.follower_lock.value));assert(!pthread_mutex_destroy(&panel.follower_lock.value));}
 static int run(void){return nvt_ts_resume(&client.dev);}
 static void *worker(void *unused){(void)unused;return (void *)(intptr_t)run();}
+static void run_retry(void){
+ assert(data.pen_retry_work.pending);data.pen_retry_work.pending=false;
+ nvt_pen_retry_work(&data.pen_retry_work.work);
+}
+static void irq_frame(u8 format){
+ pen_format=format;assert(nvt_ts_work_func(client.irq,&data)==IRQ_HANDLED);
+}
 int main(void){unsigned int cases=0;
+ for(int pattern=0xfd;pattern<=0xfe;pattern++){
+  setup();assert(!run());irq_frame(NVT_PEN_POSITION);assert(finger.touch&&pen.touch);
+  watchdog_pattern=pattern;
+  for(int n=0;n<10;n++)irq_frame(NVT_PEN_POSITION);
+  assert(data.wdt_frames==10&&data.wdt_streak==10&&!data.wdt_events&&!finger.touch&&!pen.touch);
+  irq_frame(NVT_PEN_POSITION);assert(data.wdt_events==1&&data.wdt_streak==11);
+  irq_frame(NVT_PEN_POSITION);assert(data.wdt_events==1&&data.wdt_frames==12);
+  assert(data.pen_stats.position==1&&!data.pen_stats.other&&firmware_calls==1&&!recovery_calls);
+  watchdog_pattern=0;irq_frame(NVT_PEN_ABSENT);assert(!data.wdt_streak&&finger.touch);
+  watchdog_pattern=pattern;for(int n=0;n<11;n++)irq_frame(NVT_PEN_POSITION);
+  assert(data.wdt_events==2&&data.wdt_pattern==pattern);
+  watchdog_pattern=0;finish();cases++;
+ }
+ setup();assert(!run());watchdog_pattern=0xfe;irq_frame(NVT_PEN_POSITION);
+ partial_watchdog=true;irq_frame(NVT_PEN_POSITION);assert(!data.wdt_streak&&data.wdt_frames==1);
+ partial_watchdog=false;irq_frame(NVT_PEN_POSITION);assert(data.wdt_streak==1);
+ read_error=-EIO;irq_frame(NVT_PEN_POSITION);assert(!data.wdt_streak);
+ read_error=0;watchdog_pattern=0;finish();cases++;
  setup();assert(!run()&&firmware_calls==1&&reads>=22&&irq_on&&data.touch_awake&&!recovery_calls&&!sleep_calls);finish();cases++;
  for(int mode=1;mode<=3;mode+=2){setup();read_mode=mode;assert(!run()&&firmware_calls==2&&recovery_calls==1&&finish_calls==1&&finish_ready&&irq_on&&data.touch_awake&&!sleep_calls&&reads>=170);finish();cases++;}
  setup();read_mode=2;assert(run()==-ETIMEDOUT&&firmware_calls==2&&recovery_calls==1&&finish_calls==1&&!finish_ready&&!irq_on&&!data.touch_awake&&sleep_calls==1&&reads==300);finish();cases++;
@@ -197,7 +288,48 @@ int main(void){unsigned int cases=0;
  setup();data.panel_on=false;assert(run()==-EHOSTDOWN&&!firmware_calls&&!recovery_calls&&!sleep_calls);finish();cases++;
  setup();data.stopping=true;assert(run()==-EHOSTDOWN&&!firmware_calls&&!sleep_calls);finish();cases++;
  setup();commit_fail=true;assert(run()==-EHOSTDOWN&&firmware_calls==1&&!recovery_calls&&sleep_calls==1&&!irq_on);finish();cases++;
- setup();pen_error=-EIO;assert(run()==-EIO&&firmware_calls==1&&!recovery_calls&&sleep_calls==1&&!irq_on);finish();cases++;
+ for(int fail=0;fail<2;fail++){
+  setup();pen_error=-EIO;
+  assert(!run()&&firmware_calls==1&&!recovery_calls&&!sleep_calls&&irq_on&&data.touch_awake);
+  assert(data.pen_stats.enable_attempts==1&&data.pen_stats.enable_failures==1&&data.pen_stats.enable_error==-EIO);
+  irq_frame(NVT_PEN_ABSENT);assert(finger.touch&&finger.syncs==1);
+  pen_error=fail?-EIO:0;run_retry();
+  assert(data.pen_stats.enable_attempts==2&&data.pen_stats.enable_failures==1+fail);
+  assert(data.pen_stats.enable_error==pen_error&&!data.pen_retry_work.pending&&irq_on&&firmware_calls==1);
+  finish();cases++;
+ }
+ setup();pen_error=-EIO;assert(!run()&&data.pen_retry_work.pending);
+ assert(!panel_unpreparing(&data.panel_follower));
+ assert(!data.pen_retry_work.pending&&!irq_on&&pen_calls==1);
+ data.panel_on=true;pen_error=0;assert(!run()&&irq_on&&pen_calls==2&&!data.pen_retry_work.pending);
+ finish();cases++;
+ setup();pen_error=-EIO;assert(!run()&&data.pen_retry_work.pending);
+ assert(!nvt_pm_suspend(&client.dev)&&!data.pen_retry_work.pending&&pen_calls==1);
+ finish();cases++;
+ for(int kind=0;kind<6;kind++){
+  setup();pen_error=-EIO;assert(!run()&&data.pen_retry_work.pending);
+  if(kind==0)data.panel_on=false;
+  if(kind==1)data.stopping=true;
+  if(kind==2)data.touch_awake=false;
+  if(kind==3)data.dev_pm_suspend=true;
+  if(kind==4)data.pen_is_charge=true;
+  if(kind==5)data.pen_input_dev_enable=false;
+  run_retry();assert(pen_calls==1&&!data.pen_retry_work.pending);finish();cases++;
+ }
+ setup();data.pen_support=false;assert(!run()&&irq_on&&!pen_calls);finish();cases++;
+ setup();assert(!run());
+ irq_frame(NVT_PEN_POSITION);assert(pen.touch&&data.pen_stats.reported==1);
+ data.pen_input_dev_enable=false;irq_frame(NVT_PEN_POSITION);
+ data.pen_input_dev_enable=true;data.pen_is_charge=true;irq_frame(NVT_PEN_POSITION);
+ data.pen_is_charge=false;irq_frame(NVT_PEN_ABSENT);assert(!pen.touch);
+ irq_frame(NVT_PEN_ID);irq_frame(0x99);
+ read_error=-EIO;irq_frame(NVT_PEN_POSITION);read_error=0;
+ report_recovery=true;irq_frame(NVT_PEN_POSITION);report_recovery=false;
+ data.pen_support=false;irq_frame(NVT_PEN_POSITION);
+ assert(data.pen_stats.position==3&&data.pen_stats.reported==1);
+ assert(data.pen_stats.absent==1&&data.pen_stats.id==1&&data.pen_stats.other==1);
+ assert(data.pen_stats.spi_errors==1&&pen.syncs==2&&finger.syncs==7);
+ finish();cases++;
  for(int kind=0;kind<5;kind++){
   setup();ready_at=10000;if(kind==0)liuqin_tddi_recovery=false;if(kind==1)liuqin=false;if(kind==2)data.fw_name="csot.bin";if(kind==3)data.db_wakeup=1;if(kind==4)data.is_panel_follower=false;
   assert(!run()&&firmware_calls==1&&reads==1&&irq_on&&data.touch_awake&&!recovery_calls&&!sleep_calls);finish();cases++;
@@ -214,9 +346,12 @@ int main(void){unsigned int cases=0;
 """
 with tempfile.TemporaryDirectory() as d:
  q=Path(d);(q/'touch.c').write_text('#define EXPECT_FIXED 0\n'+s)
- subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-misleading-indentation','-fsanitize=undefined','-pthread',str(q/'touch.c'),'-o',str(q/'touch')],check=True)
+ subprocess.run(['cc','-std=c11','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-misleading-indentation',
+                 '-Wno-unused-parameter','-Wno-unused-but-set-variable','-Wno-type-limits','-Wno-sign-compare',
+                 '-fsanitize=undefined','-pthread',str(q/'touch.c'),'-o',str(q/'touch')],check=True)
  count=int(subprocess.check_output([str(q/'touch')],text=True,timeout=15))
 r={'touch_and_drm_core_cases':count,'actual_candidate_c_executed':True,'single_retry_and_stable20_polls':True,'a1_transients_do_not_enable_irq':True,'input_lock_not_held_under_panel_lock':True,'follower_lock_cancel_join_no_deadlock':True,'other_board_calibration_paths_preserved':True,'display_gate_independent_of_recovery_toggle':True}
+r.update(pen_frame_accounting=True,pen_failure_leaves_touch_available=True,pen_retry_cancellation=True)
 panel_source=(args.source/'drivers/gpu/drm/panel/panel-novatek-nt36532.c').read_text()
 ps = r"""
 #include <assert.h>
@@ -243,6 +378,7 @@ struct mipi_dsi_host {const struct mipi_dsi_host_ops *ops;};
 struct mipi_dsi_device {unsigned int channel;struct mipi_dsi_host *host;};
 struct panel_desc {int id;};struct liuqin_oem_panel {int id;};
 static const struct panel_desc liuqin_desc={1},other_desc={2};
+#define LIUQIN_PANEL_TIANMA 0
 static const struct liuqin_oem_panel liuqin_oem_panels[]={{1},{2}};
 struct nt36532 {struct drm_panel panel;const struct panel_desc *desc;const struct liuqin_oem_panel *oem_panel;struct mipi_dsi_device *dsi[2];unsigned int supply_votes;bool dimming_stopping,off_deferred,esd_pending,esd_enabled,tddi_recovering,dimming_pending,cabc_ready;unsigned int tddi_recovery_cookie,esd_armed;struct mutex esd_lock;int esd_arm_work,esd_gpio[2];int requested;};
 static struct nt36532 ctx;static struct mipi_dsi_device dsi0,dsi1;static struct mipi_dsi_host host0,host1;
@@ -310,6 +446,7 @@ struct liuqin_oem_cmd {uint8_t type,flags;unsigned int wait_ms,len;uint8_t data[
 '''+table+r'''
 static const struct liuqin_oem_cmd csot_on[5]={{0}};
 struct liuqin_oem_panel {const struct liuqin_oem_cmd *on;size_t on_count;};
+#define LIUQIN_PANEL_TIANMA 0
 static const struct liuqin_oem_panel liuqin_oem_panels[]={{liuqin_tm_on,ARRAY_SIZE(liuqin_tm_on)},{csot_on,ARRAY_SIZE(csot_on)}};
 struct nt36532 {int late_wake_status,refresh_status;const struct liuqin_oem_panel *oem_panel;struct {bool backlight_after_first_frame,backlight_lock;void *backlight,*dev;}panel;};
 static struct nt36532 ctx;static bool liuqin_late_wake;static int calls,error_at,transport_error,pipa_calls;static const struct liuqin_oem_cmd *sent;static size_t count;

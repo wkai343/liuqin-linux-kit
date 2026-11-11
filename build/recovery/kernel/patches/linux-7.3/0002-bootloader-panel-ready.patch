@@ -1,0 +1,28 @@
+From: Liuqin Linux Kit maintainers
+Subject: [PATCH] Publish retained scanout readiness to the 7.3 NVT follower
+
+Applied only to the build copy of device/recovery/touch.
+The 6.17 handoff source and binary remain unchanged.
+
+--- a/liuqin_bootloader_panel.c
++++ b/liuqin_bootloader_panel.c
+@@ -84,7 +84,7 @@
+ 	}
+ 	node = of_parse_phandle(touch, "panel", 0);
+ 	of_node_put(touch);
+-	if (!node || !of_device_is_compatible(node, "xiaomi,pipa-nt36532")) {
++	if (!node || !of_device_is_compatible(node, "xiaomi,liuqin-nt36532")) {
+ 		of_node_put(node);
+ 		return -ENODEV;
+ 	}
+@@ -111,6 +111,10 @@
+ 	}
+ 	drm_panel_add(&ctx->panel);
+ 	drm_panel_prepare(&ctx->panel);
++	/* Bootloader scanout is already active; this empty panel has no
++	 * hardware callbacks or backlight. Publish the state NVT waits for.
++	 */
++	drm_panel_enable(&ctx->panel);
+ 	pr_info("liuqin-bootloader-panel: preserved scanout; panel follower ready\n");
+ 	return 0;
+ }

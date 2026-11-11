@@ -19,7 +19,7 @@ from source_build import mounted_root, sha, arm64_execution
 from fedora_oci import extract as extract_oci
 from shell_defaults import check_skeleton, ensure as ensure_shell_defaults
 from splash_assets import install_themes
-spec=importlib.util.spec_from_file_location('ubuntu_root_common',PROJECT/'build/scripts/build-official-root.py')
+spec=importlib.util.spec_from_file_location('rootfs_common',PROJECT/'build/scripts/build-official-root.py')
 common=importlib.util.module_from_spec(spec);spec.loader.exec_module(common)
 
 RUNTIME_PACKAGES=['systemd','systemd-udev','systemd-pam','dbus-broker','dbus-daemon','python3','kmod','gdisk','e2fsprogs',
@@ -175,7 +175,7 @@ def configure_login_output(root):
 
 
 def configure_input(root):
-    # The shared Ubuntu overlay still uses Maliit. Fedora ships Plasma
+    # The shared overlay uses Maliit. Fedora ships Plasma
     # Keyboard as a desktop/login dependency and should select that keyboard.
     common.write_config(root,'etc/xdg/kwinrc',
         '[Wayland]\nInputMethod=/usr/share/applications/org.kde.plasma.keyboard.desktop\nVirtualKeyboardEnabled=true\n')
@@ -450,7 +450,7 @@ def main():
         if not args.rom_sensors:parser.error('需要原厂传感器配置。')
         with arm64_execution():
             subprocess.run(['sh',str(PROJECT/'build/scripts/build-liuqin-sensors-stack.sh')],check=True,
-                env=dict(os.environ,ROOTFS=str(root),ROM_SENSORS=str(args.rom_sensors),BUILD_DISTRIBUTION='fedora',
+                env=dict(os.environ,ROOTFS=str(root),ROM_SENSORS=str(args.rom_sensors),
                          OUT_DIR=str(output/'sensors'),JOBS=str(args.jobs)))
         shutil.copyfile(output/'sensors/artifacts/sensor-stack.tar',output/'sensor-stack.tar');return
     with mounted_root(root):

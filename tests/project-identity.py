@@ -24,14 +24,16 @@ class IdentityTests(unittest.TestCase):
         self.assertIn('衍生', readme)
         self.assertIn('CREDITS.md', readme)
 
-    def test_original_license_and_notices_are_preserved(self):
+    def test_license_and_current_component_notices_are_preserved(self):
         expected = {'LICENSE': 'b9d8b4bd86feb7e54d8c272e786f859209bd6053e880d1fbd6733e16418db881',
-                    'NOTICE': '13f8f8cbd187611d0c1029022320beb6344d9077b8e1f41c855a872a2a076247'}
+                    'NOTICE': '94fded91c4c3f1d8b69d0ff7771def664d240c41f0abe896deec28385b749c69'}
         for name, digest in expected.items():
             content=(PROJECT/name).read_bytes()
             if name=='NOTICE':
-                # The build tree moved; additions must leave the original
-                # notices intact apart from this documented path correction.
+                # Reviewed current components: kernel.org + local patches,
+                # corrected board path and direct upstream fingerprint sources.
+                # Removed GNOME/Ubuntu components no longer appear as inputs;
+                # retained components keep their authors and license notices.
                 content=content.split(b'\nBoot and shutdown artwork\n')[0]
                 content=content.replace(b'build/kernel/source.json',b'kernel/source.json')
             self.assertEqual(hashlib.sha256(content).hexdigest(),digest)

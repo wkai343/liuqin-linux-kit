@@ -30,6 +30,18 @@ class TouchTests(unittest.TestCase):
   result=touch.start(self.root,self.runner)
   self.assertEqual(result['status'],'ready')
   self.runner.assert_called_once_with(['/bin/busybox','insmod',str(self.root/touch.MODULE),'bootloader_handoff=1'],check=True,timeout=10)
+ def test_retained_scanout_selects_rek_before_releasing_touch_probe(self):
+  parameter='sys/module/nt36523_ts/parameters/liuqin_tddi_recovery'
+  self.put(parameter,'Y\n')
+  self.put('sys/bus/spi/devices/spi0.0/touch_state','eng_reset_count=0 reset_ret=0 reset=a162 fw_ret=0 restore_ret=0')
+  self.runner.side_effect=lambda *a,**k:self.assertEqual((self.root/parameter).read_text(),'0\n')
+  self.assertEqual(touch.start(self.root,self.runner)['status'],'ready')
+  self.runner.assert_called_once()
+ def test_unverified_environment_never_changes_touch_policy(self):
+  parameter='sys/module/nt36523_ts/parameters/liuqin_tddi_recovery'
+  self.put(parameter,'Y\n');self.value['sealed']=False
+  with self.assertRaises(RuntimeError):touch.start(self.root,self.runner)
+  self.assertEqual((self.root/parameter).read_text(),'Y\n');self.runner.assert_not_called()
  def test_wrong_identity_or_unsealed_never_loads(self):
   for key,value in [('device','other'),('sealed',False),('slot','b'),('unlocked',False),('kernel','other')]:
    old=self.value[key];self.value[key]=value

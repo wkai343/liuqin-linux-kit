@@ -5,8 +5,8 @@ set -u
 # tests/storage-guard.sh.  systemd starts this script with a clean unit
 # environment, so on the device every default below applies unchanged.
 BB=${LIUQIN_GNOME_GUARD_TEST_BUSYBOX:-/usr/local/bin/busybox}
-marker=${LIUQIN_GNOME_GUARD_TEST_MARKER:-/etc/liuqin-gnome-root}
-marker_sha=bd86a359f5b6bf05f09abf544967489e924c251ab7c07684df62b0dbda4c3fca
+marker=${LIUQIN_GNOME_GUARD_TEST_MARKER:-/etc/liuqin-native-root}
+marker_sha=4fdae4f7a27af8b0d4a2bbc168c7f01c3c5c6b5e245fcc521389d662f8212c5b
 dev_root=${LIUQIN_GNOME_GUARD_TEST_DEV_ROOT:-/dev}
 mounts=${LIUQIN_GNOME_GUARD_TEST_MOUNTS:-/proc/mounts}
 kmsg=${LIUQIN_GNOME_GUARD_TEST_KMSG:-/dev/kmsg}

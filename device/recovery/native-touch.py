@@ -44,6 +44,13 @@ def preflight(root=Path('/')):
 
 def start(root=Path('/'),runner=subprocess.run):
     device,v=preflight(root)
+    # The retained bootloader panel has no DRM reset/recovery callbacks.
+    # Preserve the Rec ReK gate; the desktop A3 calibration/recovery path
+    # belongs to the real panel driver. Set this before publishing the shim,
+    # which can immediately release the NVT deferred probe.
+    recovery=root/'sys/module/nt36523_ts/parameters/liuqin_tddi_recovery'
+    if recovery.exists():
+        recovery.write_text('0\n')
     if not (root/'sys/module/liuqin_bootloader_panel').exists():
         runner(['/bin/busybox','insmod',str(root/MODULE),'bootloader_handoff=1'],check=True,timeout=10)
     if not (device/'driver').exists():

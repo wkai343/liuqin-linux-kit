@@ -2,7 +2,7 @@
 
 [项目首页](../README.md) ｜ [构建指南](BUILD.md) ｜ [硬件支持](HARDWARE.md)
 
-项目通过版本化 RPM/DEB 交付配套 boot 与模块，允许保留旧内核。
+项目通过版本化 RPM 交付配套 boot 与模块，允许保留旧内核。
 安装软件包、Fastboot 临时启动、A 槽固定与回读已验证；
 **系统内自动写引导尚未真机验收，默认停用，也未提供在线内核仓库。**
 
@@ -22,7 +22,7 @@
 
 - 每次发布提高 `package_version`。
 - 源码或配置改变时更换 `kernel_localversion`；release 只用小写字母、数字、点、加号和连字符，并包含 `liuqin`。
-- 仅改变引导打包、压缩或 `kernel_reclaim_mte` 时可保留 release，但仍提高包版本；MTE 范围见 [说明](BUILD.md#可选回收-mte-预留)。
+- 仅改变引导打包或压缩时可保留 release，但仍提高包版本。
 
 首次安装执行 `devbox run build`。已有系统仅需生成升级包：
 
@@ -30,12 +30,8 @@
 devbox run build -- --target packages
 ```
 
-该命令自动准备目标内核、模块和 boot，不重建桌面或安装环境，并按配方输出：
-
-| 配方 | 输出目录 |
-| --- | --- |
-| Fedora | `out/build/from-source/fedora-kernel-rpms-<内容标识>/rpms/` |
-| Ubuntu | `out/build/from-source/kernel-debs-<内容标识>/debs/` |
+该命令自动准备目标内核、模块和 boot，不重建桌面或安装环境，输出到
+`out/build/from-source/fedora-kernel-rpms-<内容标识>/rpms/`。
 
 同批软件包一起使用：
 
@@ -54,19 +50,19 @@ devbox run build -- --target packages
 
 ## 已安装系统更新
 
-1. 把同批软件包复制到平板，Fedora 用 `sudo dnf install ./*.rpm`，Ubuntu 用 `sudo apt install ./*.deb`。
+1. 把同批软件包复制到平板，执行 `sudo dnf install ./*.rpm`。
    默认只安装文件，不写 boot。
 2. 经电脑 Fastboot 临时启动新 boot，验证桌面和硬件后，再固定 A 槽并回读。
    保留上一版 boot、模块和恢复材料，且备份到平板之外。
 3. 运行配套内核后，可用 `sudo liuqin-boot-update plan <release>` 只读检查后续更新计划。
 
-日常 `dnf upgrade` / `apt upgrade` 主要更新用户态。发行版通用内核不能直接替代设备适配内核，
+日常 `dnf upgrade` 主要更新用户态。发行版通用内核不能直接替代设备适配内核，
 `update-initramfs` 也不会更新平板的启动分区。
 
 ### 系统内自动更新（待真机验收）
 
 `sudo liuqin-boot-update enable` 绑定当前设备和布局，启用后软件包事务钩子才会写 boot。
-RPM 与 DEB 使用同一后端；默认构建不启用此入口。
+默认构建不启用此入口。
 
 更新器只接受真实 liuqin、内部 Qualcomm UFS、A 槽及对应单根挂载，拒绝在构建目录/chroot 写入。
 写入前保存旧 boot 整分区、校验值及事务记录；新镜像补零覆盖整分区，回读后恢复只读保护。
@@ -84,7 +80,7 @@ RPM 与 DEB 使用同一后端；默认构建不启用此入口。
 
 管理命令需要管理员权限。状态在 `/var/lib/liuqin/boot-updates/`，
 设备绑定在 `/etc/liuqin/boot-updates.json`，这些私有数据不能进入通用 rootfs。
-正在运行、当前目标和最近回退所需的内核/模块受移除保护；APT 不自动删除项目版本化内核包。
+正在运行、当前目标和最近回退所需的内核/模块受移除保护。
 
 ## 故障与恢复
 

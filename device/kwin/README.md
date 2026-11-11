@@ -1,7 +1,7 @@
 # KWin 排查参考
 
 默认系统使用 Fedora 官方 KWin，不编译或安装这里的补丁。
-liuqin 的键盘连接问题由 `build/kernel/patches/0001-nanosic-keyboard-tablet-mode.patch`
+liuqin 的键盘连接问题由 `build/kernel/patches/linux-7.3/0001-preserve-liuqin-adaptation.patch`
 和设备 udev 规则修复，官方 KWin 已通过接上/取下键盘及重新登录测试。
 
 排查发现 KWin 6.7.5 的两个独立问题：备用鼠标判断在延迟删除期间可能覆盖真实开关，

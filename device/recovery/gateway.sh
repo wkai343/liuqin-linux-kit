@@ -59,7 +59,7 @@ enter)
     unset LD_LIBRARY_PATH LD_PRELOAD PYTHONPATH PYTHONHOME
     # Use the private loader explicitly for the one pre-chroot operation that
     # must see Recovery's complete mount namespace.
-    PYTHONHOME="$ROOT/usr" "$ROOT/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1" --library-path "$ROOT/lib/aarch64-linux-gnu" "$ROOT/usr/bin/python3" -B "$ROOT/usr/lib/liuqin/recovery-session.py" quiesce
+    PYTHONHOME="$ROOT/usr" "$ROOT/lib/ld-musl-aarch64.so.1" --library-path "$ROOT/lib" "$ROOT/usr/bin/python3" -B "$ROOT/usr/lib/liuqin/recovery-session.py" quiesce
     export PATH=/bin:/usr/bin:/usr/sbin:/sbin
     "$BB" chroot "$ROOT" /usr/bin/python3 -I -B /usr/lib/liuqin/recovery-session.py enter
     ;;

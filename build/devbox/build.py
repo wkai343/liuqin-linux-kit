@@ -21,12 +21,11 @@ from usb_identity import DEFAULTS as USB_DEFAULTS, settings as usb_settings
 EXAMPLE = PROJECT / 'build/devbox/build.example.json'
 DEFAULTS = {
     **USB_DEFAULTS,
-    'kernel_source': 'sources/linux-liuqin-7.3.3',
+    'kernel_source': 'sources/linux-liuqin-7.3.4',
     'kernel_fragments': ['build/kernel/configs/custom-zram.config'],
     'kernel_localversion': '-liuqin-custom',
-    'kernel_reclaim_mte': False,
     'jobs': 12,
-    'package_version': '0.3.19',
+    'package_version': '0.3.20',
 }
 CONFIG_KEYS = set(DEFAULTS) | {'rootfs_config', 'kernel_source_lock', 'kernel_config', 'rom_images'}
 BUILD_TARGETS = {'system': 'rootfs', 'kernel': 'kernel', 'modules': 'modules',
@@ -141,8 +140,6 @@ def config(path):
     data.update(usb_settings(data))
     if type(data['jobs']) is not int or data['jobs'] < 1:
         raise RuntimeError('jobs 必须是正整数。')
-    if type(data['kernel_reclaim_mte']) is not bool:
-        raise RuntimeError('kernel_reclaim_mte 必须是 true 或 false。')
     for key in ('kernel_fragments',):
         if not isinstance(data[key], list) or any(not isinstance(value, str) or not value for value in data[key]):
             raise RuntimeError(key + ' 必须是配置路径列表；不添加片段时使用 []。')
@@ -205,7 +202,7 @@ def doctor():
 
 
 def test():
-    for name in ('project-identity.py', 'project-structure.py', 'devbox-build.py', 'source-build.py', 'device-overlays.py', 'stock-rom.py', 'fedora-build.py', 'fedora-stats.py', 'fedora-startup.py', 'nanosic-folio.py', 'selinux-packaging.py', 'first-boot-setup.py', 'backlight-default.py', 'boot-splash.py', 'splash-handoff.py', 'splash-logo.py', 'splash-orientation.py', 'plymouth-guard.py', 'display-clock.py', 'display-brightness-minimum.py', 'display-refresh-rates.py', 'display-policy.py', 'display-recovery.py', 'wlan-mac.py', 'rtc.py', 'mipps-startup.py', 'storage-scope.py', 'storage-seal.py', 'storage-ready.py', 'storage-paths.py', 'mkbootimg-fetch.py', 'initramfs-inputs.py', 'sensor-build-environment.py', 'gui-artifacts.py', 'filesystems.py', 'windows-installer.py', 'usb-installer-network.py', 'custom-kernel.py', 'kernel-common-fixes.py', 'rootless-build.py', 'kernel-updates.py', 'gui-engine.py', 'gui-worker.py', 'install-root-single.py', 'multiboot.py', 'multiboot-device.py', 'multiboot-store.py', 'android-installer.py', 'android-device.py', 'android-direct.py', 'android-rom.py', 'android-runtime.py', 'staged-install.py', 'managed-linux-device.py', 'partition-discovery.py', 'partition-device.py', 'partition-editor-device.py', 'workflow.py', 'recovery-installer.py'):
+    for name in ('project-identity.py', 'project-structure.py', 'devbox-build.py', 'source-build.py', 'device-overlays.py', 'stock-rom.py', 'fedora-build.py', 'fedora-stats.py', 'fedora-startup.py', 'nanosic-folio.py', 'selinux-packaging.py', 'backlight-default.py', 'boot-splash.py', 'splash-handoff.py', 'splash-logo.py', 'splash-orientation.py', 'plymouth-guard.py', 'display-clock.py', 'display-brightness-minimum.py', 'display-refresh-rates.py', 'display-live-refresh.py', 'display-policy.py', 'display-recovery.py', 'wlan-mac.py', 'rtc.py', 'mipps-startup.py', 'storage-scope.py', 'storage-seal.py', 'storage-ready.py', 'storage-paths.py', 'mkbootimg-fetch.py', 'initramfs-inputs.py', 'sensor-build-environment.py', 'gui-artifacts.py', 'filesystems.py', 'windows-installer.py', 'usb-installer-network.py', 'custom-kernel.py', 'kernel-common-fixes.py', 'rootless-build.py', 'kernel-updates.py', 'gui-engine.py', 'gui-worker.py', 'install-root-single.py', 'multiboot.py', 'multiboot-device.py', 'multiboot-store.py', 'android-installer.py', 'android-device.py', 'android-direct.py', 'android-rom.py', 'android-runtime.py', 'staged-install.py', 'managed-linux-device.py', 'partition-discovery.py', 'partition-device.py', 'partition-editor-device.py', 'workflow.py', 'recovery-installer.py', 'recovery-source.py'):
         run([shutil.which('python3'), 'tests/' + name])
     run([shutil.which('python3'), 'tests/fingerprint-gallery-client.py'])
     # The provider's private-file checks run as namespace root using fake TAs.
@@ -226,7 +223,7 @@ def main():
     parser.add_argument('--target', choices=tuple(BUILD_TARGETS), help='build 的构建目标，默认 system（配套 boot/rootfs）')
     parser.add_argument('--config', type=Path, default=PROJECT / 'build.json')
     parser.add_argument('--configure-only', action='store_true')
-    parser.add_argument('--refresh',action='store_true',help='重新装配官方系统软件包阶段（APT/DNF）')
+    parser.add_argument('--refresh',action='store_true',help='重新装配官方系统软件包阶段（DNF）')
     parser.add_argument('--export-dir',type=Path,help='构建后将本次 boot/rootfs 与校验文件导出到新目录')
     args = parser.parse_args()
     if args.target is not None and args.action != 'build':

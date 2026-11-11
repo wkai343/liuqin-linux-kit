@@ -1,9 +1,0 @@
-# liuqin: the packaged gdm profile (/usr/share/dconf/profile/gdm) stacks only
-# user-db:user and the shipped file-db, leaving no slot for local admin
-# defaults.  Add system-db:gdm so /etc/dconf/db/gdm.d applies to the greeter
-# (needed for the power-button delegation; see gdm.d/00-liuqin-power).
-# Databases are listed from highest to lowest priority; keeping the packaged
-# file-db last preserves all stock greeter defaults.
-user-db:user
-system-db:gdm
-file-db:/var/lib/gdm3/greeter-dconf-defaults

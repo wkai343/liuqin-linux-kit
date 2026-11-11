@@ -16,9 +16,11 @@ The exact upstream source/binary correspondence and redistribution licenses
 must be audited before a public release. This local engineering artifact is
 not represented as a complete corresponding-source offer.
 
-The private tool runtime includes Ubuntu packages (Python, glibc, GNU tar,
-e2fsprogs, gdisk, F2FS tools and dependencies) and BusyBox under their respective
-licenses. Tool hashes and input provenance are in recovery-manifest.json and
+The private tool runtime is built from source with Buildroot and musl
+(Python, GNU tar, e2fsprogs, gdisk, F2FS tools and dependencies),
+under their respective licenses. This historical paired backend separately
+retains its pinned distribution-provided static BusyBox; the current native
+Rec uses the BusyBox built with its Buildroot runtime. Tool hashes and input provenance are in recovery-manifest.json and
 the runtime build manifests. Keep original package copyrights and obtain
 matching sources before redistributing this engineering artifact publicly.
 

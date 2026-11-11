@@ -26,7 +26,7 @@ with tempfile.TemporaryDirectory() as d:
  wait(lambda:c.data['workerReady'] and not c.data['busy'] and c.data['compatibility']);c.scanDevice();wait(lambda:c.data['inventorySummary'] and not c.data['busy'])
  c.editPartition('userdata','delete','');c.createPartition('android',32,'f2fs','Android')
  c.createPartition('linux',32,'ext4','Fedora');first=c.data['selectedPartition']
- c.createPartition('linux',32,'btrfs','Ubuntu');second=c.data['selectedPartition']
+ c.createPartition('linux',32,'btrfs','Linux Btrfs');second=c.data['selectedPartition']
  c.setInstallTarget('userdata',True);c.setInstallTarget(first,True);assert len(c.data['installTargets'])==3
  c.setInstallTarget(first,False);assert len(c.data['installTargets'])==2;c.setInstallTarget(first,True)
  c.nextFromPartitions();assert c.data['targetKind']=='combined';c.setDefaultTarget(second)

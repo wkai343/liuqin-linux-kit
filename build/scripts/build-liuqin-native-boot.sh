@@ -80,16 +80,6 @@ if [ "$root_profile" = native-updatable ] && grep -qx 'CONFIG_RD_ZSTD=y' "$kerne
     ramdisk_suffix=zst
 fi
 mkdir -p "$out_dir"
-case ${LIUQIN_RECLAIM_MTE:-0} in
-0) ;;
-1)
-    [ "$root_profile" != installer ] || die 'target memory cleanup does not belong in the independent installer'
-    python3 "$project_root/build/lib/reclaim-memory.py" --input "$raw_dtb" \
-        --output "$out_dir/mte-clean.dtb" --fdtput "${FDTPUT:-fdtput}"
-    raw_dtb=$out_dir/mte-clean.dtb
-    ;;
-*) die 'LIUQIN_RECLAIM_MTE must be 0 or 1' ;;
-esac
 
 if [ "$root_profile" = native-updatable ]; then
 python3 - "$project_root/shared" "$kernel_out" "${KERNEL_MODULES_DIR:?set KERNEL_MODULES_DIR}" "$out_dir/native-root.contract" "$image" <<'CONTRACT'

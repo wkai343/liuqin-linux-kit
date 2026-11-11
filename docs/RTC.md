@@ -21,7 +21,7 @@ PMK8350 使用 `rtc-pm8xxx` 驱动。当前设备树不允许直接写 RTC，也
   时钟在读取中跳变等会拒绝恢复；正常联网校准可以重建有效状态。
   恢复只在开机前五分钟允许执行，且不会把已经更新的系统时间向后拨。
 
-服务随 Fedora RPM 和 Ubuntu DEB 的 `liuqin-device-support` 板级载荷进入镜像。
+服务随 Fedora RPM 的 `liuqin-device-support` 板级载荷进入镜像。
 `sysinit.target.d` 与 `timers.target.d` 拉起服务，不依赖安装器修改固件或引导分区。
 
 机型识别兼容 ABL 覆盖根节点 `compatible` 的行为：原始 `xiaomi,liuqin` 可直接识别；

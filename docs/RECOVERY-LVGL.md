@@ -4,6 +4,8 @@
 
 原生 Recovery 已接入 LVGL 9.6.0，使用中文界面和经过校验的静态 ARM64 程序。显示继续使用Bootloader simplefb，不接管 DRM 显示输出，不启用外接显示或 3D GPU。
 
+公共背光驱动在启动时按默认亮度点亮；Rec 无需等待未启动的 DRM 面板，也无需单独修正背光设备树。
+
 ## 已提供的操作
 
 - 系统列表显示已登记的 Android 和 Linux、根分区、文件系统及当前默认系统。点选其他系统后，Rec 核对引导镜像和系统登记，再显示原默认与目标供确认。
@@ -29,7 +31,7 @@
 
 ## 触屏启动
 
-原来的 Novatek 驱动等待 DRM panel follower，但 Recovery 保留 Bootloader scanout，真实 DSI 面板驱动没有启动。专用 `liuqin_bootloader_panel.ko` 仅在准确 liuqin 板号、MDSS/DISPCC 停用且 simplefb 已驱动 1800×2880 framebuffer 时注册“面板已经准备好”的状态；不接管面板的 GPIO、pinctrl、供电、时钟或 DSI。现有 NVT follower 随后使用禁止工程复位的硬件 CRC 路径加载触控 RAM 固件。内置 CSOT/TM 固件，由已有板级驱动选取。
+Novatek 驱动等待 DRM panel follower，但 Recovery 保留 Bootloader scanout，真实 DSI 面板驱动没有启动。专用 `liuqin_bootloader_panel.ko` 仅在准确 liuqin 板号、MDSS/DISPCC 停用且 simplefb 已驱动 1800×2880 framebuffer 时发布面板就绪状态；7.3.4 配方同时发布 prepared/enabled 状态，不接管面板的 GPIO、pinctrl、供电、时钟或 DSI。触控服务先关闭依赖真实 DRM 面板的 TDDI 校准恢复，保留 Rec 的 ReK 就绪判断。NVT follower 随后使用禁止工程复位的硬件 CRC 路径加载触控 RAM 固件。内置 CSOT/TM 固件，由板级驱动选取；华星实机尚待验证。
 
 加载器先检查设备身份、存储只读、RAM 根文件系统、内核及模块/脚本/固件 SHA256，再加载模块并等待触屏就绪。LVGL 只有读到绑定本次 boot ID 的成功状态才接管直接触控设备；失败时保留实体按键和电脑控制。模块随 RAM 会话存在，重启后消失，不提供运行中卸载或面板断电操作。
 
@@ -58,7 +60,7 @@ python3 build/recovery/build-native.py \
   --out out/build/native-recovery-lvgl-new
 ```
 
-上述是基础原型的构建入口；当前 ADB 安装版另由 build-native-installer.py 组合 UI、adbd 与专用内核组件，见[构建方式](NATIVE-RECOVERY.md#构建与交付)。基础原型带 --ui-runtime 时会编译触屏衔接模块，要求对应维护内核提交 `fe81794b5e1b8a3f11a165f3acbfdb8fa671dbb3`；内核更换后需重新适配和验证。模块源码与 GPLv2 文本在 `device/recovery/touch/`。
+上述是基础镜像的构建入口；当前 ADB 安装版另由 build-native-installer.py 组合 UI、adbd 与专用内核组件，完整步骤见[Rec 内核构建](../build/recovery/kernel/README.md)。带 --ui-runtime 时编译与来源锁匹配的触屏衔接模块；更换内核配方后需重新构建和验证，不能混用模块。模块源码与 GPLv2 文本在 `device/recovery/touch/`。
 
 依赖版本和提交固定在 `build/recovery/ui-sources.json`。中文字体由 Noto Sans SC 生成子集，生成记录和 OFL 许可证在 `device/recovery/ui/fonts/`；普通构建直接使用这些准备好的字体源文件。LVGL、cJSON 和字体许可证随镜像与分发包提供。
 

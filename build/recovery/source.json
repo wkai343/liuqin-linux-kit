@@ -11,7 +11,6 @@
   "remove_prefixes": [
     "customzip/"
   ],
-  "busybox_sha256": "52151e7f322f926b64049cdaa1410dc3ea6485525e0624b05813791c219ae933",
   "kernel_ota": {
     "url": "https://cdnorg.d.miui.com/OS2.0.6.0.VMYCNXM/liuqin-ota_full-OS2.0.6.0.VMYCNXM-user-15.0-ff2b5906a3.zip",
     "bytes": 6150251163,

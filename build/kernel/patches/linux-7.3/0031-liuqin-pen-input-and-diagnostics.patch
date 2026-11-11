@@ -1,0 +1,529 @@
+From: Liuqin Linux Kit contributors <build@liuqin.invalid>
+Subject: [PATCH] Input: Novatek: preserve pen precision and isolate wake faults
+
+Keep the Liuqin pen grid at ten units per panel pixel in evdev coordinates
+and axis ranges, including after firmware reload. Reject zero firmware
+extents to avoid invalid maxima.
+
+Count position, absent, ID and unrecognized frames before pen filtering.
+Keep submitted frames and SPI errors separate, exposing a locked snapshot
+through touch_state. If only the pen wake command fails, preserve the
+finger readiness gates, enable touch and schedule one pen-only retry.
+Join retry work during panel unprepare, system suspend and teardown.
+
+Recognize FD/FE watchdog reports before parsing input, count frames and
+continuous fault episodes, and release contacts on the first report.
+Do not reset the shared TDDI or reload firmware from the IRQ handler;
+recovery respects mainline panel/follower ownership.
+
+Combines the local subpixel-coordinate and pen-diagnostics/wake-isolation
+patches without changing source behavior. References:
+- OS2.0.6.0.VMYCNXM vendor_dlkm nt36532_touch.ko, nvt_ts_probe axis setup.
+  SHA256: e6cf800367d4137e0c13a55566a2ad3aaaa486070a2bd42308b1e7dacb26936c
+- M81 nt36532_touch.ko in the Lineage 24 ROM: eleven consecutive FD/FE
+  reports identify a watchdog episode.
+
+diff --git a/drivers/input/touchscreen/nt36523/nt36xxx.c b/drivers/input/touchscreen/nt36523/nt36xxx.c
+index 55b72c593..9346903b0 100644
+--- a/drivers/input/touchscreen/nt36523/nt36xxx.c
++++ b/drivers/input/touchscreen/nt36523/nt36xxx.c
+@@ -569,7 +569,7 @@ int32_t nvt_read_pid(void)
+ /*******************************************************
+ Description:
+ 	Novatek touchscreen declare the coordinate axes of the
+-	touch and pen input devices, in panel pixels.
++	touch and pen input devices. Liuqin pens keep the firmware grid.
+ 
+ 	Both devices are registered from probe(), which runs
+ 	before the firmware has been downloaded and therefore
+@@ -591,10 +591,23 @@ static void nvt_ts_set_touch_abs_params(void)
+ 	input_set_abs_params(ts->input_dev, ABS_MT_POSITION_Y, 0, ts->abs_y_max - 1, 0, 0);
+ }
+ 
++static int nvt_pen_axis_max(unsigned int pixels)
++{
++	return pixels * (ts->pen_subpixel ? ts->pen_coord_scale : 1) - 1;
++}
++
++static unsigned int nvt_pen_position(unsigned int raw, unsigned int pixels)
++{
++	if (!ts->pen_subpixel)
++		raw /= ts->pen_coord_scale;
++
++	return min_t(unsigned int, raw, nvt_pen_axis_max(pixels));
++}
++
+ static void nvt_ts_set_pen_abs_params(void)
+ {
+-	int32_t x_max = ts->abs_x_max - 1;
+-	int32_t y_max = ts->abs_y_max - 1;
++	int x_max = nvt_pen_axis_max(ts->abs_x_max);
++	int y_max = nvt_pen_axis_max(ts->abs_y_max);
+ 
+ 	if (!ts->pen_input_dev)
+ 		return;
+@@ -635,9 +648,8 @@ info_retry:
+ 	 * The firmware reports the touch extent in its own tenth-of-a-pixel
+ 	 * units (measured on hardware: 18000 x 28800 for the 1800 x 2880
+ 	 * panel). Every other user of these fields -- the axis declarations,
+-	 * the pen clamp, the per-millimetre resolution -- expects panel
+-	 * pixels, and the broken-info fallback below assigns panel-pixel
+-	 * defaults, so convert here and nowhere else.
++	 * the pen range, the per-millimetre resolution -- derives from
++	 * panel pixels. The broken-info fallback also uses panel pixels.
+ 	 */
+ 	ts->abs_x_max /= NVT_COORD_SCALE;
+ 	ts->abs_y_max /= NVT_COORD_SCALE;
+@@ -648,8 +660,8 @@ info_retry:
+ 		ts->y_gang_num = buf[38];
+ 	}
+ 
+-	//---clear x_num, y_num if fw info is broken---
+-	if ((buf[1] + buf[2]) != 0xFF) {
++	/* A valid version checksum alone does not guarantee a usable extent. */
++	if ((buf[1] + buf[2]) != 0xFF || !ts->abs_x_max || !ts->abs_y_max) {
+ 		NVT_ERR("FW info is broken! fw_ver=0x%02X, ~fw_ver=0x%02X\n", buf[1], buf[2]);
+ 		ts->fw_ver = 0;
+ 		ts->x_num = 18;
+@@ -777,9 +789,12 @@ static int32_t nvt_parse_dt(struct device *dev)
+ 	 * Use the same primary selector as the display and keep the DT
+ 	 * firmware on an unknown or conflicting selection.
+ 	 */
+-	if (liuqin_board_quirks() ||
+-	    !strcmp(ts->fw_name, LIUQIN_TOUCH_FW_TM) ||
+-	    !strcmp(ts->fw_name, LIUQIN_TOUCH_FW_CSOT)) {
++	ts->pen_subpixel = liuqin_board_quirks() ||
++			   !strcmp(ts->fw_name, LIUQIN_TOUCH_FW_TM) ||
++			   !strcmp(ts->fw_name, LIUQIN_TOUCH_FW_CSOT);
++	if (ts->pen_subpixel) {
++		/* Both M81 firmwares report a tenth of a panel pixel per unit. */
++		ts->pen_coord_scale = NVT_COORD_SCALE;
+ 		switch (liuqin_boot_panel()) {
+ 		case LIUQIN_PANEL_TIANMA:
+ 			ts->fw_name = LIUQIN_TOUCH_FW_TM;
+@@ -911,38 +926,71 @@ static void nvt_esd_check_func(struct work_struct *work)
+ }
+ #endif /* #if NVT_TOUCH_ESD_PROTECT */
+ 
+-#if NVT_TOUCH_WDT_RECOVERY
+-static uint8_t recovery_cnt = 0;
+-static uint8_t nvt_wdt_fw_recovery(uint8_t *point_data)
++/* FD/FE is a firmware watchdog report, even when the SPI transfer succeeds.
++ * The vendor driver qualifies eleven consecutive reports before recovery.
++ * Do not reset a shared TDDI from this IRQ path; retain evidence for the
++ * display owner and keep these reports out of the finger/pen parsers.
++ */
++static bool nvt_watchdog_frame(struct nvt_ts_data *data, const u8 *packet)
+ {
+-   uint32_t recovery_cnt_max = 10;
+-   uint8_t recovery_enable = false;
+-   uint8_t i = 0;
+-
+-   recovery_cnt++;
+-
+-   /* check pattern */
+-   for (i=1 ; i<7 ; i++) {
+-       if ((point_data[i] != 0xFD) && (point_data[i] != 0xFE)) {
+-           recovery_cnt = 0;
+-           break;
+-       }
+-   }
+-
+-   if (recovery_cnt > recovery_cnt_max){
+-       recovery_enable = true;
+-       recovery_cnt = 0;
+-   }
++	unsigned int i;
+ 
+-   return recovery_enable;
++	for (i = 1; i < 7; i++) {
++		if (packet[i] != 0xfd && packet[i] != 0xfe) {
++			data->wdt_streak = 0;
++			return false;
++		}
++	}
++	data->wdt_frames++;
++	data->wdt_pattern = packet[1];
++	if (!data->wdt_streak) {
++		/* Release a contact that was down before the firmware stopped. */
++		for (i = 0; i < data->max_touch_num; i++) {
++			input_mt_slot(data->input_dev, i);
++			input_mt_report_slot_state(data->input_dev, MT_TOOL_FINGER, false);
++		}
++		input_report_key(data->input_dev, BTN_TOUCH, 0);
++		input_sync(data->input_dev);
++		release_pen_event();
++		NVT_ERR("firmware watchdog first frame: pattern=%02x firmware=%u\n",
++			packet[1], data->firmware_update_count);
++	}
++	if (data->wdt_streak < 11 && ++data->wdt_streak == 11) {
++		data->wdt_events++;
++		NVT_ERR("firmware watchdog confirmed: pattern=%02x frames=%llu events=%llu\n",
++			packet[1], data->wdt_frames, data->wdt_events);
++	}
++	return true;
+ }
+-#endif	/* #if NVT_TOUCH_WDT_RECOVERY */
++
+ 
+ #define PEN_DATA_LEN 14
++#define NVT_PEN_POSITION 0x01
++#define NVT_PEN_ID 0xf0
++#define NVT_PEN_ABSENT 0xff
++#define NVT_PEN_RETRY_DELAY_MS 100
+ #define FW_HISTORY_SIZE 128
+ 
+ 
+ #define POINT_DATA_LEN 65
++
++static void nvt_count_pen_frame(struct nvt_pen_stats *stats, u8 format)
++{
++	switch (format) {
++	case NVT_PEN_POSITION:
++		stats->position++;
++		break;
++	case NVT_PEN_ABSENT:
++		stats->absent++;
++		break;
++	case NVT_PEN_ID:
++		stats->id++;
++		break;
++	default:
++		stats->other++;
++		break;
++	}
++}
+ /*******************************************************
+ Description:
+ 	Novatek touchscreen work function.
+@@ -978,7 +1026,7 @@ static irqreturn_t nvt_ts_work_func(int irq, void *data)
+ 
+ 	mutex_lock(&ts->lock);
+ 
+-	if (ts->dev_pm_suspend) {
++	if (READ_ONCE(ts->dev_pm_suspend)) {
+ 		ret = wait_for_completion_timeout(&ts->dev_pm_suspend_completion, msecs_to_jiffies(500));
+ 		if (!ret) {
+ 			NVT_ERR("system(spi) can't finished resuming procedure, skip it\n");
+@@ -991,10 +1039,16 @@ static irqreturn_t nvt_ts_work_func(int irq, void *data)
+ 	else
+ 		ret = CTP_SPI_READ(ts->client, point_data, POINT_DATA_LEN + 1);
+ 	if (ret < 0) {
++		if (ts->pen_support)
++			ts->pen_stats.spi_errors++;
++		ts->wdt_streak = 0;
+ 		NVT_ERR("CTP_SPI_READ failed.(%d)\n", ret);
+ 		goto XFER_ERROR;
+ 	}
+ 
++	if (nvt_watchdog_frame(ts, point_data))
++		goto XFER_ERROR;
++
+ 	/* ESD protect by FW handshake */
+ 	if (nvt_fw_recovery(point_data)) {
+ #if NVT_TOUCH_ESD_PROTECT
+@@ -1003,6 +1057,12 @@ static irqreturn_t nvt_ts_work_func(int irq, void *data)
+ 		goto XFER_ERROR;
+ 	}
+ 
++	/* Count what arrived on SPI before applying the pen input policy. */
++	if (ts->pen_support) {
++		pen_format_id = point_data[POINT_DATA_LEN + 1];
++		nvt_count_pen_frame(&ts->pen_stats, pen_format_id);
++	}
++
+ 	finger_cnt = 0;
+ 
+ 	for (i = 0; i < ts->max_touch_num; i++) {
+@@ -1105,20 +1165,13 @@ static irqreturn_t nvt_ts_work_func(int irq, void *data)
+ 			point_data[76], point_data[77], point_data[78], point_data[79]);
+ */
+ 		// parse and handle pen report
+-		pen_format_id = point_data[66];
+-		if (pen_format_id != 0xFF) {
+-			if (pen_format_id == 0x01) {
++		if (pen_format_id != NVT_PEN_ABSENT) {
++			if (pen_format_id == NVT_PEN_POSITION) {
+ 				// report pen data
+ 				pen_x = (uint32_t)(point_data[67] << 8) + (uint32_t)(point_data[68]);
+ 				pen_y = (uint32_t)(point_data[69] << 8) + (uint32_t)(point_data[70]);
+-				pen_x /= ts->pen_coord_scale;
+-				pen_y /= ts->pen_coord_scale;
+-				if (pen_x > ts->abs_x_max - 1) {
+-					pen_x = ts->abs_x_max - 1;
+-				}
+-				if (pen_y > ts->abs_y_max - 1) {
+-					pen_y = ts->abs_y_max - 1;
+-				}
++				pen_x = nvt_pen_position(pen_x, ts->abs_x_max);
++				pen_y = nvt_pen_position(pen_y, ts->abs_y_max);
+ 				pen_pressure = (uint32_t)(point_data[71] << 8) + (uint32_t)(point_data[72]);
+ 				pen_tilt_x = (int32_t)point_data[73];
+ 				pen_tilt_y = (int32_t)point_data[74];
+@@ -1140,16 +1193,17 @@ static irqreturn_t nvt_ts_work_func(int irq, void *data)
+ 				input_report_key(ts->pen_input_dev, BTN_STYLUS, pen_btn1);
+ 				input_report_key(ts->pen_input_dev, BTN_STYLUS2, pen_btn2);
+ 				input_sync(ts->pen_input_dev);
++				ts->pen_stats.reported++;
+ 				// TBD: pen battery event report
+ 				// NVT_LOG("pen_battery=%d\n", pen_battery);
+-			} else if (pen_format_id == 0xF0) {
++			} else if (pen_format_id == NVT_PEN_ID) {
+ 				// report Pen ID
+ 			} else {
+ 				NVT_ERR_ONCE("Unknown pen format id 0x%02X!\n",
+ 					     pen_format_id);
+ 				goto XFER_ERROR;
+ 			}
+-		} else { // pen_format_id = 0xFF, i.e. no pen present
++		} else {
+ 			release_pen_event();
+ 		}
+ 	} /* if (ts->pen_support) */
+@@ -1265,6 +1319,24 @@ int32_t disable_pen_input_device(bool disable)
+ 	return __nvt_set_pen_state(disable);
+ }
+ 
++static int nvt_try_enable_pen(struct nvt_ts_data *data)
++{
++	int ret;
++
++	lockdep_assert_held(&data->lock);
++	data->pen_stats.enable_attempts++;
++	ret = __nvt_set_pen_state(false);
++	data->pen_stats.enable_error = ret;
++	if (ret < 0) {
++		data->pen_stats.enable_failures++;
++		dev_warn_ratelimited(&data->client->dev,
++				     "pen setup failed (%d), keeping finger touch available\n",
++				     ret);
++	}
++
++	return ret;
++}
++
+ static void nvt_resume_work(struct work_struct *work)
+ {
+ 	struct nvt_ts_data *ts_core = container_of(work, struct nvt_ts_data, resume_work);
+@@ -1329,11 +1401,14 @@ static ssize_t touch_state_show(struct device *dev,
+ 				struct device_attribute *attr, char *buf)
+ {
+ 	struct nvt_ts_data *ts_core = dev_get_drvdata(dev);
++	struct nvt_pen_stats pen;
+ 	u8 host_cmd[2] = { 0 };
+ 	u8 handshake[2] = { 0 };
+ 	u8 reset_state[6] = { 0 };
+ 	u8 fw_info[39] = { 0 };
+-	u8 cached_cascade;
++	u8 cached_cascade, wdt_pattern;
++	u64 wdt_frames, wdt_events;
++	u32 wdt_streak;
+ 	ssize_t count;
+ 	int host_ret, handshake_ret, reset_ret, fw_ret, restore_ret;
+ 	int i;
+@@ -1359,6 +1434,11 @@ static ssize_t touch_state_show(struct device *dev,
+ 				      fw_info, sizeof(fw_info));
+ 	restore_ret = nvt_set_page(ts_core->mmap->EVENT_BUF_ADDR);
+ 	cached_cascade = ts_core->cascade;
++	pen = ts_core->pen_stats;
++	wdt_frames = ts_core->wdt_frames;
++	wdt_events = ts_core->wdt_events;
++	wdt_streak = ts_core->wdt_streak;
++	wdt_pattern = ts_core->wdt_pattern;
+ 	mutex_unlock(&ts_core->lock);
+ 
+ 	count = sysfs_emit(buf,
+@@ -1374,9 +1454,19 @@ static ssize_t touch_state_show(struct device *dev,
+ 			       " cached_cascade=%u fwinfo_cascade=%u restore_ret=%d",
+ 			       cached_cascade, fw_info[34] & 0x01, restore_ret);
+ 	count += sysfs_emit_at(buf, count,
+-			       " eng_reset_count=%u resume_count=%u firmware_update_count=%u\n",
++			       " eng_reset_count=%u resume_count=%u firmware_update_count=%u",
+ 			       ts_core->eng_reset_count, ts_core->resume_count,
+ 			       ts_core->firmware_update_count);
++	count += sysfs_emit_at(buf, count,
++			       " wdt_frames=%llu wdt_events=%llu wdt_streak=%u wdt_pattern=%02x",
++			       wdt_frames, wdt_events, wdt_streak, wdt_pattern);
++	count += sysfs_emit_at(buf, count,
++			       " pen_pos=%llu pen_none=%llu pen_id=%llu pen_other=%llu"
++			       " pen_reported=%llu pen_spi_errors=%llu"
++			       " pen_enable_attempts=%llu pen_enable_failures=%llu pen_enable_err=%d\n",
++			       pen.position, pen.absent, pen.id, pen.other,
++			       pen.reported, pen.spi_errors, pen.enable_attempts,
++			       pen.enable_failures, pen.enable_error);
+ 
+ 	return count;
+ }
+@@ -1408,6 +1498,19 @@ static bool nvt_panel_is_on(struct nvt_ts_data *ts_core)
+ 	return panel_on;
+ }
+ 
++static void nvt_pen_retry_work(struct work_struct *work)
++{
++	struct nvt_ts_data *data = container_of(to_delayed_work(work),
++					      struct nvt_ts_data, pen_retry_work);
++
++	mutex_lock(&data->lock);
++	if (READ_ONCE(data->touch_awake) && nvt_panel_is_on(data) &&
++	    !READ_ONCE(data->dev_pm_suspend) &&
++	    data->pen_input_dev_enable && !data->pen_is_charge)
++		nvt_try_enable_pen(data);
++	mutex_unlock(&data->lock);
++}
++
+ static void nvt_set_touch_awake_state(struct nvt_ts_data *ts_core, bool awake)
+ {
+ 	unsigned long flags;
+@@ -1454,6 +1557,7 @@ static void nvt_destroy_workqueues(struct nvt_ts_data *ts_core)
+ 	/* Suspend/resume work can touch both firmware and ESD workqueues. */
+ 	if (ts_core->event_wq) {
+ 		cancel_work_sync(&ts_core->resume_work);
++		cancel_delayed_work_sync(&ts_core->pen_retry_work);
+ 		destroy_workqueue(ts_core->event_wq);
+ 		ts_core->event_wq = NULL;
+ 	}
+@@ -1790,6 +1894,7 @@ static int32_t nvt_ts_probe(struct spi_device *client)
+ 		goto err_alloc_work_thread_failed;
+ 	}
+ 	INIT_WORK(&ts->resume_work, nvt_resume_work);
++	INIT_DELAYED_WORK(&ts->pen_retry_work, nvt_pen_retry_work);
+ 
+ 	/*
+ 	 * Register only after every callback-visible resource exists.  If the
+@@ -2206,9 +2311,10 @@ static void nvt_quiesce_failed_tddi(struct nvt_ts_data *data)
+ 
+ static int32_t nvt_ts_resume(struct device *dev)
+ {
+-	bool hold_wake = ts->dev_pm_suspend;
++	bool hold_wake = READ_ONCE(ts->dev_pm_suspend);
+ 	bool tddi_recovery = nvt_tddi_recovery_enabled(ts);
+ 	bool firmware_started = false;
++	bool retry_pen = false;
+ 	int ret;
+ 
+ 	if (READ_ONCE(ts->touch_awake)) {
+@@ -2247,6 +2353,7 @@ static int32_t nvt_ts_resume(struct device *dev)
+ 		if (ret)
+ 			goto resume_fail;
+ 	}
++	ts->wdt_streak = 0;
+ 	ts->resume_count++;
+ 	NVT_LOG("follower resume #%u start\n", ts->resume_count);
+ 	ts->ic_state = NVT_IC_RESUME_IN;
+@@ -2284,11 +2391,9 @@ static int32_t nvt_ts_resume(struct device *dev)
+ 		goto resume_fail;
+ 	}
+ 
+-	ret = __nvt_set_pen_state(false);
+-	if (ret) {
+-		NVT_ERR("failed to enable pen mailbox: %d\n", ret);
+-		goto resume_fail;
+-	}
++	/* A pen mailbox error does not invalidate a ready touch controller. */
++	if (ts->pen_support)
++		retry_pen = nvt_try_enable_pen(ts) < 0;
+ 
+ 	if (ts->is_panel_follower && !nvt_commit_follower_awake(ts)) {
+ 		ret = -EHOSTDOWN;
+@@ -2318,6 +2423,9 @@ static int32_t nvt_ts_resume(struct device *dev)
+ 			   msecs_to_jiffies(NVT_TOUCH_ESD_CHECK_PERIOD));
+ #endif
+ 
++	if (retry_pen && !READ_ONCE(ts->dev_pm_suspend))
++		queue_delayed_work(ts->event_wq, &ts->pen_retry_work,
++				   msecs_to_jiffies(NVT_PEN_RETRY_DELAY_MS));
+ 	if (hold_wake)
+ 		pm_relax(dev);
+ 	NVT_LOG("follower resume #%u complete\n", ts->resume_count);
+@@ -2342,8 +2450,9 @@ static int nvt_pm_suspend(struct device *dev)
+ 		NVT_LOG("enable touch irq wake\n");
+ 		enable_irq_wake(ts->client->irq);
+ 	}
+-	ts->dev_pm_suspend = true;
+ 	reinit_completion(&ts->dev_pm_suspend_completion);
++	WRITE_ONCE(ts->dev_pm_suspend, true);
++	cancel_delayed_work_sync(&ts->pen_retry_work);
+ 
+ 	return 0;
+ }
+@@ -2354,7 +2463,7 @@ static int nvt_pm_resume(struct device *dev)
+ 		NVT_LOG("disable touch irq wake\n");
+ 		disable_irq_wake(ts->client->irq);
+ 	}
+-	ts->dev_pm_suspend = false;
++	WRITE_ONCE(ts->dev_pm_suspend, false);
+ 	complete(&ts->dev_pm_suspend_completion);
+ 
+ 	return 0;
+@@ -2400,8 +2509,10 @@ static int panel_unpreparing(struct drm_panel_follower *follower)
+ 	NVT_LOG("panel unpreparing\n");
+ 
+ 	/* The callback is the barrier before the panel's physical reset. */
+-	if (ts->event_wq)
++	if (ts->event_wq) {
+ 		cancel_work_sync(&ts->resume_work);
++		cancel_delayed_work_sync(&ts->pen_retry_work);
++	}
+ 
+ 	if (!resources_ready)
+ 		return 0;
+diff --git a/drivers/input/touchscreen/nt36523/nt36xxx.h b/drivers/input/touchscreen/nt36523/nt36xxx.h
+index 07969887b..78b9c8559 100644
+--- a/drivers/input/touchscreen/nt36523/nt36xxx.h
++++ b/drivers/input/touchscreen/nt36523/nt36xxx.h
+@@ -68,7 +68,7 @@
+ /*
+  * The firmware reports finger coordinates in tenths of a panel pixel, so the
+  * range it can produce is abs_x_max * NVT_COORD_SCALE by abs_y_max *
+- * NVT_COORD_SCALE. The input device reports whole panel pixels.
++ * NVT_COORD_SCALE. The touch input device reports whole panel pixels.
+  */
+ #define NVT_COORD_SCALE 10
+ #define TOUCH_MAX_FINGER_NUM 10
+@@ -135,6 +135,19 @@ struct nvt_config_info {
+ 	const char *nvt_limit_name;
+ };
+ 
++/* Protected by nvt_ts_data.lock. Counts are per driver bind. */
++struct nvt_pen_stats {
++	u64 position;
++	u64 absent;
++	u64 id;
++	u64 other;
++	u64 reported;
++	u64 spi_errors;
++	u64 enable_attempts;
++	u64 enable_failures;
++	int enable_error;
++};
++
+ struct nvt_ts_data {
+ 	struct spi_device *client;
+ 	struct input_dev *input_dev;
+@@ -191,6 +204,9 @@ struct nvt_ts_data {
+ 	u32 eng_reset_count;
+ 	u32 resume_count;
+ 	u32 firmware_update_count;
++	u64 wdt_frames, wdt_events;
++	u32 wdt_streak;
++	u8 wdt_pattern;
+ 	bool point_data_attr_created;
+ 	bool touch_state_attr_created;
+ 	uint8_t cascade;
+@@ -198,6 +214,8 @@ struct nvt_ts_data {
+ 	bool wgp_stylus;
+ 	/* Pen report scale, in firmware units per panel pixel. */
+ 	uint8_t pen_coord_scale;
++	bool pen_subpixel;
++	struct nvt_pen_stats pen_stats;
+ 	uint8_t x_gang_num;
+ 	uint8_t y_gang_num;
+ 	struct input_dev *pen_input_dev;
+@@ -205,6 +223,7 @@ struct nvt_ts_data {
+ 	int8_t pen_phys[32];
+ 	struct workqueue_struct *event_wq;
+ 	struct work_struct resume_work;
++	struct delayed_work pen_retry_work;
+ 	int result_type;
+ 	int panel_index;
+ 	uint32_t spi_max_freq;

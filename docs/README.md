@@ -11,7 +11,7 @@
 | ROM 格式和安装预览 | [Android ROM 安装](FULL-ROM-FLASH.md) |
 | 构建、内核配置和发行版适配 | [构建指南](BUILD.md) |
 | 内核升级与回退 | [内核更新](KERNEL-UPDATES.md) |
-| 硬件支持与待改进 | [硬件说明](HARDWARE.md) |
+| 内核实现、验证范围与待解决项 | [内核适配总清单](HARDWARE.md) |
 
 ## 安装器与 Recovery 开发
 

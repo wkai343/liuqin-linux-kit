@@ -182,12 +182,9 @@ class FedoraFlow(Flow):
             build,['packed/rootfs.tar.gz','packed/native-root.contract'])/'packed'
 
     def plan(self):
-        result=super().plan();result['steps'][0]='官方 Fedora '+self.source['release']+' ARM64 基础系统'
+        result=super().plan()
         result['output']='out/build/from-source/（使用 outputs 查看配套 boot/rootfs）'
-        result['runtime_base']=self.runtime_source
         result['kernel_configuration']='额外启用 Fedora SELinux 片段；图形启动包含固件帧缓冲配置'
         result['package_format']='rpm'
-        if self.recipe['first_boot_setup']:
-            result['steps']=[step.replace('登录前初始化组件（独立 ARM64 包）','Fedora 官方 plasma-setup 软件包') for step in result['steps']]
         result['first_boot_setup_source']='Fedora official RPM'
         return result

@@ -327,7 +327,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_obsolete_or_unknown_configuration_fields_are_rejected(self):
         for name in ('root_source','kernel_out','modules_out','root_out','boot_out','kernel_debs_out',
-                     'inputs','inputs_file','installer_kernel_source','installer_image','runtime_out','bundle_out'):
+                     'inputs','inputs_file','installer_kernel_source','installer_image','runtime_out','bundle_out','kernel_reclaim_mte'):
             with self.subTest(name=name),self.assertRaisesRegex(ValueError,'不支持的构建配置项'):
                 self.load({name:'obsolete'})
         for value in (None,'',3):

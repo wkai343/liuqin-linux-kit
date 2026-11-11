@@ -5,7 +5,7 @@ from pathlib import Path
 import argparse,json,re,subprocess,tempfile
 
 def function(s,n):
- m=re.search(r'^static (?:int|bool)\s+'+n+r'\([^;{]*\)\s*\{',s,re.M);assert m,n
+ m=re.search(r'^static (?:int|bool|unsigned int)\s+'+n+r'\([^;{]*\)\s*\{',s,re.M);assert m,n
  p=m.end();d=1
  while d:d+=(s[p]=='{')-(s[p]=='}');p+=1
  return s[m.start():p]
@@ -18,9 +18,11 @@ def main():
  dts=(a.source/'arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts').read_text()
  assert 'current-num-sinks = <6>;' in dts and 'kinetic,blanked-current-sink-mask = <0x1f>;' in dts and 'kinetic,backlight-disable-delay-ms = <10>;' in dts
  assert '.precious_reg = ktz8866_precious_reg' in s
+ binding=(a.source/'Documentation/devicetree/bindings/leds/backlight/kinetic,ktz8866.yaml').read_text()
+ assert 'backlight-initially-off' not in s+dts+binding
  defs='\n'.join(re.findall(r'^#define [^\n]+',s,re.M))
  struct=re.search(r'struct ktz8866 \{.*?\n\};',s,re.S).group()
- core='\n'.join(function(s,n) for n in ['ktz8866_precious_reg','ktz8866_write','ktz8866_set_brightness','ktz8866_backlight_update_status','ktz8866_init'])
+ core='\n'.join(function(s,n) for n in ['ktz8866_precious_reg','ktz8866_write','ktz8866_set_brightness','ktz8866_map_brightness','ktz8866_default_brightness','ktz8866_backlight_update_status','ktz8866_init'])
  cfg=re.search(r'static const struct regmap_config ktz8866_regmap_config = \{.*?\n\};',s,re.S).group()
  ops=re.search(r'static const struct backlight_ops ktz8866_backlight_ops = \{.*?\n\};',s,re.S).group()
  prefix=r'''
@@ -32,13 +34,14 @@ def main():
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-typedef uint8_t u8;typedef uint32_t u32;
+typedef uint8_t u8;typedef uint16_t u16;typedef uint32_t u32;
 #define BIT(n) (1UL<<(n))
 #define GFP_KERNEL 0
 #define GPIOD_OUT_HIGH 1
 #define BACKLIGHT_RAW 1
 #define BACKLIGHT_POWER_OFF 4
 #define BACKLIGHT_SCALE_LINEAR 1
+#define BACKLIGHT_SCALE_NON_LINEAR 2
 #define BL_CORE_SUSPENDRESUME 1
 #define EPROBE_DEFER 517
 #define IS_ERR(x) ((intptr_t)(x)<0 && (intptr_t)(x)>-4096)
@@ -48,7 +51,7 @@ static void mock_dev_info(const char *fmt, ...) {(void)fmt;}
 #define dev_info(dev, ...) mock_dev_info(__VA_ARGS__)
 #define dev_err_probe(dev,error,...) (error)
 static unsigned int ilog2(unsigned int n){assert(n);return 31-__builtin_clz(n);}
-struct device_node {int sinks,mask,delay,ramp,led_ramp;bool bias,initial_off;};
+struct device_node {int sinks,mask,delay,ramp,led_ramp;bool bias,oem;};
 struct device {struct device_node *of_node;};
 struct regmap {int id;unsigned int values[0x16];};
 struct i2c_device_id {unsigned long driver_data;};
@@ -58,7 +61,7 @@ struct ktz8866;
 struct backlight_properties {int type,max_brightness,brightness,power,scale;};
 struct backlight_device;
 struct backlight_ops {int options;int (*update_status)(struct backlight_device*);};
-struct backlight_device {struct backlight_properties props;struct ktz8866 *data;const struct backlight_ops *ops;};
+struct backlight_device {struct backlight_properties props;struct ktz8866 *data;const struct backlight_ops *ops;struct device dev;};
 struct regmap_config {int reg_bits,val_bits,max_register;bool (*precious_reg)(struct device*,unsigned int);};
 struct op {char kind;unsigned int map,reg,val;};
 static struct op trace[256];static int ntrace,writes,fail_at=-1,fail_after,reg_fail,published,cases;
@@ -78,7 +81,10 @@ static int of_property_read_u32(struct device_node *n,const char *name,unsigned 
  if(!strcmp(name,"kinetic,led-enable-ramp-delay-ms"))v=n->led_ramp;
  if(v<0)return -EINVAL;*out=v;return 0;
 }
-static bool of_property_read_bool(struct device_node *n,const char *name){return !strcmp(name,"kinetic,enable-lcd-bias")?n->bias:n->initial_off;}
+static bool of_property_read_bool(struct device_node *n,const char *name){
+ if(!strcmp(name,"kinetic,enable-lcd-bias"))return n->bias;
+ assert(!strcmp(name,"xiaomi,liuqin-brightness-curve"));return n->oem;
+}
 static struct ktz8866 *bl_get_data(struct backlight_device *b){return b->data;}
 static unsigned int backlight_get_brightness(struct backlight_device *b){return b->props.power?0:b->props.brightness;}
 static const struct i2c_device_id *i2c_client_get_device_id(struct i2c_client *c){return &c->id;}
@@ -91,13 +97,17 @@ static struct backlight_device *devm_backlight_device_register(struct device *d,
  if(reg_fail)return (void*)(intptr_t)-ENOMEM;published++;bl=(struct backlight_device){.props=*props,.data=ktz,.ops=ops};return &bl;
 }
 static void i2c_set_clientdata(struct i2c_client *c,void *data){c->data=data;}
+static bool oem_brightness_curve=true;
+static const int ktz8866_diagnostic_group;
+static int devm_device_add_group(struct device *dev,const int *group){assert(group==&ktz8866_diagnostic_group);return 0;}
+static void backlight_disable(struct backlight_device *b){b->props.power=4;b->ops->update_status(b);}
 '''
  cases=r'''
 static struct ktz8866 ktz,slave;
 static void reset(bool oem,bool dual){
  ktz_b=NULL;for(int i=0;i<nalloc;i++)free(allocations[i]);nalloc=0;
  memset(maps,0,sizeof(maps));maps[0].id=0;maps[1].id=1;
- node=(struct device_node){.sinks=oem?6:5,.mask=oem?31:-1,.delay=oem?10:-1,.ramp=128,.led_ramp=1,.bias=true,.initial_off=true};
+ node=(struct device_node){.sinks=oem?6:5,.mask=oem?31:-1,.delay=oem?10:-1,.ramp=128,.led_ramp=1,.bias=true,.oem=oem};
  client=(struct i2c_client){.dev={&node},.map=&maps[0]};
  ktz=(struct ktz8866){.client=&client,.regmap=&maps[0]};slave=(struct ktz8866){.client=&client,.regmap=&maps[1]};
  if(dual)ktz_b=&slave;ntrace=writes=reg_fail=published=fail_after=0;fail_at=-1;cases++;
@@ -132,18 +142,20 @@ int main(void){
  reset(true,false);node.led_ramp=16385;assert(ktz8866_init(&ktz)==-EINVAL && writes==2);
  ready(false);assert(ktz8866_set_brightness(&ktz,2048)==-EINVAL && !writes);assert(!ktz8866_set_brightness(&ktz,2047));check_lit(1,2047);assert(!(maps[0].values[8]&128));
  reset(true,false);assert(ktz8866_precious_reg(&client.dev,15));for(int i=0;i<=21;i++)if(i!=15)assert(!ktz8866_precious_reg(&client.dev,i));
- reset(true,false);assert(!ktz8866_probe(&client));assert(published==1 && published_mask==31 && !published_brightness);assert(bl.props.max_brightness==2047 && bl.props.brightness==1500 && bl.props.power==4 && client.data==&bl);
- clear_trace();bl.props.power=0;bl.props.brightness=1000;assert(!bl.ops->update_status(&bl));check_lit(1,1000);
- for(int i=0;i<6;i++){reset(true,false);fail_at=i;fail_after=1;assert(ktz8866_probe(&client)==-EIO && !published);}
- reset(false,false);node.initial_off=false;reg_fail=1;assert(ktz8866_probe(&client)==-ENOMEM && !published);check_dark(1);
- reset(false,false);node.initial_off=false;fail_at=6;fail_after=1;assert(ktz8866_probe(&client)==-EIO && !published);check_dark(1);
+ reset(true,false);assert(!ktz8866_probe(&client));assert(published==1 && published_mask==127 && published_brightness==1500);assert(bl.props.max_brightness==4095 && bl.props.brightness==510 && bl.props.power==0 && client.data==&bl);
+ clear_trace();backlight_disable(&bl);check_dark(1);bl.props.power=0;assert(!bl.ops->update_status(&bl));check_lit(1,1500);
+ reset(false,false);assert(!ktz8866_probe(&client));assert(published==1 && published_mask==95 && published_brightness==1500 && bl.props.max_brightness==2047 && bl.props.brightness==1500 && !bl.props.power);
+ for(int i=0;i<7;i++){reset(true,false);fail_at=i;fail_after=1;assert(ktz8866_probe(&client)==-EIO && !published);}
+ reset(false,false);reg_fail=1;assert(ktz8866_probe(&client)==-ENOMEM && !published);check_dark(1);
+ reset(false,false);fail_at=6;fail_after=1;assert(ktz8866_probe(&client)==-EIO && !published);check_dark(1);
  reset(false,false);client.id.driver_data=1;assert(ktz8866_probe(&client)==-EPROBE_DEFER && !writes && !published);
  for(int i=0;i<nalloc;i++)free(allocations[i]);printf("%d\n",cases);return 0;
 }
 '''
  with tempfile.TemporaryDirectory(prefix='oem-backlight-tests-') as tmp:
   src=Path(tmp)/'test.c';exe=Path(tmp)/'test'
-  src.write_text(prefix+defs+'\n'+struct+'\nstruct ktz8866 *ktz_b;\n'+core+'\n'+cfg+'\n'+ops+'\n'+function(s,'ktz8866_probe')+cases)
+  curve=(a.source/'drivers/video/backlight/ktz8866-liuqin-curve.h').read_text()
+  src.write_text(prefix+defs+'\n'+struct+'\nstruct ktz8866 *ktz_b;\n'+curve+'\n'+core+'\n'+cfg+'\n'+ops+'\n'+function(s,'ktz8866_probe')+cases)
   subprocess.run([a.cc,'-std=c11','-Wall','-Wextra','-Werror','-Wno-unused-parameter','-Wno-misleading-indentation','-fsanitize=undefined','-fno-sanitize-recover=all',str(src),'-o',str(exe)],check=True)
   count=int(subprocess.check_output([str(exe)],text=True,timeout=20))
  report={'cases':count,'all_passed':True,'actual_candidate_c_executed':True,'oem_on_7f_blank_1f_and_10ms_wait_verified':True,'single_and_dual_chip_partial_write_errors_checked':True,'reverse_direction_retry_restores_enable_state':True,'probe_publishes_only_after_complete_initialization':True,'failed_probe_cleanup_checked':True,'flag_read_to_clear_excluded_from_debug_dumps':True,'raw_brightness_range_and_bias_voltages_unchanged':True,'generic_five_sink_success_path_preserved':True,'hardware_validation_required':True}

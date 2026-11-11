@@ -1,12 +1,12 @@
 {
-  "kernel_source": "sources/linux-liuqin-7.3.3",
+  "kernel_source": "sources/linux-liuqin-7.3.4",
   "kernel_fragments": [
     "build/kernel/configs/custom-zram.config"
   ],
-  "kernel_localversion": "-liuqin-fedora-v733",
+  "kernel_localversion": "-liuqin-fedora",
   "rootfs_config": "build/rootfs/fedora-plasma.json",
   "usb_manufacturer": "Xiaomi",
   "usb_product": "Pad 6 Pro",
   "rom_images": "inputs/roms/liuqin/OS2.0.6.0.VMYCNXM/images",
-  "package_version": "0.3.19"
+  "package_version": "0.3.20"
 }

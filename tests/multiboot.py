@@ -26,7 +26,7 @@ def configuration():
     ids=[str(uuid.uuid4()),str(uuid.uuid4())]
     return dict(schema_version=1,userdata_gib=32,boot_gib=2,
         roots=[dict(id=ids[i],name=name,size_gib=32,filesystem=fs,bundle='',boot_image='')
-               for i,(name,fs) in enumerate((('Fedora','ext4'),('Ubuntu','btrfs')))],
+               for i,(name,fs) in enumerate((('Fedora','ext4'),('Linux Btrfs','btrfs')))],
         boot_action='set-default',default_id=ids[1])
 
 

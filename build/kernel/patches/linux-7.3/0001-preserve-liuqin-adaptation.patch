@@ -9,8 +9,9 @@ and licenses are retained.
 
 The Iris platform layout follows Seeker0472/liuqin-nixos commit
 73e8071e09880aeb47f0a427b9a65b8cc10927c4, pkgs/kernel/patches/0006-liuqin-media-iris.patch,
-rebased to the current firmware-descriptor API. Do not infer hardware validation
-from successful compilation. The existing installer and product lock stay on 6.17.
+rebased to the current firmware-descriptor API. Fedora and Recovery share
+this baseline with separate configurations and Recovery-only adaptations.
+Hardware validation is tracked separately from successful compilation.
 
 Newer mainline DPU, atomic-commit, panel allocation/follower, GPIO descriptor,
 audio and UCSI APIs replace the corresponding old mechanisms. Preserve first-frame
@@ -18,8 +19,8 @@ backlight ordering, panel policies, FPC IRQ-level semantics, camera registers,
 GPU reporting/recovery and battery units. Already-upstream DSI rounding and MDSS
 SMMU fixes are not duplicated. Unrelated phone drivers and DTs are excluded.
 
-This patch is a reviewable experimental baseline, to be split by subsystem after
-hardware validation. No firmware or per-device calibration is included.
+Focused patches build on this shared device baseline. No firmware or
+per-device calibration is included.
 
 diff --git a/Documentation/ABI/testing/sysfs-class-backlight-ktz8866 b/Documentation/ABI/testing/sysfs-class-backlight-ktz8866
 new file mode 100644
@@ -293,7 +294,7 @@ index 00000000000..04c02319316
 +        };
 +    };
 diff --git a/Documentation/devicetree/bindings/leds/backlight/kinetic,ktz8866.yaml b/Documentation/devicetree/bindings/leds/backlight/kinetic,ktz8866.yaml
-index c914e127698..0f5575c2dee 100644
+index c914e12769825f9436657c8f9153cbee32ecc5cf..43eba1fd5f464c40a396401faf9df03484da48f7 100644
 --- a/Documentation/devicetree/bindings/leds/backlight/kinetic,ktz8866.yaml
 +++ b/Documentation/devicetree/bindings/leds/backlight/kinetic,ktz8866.yaml
 @@ -39,6 +39,27 @@ properties:
@@ -324,19 +325,6 @@ index c914e127698..0f5575c2dee 100644
    kinetic,current-ramp-delay-ms:
      description: |
        LED current ramping delay time in milliseconds, note that the
-@@ -51,6 +72,12 @@ properties:
-       mapped to 512μs because ktz8866 can't ramp faster than it.
-     enum: [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384]
- 
-+  kinetic,backlight-initially-off:
-+    description: |
-+      Keep the LED output powered off after probe until the display panel
-+      enables its backlight. This does not disable the LCD bias outputs.
-+    type: boolean
-+
-   kinetic,enable-lcd-bias:
-     description: Set if we want to output bias power supply for LCD.
-     type: boolean
 diff --git a/Documentation/devicetree/bindings/media/i2c/samsung,s5kjn1.yaml b/Documentation/devicetree/bindings/media/i2c/samsung,s5kjn1.yaml
 index 8f368ae044b..21cb6f2fab6 100644
 --- a/Documentation/devicetree/bindings/media/i2c/samsung,s5kjn1.yaml
@@ -1102,10 +1090,10 @@ index b8793482b18..d902cb253ac 100644
  				};
 diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
 new file mode 100644
-index 00000000000..6e4c19bd4c8
+index 0000000000000000000000000000000000000000..3b32c4a444ce5cbcb35c953c0bb6e163c52db132
 --- /dev/null
 +++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
-@@ -0,0 +1,1949 @@
+@@ -0,0 +1,1948 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/dts-v1/;
 +
@@ -1821,7 +1809,6 @@ index 00000000000..6e4c19bd4c8
 +		xiaomi,liuqin-brightness-curve;
 +		kinetic,blanked-current-sink-mask = <0x1f>;
 +		kinetic,backlight-disable-delay-ms = <10>;
-+		kinetic,backlight-initially-off;
 +		kinetic,current-ramp-delay-ms = <128>;
 +		kinetic,led-enable-ramp-delay-ms = <1>;
 +		kinetic,enable-lcd-bias;
@@ -23215,7 +23202,7 @@ index 00000000000..7f988258b61
 +	2045, 2045, 2046, 2046, 2046, 2047, 2047, 2047,
 +};
 diff --git a/drivers/video/backlight/ktz8866.c b/drivers/video/backlight/ktz8866.c
-index 53c1301dbb8..2c492523cbc 100644
+index 53c1301dbb8c5a58aec33c7f51d527705dc50dba..82f424c907ea88ccb1018d1f634bf040e9ca82e6 100644
 --- a/drivers/video/backlight/ktz8866.c
 +++ b/drivers/video/backlight/ktz8866.c
 @@ -6,6 +6,7 @@
@@ -23439,7 +23426,7 @@ index 53c1301dbb8..2c492523cbc 100644
  }
  
  static const struct backlight_ops ktz8866_backlight_ops = {
-@@ -93,44 +225,81 @@ static const struct backlight_ops ktz8866_backlight_ops = {
+@@ -93,44 +225,80 @@ static const struct backlight_ops ktz8866_backlight_ops = {
  	.update_status = ktz8866_backlight_update_status,
  };
  
@@ -23532,7 +23519,6 @@ index 53c1301dbb8..2c492523cbc 100644
 +	const struct i2c_device_id *id = i2c_client_get_device_id(client);
  	struct backlight_device *backlight_dev;
  	struct backlight_properties props;
-+	unsigned int initial_brightness;
  	struct ktz8866 *ktz;
  	int ret = 0;
  
@@ -23542,7 +23528,7 @@ index 53c1301dbb8..2c492523cbc 100644
  	ktz = devm_kzalloc(&client->dev, sizeof(*ktz), GFP_KERNEL);
  	if (!ktz)
  		return -ENOMEM;
-@@ -147,27 +316,59 @@ static int ktz8866_probe(struct i2c_client *client)
+@@ -147,27 +315,53 @@ static int ktz8866_probe(struct i2c_client *client)
  	if (ret)
  		return dev_err_probe(&client->dev, ret, "get regulator vddneg failed\n");
  
@@ -23564,20 +23550,14 @@ index 53c1301dbb8..2c492523cbc 100644
 +		of_property_read_bool(client->dev.of_node, "xiaomi,liuqin-brightness-curve");
 +	props.max_brightness = ktz->oem_curve ? 4095 : MAX_BRIGHTNESS;
 +	props.brightness = ktz8866_default_brightness(ktz);
-+	/* Keep the requested brightness, but let the panel enable the LEDs. */
-+	if (of_property_read_bool(client->dev.of_node,
-+				  "kinetic,backlight-initially-off"))
-+		props.power = BACKLIGHT_POWER_OFF;
 +	props.scale = ktz->oem_curve ? BACKLIGHT_SCALE_NON_LINEAR : BACKLIGHT_SCALE_LINEAR;
 +
 +	/* Publish only after configuration and the initial LED state succeeded. */
 +	ret = ktz8866_init(ktz);
 +	if (ret)
 +		return dev_err_probe(&client->dev, ret, "failed to configure backlight\n");
-+	initial_brightness = ktz8866_map_brightness(ktz, props.brightness);
-+	if (props.power == BACKLIGHT_POWER_OFF)
-+		initial_brightness = 0;
-+	ret = ktz8866_set_brightness(ktz, initial_brightness);
++	ret = ktz8866_set_brightness(ktz,
++		ktz8866_map_brightness(ktz, props.brightness));
 +	if (ret) {
 +		ktz8866_set_brightness(ktz, 0);
 +		return dev_err_probe(&client->dev, ret, "failed to set initial brightness\n");
@@ -23609,7 +23589,7 @@ index 53c1301dbb8..2c492523cbc 100644
  	return 0;
  }
  
-@@ -180,14 +381,16 @@ static void ktz8866_remove(struct i2c_client *client)
+@@ -180,14 +374,16 @@ static void ktz8866_remove(struct i2c_client *client)
  
  static const struct i2c_device_id ktz8866_ids[] = {
  	{ .name = "ktz8866" },

@@ -18,7 +18,7 @@ GUI 使用的原生 Rec 由 `build/recovery/` 独立构建。
 
 ## 目标内核
 
-使用 `build/devbox/build.example.json` 的默认 Fedora 45 / Linux 7.3.3 配方，在 CI 中设置并行数为 2，
+使用 `build/devbox/build.example.json` 的默认 Fedora 45 / Linux 7.3.4 配方，在 CI 中设置并行数为 2，
 执行 `devbox run build -- --target kernel` 和 `devbox run build -- --target modules`，包含来源清单选定的键盘、指纹、显示和电池接口补丁。
 不需要原厂 ROM，不构建 boot、rootfs 或安装镜像。
 Devbox 使用固定版本的[官方安装 Action](https://github.com/jetify-com/devbox-install-action)，依赖由锁文件选择。

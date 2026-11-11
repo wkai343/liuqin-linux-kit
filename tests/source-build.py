@@ -23,6 +23,7 @@ sys.path[:0]=[str(PROJECT/'build/lib'),str(PROJECT/'shared')]
 import android_images as android
 import source_build as helpers
 import source_flow as flow
+import fedora_flow
 import speaker_firmware as speaker
 
 
@@ -46,14 +47,14 @@ class SourceTests(unittest.TestCase):
         pipeline=flow.Flow(data,lambda *_a,**_k:self.fail('unexpected build'),distribution='fedora')
         self.assertEqual(pipeline.kernel_source_lock(),PROJECT/'build/kernel/source.json')
         target=json.loads(pipeline.kernel_source_lock().read_text())
-        self.assertEqual(target['branch'],'v7.3.3')
+        self.assertEqual(target['branch'],'v7.3.4')
         data['kernel_source_lock']='custom/target.json'
         self.assertEqual(pipeline.kernel_source_lock(),PROJECT/'custom/target.json')
 
     def test_retired_source_stages_stop_before_initializing_or_downloading(self):
         data=builder.config(PROJECT/'build/devbox/build.example.json')
         for action in ('all','build-target','images','installer','build-installer','installer-kernel','runtime'):
-            with self.subTest(action=action), patch.object(flow,'download') as download:
+            with self.subTest(action=action), patch.object(fedora_flow,'download') as download:
                 with self.assertRaisesRegex(ValueError,'退役'):
                     flow.execute(data,action,lambda *_a,**_k:self.fail('unexpected command'))
                 download.assert_not_called()
@@ -61,28 +62,39 @@ class SourceTests(unittest.TestCase):
     def test_complete_build_uses_rootfs_graph(self):
         from unittest.mock import Mock
         data=builder.config(PROJECT/'build/devbox/build.example.json')
-        data['rootfs_config']=str(PROJECT/'build/rootfs/ubuntu-plasma.json')
+        data['rootfs_config']=str(PROJECT/'build/rootfs/fedora-plasma.json')
         pipeline=Mock(data=data)
         pipeline.rootfs.return_value=self.root/'packed'
-        with patch.object(flow,'PROJECT',self.project),patch.object(flow,'Flow',return_value=pipeline) as factory, \
+        with patch.object(flow,'PROJECT',self.project),patch.object(fedora_flow,'FedoraFlow',return_value=pipeline) as factory, \
              contextlib.redirect_stdout(io.StringIO()):
-            factory.resolve.side_effect=Path
             flow.execute(data,'rootfs',lambda *_a,**_k:self.fail('unexpected command'))
         pipeline.board.assert_called_once_with()
         pipeline.rootfs.assert_called_once_with()
         pipeline.images.assert_not_called()
         pipeline.runtime.assert_not_called()
 
+    def test_prepare_downloads_only_target_materials(self):
+        data=builder.config(PROJECT/'build/devbox/build.example.json')
+        pipeline=fedora_flow.FedoraFlow(data,lambda *_a,**_k:self.fail('unexpected command'))
+        stats=json.loads((PROJECT/'build/rootfs/fedora-stats-source.json').read_text())
+        with patch.object(flow,'PROJECT',self.project), \
+             patch.object(fedora_flow,'FedoraFlow',return_value=pipeline), \
+             patch.object(pipeline,'fingerprint_image'),patch.object(pipeline,'board'), \
+             patch.object(pipeline,'tools'),patch.object(pipeline,'kernel_source'), \
+             patch.object(fedora_flow,'download',return_value=self.root/'download') as download:
+            flow.execute(data,'prepare',lambda *_a,**_k:self.fail('unexpected command'))
+        self.assertEqual([call.args[0] for call in download.call_args_list],
+                         [pipeline.source['url'],stats['url']])
+
     def test_image_export_uses_results_from_this_flow_and_skips_failed_builds(self):
         from unittest.mock import Mock
         data=builder.config(PROJECT/'build/devbox/build.example.json')
-        data['rootfs_config']=str(PROJECT/'build/rootfs/ubuntu-plasma.json')
+        data['rootfs_config']=str(PROJECT/'build/rootfs/fedora-plasma.json')
         pipeline=Mock(data=data)
         pipeline.rootfs.return_value=self.root/'selected-rootfs/packed'
         pipeline.boot.return_value=self.root/'selected-boot/image/boot-liuqin-native.img'
-        with patch.object(flow,'PROJECT',self.project),patch.object(flow,'Flow',return_value=pipeline) as factory, \
+        with patch.object(flow,'PROJECT',self.project),patch.object(fedora_flow,'FedoraFlow',return_value=pipeline) as factory, \
              patch('image_export.export_images') as export,contextlib.redirect_stdout(io.StringIO()):
-            factory.resolve.side_effect=Path
             flow.execute(data,'rootfs',lambda *_a,**_k:self.fail('unexpected command'),export_dir=Path('export'))
             export.assert_called_once_with(pipeline.boot.return_value,
                 pipeline.rootfs.return_value/'rootfs.tar.gz',self.project/'export')
@@ -152,6 +164,42 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(git('status','--porcelain'),'')
         self.assertEqual((source/'driver.c').read_text(),'old\n')
 
+    def test_consolidated_kernel_patches_preserve_tree_but_invalidate_source_cache(self):
+        project=self.root/'consolidated-kernel';source=project/'kernel';source.mkdir(parents=True)
+        def git(*args):
+            return subprocess.check_output(['git','-C',str(source),*args],text=True).strip()
+        git('init','-q');(source/'driver.c').write_text('base\n');git('add','driver.c')
+        git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid',
+            '-c','commit.gpgsign=false','commit','-qm','base')
+        base=git('rev-parse','HEAD')
+        patches=project/'build/kernel/patches';patches.mkdir(parents=True)
+        for name,before,after in (('first','base','intermediate'),('second','intermediate','final'),
+                                  ('combined','base','final')):
+            (patches/(name+'.patch')).write_text(
+                '--- a/driver.c\n+++ b/driver.c\n@@ -1 +1 @@\n-'+before+'\n+'+after+'\n')
+        git('apply','--cached',str(patches/'combined.patch'))
+        expected=git('write-tree');git('read-tree','HEAD')
+        (project/'build/lib').mkdir()
+        shutil.copyfile(PROJECT/'build/lib/kernel_adaptation.py',project/'build/lib/kernel_adaptation.py')
+        lock=project/'source.json';cache=helpers.Cache(project/'cache',None);results=[]
+        with patch.object(flow,'PROJECT',project):
+            for names in (('first','second'),('combined',),('combined',)):
+                record=dict(commit=base,expected_source_tree=expected,
+                            target_patches=['build/kernel/patches/'+name+'.patch' for name in names])
+                lock.write_text(json.dumps(record))
+                pipeline=object.__new__(flow.Flow)
+                pipeline.data={'kernel_source':str(source),'kernel_source_lock':str(lock)}
+                pipeline.code={};pipeline.memo={};pipeline.cache=cache
+                result,commit=pipeline.kernel_source();results.append((result,commit))
+                self.assertEqual((result/'driver.c').read_text(),'final\n')
+                self.assertEqual(subprocess.check_output(
+                    ['git','-C',str(result),'rev-parse','HEAD^{tree}'],text=True).strip(),expected)
+        self.assertNotEqual(results[0][0],results[1][0])
+        self.assertNotEqual(results[0][1],results[1][1])
+        self.assertEqual(results[1],results[2])
+        self.assertEqual(git('status','--porcelain'),'')
+        self.assertEqual(git('rev-parse','HEAD'),base)
+
     def test_cache_changes_only_the_requested_stage_and_detects_tampering(self):
         cache=helpers.Cache(self.root/'cache',None);calls=[]
         def build(out):calls.append(out);(out/'image').write_bytes(b'complete')
@@ -205,7 +253,7 @@ class SourceTests(unittest.TestCase):
             with patch.object(pipeline,'kernel',return_value=(self.root,self.root)), \
                  patch.object(pipeline,'modules',return_value=self.root), \
                  patch.object(pipeline,'board',return_value=self.root), \
-                 patch.object(pipeline,'board_inputs',return_value={}), \
+                 patch.object(pipeline,'board_inputs',return_value={'BUSYBOX':self.root/'busybox'}), \
                  patch.object(flow,'sha',side_effect=lambda path:str(path)), \
                  patch.object(flow,'tree_identity',side_effect=lambda path:str(path)), \
                  patch.object(pipeline,'stage',side_effect=stage),patch.object(pipeline,'run') as run:
@@ -219,23 +267,24 @@ class SourceTests(unittest.TestCase):
         for name in ('boot',):
             self.assertNotEqual(stages[0][name],stages[1][name])
 
-    def test_boot_argument_changes_invalidate_target_image(self):
+    def test_boot_arguments_and_busybox_changes_invalidate_target_image(self):
         device=self.project/'device';device.mkdir()
         for name in ('native-bootargs.txt',):
             shutil.copyfile(PROJECT/'device'/name,device/name)
         data=builder.config(PROJECT/'build/devbox/build.example.json')
         pipeline=flow.Flow(data,lambda *_a,**_k:self.fail('unexpected build'),distribution='fedora')
+        busybox=self.root/'busybox';busybox.write_bytes(b'first binary')
         records={}
         def capture(name,dependency,_build,_artifacts):
             records[name]=helpers.key(dependency)
             return self.root
         def digest(path):
-            return helpers.sha(path) if path.name in ('native-bootargs.txt','installer-bootargs.txt') else str(path)
+            return helpers.sha(path) if path.name in ('native-bootargs.txt','installer-bootargs.txt','busybox') else str(path)
         with patch.object(flow,'PROJECT',self.project), \
              patch.object(pipeline,'kernel',return_value=(self.root,self.root)), \
              patch.object(pipeline,'modules',return_value=self.root), \
              patch.object(pipeline,'board',return_value=self.root), \
-             patch.object(pipeline,'board_inputs',return_value={}), \
+             patch.object(pipeline,'board_inputs',return_value={'BUSYBOX':self.root/'busybox'}), \
              patch.object(flow,'sha',side_effect=digest), \
              patch.object(flow,'tree_identity',side_effect=lambda path:str(path)), \
              patch.object(pipeline,'stage',side_effect=capture):
@@ -243,6 +292,9 @@ class SourceTests(unittest.TestCase):
             path=device/'native-bootargs.txt';path.write_text(path.read_text()+' consoleblank=0\n')
             pipeline.boot();second=dict(records)
             self.assertNotEqual(first['boot'],second['boot'])
+            busybox.write_bytes(b'rebuilt binary')
+            pipeline.boot()
+            self.assertNotEqual(second['boot'],records['boot'])
 
     def test_splash_runtime_reaches_only_target_boot_and_has_an_independent_cache_identity(self):
         data=builder.config(PROJECT/'build/devbox/build.example.json')
@@ -254,7 +306,7 @@ class SourceTests(unittest.TestCase):
         with patch.object(pipeline,'kernel',return_value=(self.root,self.root)), \
              patch.object(pipeline,'modules',return_value=self.root), \
              patch.object(pipeline,'board',return_value=self.root), \
-             patch.object(pipeline,'board_inputs',return_value={}), \
+             patch.object(pipeline,'board_inputs',return_value={'BUSYBOX':self.root/'busybox'}), \
              patch.object(pipeline,'boot_splash_runtime',return_value=runtime) as splash, \
              patch.object(flow,'sha',side_effect=lambda path:str(path)), \
              patch.object(flow,'tree_identity',side_effect=identity), \
@@ -268,7 +320,7 @@ class SourceTests(unittest.TestCase):
 
     def test_missing_rom_stops_full_build_before_network_or_privileged_work(self):
         data=builder.config(PROJECT/'build/devbox/build.example.json');data['rom_images']=str(self.root/'missing')
-        with patch.object(flow,'PROJECT',self.project), patch.object(flow,'download',side_effect=AssertionError('network')):
+        with patch.object(flow,'PROJECT',self.project), patch.object(fedora_flow,'download',side_effect=AssertionError('network')):
             with self.assertRaisesRegex(ValueError,'原厂 ROM 缺少'):
                 flow.execute(data,'rootfs',lambda *_a,**_k:self.fail('unexpected command'))
 
@@ -321,57 +373,28 @@ class SourceTests(unittest.TestCase):
         data=builder.config(PROJECT/'build/devbox/build.example.json');data['rom_images']=str(self.root/'missing')
         with patch.object(flow,'PROJECT',self.project), patch.object(flow.Flow,'kernel',return_value=('source','kernel')) as kernel, \
              patch.object(flow.Flow,'board',side_effect=AssertionError('unrelated ROM')), \
-             patch.object(flow.Flow,'apps',side_effect=AssertionError('unrelated rootfs')):
+             patch.object(fedora_flow.FedoraFlow,'apps',side_effect=AssertionError('unrelated rootfs')):
             flow.execute(data,'kernel',lambda *_a,**_k:self.fail('unexpected command'))
         kernel.assert_called_once()
 
     def test_root_recipe_rejects_unsupported_system_and_shell_arguments(self):
-        data=json.loads((PROJECT/'build/rootfs/ubuntu-plasma.json').read_text());path=self.root/'recipe.json'
-        for changes in ({'distribution':'fedora'},{'packages':['--allow-unauthenticated']},{'remove':['systemd']},{'user':'root'}):
+        data=json.loads((PROJECT/'build/rootfs/fedora-plasma.json').read_text());path=self.root/'recipe.json'
+        for changes in ({'distribution':'ubuntu'},{'packages':['--allow-unauthenticated']},{'remove':['systemd']},{'user':'root'}):
             path.write_text(json.dumps(dict(data,**changes)))
             with self.assertRaises(ValueError):root_builder.recipe(path)
 
-    def test_desktop_content_keeps_catalogs_and_project_licenses_without_untrimming_manpages(self):
-        root=self.root/'desktop';root.mkdir()
-        root_builder.prepare_desktop_content(root)
-        text=(root/'etc/dpkg/dpkg.cfg.d/zz-liuqin-desktop-content').read_text()
-        self.assertIn('path-include=/usr/share/locale/*/LC_MESSAGES/*.mo',text)
-        self.assertIn('path-include=/usr/share/doc/liuqin-*/*',text)
-        self.assertNotIn('/usr/share/man/',text)
-        (root/'etc/locale.gen').write_text('# zh_CN.UTF-8 UTF-8\n')
-        with patch.object(root_builder,'chroot') as run:
-            root_builder.configure_locales(root);root_builder.configure_locales(root)
-        entries=(root/'etc/locale.gen').read_text().splitlines()
-        self.assertEqual(entries.count('zh_CN.UTF-8 UTF-8'),1)
-        self.assertEqual(entries.count('en_US.UTF-8 UTF-8'),1)
-        self.assertEqual(run.call_args.args[1],['locale-gen'])
 
     def test_first_boot_recipe_has_no_account_and_preserves_explicit_old_accounts(self):
-        data=json.loads((PROJECT/'build/rootfs/ubuntu-plasma.json').read_text());path=self.root/'recipe.json'
+        data=json.loads((PROJECT/'build/rootfs/fedora-plasma.json').read_text());path=self.root/'recipe.json'
         path.write_text(json.dumps(data));normalized=root_builder.recipe(path)
         self.assertTrue(normalized['first_boot_setup']);self.assertNotIn('user',normalized)
         self.assertEqual(normalized['hostname'],'liuqin')
-        for changes in ({'password_file':'private.txt'},{'user':'pad'},{'first_boot_setup':'true'},{'remove':['sddm']}):
+        for changes in ({'password_file':'private.txt'},{'user':'pad'},{'first_boot_setup':'true'},{'remove':['plasma-login-manager']}):
             path.write_text(json.dumps(dict(data,**changes)))
             with self.assertRaises(ValueError):root_builder.recipe(path)
         data.pop('first_boot_setup');data.update(user='pad',password_file=None)
         path.write_text(json.dumps(data));self.assertFalse(root_builder.recipe(path)['first_boot_setup'])
 
-    def test_first_boot_configuration_creates_no_regular_account_or_credentials(self):
-        root=self.root/'first-boot';(root/'etc').mkdir(parents=True)
-        (root/'etc/passwd').write_text('root:x:0:0:root:/root:/bin/bash\nnobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin\n')
-        for name in ('usr/libexec/plasma-setup','usr/lib/systemd/system/plasma-setup.service'):
-            path=root/name;path.parent.mkdir(parents=True,exist_ok=True);path.touch()
-        with patch.object(root_builder,'chroot') as run:root_builder.configure_first_boot(root)
-        commands=[call.args[1] for call in run.call_args_list]
-        self.assertNotIn('chpasswd',[command[0] for command in commands])
-        self.assertEqual([c for c in commands if c[0]=='useradd'],[['useradd','-D','-s','/bin/bash']])
-        self.assertEqual((root/'etc/xdg/plasmasetuprc').read_text(),'[Accounts]\nUserGroups=sudo\n')
-        self.assertEqual(os.readlink(root/'etc/systemd/system/multi-user.target.wants/plasma-setup.service'),'/usr/lib/systemd/system/plasma-setup.service')
-        self.assertFalse((root/'etc/plasma-setup-done').exists())
-        with patch.object(root_builder,'chroot',side_effect=AssertionError('must stop')):
-            (root/'etc/passwd').write_text('pad:x:1000:1000:pad:/home/pad:/bin/bash\n')
-            with self.assertRaisesRegex(ValueError,'预置普通用户'):root_builder.configure_first_boot(root)
 
     def test_overlay_cannot_traverse_existing_symlink_parent_or_runtime_directory(self):
         target=self.root/'target';target.mkdir();source=self.root/'overlay';source.mkdir()
@@ -508,8 +531,8 @@ class SourceTests(unittest.TestCase):
     def test_chroot_uses_host_executable_before_setting_target_path(self):
         with patch.object(root_builder.shutil,'which',return_value='/host/tools/chroot'), \
              patch.object(root_builder.subprocess,'run') as run:
-            root_builder.chroot(self.root,['apt-get','update'])
-        self.assertEqual(run.call_args.args[0],['/host/tools/chroot',str(self.root),'apt-get','update'])
+            root_builder.chroot(self.root,['dnf','makecache'])
+        self.assertEqual(run.call_args.args[0],['/host/tools/chroot',str(self.root),'dnf','makecache'])
         self.assertEqual(run.call_args.kwargs['env']['PATH'],'/usr/sbin:/usr/bin:/sbin:/bin')
 
 
@@ -627,17 +650,17 @@ class AndroidTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which('dpkg-deb'),'Debian tools required')
 class DevicePackageTests(unittest.TestCase):
-    def test_generic_device_cache_tracks_board_and_composer_but_not_gnome(self):
+    def test_generic_device_cache_tracks_board_and_composer_but_not_other_files(self):
         import fedora_flow
         with tempfile.TemporaryDirectory() as temporary:
             project=Path(temporary)
             board=project/'device/board-overlay';board.mkdir(parents=True)
-            gnome=project/'device/gnome-overlay';gnome.mkdir()
+            gnome=project/'device/unrelated-fixture';gnome.mkdir()
             (board/'policy').write_text('board-v1')
             (gnome/'policy').write_text('gnome-v1')
             composer=project/'build/lib/device_overlay.py';composer.parent.mkdir(parents=True)
             composer.write_text('composer-v1')
-            for module,cls in ((flow,flow.Flow),(fedora_flow,fedora_flow.FedoraFlow)):
+            for module,cls in ((fedora_flow,fedora_flow.FedoraFlow),):
                 with self.subTest(pipeline=cls.__name__):
                     pipeline=object.__new__(cls);pipeline.version='0.1'
                     records=[]
@@ -665,7 +688,7 @@ class DevicePackageTests(unittest.TestCase):
                     self.assertNotEqual(records[1],records[2])
                     self.assertNotEqual(records[2],records[3])
 
-    def test_sensor_deb_leaves_distribution_libraries_to_apt(self):
+    def test_sensor_deb_leaves_distribution_libraries_to_packages(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);layer=root/'layer';library=layer/'usr/lib/aarch64-linux-gnu'
             library.mkdir(parents=True)
@@ -699,7 +722,7 @@ class DevicePackageTests(unittest.TestCase):
             root=Path(temporary);busy=root/'busybox';busy.write_bytes(b'SYNTHETIC BUSYBOX FILE');busy.chmod(0o755)
             out=root/'debs'
             env=dict(os.environ,DEVICE_DESKTOP='generic',BUSYBOX=str(busy),BUSYBOX_SHA256=helpers.sha(busy),
-                     OUT_DIR=str(out),GNOME_OVERLAY='/not/a/gnome/overlay',UBUNTU_DESKTOP_ROOT='/not/an/author/rootfs',POWER_SETTINGS_BINARY='/not/gnome',POWER_KEY_CC='/not/a/compiler')
+                     OUT_DIR=str(out))
             subprocess.run(['sh',str(PROJECT/'build/scripts/build-liuqin-debs.sh'),'device-support'],env=env,check=True)
             subprocess.run(['sh',str(PROJECT/'build/scripts/build-liuqin-debs.sh'),'meta'],env=env,check=True)
             package=next(out.glob('liuqin-device-support_*.deb'));extracted=root/'extracted'

@@ -8,9 +8,26 @@ from liuqin_artifacts import boot_interface,bounded_initramfs
 from liuqin_recovery_image import records,pack,add
 from liuqin_native_recovery import MARKER,AGENT,BOARD_HELPER,UI_FILES,TOUCH_FILES,INSTALL_FILES,ADB_FILES,FIXED_RESTORE_FILES,TABLET_SWITCH_FILES,STORAGE_SEAL,BCB_FILES,STORE_FILES,RETENTION_FILES
 from liuqin_native_install import CAPABILITIES,FIXED_USAGE
+sys.path.insert(0, str(PROJECT/'build/recovery'))
+from kernel_recipe import identity as source_identity, project_file, verify_components
 BASE_SHA='dcc287f5a8273260613fdcf26447e35e28fd40cec36358615d32c0e9c7abe569'
 def sha(b):return hashlib.sha256(b).hexdigest()
 def encoded(v):return (json.dumps(v,ensure_ascii=False,sort_keys=True,indent=2)+'\n').encode()
+
+def check_source_base(manifest, base_sha, kernel_runtime):
+    if base_sha == BASE_SHA:
+        return None
+    source = manifest.get('identity',{}).get('recovery_source')
+    if (not isinstance(source,dict) or not kernel_runtime or
+            source != source_identity(project_file(source.get('lock')))):
+        raise ValueError('base must be source-built with matching Recovery kernel components')
+    return source
+
+def check_component_base(components, source, kernel_sha):
+    if source and (components.get('source') != source or
+                   components.get('raw_kernel_sha256') != kernel_sha):
+        raise ValueError('Recovery kernel components do not match the source-built base')
+
 def native_init():
     source=(PROJECT/'device/boot/initramfs/init').read_bytes()
     marker=b'gadget=/sys/kernel/config/usb_gadget/liuqin\n'
@@ -61,8 +78,9 @@ def build(a):
     out=a.out.resolve()
     if out.exists() or not out.is_relative_to(PROJECT/'out'):raise ValueError('use a new output directory below project/out')
     b=a.base_image.read_bytes()
-    if sha(b)!=BASE_SHA:raise ValueError('base must be the qualified native LVGL/touch image')
     info=boot_interface(a.base_image,installer=True);m=info['native_recovery_manifest']
+    base_sha = sha(b)
+    fresh_source = check_source_base(m, base_sha, getattr(a,'kernel_runtime',None))
     u=lambda n:struct.unpack_from('<I',b,n)[0];align=lambda n:(n+4095)//4096*4096
     r=4096+align(u(8));d=r+align(u(16));kernel=b[4096:4096+u(8)];dtb=b[d:d+u(1648)]
     entries=records(bounded_initramfs(b[r:r+u(16)],256*1024**2));sources={}
@@ -71,9 +89,12 @@ def build(a):
     if kernel_runtime:
         kernel_runtime = kernel_runtime.resolve()
         components = json.loads((kernel_runtime/'kernel-manifest.json').read_text())
-        if (components.get('schema') != 1 or components.get('device') != 'liuqin'
+        if components.get('schema') == 2:
+            components = verify_components(kernel_runtime)
+            check_component_base(components, fresh_source, m['kernel_sha256'])
+        elif (fresh_source or components.get('schema') != 1 or components.get('device') != 'liuqin'
                 or components.get('base_image_sha256') != BASE_SHA):
-            raise ValueError('Recovery kernel components do not match the qualified base')
+            raise ValueError('Recovery kernel components do not match the historical base')
         for name,digest in components['files'].items():
             if Path(name).name != name or sha((kernel_runtime/name).read_bytes()) != digest:
                 raise ValueError('Recovery kernel component changed: '+name)
@@ -87,7 +108,9 @@ def build(a):
             raise ValueError('Recovery kernel or DTB differs from its component manifest')
         add(entries,TOUCH_FILES[0],(kernel_runtime/'liuqin_bootloader_panel.ko').read_bytes())
         add(entries,'etc/liuqin-installer-kernel.release',(components['kernel_release']+'\n').encode())
-        for name in ('kernel.config','kernel-log-fixes.patch'):
+        for name in components['files']:
+            if not (name.endswith('.patch') or name in ('kernel.config','source-lock.json','shared-source-lock.json')):
+                continue
             add(entries,'usr/share/licenses/liuqin-recovery-kernel/'+name,(kernel_runtime/name).read_bytes())
         add(entries,'usr/share/licenses/liuqin-recovery-kernel/aligned-entry.S',
             (PROJECT/'device/recovery/aligned-entry.S').read_bytes())
@@ -154,13 +177,15 @@ def build(a):
     payload={n:sha(entries[n][1]) for n in sorted(names)}
     for path in ('build/recovery/build-native-installer.py','shared/liuqin_native_recovery.py','shared/liuqin_artifacts.py'):sources[path]=sha((PROJECT/path).read_bytes())
     if a.inspection_only and not adb:raise ValueError('this readonly variant is for native ADB only')
-    identity=dict(base_image_sha256=BASE_SHA,kernel_sha256=m['kernel_sha256'],dtb_sha256=m['dtb_sha256'],payload_sha256=payload,sources=sources,ui=ui,
+    identity=dict(base_image_sha256=base_sha,kernel_sha256=m['kernel_sha256'],dtb_sha256=m['dtb_sha256'],payload_sha256=payload,sources=sources,ui=ui,
         generic_ota_version=0 if a.inspection_only else 2,combined_install_version=0 if a.inspection_only else 1,
         boot_switch_version=0 if a.inspection_only else 1,android_sparse_store_version=0 if a.inspection_only else 1,sparse_boot_store_version=0 if a.inspection_only else 1,
         fixed_recovery_restore_version=0 if a.inspection_only else 1,
         inspection_only=a.inspection_only,installer_capabilities=[] if a.inspection_only else CAPABILITIES,adbd=adb)
     if components:
         identity['recovery_kernel_components'] = components
+    if m.get('identity',{}).get('tool_runtime'):
+        identity['tool_runtime'] = m['identity']['tool_runtime']
     if adb:
         identity['recovery_fast_start_version'] = 1
     if not a.inspection_only:

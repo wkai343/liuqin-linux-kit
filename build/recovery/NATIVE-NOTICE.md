@@ -45,14 +45,21 @@ directly attached computer. Historical network images remain build/research refe
 not supported by the current GUI.
 
 Kernel provenance is retained in the build records and native manifest.
-Dedicated Recovery kernel builds also embed their exact config, local kernel
-patch, ARM64 aligned-entry source and component hashes under
+Dedicated Recovery kernel builds use pinned kernel.org sources plus local
+device adaptations. The 7.3.4 default reuses the desktop kernel's ordered
+patch files with a separate maintenance config and Recovery-only changes.
+The earlier device fork remains attribution, not a build input.
+Builds embed their Recovery/shared source locks, exact config, all kernel and touch-module patches,
+ARM64 aligned-entry source and component hashes under
 /usr/share/licenses/liuqin-recovery-kernel; desktop packages copy these records
-to installer/runtime/kernel-build. The kernel patch applies to the exact
-upstream commit recorded by kernel-manifest.json. New image digests require
+to installer/runtime/kernel-build. Ordered patches apply to the official
+commit recorded by source-lock.json and kernel-manifest.json. New image digests require
 their own hardware validation; a qualification for an older kernel is not
 inherited.
 Firmware provenance and redistribution restrictions are described in
 device/firmware/NOTICE and device/firmware/firmware.manifest in the source
-repository. The ARM64 tool runtime retains its upstream licenses. A public
+repository. The ARM64 tool runtime is built with Buildroot and musl; its
+package versions and licenses are embedded in /usr/share/licenses/liuqin-runtime.
+Keep runtime-sources.tar (Buildroot, package sources, patches and project build
+scripts/configuration) alongside distributions. The runtime retains its upstream licenses. A public
 redistribution requires a corresponding-source and firmware-license audit.

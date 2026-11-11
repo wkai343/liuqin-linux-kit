@@ -37,7 +37,7 @@ class KernelIdentityTests(unittest.TestCase):
  def test_symlink_module_is_rejected(self):
   saved=self.module.with_name('outside.ko');self.module.rename(saved);self.module.symlink_to(saved)
   with self.assertRaisesRegex(RuntimeError,'module hash'):stable.installed_kernel_module(self.root,self.release)
- def test_display_selection_preserves_ubuntu_and_supports_fedora(self):
+ def test_display_selection_supports_explicit_display_services(self):
   self.assertEqual(stable.readiness_services({'deployment_mode':'installed'}),('gdm','iio-sensor-proxy'))
   self.assertEqual(stable.readiness_services({'deployment_mode':'installed','display_service':'display-manager'}),('display-manager','iio-sensor-proxy'))
   with self.assertRaisesRegex(ValueError,'display service'):

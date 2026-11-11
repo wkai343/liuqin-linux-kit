@@ -1,0 +1,77 @@
+From: Liuqin Linux Kit maintainers
+Subject: [PATCH] Preserve Recovery fixed USB and inert ABL handoff on 7.3
+
+Port the remaining maintenance-only quirks from kernel-log-fixes.patch.
+SpecSEI, validated factory GPT and NVT diagnostics are already covered
+by the shared Liuqin adaptation. Retain PMIC charger PDR service data.
+
+diff --git a/drivers/of/property.c b/drivers/of/property.c
+index 72cf12907de034e96724c4bcd920cde0340a7342..0f405a519e73cb013b967d098cac03257a9be441 100644
+--- a/drivers/of/property.c
++++ b/drivers/of/property.c
+@@ -1678,6 +1678,23 @@ static int of_fwnode_add_links(struct fwnode_handle *fwnode)
+ 	if (!con_np)
+ 		return -EINVAL;
+ 
++	/*
++	 * ABL fixups are absorbed outside the live hardware buses. Those
++	 * vendor GPIO/clock phandles describe another kernel's bindings.
++	 * They must not create supplier links for the maintenance kernel.
++	 */
++	if ((of_machine_is_compatible("xiaomi,liuqin") ||
++	     of_property_match_string(of_root, "model",
++		"Liuqin based on Qualcomm Technologies, Inc SM8475") == 0) &&
++	    of_property_read_bool(of_root, "liuqin,recovery")) {
++		struct device_node *ancestor;
++
++		for (ancestor = con_np; ancestor; ancestor = ancestor->parent)
++			if (ancestor->parent == of_root &&
++			    of_node_name_eq(ancestor, "liuqin-abl-overlay-sink"))
++				return 0;
++	}
++
+ 	for_each_property_of_node(con_np, p)
+ 		of_link_property(con_np, p->name);
+ 
+diff --git a/drivers/phy/qualcomm/phy-qcom-qmp-combo.c b/drivers/phy/qualcomm/phy-qcom-qmp-combo.c
+index 7898aa26d1d1ac38809ebce01d659b6cd202a2b1..9c392c57058f7792ce2aad6cedc01ca12ac58c1c 100644
+--- a/drivers/phy/qualcomm/phy-qcom-qmp-combo.c
++++ b/drivers/phy/qualcomm/phy-qcom-qmp-combo.c
+@@ -5512,9 +5512,12 @@ static int qmp_combo_probe(struct platform_device *pdev)
+ 		}
+ 	}
+ 
+-	ret = drm_aux_bridge_register(dev);
+-	if (ret)
+-		goto err_node_put;
++	/* Recovery keeps fixed peripheral USB and has no DP connector. */
++	if (!of_property_read_bool(dev->of_node, "liuqin,recovery")) {
++		ret = drm_aux_bridge_register(dev);
++		if (ret)
++			goto err_node_put;
++	}
+ 
+ 	/*
+ 	 * Enable runtime PM before creating the PHYs, phy_create() only enables
+diff --git a/drivers/soc/qcom/pmic_glink.c b/drivers/soc/qcom/pmic_glink.c
+index 49a14664aa5f03db85f9c10fef5e022ecb598d38..838caa2b609562058a6cd0ea7ddebdae70b3a217 100644
+--- a/drivers/soc/qcom/pmic_glink.c
++++ b/drivers/soc/qcom/pmic_glink.c
+@@ -355,6 +355,17 @@ static int pmic_glink_probe(struct platform_device *pdev)
+ 	if (!pg->data)
+ 		return -EINVAL;
+ 
++	/* Keep charger service discovery; Recovery has no Type-C/DP mux. */
++	if (of_property_read_bool(pdev->dev.of_node, "liuqin,recovery")) {
++		struct pmic_glink_data *data;
++
++		data = devm_kmemdup(&pdev->dev, pg->data, sizeof(*data), GFP_KERNEL);
++		if (!data)
++			return -ENOMEM;
++		data->client_mask = BIT(PMIC_GLINK_CLIENT_BATT);
++		pg->data = data;
++	}
++
+ 	pg->pdr = pdr_handle_alloc(pmic_glink_pdr_callback, pg);
+ 	if (IS_ERR(pg->pdr)) {
+ 		ret = dev_err_probe(&pdev->dev, PTR_ERR(pg->pdr),

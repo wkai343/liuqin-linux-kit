@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: MIT
 """Export the desktop installer without build sources, tools, images or device data."""
 import argparse
+import hashlib
+import json
 from pathlib import Path
 import posixpath
 import re
@@ -12,6 +14,32 @@ import zipfile
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / 'shared'))
 from liuqin_identity import PROJECT_NAME, INSTALLER_ARCHIVE_ROOT, UPSTREAM_PROJECT, PROJECT_URL
+
+
+def kernel_build_records(entries, components):
+    """Export the sources belonging to this image, including shared patches."""
+    prefix='usr/share/licenses/liuqin-recovery-kernel/'
+    names={'kernel.config','aligned-entry.S','kernel-manifest.json'}
+    if components.get('schema') == 2:
+        names.add('source-lock.json')
+        names.update(name for name in components['files']
+                     if name.endswith('.patch') or name == 'shared-source-lock.json')
+    else:
+        names.add('kernel-log-fixes.patch')
+    result={}
+    for name in sorted(names):
+        if Path(name).name != name or prefix+name not in entries:
+            raise RuntimeError('Recovery 内核构建记录缺失或格式无效。')
+        fields,body=entries[prefix+name]
+        if fields[1]&0o170000!=0o100000 or not 0<len(body)<16*1024**2:
+            raise RuntimeError('Recovery 内核构建记录缺失或格式无效。')
+        expected=components.get('files',{}).get(name)
+        if expected and hashlib.sha256(body).hexdigest()!=expected:
+            raise RuntimeError('Recovery 内核构建记录摘要不匹配。')
+        if name=='kernel-manifest.json' and json.loads(body)!=components:
+            raise RuntimeError('Recovery 内核组件清单不匹配。')
+        result['installer/runtime/kernel-build/'+name]=body
+    return result
 
 
 def export_markdown(name, body, available):
@@ -87,11 +115,7 @@ def package(output, runtime_image=None, recovery_image=None, recovery_variants=(
                         embedded['installer/runtime/adbd-licenses/'+name.rsplit('/',1)[1]]=body
             kernel_components=native_info['native_recovery_manifest'].get('identity',{}).get('recovery_kernel_components')
             if kernel_components:
-                for name in ('kernel.config','kernel-log-fixes.patch','aligned-entry.S','kernel-manifest.json'):
-                    fields,body=entries['usr/share/licenses/liuqin-recovery-kernel/'+name]
-                    if fields[1]&0o170000!=0o100000 or not 0<len(body)<1024**2:
-                        raise RuntimeError('Recovery 内核构建记录缺失或格式无效。')
-                    embedded['installer/runtime/kernel-build/'+name]=body
+                embedded.update(kernel_build_records(entries,kernel_components))
     if universal_candidate is not None:
         from liuqin_universal_recovery import inspect as inspect_universal,load_catalog
         candidate=Path(universal_candidate).resolve();checked=inspect_universal(candidate);catalog=load_catalog();artifact=catalog['artifact']

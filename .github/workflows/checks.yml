@@ -19,8 +19,7 @@ jobs:
           from pathlib import Path
           for path in [p for base in ('build','installer','shared','device/boot','device/recovery') for p in Path(base).rglob('*.py')]:
               ast.parse(path.read_text(), filename=str(path))
-          paths = [p for name in ('board-overlay', 'gnome-overlay')
-                   for p in (Path('device')/name).rglob('*')]
+          paths = list(Path('device/board-overlay').rglob('*'))
           for path in sorted(paths):
               if path.is_file() and path.read_bytes().split(b'\n', 1)[0] in (b'#!/usr/bin/env python3', b'#!/usr/bin/python3'):
                   ast.parse(path.read_text(), filename=str(path))
@@ -75,6 +74,7 @@ jobs:
           python3 tests/native-bcb.py
           python3 tests/native-touch-service.py
           python3 tests/recovery-kernel-components.py
+          python3 tests/recovery-source.py
           python3 tests/kernel-common-fixes.py
           python3 tests/rootless-build.py
           cc -Wall -Wextra -Werror -I device/recovery/ui tests/native-touch-input.c device/recovery/ui/touch_input.c -o /tmp/liuqin-touch-input
@@ -110,6 +110,7 @@ jobs:
           python3 tests/display-clock.py
           python3 tests/display-brightness-minimum.py
           python3 tests/display-refresh-rates.py
+          python3 tests/display-live-refresh.py
           python3 tests/backlight-default.py
           python3 tests/boot-splash.py
           python3 tests/splash-handoff.py
@@ -122,7 +123,6 @@ jobs:
           python3 tests/rtc.py
           python3 tests/mipps-startup.py
           python3 tests/storage-scope.py
-          python3 tests/memory-reclaim.py
           python3 tests/mkbootimg-fetch.py
           python3 tests/initramfs-inputs.py
           python3 tests/sensor-build-environment.py

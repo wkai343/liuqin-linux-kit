@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT
-# Build the exact matching module tree for the full Ubuntu root.  Boot-critical
+# Build the exact matching module tree for the target root filesystem.  Boot-critical
 # liuqin drivers stay built in; ordinary distro consumers no longer become
 # silent no-ops merely because a generic arm64 defconfig selected =m.
 set -eu

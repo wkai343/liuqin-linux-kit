@@ -1,10 +1,10 @@
 {
   "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
-  "branch": "v7.3.3",
+  "branch": "v7.3.4",
   "upstream_url": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
-  "upstream_base": "d50d994bffa3c7c6db2d8bc4c5f0c55e3f46b0cd",
-  "commit": "d50d994bffa3c7c6db2d8bc4c5f0c55e3f46b0cd",
-  "config_sha256": "6ad4fc62b5bdc03b6e72c2c0eb825acf3fd33646042c62161f68b700b84d9beb",
+  "upstream_base": "7595a62d45ee1a2297eafa5f2ef5d0a45142d84d",
+  "commit": "7595a62d45ee1a2297eafa5f2ef5d0a45142d84d",
+  "config_sha256": "522da05644d15ff84e773029d200e8afa5bacb481cc00048241d0d4ddcf75282",
   "config_fragments": [
     "build/kernel/configs/linux-7.3-preserve.config"
   ],
@@ -16,13 +16,10 @@
     "build/kernel/patches/linux-7.3/0004-preserve-audio-and-usb-resume-lifecycles.patch",
     "build/kernel/patches/linux-7.3/0005-fix-dp-detection-lifecycle.patch",
     "build/kernel/patches/linux-7.3/0006-nanosic-caps-lock-led.patch",
-    "build/kernel/patches/linux-7.3/0007-liuqin-command-dma-schedule.patch",
     "build/kernel/patches/linux-7.3/0008-liuqin-prepare-margin-controls.patch",
-    "build/kernel/patches/linux-7.3/0010-liuqin-tddi-calibration-recovery.patch",
-    "build/kernel/patches/linux-7.3/0011-liuqin-initial-wake-after-first-frame.patch",
-    "build/kernel/patches/0034-liuqin-minimum-brightness.patch",
+    "build/kernel/patches/linux-7.3/0011-liuqin-tddi-wake-and-calibration-recovery.patch",
+    "build/kernel/patches/linux-7.3/0034-liuqin-minimum-brightness.patch",
     "build/kernel/patches/linux-7.3/0012-nanosic-folio-posture.patch",
-    "build/kernel/patches/linux-7.3/0013-liuqin-multiple-refresh-rates.patch",
     "build/kernel/patches/linux-7.3/0014-liuqin-validated-platform-quirks.patch",
     "build/kernel/patches/linux-7.3/0015-audio-readiness-and-no-jack-policy.patch",
     "build/kernel/patches/linux-7.3/0016-liuqin-abl-metadata-and-apm-header.patch",
@@ -30,15 +27,18 @@
     "build/kernel/patches/linux-7.3/0018-liuqin-peripheral-probe-lifecycles.patch",
     "build/kernel/patches/linux-7.3/0021-liuqin-publish-ready-power-supplies.patch",
     "build/kernel/patches/linux-7.3/0022-ucsi-debugfs-version-and-v1-reads.patch",
-    "build/kernel/patches/linux-7.3/0023-q6dsp-publish-state-before-clocks.patch"
+    "build/kernel/patches/linux-7.3/0023-q6dsp-publish-state-before-clocks.patch",
+    "build/kernel/patches/linux-7.3/0024-liuqin-refresh-modes-and-live-switching.patch",
+    "build/kernel/patches/linux-7.3/0030-nanosic-debounce-fold-and-reject-stale-input.patch",
+    "build/kernel/patches/linux-7.3/0031-liuqin-pen-input-and-diagnostics.patch"
   ],
-  "status": "Linux 7.3.3 with 21 Liuqin adaptations; early Q6DSP clock drvdata publication and rootfs-loaded Qualcomm audio. USB charging initialization is isolated from early audio resource requests; hardware evidence is tracked separately.",
-  "expected_source_tree": "4be297a14139b2cc4bb58f1de0151328e094fb3d",
+  "status": "Linux 7.3.4 with 21 local Liuqin adaptations shared by Fedora and Recovery. Desktop boot arguments enable guarded 60/90/120/144 Hz switching for Tianma and CSOT; only Tianma has hardware evidence. Backlight probe uses default brightness and panel first-frame sequencing remains enabled. Exact image hardware validation is recorded separately.",
+  "expected_source_tree": "e1c84dce7dc637ecc2c52502fd9a900185e7309e",
   "tested_source_commit": "f6a2abb77b2005da10c201156cca41e32dff06c3",
   "tested_source_tree": "ba45a3439dcc0d17175ea65b65ca6aed7538a2ad",
   "reference_repository": "https://github.com/Seeker0472/liuqin-nixos",
   "reference_commit": "73e8071e09880aeb47f0a427b9a65b8cc10927c4",
-  "previous_source_tree": "2c5285895efba987c71887cd57612034eb188056",
+  "previous_source_tree": "562bf48111c1c8ab6430234871923f990093b79e",
   "load_alignment": "liuqin-arm64-align2m-v1",
   "validation_status": "NOT_DEVICE_TESTED"
 }

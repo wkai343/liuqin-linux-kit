@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Configuration-driven Ubuntu/Plasma build graph; no tablet access."""
+"""Shared Fedora and kernel build graph; no tablet access."""
 import fcntl
 import importlib.util
 import json
@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 
-from source_build import PROJECT, Cache, download, key, sha, tree_identity
+from source_build import PROJECT, Cache, key, sha, tree_identity
 from usb_identity import settings as usb_settings, environment as usb_environment
 
 
@@ -33,14 +33,14 @@ def kernel_source_record(data):
 
 
 class Flow:
-    def __init__(self, data, run, *, refresh=False, distribution='ubuntu'):
+    def __init__(self, data, run, *, refresh=False, distribution='fedora'):
+        if distribution != 'fedora':raise ValueError('目标系统只支持 Fedora + Plasma。')
         self.data, self.run = data, run
         self.usb = usb_settings(data)
         self.root_builder=load_module('official_root',PROJECT/'build/scripts/build-official-root.py')
         self.board_builder=load_module('source_board',PROJECT/'build/scripts/prepare-source-board.py')
         self.distribution=distribution
         self.source=json.loads((PROJECT/('build/rootfs/'+distribution+'-source.json')).read_text())
-        self.runtime_source=json.loads((PROJECT/'build/rootfs/ubuntu-source.json').read_text())
         self.recipe_path=self.path('rootfs_config')
         self.recipe=self.root_builder.recipe(self.recipe_path,distribution)
         self.cache=Cache(PROJECT/'out/build/from-source',run)
@@ -63,12 +63,6 @@ class Flow:
         if name not in self.memo:
             self.memo[name]=self.cache.stage(name,dict(code=self.code,inputs=inputs),build,artifacts)
         return self.memo[name]
-
-    def root_action(self,action,archive,out,**values):
-        argv=[sys.executable,str(PROJECT/'build/scripts/build-official-root.py'),action,
-              '--archive',str(archive),'--archive-sha256',sha(archive),'--out',str(out)]
-        for name,value in values.items():argv+=['--'+name.replace('_','-'),str(value)]
-        self.run(argv,root=True)
 
     def kernel_source_lock(self):
         return self.resolve(kernel_source_record(self.data))
@@ -115,7 +109,6 @@ class Flow:
         inputs=dict(commit=commit,config=self.data.get('kernel_config'),
                     fragments={str(p):sha(p) for p in [self.resolve(v) for v in fragments]},
                     localversion=self.data.get('kernel_localversion','-liuqin1'),
-                    board_configs=tree_identity(PROJECT/'device/configs'),
                     builder=sha(PROJECT/'build/scripts/build-liuqin-kernel.py'))
         inputs['source_lock']=sha(self.kernel_source_lock())
         alignment=json.loads(self.kernel_source_lock().read_text()).get('load_alignment')
@@ -147,17 +140,16 @@ class Flow:
     def resolve(value):
         path=Path(value).expanduser();return path.resolve() if path.is_absolute() else PROJECT/path
 
-    def base(self):
-        return download(self.runtime_source['url'],PROJECT/'inputs/ubuntu-base'/self.runtime_source['archive'],self.runtime_source['sha256'])
-
-    def setup_archive(self):
-        record=json.loads((PROJECT/'build/rootfs/plasma-setup-source.json').read_text())
-        return download(record['url'],PROJECT/'inputs/plasma-setup'/record['archive'],record['sha256'])
-
     def tools(self):
-        busy=PROJECT/'inputs/busybox-arm64/usr/bin/busybox'
+        builder=load_module('busybox_builder',PROJECT/'build/scripts/build-busybox.py')
+        def build(out):
+            self.run([sys.executable,'build/scripts/build-busybox.py','--out',str(out/'runtime'),
+                      '--jobs',str(self.data.get('jobs',12))])
+        result=self.stage('busybox',builder.inputs(),build,
+            ['runtime/busybox','runtime/busybox.config','runtime/busybox-manifest.json',
+             'runtime/busybox-sources.tar','runtime/LICENSE'])
+        busy=result/'runtime/busybox'
         mk=PROJECT/'inputs/aosp-mkbootimg'
-        if not busy.exists():self.run(['sh','build/scripts/fetch-busybox-arm64.sh'])
         self.run(['sh','build/scripts/fetch-aosp-mkbootimg.sh'])
         return dict(BUSYBOX=str(busy),MKBOOTIMG_DIR=str(mk))
 
@@ -177,19 +169,13 @@ class Flow:
         board=self.board();inputs=json.loads((board/'board.json').read_text())
         return dict({name:str(board/value) for name,value in inputs.items()},**self.tools())
 
-    def runtime_root(self):
-        archive=self.base()
-        inputs=dict(base=sha(archive),builder=sha(PROJECT/'build/scripts/build-official-root.py'),refresh=self.refresh)
-        def build(out):self.root_action('runtime',archive,out/'assembled')
-        return self.stage('runtime-root',inputs,build,['assembled/root.tar.gz','assembled/packages.tsv'])/'assembled/root.tar.gz'
-
     def boot_splash_runtime(self):
         return None
 
     def boot(self):
         source,kernel=self.kernel()
         inputs=self.board_inputs()
-        dependency=dict(kernel=sha(kernel/'build-info.json'),board=tree_identity(self.board()),
+        dependency=dict(kernel=sha(kernel/'build-info.json'),board=tree_identity(self.board()),busybox=sha(inputs['BUSYBOX']),
                         builder=sha(PROJECT/'build/scripts/build-liuqin-native-boot.sh'),
                         initramfs=sha(PROJECT/'build/lib/build-initramfs.sh'),
                         usb_strings=self.usb,usb_builder=sha(PROJECT/'build/lib/usb_identity.py'),
@@ -199,8 +185,6 @@ class Flow:
                         init=tree_identity(PROJECT/'device/boot'),
                         dtb_tools=sha(PROJECT/'build/lib/build-bootimg.sh'),
                         abl_symbols=sha(PROJECT/'build/lib/abl-symbols.py'))
-        dependency.update(reclaim_mte=bool(self.data.get('kernel_reclaim_mte',False)),
-            memory_helper=sha(PROJECT/'build/lib/reclaim-memory.py'))
         env=dict(inputs,**usb_environment(self.usb),KERNEL_SOURCE=str(source),KERNEL_OUT=str(kernel))
         modules=self.modules();dependency['modules']=sha(modules/'kernel.build.json')
         splash=self.boot_splash_runtime()
@@ -211,8 +195,7 @@ class Flow:
         def build(out):
             self.run(['sh','build/scripts/build-liuqin-native-boot.sh'],env=dict(env,
                 KERNEL_MODULES_DIR=str(modules),LIUQIN_ROOT_PROFILE='native-updatable',OUT_DIR=str(out/'image'),INSTALLER_RUNTIME='',
-                BOOT_SPLASH_RUNTIME=str(splash) if splash else '',
-                LIUQIN_RECLAIM_MTE='1' if self.data.get('kernel_reclaim_mte',False) else '0'))
+                BOOT_SPLASH_RUNTIME=str(splash) if splash else ''))
         result=self.stage('boot',dependency,build,['image/boot-liuqin-native.img','image/native-root.contract'])
         return result/'image/boot-liuqin-native.img'
 
@@ -225,105 +208,13 @@ class Flow:
             build,['modules/modules.tar','modules/modules.manifest','modules/kernel.build.json','modules/kernel.release','modules/kernel.commit'])
         return result/'modules'
 
-    def kernel_debs(self):
-        source,kernel=self.kernel();modules=self.modules();boot=self.boot()
-        def build(out):
-            self.run([sys.executable,'build/scripts/build-liuqin-kernel-debs.py','--kernel-source',str(source),
-                      '--kernel-out',str(kernel),'--modules-dir',str(modules),'--boot-image',str(boot),
-                      '--out',str(out/'debs'),'--version',self.version])
-        inputs=dict(boot=sha(boot),modules=sha(modules/'kernel.build.json'),version=self.version,
-                    builder=sha(PROJECT/'build/scripts/build-liuqin-kernel-debs.py'),
-                    tools=sha(PROJECT/'device/boot/boot-update.py'),interfaces=tree_identity(PROJECT/'shared'))
-        return self.stage('kernel-debs',inputs,build,['debs'])/'debs'
-
-    def sensors(self):
-        archive=self.runtime_root();board=self.board()
-        def build(out):self.root_action('sensors',archive,out/'assembled',rom_sensors=board/'sensors',jobs=self.data.get('jobs',12))
-        inputs=dict(base=sha(archive),config=tree_identity(board/'sensors'),
-                    sources=tree_identity(PROJECT/'device/sensors'),overlay=tree_identity(PROJECT/'device/sensors-overlay'),
-                    builder=sha(PROJECT/'build/scripts/build-liuqin-sensors-stack.sh'))
-        return self.stage('sensors',inputs,build,['assembled/sensor-stack.tar'])/'assembled/sensor-stack.tar'
-
-    def device_debs(self):
-        from storage_scope import inputs as storage_scope_inputs
-        storage=storage_scope_inputs()
-        sensors=self.sensors();tools=self.tools();speaker_firmware=self.board()/'speaker-firmware'
-        def build(out):
-            env=dict(OUT_DIR=str(out/'debs'),DEVICE_DESKTOP='generic',BUSYBOX=tools['BUSYBOX'],
-                     SENSOR_STACK_TAR=str(sensors),SENSOR_STACK_SHA256=sha(sensors),LIUQIN_DEB_VERSION=self.version,
-                     SPEAKER_FIRMWARE_DIR=str(speaker_firmware),STORAGE_SCOPE_CC=storage['compiler'])
-            for name in ('firmware','device-support','sensors','meta'):
-                self.run(['sh','build/scripts/build-liuqin-debs.sh',name],env=env)
-        return self.stage('device-debs',dict(sensors=sha(sensors),firmware=tree_identity(PROJECT/'device/firmware'),
-            board_overlay=tree_identity(PROJECT/'device/board-overlay'),
-            overlay_builder=sha(PROJECT/'build/lib/device_overlay.py'),busybox=sha(tools['BUSYBOX']),version=self.version,
-            storage_scope=storage,storage_builder=sha(PROJECT/'build/lib/storage_scope.py'),
-            speaker_firmware=tree_identity(speaker_firmware),speaker_builder=sha(PROJECT/'build/lib/speaker_firmware.py'),
-            builder=sha(PROJECT/'build/scripts/build-liuqin-debs.sh')),build,['debs'])/'debs'
-
-    def first_boot_deb(self):
-        if not self.recipe['first_boot_setup']:return None
-        from plasma_setup import RUNTIME_PACKAGES, BUILD_PACKAGES
-        archive=self.runtime_root();upstream=self.setup_archive()
-        record=json.loads((PROJECT/'build/rootfs/plasma-setup-source.json').read_text())
-        name='liuqin-plasma-setup_'+record['version']+'-liuqin'+str(record.get('package_revision',1))+'_arm64.deb'
-        def build(out):
-            self.root_action('setup',archive,out/'assembled',setup_source=upstream,jobs=self.data.get('jobs',12))
-        inputs=dict(base=sha(archive),source=sha(upstream),packages=BUILD_PACKAGES+RUNTIME_PACKAGES,
-                    source_lock=sha(PROJECT/'build/rootfs/plasma-setup-source.json'),
-                    patches=tree_identity(PROJECT/'build/rootfs/plasma-setup'),
-                    panel_helper=tree_identity(PROJECT/'build/rootfs/plasma-panel'),
-                    builder=sha(PROJECT/'build/lib/plasma_setup.py'),
-                    root_builder=sha(PROJECT/'build/scripts/build-official-root.py'),refresh=self.refresh)
-        return self.stage('first-boot-setup',inputs,build,['assembled/'+name,'assembled/setup-packages.tsv'])/'assembled'/name
-
-    def apps(self):
-        archive=self.runtime_root();debs=self.device_debs()
-        setup_deb=self.first_boot_deb()
-        inputs=dict(base=sha(archive),debs=tree_identity(debs),recipe=self.recipe,
-                    builder=sha(PROJECT/'build/scripts/build-official-root.py'),refresh=self.refresh)
-        if setup_deb:inputs['setup_deb']=sha(setup_deb)
-        if self.recipe.get('overlay'):inputs['overlay']=tree_identity(self.recipe['overlay'])
-        if self.recipe.get('password_file'):inputs['password_sha256']=sha(self.recipe['password_file'])
-        def build(out):
-            snapshot=dict(self.recipe)
-            if snapshot.get('overlay'):
-                target=out/'overlay'
-                shutil.copytree(snapshot['overlay'],target,symlinks=True)
-                if tree_identity(target)!=inputs['overlay']:raise ValueError('overlay 在暂存期间发生变化。')
-                snapshot['overlay']=str(target)
-            if snapshot.get('password_file'):
-                source=Path(snapshot['password_file'])
-                if source.is_symlink() or source.stat().st_mode & 0o077:raise ValueError('密码输入必须是私有普通文件。')
-                target=out/'.password'
-                target.write_bytes(source.read_bytes());target.chmod(0o600)
-                if sha(target)!=inputs['password_sha256']:raise ValueError('密码文件在暂存期间发生变化。')
-                snapshot['password_file']=str(target)
-            path=out/'recipe.json';path.write_text(json.dumps(snapshot)+'\n')
-            values=dict(recipe=path,debs=debs)
-            if setup_deb:values['setup_deb']=setup_deb
-            self.root_action('apps',archive,out/'assembled',**values)
-        artifacts=['assembled/root.tar.gz','assembled/packages.tsv']
-        if not self.recipe['first_boot_setup']:artifacts.append('assembled/login.txt')
-        return self.stage('apps',inputs,build,artifacts)/'assembled'
-
-    def rootfs(self):
-        apps=self.apps();debs=self.kernel_debs();source,kernel=self.kernel();modules=self.modules()
-        def build(out):
-            self.root_action('kernel-files',apps/'root.tar.gz',out/'assembled',debs=debs)
-            self.run([sys.executable,'build/scripts/build-liuqin-custom-root.py','--root',str(out/'assembled/rootfs'),
-                      '--kernel-out',str(kernel),'--modules-dir',str(modules),'--out',str(out/'packed')],root=True)
-        return self.stage('rootfs',dict(apps=sha(apps/'root.tar.gz'),debs=tree_identity(debs),
-            builder=sha(PROJECT/'build/scripts/build-liuqin-custom-root.py'),interfaces=tree_identity(PROJECT/'shared')),
-            build,['packed/rootfs.tar.gz','packed/native-root.contract'])/'packed'
-
     def plan(self):
         images=self.resolve(self.data.get('rom_images','inputs/roms/liuqin/OS2.0.6.0.VMYCNXM/images'))
         return dict(official_base=self.source,recipe=self.recipe,rom_images=str(images),usb_device=self.usb,
                     missing_rom_files=[name for name in ('vendor_boot.img','dtbo.img','super.img') if not (images/name).is_file()],
-                    steps=['官方 Ubuntu Base','原厂板级输入',
+                    steps=['官方 Fedora '+self.source['release']+' ARM64 基础系统','原厂板级输入',
                            '自定义内核/模块/boot/更新包','传感器和设备包']+
-                          (['登录前初始化组件（独立 ARM64 包）'] if self.recipe['first_boot_setup'] else [])+
+                          (['Fedora 官方 plasma-setup 软件包'] if self.recipe['first_boot_setup'] else [])+
                           ['Plasma 和自定义软件','配套 boot/rootfs'],
                     output='out/build/from-source/（使用 outputs 查看配套 boot/rootfs）',tablet_access=False)
 
@@ -340,28 +231,26 @@ def execute(data,action,run,*,refresh=False,configure_only=False,export_dir=None
     if action not in ('plan','prepare','check-inputs','kernel','modules','boot','kernel-debs','rootfs'):
         raise ValueError('该构建阶段已退役；使用 devbox run build -- --target 选择目标，原生 Rec 独立构建。')
     distribution=json.loads(recipe_path.read_text()).get('distribution')
-    if distribution=='fedora':
-        from fedora_flow import FedoraFlow
-        flow=FedoraFlow(data,run,refresh=refresh)
-    else:flow=Flow(data,run,refresh=refresh)
+    if distribution!='fedora':raise ValueError('目标系统只支持 Fedora + Plasma。')
+    from fedora_flow import FedoraFlow
+    flow=FedoraFlow(data,run,refresh=refresh)
     data=flow.data
     if action=='plan':print(json.dumps(flow.plan(),ensure_ascii=False,indent=2));return
     if action=='check-inputs':
         flow.board_builder.verify_rom(flow.resolve(data.get('rom_images','inputs/roms/liuqin/OS2.0.6.0.VMYCNXM/images')))
-        if distribution=='fedora':flow.fingerprint_image()
+        flow.fingerprint_image()
         print('PASS：官方系统配置和原厂 ROM 镜像输入有效。');return
     root=PROJECT/'out/build/from-source';root.mkdir(parents=True,exist_ok=True)
     with (root/'lock').open('a') as owner:
         fcntl.flock(owner,fcntl.LOCK_EX|fcntl.LOCK_NB)
         if action in ('prepare','boot','kernel-debs','rootfs'):
             # Check model-specific input availability before downloads or compilation.
-            if distribution=='fedora' and action in ('prepare','rootfs'):
+            if action in ('prepare','rootfs'):
                 flow.fingerprint_image()
             flow.board()
         if action=='prepare':
-            flow.base();flow.tools();flow.kernel_source()
-            if distribution=='fedora':flow.target_base();flow.stats_archive()
-            if flow.recipe['first_boot_setup'] and distribution!='fedora':flow.setup_archive()
+            flow.tools();flow.kernel_source()
+            flow.target_base();flow.stats_archive()
             return
         if action=='kernel' and configure_only:
             source,commit=flow.kernel_source()
