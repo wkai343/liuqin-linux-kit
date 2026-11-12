@@ -87,7 +87,7 @@ CPU、空闲、供电与带宽的原厂对照及补齐项见[设备树对照](DE
 | 指纹认证 | TA、QSEE 客户端、libfprint/fprintd；两枚录入、分别解锁及未录手指拒绝已验证；五枚录满、多账号与重启专项待验证，登录界面仍用密码 |
 | 相机与视频 | libcamera 软件 ISP、GStreamer/V4L2 及应用接入；内核节点存在不代表应用已使用硬件加速 |
 | 充电策略 | 电芯/适配器认证由 `liuqin-mipps-auth` 配合 ADSP 执行；不以运行中重启 ADSP 或 PD 复位作为常规修复 |
-| 睡眠与时间 | 系统以 `SuspendState=freeze` 选择 s2idle；RTC 偏移由 `liuqin-rtc` 保存到 Linux 文件系统，不写 Android persist |
+| 睡眠与时间 | 板级 tmpfiles 在开机时将 `mem_sleep` 设为 `s2idle`，系统以 `SuspendState=freeze` 直接选择同一路径；RTC 偏移由 `liuqin-rtc` 保存到 Linux 文件系统，不写 Android persist |
 | 设备监测 | [KSystemStats 插件](../device/ksystemstats/README.md)读取 GPU 忙碌率与频率；不提供独立显存、GPU 温度或功耗 |
 | 安装、存储保护与更新 | initramfs/安装器负责根系统身份、分区及只读保护；多系统与 ext4/Btrfs 引导已验证；[自动内核写入](KERNEL-UPDATES.md)默认停用，Rec 独立验收 |
 
