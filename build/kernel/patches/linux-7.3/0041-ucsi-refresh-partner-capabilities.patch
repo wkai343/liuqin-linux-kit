@@ -1,0 +1,163 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] usb: typec: ucsi: refresh published partner source capabilities
+
+Authentication can change the source PDOs without detaching the partner.
+UCSI refreshes the power-supply cache but skips capability registration
+once partner_pd exists, leaving the Type-C directory at its first snapshot.
+
+Follow TCPM's source-capability replacement model while preserving the
+partner, PD object and their link. Compare complete PDO sets so unchanged
+negotiated-power events do not churn sysfs. Read errors preserve the old
+capabilities; registration failures leave no dangling pointers and use the
+existing bounded delayed retry. Clean up every partially initialized PD
+object and process explicit PDO-change notifications as well.
+
+diff --git a/drivers/usb/typec/ucsi/ucsi.c b/drivers/usb/typec/ucsi/ucsi.c
+--- a/drivers/usb/typec/ucsi/ucsi.c
++++ b/drivers/usb/typec/ucsi/ucsi.c
+@@ -1068,46 +1068,91 @@
+ 	typec_port_set_usb_power_delivery(con->port, con->pd);
+ }
+ 
+-static int ucsi_register_partner_pdos(struct ucsi_connector *con)
+-{
+-	struct usb_power_delivery_desc desc = { con->ucsi->cap.pd_version };
+-	struct usb_power_delivery_capabilities *cap;
+-
+-	if (con->partner_pd)
+-		return 0;
+-
+-	con->partner_pd = typec_partner_usb_power_delivery_register(con->partner, &desc);
+-	if (IS_ERR(con->partner_pd))
+-		return PTR_ERR(con->partner_pd);
+-
+-	cap = ucsi_get_pd_caps(con, TYPEC_SOURCE, true);
+-	if (IS_ERR(cap) ||
+-	    (!cap && con->ucsi->quirks & UCSI_READ_PARTNER_SOURCE_PDOS)) {
+-		/* A late source response must be retryable on this same partner. */
+-		usb_power_delivery_unregister(con->partner_pd);
+-		con->partner_pd = NULL;
+-		return cap ? PTR_ERR(cap) : -ENODATA;
+-	}
+-
+-	con->partner_source_caps = cap;
+-
+-	cap = ucsi_get_pd_caps(con, TYPEC_SINK, true);
+-	if (IS_ERR(cap))
+-	    return PTR_ERR(cap);
+-
+-	con->partner_sink_caps = cap;
+-
+-	return typec_partner_set_usb_power_delivery(con->partner, con->partner_pd);
+-}
+-
+ static void ucsi_unregister_partner_pdos(struct ucsi_connector *con)
+ {
+ 	usb_power_delivery_unregister_capabilities(con->partner_sink_caps);
+ 	con->partner_sink_caps = NULL;
+ 	usb_power_delivery_unregister_capabilities(con->partner_source_caps);
+ 	con->partner_source_caps = NULL;
++	memset(con->partner_src_pdos, 0, sizeof(con->partner_src_pdos));
+ 	usb_power_delivery_unregister(con->partner_pd);
+ 	con->partner_pd = NULL;
++}
++
++static int ucsi_update_partner_source_pdos(struct ucsi_connector *con)
++{
++	struct usb_power_delivery_capabilities_desc desc = { .role = TYPEC_SOURCE };
++	struct usb_power_delivery_capabilities *cap;
++	int ret;
++
++	/* Do not replace a complete published set with a failed or empty read. */
++	ret = ucsi_get_src_pdos(con);
++	if (ret < 0)
++		return ret;
++	if (!ret)
++		return con->partner_source_caps ||
++		       con->ucsi->quirks & UCSI_READ_PARTNER_SOURCE_PDOS ? -ENODATA : 0;
++
++	/* MESSAGE_IN can retain data beyond the reported PDO count. */
++	memcpy(desc.pdo, con->src_pdos, ret * sizeof(u32));
++	if (con->partner_source_caps &&
++	    !memcmp(con->partner_src_pdos, desc.pdo, sizeof(desc.pdo)))
++		return 0;
++
++	/* Like TCPM, replace the capabilities while retaining the partner PD. */
++	usb_power_delivery_unregister_capabilities(con->partner_source_caps);
++	con->partner_source_caps = NULL;
++	cap = usb_power_delivery_register_capabilities(con->partner_pd, &desc);
++	if (IS_ERR(cap))
++		return PTR_ERR(cap);
++
++	con->partner_source_caps = cap;
++	memcpy(con->partner_src_pdos, desc.pdo, sizeof(desc.pdo));
++	return 0;
++}
++
++static int ucsi_register_partner_pdos(struct ucsi_connector *con)
++{
++	struct usb_power_delivery_desc desc = { con->ucsi->cap.pd_version };
++	struct usb_power_delivery_capabilities *cap;
++	struct usb_power_delivery *pd;
++	bool new_pd = !con->partner_pd;
++	int ret;
++
++	if (new_pd) {
++		pd = typec_partner_usb_power_delivery_register(con->partner, &desc);
++		if (IS_ERR(pd)) {
++			ret = PTR_ERR(pd);
++			goto out;
++		}
++		con->partner_pd = pd;
++	}
++
++	ret = ucsi_update_partner_source_pdos(con);
++	if (ret)
++		goto err;
++	if (!new_pd)
++		return 0;
++
++	cap = ucsi_get_pd_caps(con, TYPEC_SINK, true);
++	if (IS_ERR(cap)) {
++		ret = PTR_ERR(cap);
++		goto err;
++	}
++	con->partner_sink_caps = cap;
++
++	ret = typec_partner_set_usb_power_delivery(con->partner, con->partner_pd);
++	if (ret)
++		goto err;
++	return 0;
++err:
++	if (new_pd)
++		ucsi_unregister_partner_pdos(con);
++out:
++	/* Use the partner task's bounded delayed retry for transient failures. */
++	if (ret == -ENOMEM || ret == -EAGAIN || ret == -ENODATA)
++		return -EBUSY;
++	return ret;
+ }
+ 
+ static int ucsi_register_plug(struct ucsi_connector *con)
+@@ -1534,7 +1579,8 @@
+ 		}
+ 	}
+ 
+-	if (change & (UCSI_CONSTAT_POWER_OPMODE_CHANGE | UCSI_CONSTAT_POWER_LEVEL_CHANGE))
++	if (change & (UCSI_CONSTAT_POWER_OPMODE_CHANGE | UCSI_CONSTAT_POWER_LEVEL_CHANGE |
++		      UCSI_CONSTAT_PDOS_CHANGE))
+ 		ucsi_pwr_opmode_change(con);
+ 
+ 	if (con->partner && (change & UCSI_CONSTAT_PARTNER_CHANGE)) {
+diff --git a/drivers/usb/typec/ucsi/ucsi.h b/drivers/usb/typec/ucsi/ucsi.h
+--- a/drivers/usb/typec/ucsi/ucsi.h
++++ b/drivers/usb/typec/ucsi/ucsi.h
+@@ -569,6 +569,8 @@
+ 	struct usb_power_delivery_capabilities *port_sink_caps;
+ 	struct usb_power_delivery *partner_pd;
+ 	struct usb_power_delivery_capabilities *partner_source_caps;
++	/* Last complete source capabilities published in sysfs. */
++	u32 partner_src_pdos[PDO_MAX_OBJECTS];
+ 	struct usb_power_delivery_capabilities *partner_sink_caps;
+ 
+ 	struct usb_role_switch *usb_role_sw;

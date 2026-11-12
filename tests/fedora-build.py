@@ -83,6 +83,16 @@ class FedoraTests(unittest.TestCase):
         self.assertTrue((root/'etc/systemd/system/liuqin-splash-orientation.service').is_file())
         self.assertEqual((root/'usr/libexec/liuqin-storage-seal').read_bytes(),storage_fixture.read_bytes())
         self.assertFalse((root/'etc/systemd/system/liuqin-boot-usb-storage.service').exists())
+        battery=root/'etc/systemd/system/multi-user.target.wants/liuqin-mipps-battery-auth.service'
+        self.assertTrue(battery.is_symlink())
+        self.assertEqual(battery.resolve(),root/'etc/systemd/system/liuqin-mipps-battery-auth.service')
+        watcher=root/'etc/systemd/system/multi-user.target.wants/liuqin-mipps-auth.path'
+        self.assertTrue(watcher.is_symlink())
+        self.assertEqual(watcher.resolve(),root/'etc/systemd/system/liuqin-mipps-auth.path')
+        self.assertFalse((root/'etc/systemd/system/liuqin-mipps-auth.service.d/10-allow-unverified-adapter.conf').exists())
+        charger=(root/'etc/systemd/system/liuqin-mipps-auth.service').read_text()
+        self.assertIn('After=liuqin-mipps-battery-auth.service',charger)
+        self.assertIn('--role-first',charger)
         for name in ('usr/local/sbin/liuqin-gnome-usb-rescue','usr/local/sbin/liuqin-rescue',
                      'usr/local/bin/liuqin-shell','etc/systemd/system/liuqin-gnome-usb-rescue.service'):
             self.assertFalse((root/name).exists(),name)

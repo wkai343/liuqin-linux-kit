@@ -1,0 +1,48 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] Keep UCSI registration and connector ownership accurate
+
+Do not record a failed synchronous ucsi_register() as a live registration.
+Leave later service events able to register the interface, and avoid issuing
+unregister for an interface whose version read never succeeded.
+
+Clear the connector pointer after releasing it. PMIC GLINK reuses the UCSI
+instance across firmware service restarts; if the next initialization fails
+before allocating connectors, another unregister must not use the old array.
+
+Adapted from yzddmr6's registration fix and Codex's connector cleanup fix:
+https://github.com/yzddmr6/linux-sm8450-liuqin/commit/9f9cd5ac3bc1fade2c2584a051913a2b03d506d2
+https://github.com/yzddmr6/linux-sm8450-liuqin/commit/f43a4aa7fa89c6e227c5ec763e695576e66e2eb7
+The existing work cancellation and port teardown ordering are retained.
+
+--- a/drivers/usb/typec/ucsi/ucsi_glink.c
++++ b/drivers/usb/typec/ucsi/ucsi_glink.c
+@@ -316,13 +316,18 @@ static void pmic_glink_ucsi_register(struct work_struct *work)
+ 	struct pmic_glink_ucsi *ucsi = container_of(work, struct pmic_glink_ucsi, register_work);
+ 	unsigned long flags;
+ 	bool pd_running;
++	int ret;
+ 
+ 	spin_lock_irqsave(&ucsi->state_lock, flags);
+ 	pd_running = ucsi->pd_running;
+ 	spin_unlock_irqrestore(&ucsi->state_lock, flags);
+ 
+ 	if (!ucsi->ucsi_registered && pd_running) {
+-		ucsi_register(ucsi->ucsi);
++		ret = ucsi_register(ucsi->ucsi);
++		if (ret) {
++			dev_err(ucsi->dev, "UCSI registration failed: %d\n", ret);
++			return;
++		}
+ 		ucsi->ucsi_registered = true;
+ 	} else if (ucsi->ucsi_registered && !pd_running) {
+ 		ucsi_unregister(ucsi->ucsi);
+--- a/drivers/usb/typec/ucsi/ucsi.c
++++ b/drivers/usb/typec/ucsi/ucsi.c
+@@ -2493,6 +2493,7 @@ void ucsi_unregister(struct ucsi *ucsi)
+ 	}
+ 
+ 	kfree(ucsi->connector);
++	ucsi->connector = NULL;
+ }
+ EXPORT_SYMBOL_GPL(ucsi_unregister);
+ 

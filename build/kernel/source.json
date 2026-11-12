@@ -32,15 +32,23 @@
     "build/kernel/patches/linux-7.3/0030-nanosic-debounce-fold-and-reject-stale-input.patch",
     "build/kernel/patches/linux-7.3/0031-liuqin-pen-input-and-diagnostics.patch",
     "build/kernel/patches/linux-7.3/0035-liuqin-cpu-capacities.patch",
-    "build/kernel/patches/linux-7.3/0036-liuqin-cpu-power-and-bandwidth.patch"
+    "build/kernel/patches/linux-7.3/0036-liuqin-cpu-power-and-bandwidth.patch",
+    "build/kernel/patches/linux-7.3/0037-liuqin-refresh-fuel-gauge.patch",
+    "build/kernel/patches/linux-7.3/0038-liuqin-m81-charger-properties-and-events.patch",
+    "build/kernel/patches/linux-7.3/0039-liuqin-ucsi-partner-source-pdos.patch",
+    "build/kernel/patches/linux-7.3/0040-ucsi-pps-power-supply.patch",
+    "build/kernel/patches/linux-7.3/0041-ucsi-refresh-partner-capabilities.patch",
+    "build/kernel/patches/linux-7.3/0042-ucsi-recover-registration-failures.patch",
+    "build/kernel/patches/linux-7.3/0043-glink-retry-firmware-readiness.patch",
+    "build/kernel/patches/linux-7.3/0044-ucsi-validate-glink-response-lengths.patch"
   ],
-  "status": "Linux 7.3.4 with 23 local Liuqin adaptations shared by Fedora and Recovery. CPU capacities and dynamic power coefficients use the OEM Cape descriptors; Liuqin CPU/LLCC BWMON nodes use mainline bindings with OEM bandwidth tables (Fedora temporary-boot verified on one Tianma unit: three CPU energy domains, PSCI idle accounting, both BWMON bindings and dynamic ICC votes; Recovery validation remains separate). Desktop boot arguments enable guarded 60/90/120/144 Hz switching for Tianma and CSOT; only Tianma has hardware evidence. Backlight probe uses default brightness and panel first-frame sequencing remains enabled. Exact image hardware validation is recorded separately.",
-  "expected_source_tree": "fb0c49038fa75c46bfb8014f2e2c53c06ff4ac58",
-  "tested_source_commit": "868a7ace249aa898a556ddc664fad3ecc959789e",
-  "tested_source_tree": "fb0c49038fa75c46bfb8014f2e2c53c06ff4ac58",
+  "status": "Linux 7.3.4 with 31 local Liuqin adaptations shared by Fedora and Recovery. CPU capacities and dynamic power coefficients use the OEM Cape descriptors; Liuqin CPU/LLCC BWMON nodes use mainline bindings with OEM bandwidth tables (Fedora temporary-boot verified on one Tianma unit: three CPU energy domains, PSCI idle accounting, both BWMON bindings and dynamic ICC votes; Recovery validation remains separate). Desktop boot arguments enable guarded 60/90/120/144 Hz switching for Tianma and CSOT; only Tianma has hardware evidence. Backlight probe uses default brightness and panel first-frame sequencing remains enabled. Exact image hardware validation is recorded separately. M81 fuel-gauge refresh follows the OEM periodic property-86 read, with frozen work during sleep and immediate refresh on resume. M81 charger property IDs and deferred vendor change events follow the shipping OEM module. Liuqin reads attached-source PDOs despite the missing UCSI capability flag; authentication uses their USB communication capability. UCSI decodes PPS request voltage/current and selected APDO limits, retaining M81 negotiated-power notifications for fresh RDO values. UCSI refreshes changed partner source capabilities without replacing the partner PD object, with bounded retries after transient registration failures. UCSI records registration only after a successful version read and clears freed connectors across firmware-service recovery. PMIC GLINK notification subscription and synchronous UCSI registration retry transient failures with bounded per-service budgets. Recovery rejects stale service results, drains work before client release, and resets asynchronous initialization state while cleaning partial ports before retry. UCSI GLINK validates complete read and write response lengths before accessing reply data.",
+  "expected_source_tree": "7998a445b112671cf2b6ae11314099ba419e4b69",
+  "tested_source_commit": "b9e4b76c6b396ec8ee033d2c89151afb7b37e665",
+  "tested_source_tree": "7998a445b112671cf2b6ae11314099ba419e4b69",
   "reference_repository": "https://github.com/Seeker0472/liuqin-nixos",
   "reference_commit": "73e8071e09880aeb47f0a427b9a65b8cc10927c4",
-  "previous_source_tree": "030bee333faec28d4df1ded10de0eb841137295e",
+  "previous_source_tree": "671bd4a9ccedddff217f14544630bc58c1a2c2a2",
   "load_alignment": "liuqin-arm64-align2m-v1",
-  "validation_status": "DEVICE_TESTED"
+  "validation_status": "SOURCE_TESTED"
 }

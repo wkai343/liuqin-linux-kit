@@ -32,7 +32,7 @@ except ImportError:
 
 
 def function(text,name):
-    match=re.search(r'^(?:static\s+)?(?:inline\s+)?(?:bool|int|int32_t|void)\s+'+name+r'\([^;{]*\)\s*\{',text,re.M)
+    match=re.search(r'^(?:static\s+)?(?:inline\s+)?(?:bool|int|int32_t|u32|u64|void)\s+'+name+r'\([^;{]*\)\s*\{',text,re.M)
     if not match:raise ValueError(name)
     end=match.end();depth=1
     while depth:
@@ -51,6 +51,21 @@ def execute(code, expected_null_failure=False):
                               capture_output=expected_null_failure,text=expected_null_failure)
         if expected_null_failure and (not result.returncode or 'null pointer' not in result.stderr):
             raise AssertionError('The clock fixture did not reproduce the expected NULL access: '+str(result))
+
+
+class BoardIdentificationTests(unittest.TestCase):
+    def test_board_detection_is_centralized_in_abl_aware_helper(self):
+        # Shared board adaptations serve both desktop and Recovery kernels.
+        patches=set(json.loads((PROJECT/'build/kernel/source.json').read_text())['target_patches'])
+        for name in sorted(patches):
+            target=None
+            for line in (PROJECT/name).read_text().splitlines():
+                if line.startswith('+++ b/'):
+                    target=line[6:]
+                elif line.startswith('+') and re.search(
+                        r'of_machine_is_compatible\s*\(\s*"xiaomi,liuqin"',line):
+                    self.assertEqual(target,'include/linux/platform_data/liuqin.h',
+                                     name+': use liuqin_board_quirks() so ABL replacement is covered')
 
 
 @unittest.skipUnless(CC and OBJCOPY,'an ARM64 toolchain is required')
@@ -119,42 +134,116 @@ static int of_property_read_u32_array(void *p,const char *key,u32 *out,int n){me
 class PlatformTests(unittest.TestCase):
     def board(self):return BOARD+function((SOURCE/'include/linux/platform_data/liuqin.h').read_text(),'liuqin_board_quirks')
 
-    def test_power_notification_startup_is_serialized_and_publishes_only_after_ack(self):
+    def test_m81_refresh_reads_vendor_trigger_and_recovers_from_transport_loss(self):
         source=(SOURCE/'drivers/power/supply/qcom_battmgr.c').read_text()
         code=COMMON+r'''
-#define PMIC_GLINK_OWNER_BATTMGR 32778
-#define PMIC_GLINK_NOTIFY 2
-#define BATTMGR_REQUEST_NOTIFICATION 4
-#define cpu_to_le32(x) (x)
+#define XM_THERMAL_TEMP 86
+#define HZ 250
+#define SM8475_REFRESH_INTERVAL (10 * HZ)
+#define QCOM_BATTMGR_SM8475 1
+#define READ_ONCE(x) (x)
 struct work_struct {int unused;};
-struct pmic_glink_hdr {u32 owner,type,opcode;};
-struct qcom_battmgr_enable_request {struct pmic_glink_hdr hdr;u32 battery_id,power_state,low_capacity,high_capacity;};
-struct qcom_battmgr {int lock;void *dev,*bat_psy,*usb_psy,*ac_psy,*wls_psy;};
+struct delayed_work {struct work_struct work;};
+struct device {int unused;};
+struct qcom_battmgr {struct device *dev;int variant;bool service_up;struct delayed_work refresh_work;};
 static struct qcom_battmgr b;
+static int queue,requests,retries,immediate,result;
+static void *system_freezable_wq=&queue;
 #define container_of(p,t,m) (&b)
-static int depth,requests,notifications,errors,result;
-static void mutex_lock(int *l){assert(!depth);depth++;}
-static void mutex_unlock(int *l){assert(depth==1);depth--;}
-static int qcom_battmgr_request(struct qcom_battmgr *p,void *data,size_t size){
- struct qcom_battmgr_enable_request *r=data;
- assert(depth==1&&size==sizeof(*r));assert(r->hdr.owner==32778&&r->hdr.type==2&&r->hdr.opcode==4);
- requests++;return result;
+#define to_delayed_work(p) (&b.refresh_work)
+#define dev_dbg(...) ((void)0)
+static void *dev_get_drvdata(struct device *dev){return &b;}
+static int qcom_battmgr_xm_get(struct qcom_battmgr *p,u32 property,u32 *value){
+ assert(p==&b && p->service_up && property==86);requests++;*value=260;return result;
 }
-static void power_supply_changed(void *p){assert(p&&!depth);notifications++;}
-#define dev_err(...) do{errors++;}while(0)
-'''+function(source,'qcom_battmgr_enable_worker')+r'''
+static bool queue_delayed_work(void *q,struct delayed_work *w,unsigned long delay){
+ assert(q==system_freezable_wq && w==&b.refresh_work && delay==10*HZ);retries++;return true;
+}
+static bool mod_delayed_work(void *q,struct delayed_work *w,unsigned long delay){
+ assert(q==system_freezable_wq && w==&b.refresh_work && !delay);immediate++;return true;
+}
+'''+function(source,'qcom_battmgr_sm8475_refresh_worker')+function(source,'qcom_battmgr_resume')+r'''
 int main(void){
- struct work_struct work;
- b.bat_psy=(void *)1;b.usb_psy=(void *)2;b.wls_psy=(void *)3;
- qcom_battmgr_enable_worker(&work);assert(requests==1&&notifications==3&&!errors&&!depth);
- notifications=0;result=-ETIMEDOUT;qcom_battmgr_enable_worker(&work);
- assert(requests==2&&!notifications&&errors==1&&!depth);
- b=(struct qcom_battmgr){0};result=0;qcom_battmgr_enable_worker(&work);
- assert(requests==3&&!notifications&&errors==1&&!depth);
+ struct work_struct work;struct device dev;
+ qcom_battmgr_sm8475_refresh_worker(&work);assert(!requests && retries==1);
+ b.service_up=true;qcom_battmgr_sm8475_refresh_worker(&work);assert(requests==1 && retries==2);
+ result=-ETIMEDOUT;qcom_battmgr_sm8475_refresh_worker(&work);assert(requests==2 && retries==3);
+ b.service_up=false;qcom_battmgr_sm8475_refresh_worker(&work);assert(requests==2 && retries==4);
+ b.service_up=true;result=0;qcom_battmgr_sm8475_refresh_worker(&work);assert(requests==3 && retries==5);
+ for(int variant=0;variant<5;variant++){
+  b.variant=variant;immediate=0;assert(!qcom_battmgr_resume(&dev));
+  assert(immediate==(variant==QCOM_BATTMGR_SM8475));
+ }
  return 0;
 }
 '''
         execute(code)
+        probe=function(source,'qcom_battmgr_probe')
+        # Reverse devres order must stop periodic RPC before freeing its client.
+        self.assertLess(probe.index('devm_pmic_glink_client_alloc'),
+                        probe.index('devm_delayed_work_autocancel(dev, &battmgr->refresh_work'))
+        self.assertLess(probe.index('devm_delayed_work_autocancel(dev, &battmgr->refresh_work'),
+                        probe.index('pmic_glink_client_register'))
+        self.assertLess(probe.index('devm_device_add_group(dev, &qcom_battmgr_xiaomi_group)'),
+                        probe.index('queue_delayed_work(system_freezable_wq'))
+
+    def test_m81_power_properties_and_vendor_events_match_shipping_abi(self):
+        source=(SOURCE/'drivers/power/supply/qcom_battmgr.c').read_text()
+        constants='\n'.join(re.findall(r'^#define (?:XM_(?:APDO_MAX|POWER_MAX)|NOTIF_\w+)\s+[^\n]+',source,re.M))
+        macro=source[source.index('#define QCOM_BATTMGR_XM_RO_ATTR'):source.index('\n\nQCOM_BATTMGR_XM_RO_ATTR(adapter_id')]
+        getters='\n'.join(re.findall(r'^QCOM_BATTMGR_XM_RO_ATTR\((?:apdo_max|power_max),.*',source,re.M))
+        code=COMMON+r'''
+#include <stdio.h>
+#include <sys/types.h>
+#define QCOM_BATTMGR_SM8475 1
+#define KOBJ_CHANGE 2
+#define fallthrough __attribute__((fallthrough))
+#define le32_to_cpu(x) (x)
+#define dev_warn(...) ((void)0)
+#define dev_err(...) ((void)0)
+#define DEVICE_ATTR_RO(n) int unused_##n __attribute__((unused))
+#define sysfs_emit snprintf_page
+struct work_struct {int unused;};
+struct device_attribute {int unused;};
+struct device {int kobj;};
+struct pmic_glink_hdr {u32 owner,type,opcode;};
+struct qcom_battmgr_message {struct pmic_glink_hdr hdr;u32 notification;};
+struct qcom_battmgr {struct device *dev;int variant;struct {bool valid;} info;
+ void *bat_psy,*usb_psy,*wls_psy;struct work_struct xm_notify_work;};
+static struct device dev;
+static struct qcom_battmgr b={.dev=&dev,.variant=1,.bat_psy=(void *)1,.usb_psy=(void *)2};
+static int queued,events,battery,usb,error;
+#define container_of(p,t,m) (&b)
+static void *dev_get_drvdata(struct device *d){return &b;}
+static int snprintf_page(char *buf,const char *fmt,unsigned int v){return snprintf(buf,64,fmt,v);}
+static int qcom_battmgr_xm_get(struct qcom_battmgr *p,u32 property,u32 *value){
+ /* Independently decoded from OEM apdo_max_show / power_max_show. */
+ assert(property==45 || property==46);*value=property==45?100:67;return error;
+}
+static bool schedule_work(struct work_struct *w){assert(w==&b.xm_notify_work);queued++;return true;}
+static int kobject_uevent(int *k,int action){assert(k==&dev.kobj && action==KOBJ_CHANGE);events++;return 0;}
+static void power_supply_changed(void *p){if(p==b.bat_psy)battery++;else if(p==b.usb_psy)usb++;else assert(0);}
+'''+constants+'\n'+macro+'\n'+getters+'\n'+function(source,'qcom_battmgr_xm_notify_worker')+function(source,'qcom_battmgr_notification')+r'''
+int main(void){
+ char buf[64];
+ assert(apdo_max_show(&dev,NULL,buf)==4 && !strcmp(buf,"100\n"));
+ assert(power_max_show(&dev,NULL,buf)==3 && !strcmp(buf,"67\n"));
+ error=-ETIMEDOUT;assert(power_max_show(&dev,NULL,buf)==-ETIMEDOUT);
+ struct qcom_battmgr_message msg={.notification=0x50};
+ qcom_battmgr_notification(&b,&msg,sizeof(msg));assert(queued==1 && !events && !battery && !usb);
+ qcom_battmgr_xm_notify_worker(&b.xm_notify_work);assert(events==1);
+ b.variant=0;qcom_battmgr_notification(&b,&msg,sizeof(msg));assert(queued==1);
+ b.variant=1;qcom_battmgr_notification(&b,&msg,sizeof(msg)-1);assert(queued==1);
+ msg.notification=0x80;qcom_battmgr_notification(&b,&msg,sizeof(msg));assert(battery==1 && !usb);
+ msg.notification=0x32;qcom_battmgr_notification(&b,&msg,sizeof(msg));assert(battery==1 && usb==1);
+ return 0;
+}
+'''
+        execute(code)
+        probe=function(source,'qcom_battmgr_probe')
+        self.assertLess(probe.index('devm_work_autocancel(dev, &battmgr->xm_notify_work'),
+                        probe.index('devm_pmic_glink_client_alloc'))
+
 
 
 

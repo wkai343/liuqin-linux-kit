@@ -29,6 +29,11 @@ def board_overlay(root, busybox, storage_helper):
     recovery=root/'etc/systemd/user/default.target.wants/liuqin-display-recovery.service'
     recovery.parent.mkdir(parents=True,exist_ok=True)
     recovery.symlink_to('../liuqin-display-recovery.service')
+    battery=root/'etc/systemd/system/multi-user.target.wants/liuqin-mipps-battery-auth.service'
+    battery.parent.mkdir(parents=True,exist_ok=True)
+    battery.symlink_to('../liuqin-mipps-battery-auth.service')
+    auth_events=root/'etc/systemd/system/multi-user.target.wants/liuqin-mipps-auth.path'
+    auth_events.symlink_to('../liuqin-mipps-auth.path')
     old='marker=${LIUQIN_GNOME_GUARD_TEST_MARKER:-/etc/liuqin-native-root}'
     if text.count(old)!=1:raise ValueError('存储保护脚本标记不符。')
     text=text.replace(old,'marker=/etc/liuqin-native-root')

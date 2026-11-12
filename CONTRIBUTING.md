@@ -7,6 +7,10 @@
 `build/kernel/patches/`。自定义内核可使用独立、已提交的源码目录和配置片段，
 不要求先向原作者的内核仓库提交；内核源码检出和构建缓存可放在忽略的 sources/、out/，不要提交到源码仓库。
 
+内核中的 liuqin 设备判断复用 `include/linux/platform_data/liuqin.h` 的 `liuqin_board_quirks()`。
+原厂 ABL 会改写设备树顶层 `compatible` 和 `model`；该函数兼容原始设备树与原厂名称、板号组合。
+`tests/kernel-common-fixes.py` 在常规离线回归中检查共享内核补丁是否绕过了这个统一入口。
+
 提交应围绕明确的问题，说明最终行为、修改原因和验证结果。适配第三方代码时保留原作者与许可证声明。修改后构建、测试受影响的组件，再提出变更。
 
 常规离线回归运行 `devbox run test`；存储、源码阶段测试及其输入要求见 [测试说明](tests/README.md)。

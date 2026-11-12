@@ -1,10 +1,17 @@
 [Unit]
 Description=LiUQIN MiPPS/PPS charger authentication
 Documentation=https://github.com/wkai343/liuqin-linux-kit/blob/main/docs/FASTCHARGE.md
-ConditionPathExistsGlob=/sys/devices/platform/pmic-glink/*/xiaomi/request_vdm_cmd
+Wants=liuqin-mipps-battery-auth.service
+After=liuqin-mipps-battery-auth.service
+# Vendor property events can exceed systemd's default start burst. The worker
+# serializes execution and bounds attempts per attach; valid events must not
+# block a later cable attach through the service manager's rate limit.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/flock -n -E 0 /run/liuqin-mipps-auth.lock \
-          /usr/local/libexec/liuqin-mipps-auth --timeout 4 --no-data-role-swap
-TimeoutStartSec=35
+ExecStart=/usr/bin/flock -w 35 /run/liuqin-mipps-auth.lock \
+          /usr/local/libexec/liuqin-mipps-auth --timeout 4 --role-first --consume-event
+# Includes fallback cell verification, bounded DR_SWAP retries, the stock
+# per-command response budgets and cleanup of verify_process/pd_verifed.
+TimeoutStartSec=120

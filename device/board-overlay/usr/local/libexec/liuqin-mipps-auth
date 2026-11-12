@@ -12,8 +12,12 @@
 # (https://github.com/yzddmr6/xiaomipad-6pro-mainline/pull/7): renamed state
 # paths and unit, and the --allow-unverified-adapter switch for standard PPS
 # adapters.  The switch's cable capability gate was added on integration.
+# Role-first sequencing and current-attach verification are adapted from
+# yumo666666 / xiaomipad-6pro-mainline commits 43aa1cb and 87f0250.
 
 import argparse
+import errno
+import json
 import glob
 import hashlib
 import hmac
@@ -21,6 +25,7 @@ import os
 import pwd
 import random
 import secrets
+import signal
 import subprocess
 import sys
 import time
@@ -58,25 +63,162 @@ FG_KEYS = [
 ]
 
 XIAOMI_SVID = 0x2717
-FAST_CHARGE_NOTIFICATION_TITLE = "Fast charge active"
+FAST_CHARGE_NOTIFICATION_TITLE = "Charging profile"
 NOTIFICATION_STATE_FILE = "/run/liuqin-mipps-auth/last-notification"
 CHARGE_PROFILE_STATE_FILE = "/run/liuqin-mipps-auth/charge-profile"
+ATTEMPT_STATE_FILE = "/run/liuqin-mipps-auth/role-first-attempt"
+READY_STATE_FILE = "/run/liuqin-mipps-auth/readiness-attempt"
+VERIFIED_STATE_FILE = "/run/liuqin-mipps-auth/verified-attach"
+ACTIVE_ATTACH = None
+AUTHENTICATED_STATE_FILE = "/run/liuqin-mipps-auth/authenticated-adapter"
 USB_ONLINE_STATE_FILE = "/run/liuqin-mipps-auth/usb-online"
 SYSTEMD_UNIT = "liuqin-mipps-auth.service"
-ANDROID_CMD_SETTLE = {
-    1: 0.005,
-    2: 0.005,
-    3: 0.005,
-    4: 0.500,
-    5: 0.500,
-    6: 0.005,
-}
+SYSTEMD_PATH_UNIT = "liuqin-mipps-auth.path"
+PENDING_EVENT_FILE = "/run/liuqin-mipps-auth/pending"
+READINESS_ATTEMPTS = 3
+READINESS_RETRY_DELAY = 2.0
+# OS2.0.6.0.VMYCNXM /vendor/bin/batterysecret, usbpd_conmunication()
+# and usbpd_send_vdm_cmd(): these are poll counts, NOT millisecond delays.
+# See docs/FASTCHARGE-SOURCES.md for the pinned binary and function addresses.
+VDM_POLL_COUNTS = {1: 5, 2: 5, 3: 5, 4: 500, 5: 500, 7: 5, 6: 5}
+VDM_POLL_INTERVAL = 0.01
+VDM_CONNECT_INTERVAL = 0.02
+ROLE_ATTEMPTS = 4
+ROLE_TIMEOUT = 12.0
+TRANSIENT_READ_ERRORS = (errno.EAGAIN, errno.EBUSY)
+TRANSIENT_ROLE_ERRORS = (errno.EAGAIN, errno.EBUSY, errno.ETIMEDOUT, errno.EIO)
 
 
 class UnsupportedChargerError(Exception):
     def __init__(self, message, terminal=False):
         super().__init__(message)
         self.terminal = terminal
+
+class ChargerDisconnectedError(UnsupportedChargerError):
+    pass
+
+
+class AdapterReadinessTimeout(UnsupportedChargerError):
+    def __init__(self, last, snapshot):
+        super().__init__(f"adapter capabilities not ready: {last}")
+        # None means unreadable, not a stable capability snapshot.
+        self.snapshot = snapshot
+
+
+class VdmResponseTimeout(UnsupportedChargerError):
+    """A command was written, but its UVDM state did not arrive in time.
+
+    This is batterysecret's local -EAGAIN, not a failed GLINK write/read.
+    Only this condition allows the one-pass sequence to advance.
+    """
+
+    def __init__(self, cmd, last):
+        super().__init__(f"timed out waiting for VDM state {cmd}, last={last}")
+        self.cmd = cmd
+
+
+def check_usb_connection(attach_token=None):
+    online = usb_is_online()
+    if online is None:
+        raise OSError(errno.EAGAIN, "USB power status is unreadable")
+    if not online:
+        raise ChargerDisconnectedError("USB power disconnected", terminal=True)
+    current = current_attach_token()
+    if attach_token is not None and current != attach_token:
+        raise ChargerDisconnectedError("Type-C partner changed", terminal=True)
+    return current
+
+
+def adapter_readiness_snapshot(root):
+    # Preserve read errors instead of converting them to apparently valid data.
+    return [read_node(root, "real_type"), read_node(root, "current_state"),
+            int(read_node(root, "pdo2")[:8], 16)]
+
+
+def adapter_is_ready(snapshot):
+    return (snapshot is not None and snapshot[0] in ("PD", "PD_PPS")
+            and snapshot[1] == "SNK_Ready" and snapshot[2] != 0)
+
+
+def readiness_read_error(exc):
+    return isinstance(exc, ValueError) or exc.errno in (
+        errno.EAGAIN, errno.EBUSY, errno.ETIMEDOUT, errno.EIO,
+        errno.ENODEV, errno.ENODATA, errno.ENOENT)
+
+
+def readiness_retry_state():
+    try:
+        state = json.loads(read_state_file(READY_STATE_FILE) or "null")
+        if (isinstance(state, dict) and isinstance(state.get("key"), list)
+                and isinstance(state.get("attempts"), int)
+                and 1 <= state["attempts"] <= READINESS_ATTEMPTS
+                and isinstance(state.get("retry_at"), (float, int))):
+            return state
+    except (ValueError, TypeError):
+        pass
+    # Includes the old pre-wait snapshot cache, which could block recovery.
+    return {}
+
+
+def wait_adapter_ready(root, timeout, attach_token):
+    deadline = time.monotonic() + timeout
+    last = "no capabilities"
+    while True:
+        check_usb_connection(attach_token)
+        snapshot = None
+        try:
+            snapshot = adapter_readiness_snapshot(root)
+            last = str(snapshot)
+            if adapter_is_ready(snapshot):
+                return snapshot[0]
+        except (ValueError, OSError) as exc:
+            if not readiness_read_error(exc):
+                raise
+            last = str(exc)
+        if time.monotonic() >= deadline:
+            raise AdapterReadinessTimeout(last, snapshot)
+        time.sleep(0.1)
+
+
+def require_current_attach():
+    if not ACTIVE_ATTACH:
+        raise ChargerDisconnectedError("no Type-C partner", terminal=True)
+    check_usb_connection(ACTIVE_ATTACH)
+
+
+def clear_verdict(root):
+    # Clear the local proof even if the transport has gone away.
+    write_state_file(VERIFIED_STATE_FILE, "none")
+    write_state_file(AUTHENTICATED_STATE_FILE, "none")
+    # Rewriting zero on every OEM notification can generate another event.
+    if current_string_value(root, "pd_verifed") != "0":
+        write_node_if_present(root, "pd_verifed", "0")
+
+
+def set_verify_process(root, active):
+    value = "1" if active else "0"
+    # Avoid a write/uevent loop on repeated notifications. This also clears
+    # an interrupted previous worker's flag before starting a new exchange.
+    if read_node(root, "verify_process") != value:
+        write_node(root, "verify_process", value)
+
+
+def reserve_adapter_attempt(token):
+    # Persist before touching the role. Bounded role retries happen inside
+    # this worker; notifications must not replay a completed/failed exchange.
+    write_state_file(ATTEMPT_STATE_FILE, token)
+    if read_state_file(ATTEMPT_STATE_FILE) != token:
+        raise RuntimeError("cannot persist adapter attempt; refusing to repeat handshake")
+
+
+def attempt_available(force=False):
+    if force:
+        return True
+    if read_state_file(ATTEMPT_STATE_FILE) == ACTIVE_ATTACH:
+        print("role_first=already_attempted_this_attach")
+        return False
+    return True
+
 
 def find_xiaomi_dir():
     candidates = ["/sys/class/qcom-battery"]
@@ -116,16 +258,21 @@ def find_power_supply(*names):
 
 
 def usb_is_online():
+    # An unavailable property is not evidence of a disconnect. Callers that
+    # start a transaction must still require a positive online result.
     path = find_power_supply("qcom-battmgr-usb", "usb")
     if not path:
         print("warning: USB power_supply node not found", file=sys.stderr)
-        return False
+        return None
 
     try:
-        return read_node(path, "online") == "1"
-    except OSError as e:
+        value = read_node(path, "online")
+        if value not in ("0", "1"):
+            raise ValueError(f"invalid USB online value {value!r}")
+        return value == "1"
+    except (OSError, ValueError) as e:
         print(f"warning: failed to read {path}/online: {e}", file=sys.stderr)
-        return False
+        return None
 
 
 def wait_usb_online(timeout):
@@ -228,6 +375,24 @@ def start_systemd_unit(unit):
     subprocess.run([systemctl, "--no-block", "start", unit],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                    timeout=2, check=True)
+
+
+def queue_auth_event():
+    # A level-triggered path survives StartUnit coalescing and the worker's
+    # exit window. systemd rechecks it after the service becomes inactive.
+    os.makedirs(os.path.dirname(PENDING_EVENT_FILE), exist_ok=True)
+    fd = os.open(PENDING_EVENT_FILE, os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    os.close(fd)
+    start_systemd_unit(SYSTEMD_PATH_UNIT)
+
+
+def consume_auth_event():
+    # Claim before reading the charger. Never remove events in final cleanup:
+    # an event arriving during this worker belongs to the next activation.
+    try:
+        os.unlink(PENDING_EVENT_FILE)
+    except FileNotFoundError:
+        pass
 
 
 def parse_power_watts(value):
@@ -335,10 +500,10 @@ def pd_verified(root):
 
 def charge_mode_body(mode, watts):
     if mode == "MiPPS":
-        return f"MiPPS enabled at {watts}W"
+        return f"MiPPS active; reported maximum {watts}W"
     if mode == "PD":
         return "PD enabled"
-    return f"PPS enabled at {watts}W"
+    return f"PPS negotiated; reported maximum {watts}W"
 
 
 def current_charge_profile(root, pd_auth):
@@ -352,18 +517,16 @@ def current_charge_profile(root, pd_auth):
 
     fastchg_mode = current_int_value(root, "fastchg_mode")
     real_type = current_string_value(root, "real_type")
-    fastchg_active = fastchg_mode is None or fastchg_mode > 0
+    fastchg_active = fastchg_mode is not None and fastchg_mode > 0
 
-    if pd_auth:
+    if pd_auth and fastchg_active:
         return "MiPPS", watts
 
     if real_type == "PD_PPS":
         return "PPS", watts
 
     if real_type == "PD":
-        if not fastchg_active:
-            return "PD", watts
-        return "PPS", watts
+        return "PD", watts
 
     return None
 
@@ -432,86 +595,269 @@ def notify_charge_profile(root, pd_auth, state_file, timeout=2.0):
 
 def notify_completed_charge(root, state_file, pd_auth=None, timeout=2.0):
     if pd_auth is None:
-        pd_auth = pd_verified(root)
+        # pd_verifed can also be set by the optional PPS policy. Only a
+        # remembered successful digest exchange establishes Xiaomi auth.
+        token = current_attach_token()
+        pd_auth = (bool(token) and pd_verified(root) and
+                   read_state_file(AUTHENTICATED_STATE_FILE) == token)
     return notify_charge_profile(root, pd_auth, state_file, timeout)
 
 
-def wait_real_type(root, timeout):
+def partner_source_usb_data():
+    """Read the current partner's first fixed source PDO, never cached SVID.
+
+    None means unreported/invalid, not a power-only source. The kernel owns
+    PDO lifetime; detach removes the directory with the Type-C partner.
+    """
+    partners = glob.glob("/sys/class/typec/port*-partner")
+    if len(partners) != 1:
+        return None
+    root = os.path.join(partners[0], "usb_power_delivery/source-capabilities/1:fixed_supply")
+    try:
+        voltage = read_node(root, "voltage")
+        current = read_node(root, "maximum_current")
+        data = read_node(root, "usb_communication_capable")
+        if voltage != "5000mV" or not current.endswith("mA") or int(current[:-2]) <= 0:
+            return None
+        return {"0": False, "1": True}.get(data)
+    except (OSError, ValueError):
+        return None
+
+
+def wait_partner_source_usb_data(timeout):
     deadline = time.monotonic() + timeout
-    last = "Unknown"
-    while time.monotonic() < deadline:
-        try:
-            last = read_node(root, "real_type")
-        except OSError:
-            return "Unknown"
-        if last and last != "Unknown":
-            return last
-        time.sleep(0.05)
-    return last
+    while True:
+        require_current_attach()
+        value = partner_source_usb_data()
+        require_current_attach()
+        if value is not None or time.monotonic() >= deadline:
+            return value
+        time.sleep(0.1)
 
 
-def ensure_typec_host(timeout):
+def request_data_role(port, role, timeout):
+    # Bound the synchronous UCSI store and preserve errno. A shell's generic
+    # exit status cannot distinguish a transient refusal from EACCES/EINVAL.
+    if role not in ("host", "device"):
+        raise ValueError("invalid Type-C data role")
+    command = """import sys
+try:
+    with open(sys.argv[1], 'w', encoding='ascii') as stream:
+        stream.write(sys.argv[2])
+except OSError as exc:
+    print(str(exc), file=sys.stderr)
+    sys.exit(exc.errno or 1)
+"""
+    try:
+        result = subprocess.run([sys.executable, "-c", command,
+                                 os.path.join(port, "data_role"), role], text=True,
+                                capture_output=True, timeout=timeout)
+        return result.returncode, result.stderr.strip()
+    except subprocess.TimeoutExpired as exc:
+        return errno.ETIMEDOUT, str(exc)
+
+
+def request_host_data_role(port, timeout):
+    return request_data_role(port, "host", timeout)
+
+
+def take_host_data_role(root, port, args):
+    # Stock retries DR_SWAP up to four times; its not-ready loop is unbounded.
+    # Keep the retry count, but bound the whole operation for the Linux unit.
+    deadline = time.monotonic() + ROLE_TIMEOUT
+    for attempt in range(1, ROLE_ATTEMPTS + 1):
+        require_current_attach()
+        if "[host]" in read_node(port, "data_role"):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        real_type = wait_adapter_ready(root, remaining, ACTIVE_ATTACH)
+        data = partner_source_usb_data()
+        if data is not False and not (data is None and args.probe_unknown_pps and real_type == "PD_PPS"):
+            raise UnsupportedChargerError("source data capability changed before role retry")
+        require_current_attach()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        print(f"role_request=begin attempt={attempt}", flush=True)
+        code, error = request_host_data_role(port, min(8.0, remaining))
+        require_current_attach()
+        role = read_node(port, "data_role")
+        print(f"role_request=end returncode={code} role={role} stderr={error}", flush=True)
+        # A timed-out store may have completed the swap. Never swap again
+        # solely because the child reported an error.
+        if "[host]" in role:
+            return True
+        if code and code not in TRANSIENT_ROLE_ERRORS:
+            break
+        for _ in range(4):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.1, remaining))
+            require_current_attach()
+            if "[host]" in read_node(port, "data_role"):
+                return True
+    print("role_first=no_host_no_adapter_commands")
+    return False
+
+
+def role_first_prelude(root, args):
+    require_current_attach()
+    snapshot = None
+    try:
+        snapshot = adapter_readiness_snapshot(root)
+    except (OSError, ValueError) as exc:
+        if not readiness_read_error(exc):
+            raise
+    previous = readiness_retry_state()
+    key = [ACTIVE_ATTACH, snapshot]
+    if not args.force and previous.get("key") == key and not adapter_is_ready(snapshot):
+        if previous["attempts"] >= READINESS_ATTEMPTS:
+            print("role_first=unchanged_unready_source")
+            return False
+        # A newly readable/ready source bypasses this delay. A detached source
+        # cancels it, leaving the next connection's pending event untouched.
+        deadline = min(previous["retry_at"], time.monotonic() + READINESS_RETRY_DELAY)
+        while time.monotonic() < deadline:
+            require_current_attach()
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(0.1, remaining))
+    try:
+        real_type = wait_adapter_ready(root, args.ready_timeout, ACTIVE_ATTACH)
+    except AdapterReadinessTimeout as exc:
+        require_current_attach()
+        # Cache the failed observation, never the snapshot from before waiting.
+        # Read errors have their own key and cannot poison a healthy snapshot.
+        key = [ACTIVE_ATTACH, exc.snapshot]
+        count = previous.get("attempts", 0) if previous.get("key") == key else 0
+        count = min(count + 1, READINESS_ATTEMPTS)
+        state = json.dumps(dict(key=key, attempts=count,
+                                retry_at=time.monotonic() + READINESS_RETRY_DELAY))
+        write_state_file(READY_STATE_FILE, state)
+        if read_state_file(READY_STATE_FILE) != state:
+            raise RuntimeError("cannot persist readiness retry budget")
+        if count < READINESS_ATTEMPTS:
+            queue_auth_event()
+        raise
+    require_current_attach()
+    usb_data = wait_partner_source_usb_data(args.timeout)
+    if usb_data is True:
+        # M81 can retain the previous charger's SVID even on a computer.
+        print("role_first=usb_data_source_no_role_swap")
+        return False
+    if usb_data is None and not (args.probe_unknown_pps and real_type == "PD_PPS"):
+        print("role_first=source_data_capability_unknown")
+        return False
+    svid = current_adapter_svid(root)
+    probe = (real_type == "PD_PPS" and svid in (None, 0) and
+             (usb_data is False or args.probe_unknown_pps))
+    if svid != XIAOMI_SVID and not probe:
+        print(f"role_first=unidentified_or_non_xiaomi adapter_svid={svid}")
+        return False
+    if probe:
+        print(f"role_first={'power_only_pps_probe' if usb_data is False else 'explicit_pps_probe'}")
+    if not attempt_available(args.force):
+        return False
     port = find_typec_port()
     if not port:
-        print("warning: no Type-C data_role node found", file=sys.stderr)
+        print("role_first=no_typec_port")
         return False
-
-    path = os.path.join(port, "data_role")
-    try:
-        role = read_node(port, "data_role")
-    except OSError as e:
-        print(f"warning: failed to read {path}: {e}", file=sys.stderr)
+    role = read_node(port, "data_role")
+    require_current_attach()
+    if args.no_data_role_swap and not args.role_first and "[host]" not in role:
+        print("role_first=host_required_but_swap_disabled")
         return False
-
-    if role.startswith("[host]") or "[host]" in role.split():
-        print(f"typec_data_role={role}")
-        return True
-
-    try:
-        write_node(port, "data_role", "host")
-    except OSError as e:
-        print(f"warning: failed to request Type-C host role: {e}", file=sys.stderr)
-        return False
-
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        role = read_node(port, "data_role")
-        if role.startswith("[host]") or "[host]" in role.split():
-            print(f"typec_data_role={role}")
-            return True
+    reserve_adapter_attempt(ACTIVE_ATTACH)
+    set_verify_process(root, True)
+    changed_role = "[host]" not in role
+    if changed_role:
+        time.sleep(0.07)
+        require_current_attach()
+        if not take_host_data_role(root, port, args):
+            return False
+    # DR_SWAP can reveal or replace the cached identity. Recheck even a
+    # previously known SVID; discovery alone does not establish authentication.
+    deadline = time.monotonic() + args.timeout
+    while current_adapter_svid(root) != XIAOMI_SVID:
+        require_current_attach()
+        if time.monotonic() >= deadline:
+            print("role_first=probe_did_not_identify_xiaomi")
+            if changed_role:
+                require_current_attach()
+                code, error = request_data_role(port, "device", 8)
+                print(f"role_restore=returncode:{code} stderr={error}")
+            return False
         time.sleep(0.05)
-
-    print(f"warning: timed out waiting for Type-C host role, last={role}", file=sys.stderr)
-    return False
+    require_current_attach()
+    print("role_first=proceed")
+    return True
 
 
 def vdm_state(root):
     text = read_node(root, "request_vdm_cmd")
     state, _, payload = text.partition(",")
-    return int(state), payload.strip()
+    state = int(state)
+    if not 0 <= state <= 9:
+        raise ValueError(f"invalid UVDM state {state}")
+    return state, payload.strip()
 
 
-def wait_state(root, expected, timeout):
-    deadline = time.monotonic() + timeout
+def poll_vdm_state(root, expected, count, interval, attach_token):
+    # Bound both reads and elapsed time: a slow/failed GLINK read must not
+    # multiply the stock 500-poll budget into minutes of waiting.
+    deadline = time.monotonic() + count * interval
     last = None
-    while time.monotonic() < deadline:
-        last = vdm_state(root)
-        if last[0] == expected:
-            return last
-        time.sleep(0.02)
-    raise UnsupportedChargerError(f"timed out waiting for VDM state {expected}, last={last}")
+    last_error = None
+    for sample in range(count):
+        if sample and time.monotonic() >= deadline:
+            break
+        check_usb_connection(attach_token)
+        try:
+            last = vdm_state(root)
+            last_error = None
+        except OSError as exc:
+            if exc.errno not in TRANSIENT_READ_ERRORS:
+                raise
+            last_error = exc
+        check_usb_connection(attach_token)
+        if last_error is None and last is not None:
+            if expected is None:
+                if last[0] != 0:
+                    return last
+            elif last[0] == 0:
+                raise ChargerDisconnectedError("firmware UVDM state is disconnected", terminal=True)
+            elif last[0] == expected:
+                return last
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(interval, remaining))
+    check_usb_connection(attach_token)
+    if last_error is not None:
+        raise last_error
+    if expected is None:
+        raise UnsupportedChargerError("firmware UVDM connection not ready")
+    raise VdmResponseTimeout(expected, last)
 
 
-def send_vdm(root, cmd, payload="null", timeout=2.0, wait=True, settle=0.0):
+def send_vdm(root, cmd, payload="null"):
+    if cmd not in VDM_POLL_COUNTS:
+        raise ValueError(f"unsupported UVDM command {cmd}")
+    require_current_attach()
+    attach_token = ACTIVE_ATTACH
+    # Stock waits for a nonzero UVDM state before every command (20 reads
+    # for command 1, four for later commands), then checks Xiaomi identity.
+    poll_vdm_state(root, None, 20 if cmd == 1 else 4,
+                   VDM_CONNECT_INTERVAL, attach_token)
+    if normalize_adapter_svid(read_node(root, "adapter_svid")) != XIAOMI_SVID:
+        raise UnsupportedChargerError("Xiaomi identity changed during adapter commands")
+    require_current_attach()
     write_node(root, "request_vdm_cmd", f"{cmd},{payload}")
-    if not wait:
-        time.sleep(settle)
-        return vdm_state(root)
-    state = wait_state(root, cmd, timeout)
-    if settle:
-        time.sleep(settle)
-        state = vdm_state(root)
-    return state
+    return poll_vdm_state(root, cmd, VDM_POLL_COUNTS[cmd],
+                          VDM_POLL_INTERVAL, attach_token)
 
 
 def normalize_adapter_id(adapter_id):
@@ -545,6 +891,7 @@ def current_adapter_svid(root):
 def detect_adapter_id(root, timeout):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        require_current_attach()
         try:
             adapter_id = normalize_adapter_id(read_node(root, "adapter_id"))
             if adapter_id:
@@ -555,28 +902,67 @@ def detect_adapter_id(root, timeout):
     return None
 
 
-def should_skip_pdo2(root):
-    try:
-        pdo2 = read_node(root, "pdo2").strip().lower()
-    except OSError:
+def auth_already_completed(root):
+    """Return True/False for known state, None when a proven attach is unreadable."""
+    token = current_attach_token()
+    # Stock checks verify_process=0 and pd_verifed=1, not the last command
+    # number. A lost 7/6 response must not erase a verified fresh digest.
+    # A fresh attach has no proof. Leave its first UVDM read to the bounded
+    # connection wait, where a transient read can recover before any command.
+    if not token or read_state_file(VERIFIED_STATE_FILE) != token:
         return False
-    return len(pdo2) >= 8 and pdo2[:8] == "00000000"
-
-
-def auth_already_completed(root, state):
-    return state in (6, 7)
+    online = usb_is_online()
+    if online is False:
+        return False
+    unknown = online is None
+    # Read all three even after an error: a definite gate reset or firmware
+    # disconnect takes precedence over a different unavailable property.
+    for name, expected in (("pd_verifed", "1"), ("verify_process", "0"),
+                           ("request_vdm_cmd", None)):
+        try:
+            if expected is None:
+                if vdm_state(root)[0] == 0:
+                    return False
+            else:
+                value = read_node(root, name)
+                if value not in ("0", "1"):
+                    raise ValueError(f"invalid {name} value {value!r}")
+                if value != expected:
+                    return False
+        except (OSError, ValueError) as exc:
+            print(f"warning: completed auth state unreadable: {name}: {exc}", file=sys.stderr)
+            unknown = True
+    if current_attach_token() != token or read_state_file(VERIFIED_STATE_FILE) != token:
+        return False
+    return None if unknown else True
 
 
 def print_status(root):
     for name in ("request_vdm_cmd", "authentic", "slave_authentic",
                  "adapter_svid", "adapter_id", "apdo_max",
                  "power_max", "fastchg_mode", "quick_charge_type",
-                 "pps_ptf", "pd_verifed",
+                 "pps_ptf", "verify_process", "pd_verifed",
                  "bq2597x_bus_voltage", "bq2597x_bus_current",
                  "bq2597x_slave_bus_current"):
         path = os.path.join(root, name)
         if os.path.exists(path):
-            print(f"{name}={read_node(root, name)}")
+            try:
+                value = read_node(root, name)
+            except OSError as exc:
+                print(f"warning: status unavailable: {name}: {exc}", file=sys.stderr)
+                continue
+            print(f"{name}={value}")
+
+
+def report_completed_charge(root, status=False):
+    # Reporting follows the transaction commit. It must never undo a valid
+    # digest or reopen the gate on its own when the transport is unavailable.
+    if status:
+        print_status(root)
+    try:
+        notify_completed_charge(root, NOTIFICATION_STATE_FILE)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        print(f"warning: charge notification unavailable: {exc}", file=sys.stderr)
 
 
 def node_is_one(root, name):
@@ -607,15 +993,19 @@ def verify_fuel_gauge_once(root, slave):
 def verify_fuel_gauge(root, slave, required=True, retries=10):
     result_node = "slave_authentic" if slave else "authentic"
 
-    if node_is_one(root, result_node):
-        print(f"{result_node}_verified=1")
-        return True
-
     for attempt in range(1, retries + 1):
-        if verify_fuel_gauge_once(root, slave):
-            print(f"{result_node}_verified=1")
-            return True
-        time.sleep(0.2)
+        try:
+            if node_is_one(root, result_node) or verify_fuel_gauge_once(root, slave):
+                print(f"{result_node}_verified=1")
+                return True
+        except OSError as exc:
+            if exc.errno not in (*TRANSIENT_READ_ERRORS, errno.EIO, errno.ETIMEDOUT, errno.ENODEV):
+                raise
+            print(f"{result_node}_retry={attempt} error={exc}", file=sys.stderr)
+        # Battery challenges are independent and stock retries each cell up
+        # to ten times. This does not restart an adapter UVDM exchange.
+        if attempt < retries:
+            time.sleep(0.2)
 
     print(f"{result_node}_verified=0")
     if required:
@@ -629,16 +1019,110 @@ def enable_battery_auth(root):
         raise FileNotFoundError("verify_digest sysfs node not found")
 
     verify_fuel_gauge(root, False, required=True)
+    # Stock main() waits one second between the two fuel gauges.
+    time.sleep(1.0)
     verify_fuel_gauge(root, True, required=True)
-    time.sleep(0.5)
+
+
+def authenticate_adapter(root, args, attach_token):
+    seed_index = args.seed_index if args.seed_index is not None else random.randrange(len(SEEDS))
+    print(f"seed_index={seed_index}")
+
+    def send(cmd, *values):
+        check_usb_connection(attach_token)
+        try:
+            return send_vdm(root, cmd, *values)
+        except VdmResponseTimeout:
+            # batterysecret advances after its local -EAGAIN. Do not resend
+            # the command, and do not confuse a failed GLINK write with this.
+            print(f"vdm_response=timeout cmd={cmd} action=continue", flush=True)
+            return None
+
+    adapter_svid = current_adapter_svid(root)
+    if adapter_svid != XIAOMI_SVID:
+        raise UnsupportedChargerError("Xiaomi identity missing before adapter commands")
+    print(f"adapter_svid=0x{adapter_svid:04x}")
+
+    for cmd in (1, 2, 3):
+        send(cmd)
+    send(4, SEEDS[seed_index])
+
+    challenge = secrets.token_hex(16)
+    response = send(5, challenge)
+    auth_failure = None
+    adapter_id = None
+    pd_auth = False
+    if response is None:
+        auth_failure = "adapter digest response timed out"
+    else:
+        auth = response[1].lower()
+        try:
+            valid_digest = len(auth) == 32 and len(bytes.fromhex(auth)) == 16
+        except ValueError:
+            valid_digest = False
+        if not valid_digest:
+            auth_failure = "adapter digest response is malformed"
+        else:
+            adapter_id = detect_adapter_id(root, args.timeout)
+            if not adapter_id:
+                auth_failure = "adapter_id sysfs node did not report a valid adapter id"
+            else:
+                digest = hmac.new(bytes.fromhex(KEYS[seed_index]),
+                                  bytes.fromhex(challenge + adapter_id),
+                                  hashlib.sha256).hexdigest()
+                pd_auth = hmac.compare_digest(auth, digest[:32])
+                if not pd_auth:
+                    print(f"adapter auth mismatch: seed_index={seed_index} adapter_id={adapter_id}",
+                          file=sys.stderr)
+    print(f"adapter_id={adapter_id}")
+
+    pd_auth_payload = "01000000" if pd_auth else "00000000"
+    # Stock batterysecret closes even a missing/mismatched digest with 7 -> 6
+    # carrying zero. Only successful writes followed by a fresh valid digest
+    # may open the gate; a response timeout alone is not a transport failure.
+    send(7, pd_auth_payload)
+    send(6, pd_auth_payload)
+    set_verify_process(root, False)
+    print("adapter_sequence=android:7,6")
+    if auth_failure:
+        raise UnsupportedChargerError(auth_failure, terminal=True)
+
+    # pd_verifed is the firmware's gate on the high-voltage charge path and
+    # is normally the outcome of the adapter authentication above.  Adapters
+    # without Xiaomi authentication support cannot compute this digest.
+    # Preserve the existing opt-in policy for completed but mismatched
+    # handshakes; transport failures must not assert the gate.
+    check_usb_connection(attach_token)
+    gate = False
+    if os.path.exists(os.path.join(root, "pd_verifed")):
+        gate = pd_auth
+        if not pd_auth and args.allow_unverified_adapter:
+            gate, reason = unverified_adapter_allowed(root)
+            print(f"unverified_adapter={'allowed' if gate else 'refused'}: {reason}")
+        check_usb_connection(attach_token)
+        write_node(root, "pd_verifed", "1" if gate else "0")
+        if gate and not pd_auth:
+            print("pd_verifed=1 (adapter authentication bypassed on request)")
+
+    require_current_attach()
+    write_state_file(AUTHENTICATED_STATE_FILE, attach_token if pd_auth else "none")
+    if gate:
+        write_state_file(VERIFIED_STATE_FILE, attach_token)
+    print(f"pd_auth={1 if pd_auth else 0}")
+    return gate
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--sysfs", help="directory containing request_vdm_cmd")
     parser.add_argument("--seed-index", type=int, choices=range(10), help="fixed seed index for repeatable tests")
-    parser.add_argument("--no-data-role-swap", action="store_true",
-                        help="do not request Type-C host data role before Xiaomi UVDM auth")
+    parser.add_argument("--battery-auth-only", action="store_true",
+                        help="authenticate the fuel gauges without adapter commands")
+    parser.add_argument("--role-first", action="store_true",
+                        help="compatibility option; role-first is always required")
+    parser.add_argument("--no-data-role-swap", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--probe-unknown-pps", action="store_true",
+                        help="explicitly probe the host role for a known PPS charger with missing SVID")
     parser.add_argument("--allow-unverified-adapter", action="store_true",
                         help="assert pd_verifed even when adapter authentication fails, "
                              "which enables standard PPS fast charging on third-party "
@@ -654,14 +1138,37 @@ def main():
                         help=argparse.SUPPRESS)
     parser.add_argument("--usb-online-trigger", action="store_true",
                         help=argparse.SUPPRESS)
-    parser.add_argument("--timeout", type=float, default=2.0)
+    parser.add_argument("--xm-property-trigger", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--typec-trigger", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--consume-event", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--ready-timeout", type=float, default=12.0,
+                        help="seconds to wait for SNK_Ready and PD capabilities (max 12)")
+    parser.add_argument("--timeout", type=float, default=2.0,
+                        help="seconds for source/identity discovery (max 4); "
+                             "UVDM response budgets follow the stock command table")
     args = parser.parse_args()
+    if not (0 < args.timeout <= 4 and 0 < args.ready_timeout <= 12):
+        parser.error("timeout must be in (0,4], ready-timeout in (0,12]")
 
     if args.clear_notification:
         write_state_file(NOTIFICATION_STATE_FILE, "none")
         write_state_file(CHARGE_PROFILE_STATE_FILE, "none")
         write_state_file(USB_ONLINE_STATE_FILE, "0")
+        write_state_file(VERIFIED_STATE_FILE, "none")
+        write_state_file(AUTHENTICATED_STATE_FILE, "none")
+        write_state_file(READY_STATE_FILE, "")
+        # The worker clears any stale firmware gate outside the udev process.
+        queue_auth_event()
         print("fast_charge_notification_state=cleared")
+        return
+
+    if args.xm_property_trigger:
+        if read_state_file(USB_ONLINE_STATE_FILE) == "1":
+            queue_auth_event()
+        return
+
+    if args.typec_trigger:
+        queue_auth_event()
         return
 
     if args.usb_online_trigger:
@@ -669,140 +1176,70 @@ def main():
             print("usb_online_trigger=skipped")
             return
         write_state_file(USB_ONLINE_STATE_FILE, "1")
-        start_systemd_unit(SYSTEMD_UNIT)
+        queue_auth_event()
         print("usb_online_trigger=started")
         return
 
-    root = args.sysfs or find_xiaomi_dir()
-    if not wait_usb_online(args.timeout):
-        print("usb_online=0")
-        write_state_file(NOTIFICATION_STATE_FILE, "none")
-        write_state_file(CHARGE_PROFILE_STATE_FILE, "none")
-        write_state_file(USB_ONLINE_STATE_FILE, "0")
-        return
-    write_state_file(USB_ONLINE_STATE_FILE, "1")
-
-    attach_token = current_attach_token() if args.once_per_attach else None
-    if args.once_per_attach:
-        if attach_token:
-            if read_state_file(args.state_file) == attach_token:
-                print("MiPPS auth skipped: already attempted for current Type-C attach")
-                return
-        else:
-            print("warning: no Type-C partner found for once-per-attach state",
-                  file=sys.stderr)
-
-    state, _ = vdm_state(root)
-    if auth_already_completed(root, state) and not args.force:
-        print(f"sysfs={root}")
-        enable_battery_auth(root)
-        print("MiPPS auth sequence already completed")
-        print_status(root)
-        notify_completed_charge(root, NOTIFICATION_STATE_FILE)
-        return
-
+    if args.consume_event and not args.battery_auth_only:
+        consume_auth_event()
     try:
-        seed_index = args.seed_index if args.seed_index is not None else random.randrange(len(SEEDS))
-        print(f"sysfs={root}")
-        print(f"real_type={wait_real_type(root, args.timeout)}")
-        print(f"seed_index={seed_index}")
-
-        if not args.no_data_role_swap:
-            ensure_typec_host(args.timeout)
-
-        adapter_svid = current_adapter_svid(root)
-        if adapter_svid is None:
-            print("adapter_svid=unknown")
-        else:
-            print(f"adapter_svid=0x{adapter_svid:04x}")
-            if adapter_svid != XIAOMI_SVID:
-                print(
-                    "warning: adapter_svid is not Xiaomi; continuing because "
-                    "firmware may expose a stale SVID after detach",
-                    file=sys.stderr)
-
-        # Fuel-gauge verification is per battery, not Xiaomi-adapter auth.
-        # A plain PD computer may have no PDO2/UVDM service; skipping its
-        # adapter handshake must not leave both battery flags unverified.
-        enable_battery_auth(root)
-
-        if should_skip_pdo2(root):
-            raise UnsupportedChargerError("pdo2 reports no source PDO for adapter authentication",
-                                          terminal=True)
-
-        send_vdm(root, 1, timeout=args.timeout, settle=ANDROID_CMD_SETTLE[1])
-        send_vdm(root, 2, timeout=args.timeout, settle=ANDROID_CMD_SETTLE[2])
-        send_vdm(root, 3, timeout=args.timeout, settle=ANDROID_CMD_SETTLE[3])
-        send_vdm(root, 4, SEEDS[seed_index], timeout=args.timeout,
-                 settle=ANDROID_CMD_SETTLE[4])
-
-        challenge = secrets.token_hex(16)
-        print(f"challenge={challenge}")
-        _, auth = send_vdm(root, 5, challenge, timeout=args.timeout,
-                           settle=ANDROID_CMD_SETTLE[5])
-
-        adapter_id = detect_adapter_id(root, args.timeout)
-        if not adapter_id:
-            raise UnsupportedChargerError("adapter_id sysfs node did not report a valid adapter id",
-                                          terminal=True)
-
-        digest = hmac.new(bytes.fromhex(KEYS[seed_index]),
-                          bytes.fromhex(challenge + adapter_id),
-                          hashlib.sha256).hexdigest()
-        pd_auth = auth.lower()[:32] == digest[:32]
-        if not pd_auth:
-            print(
-                f"adapter auth mismatch: seed_index={seed_index} adapter_id={adapter_id} "
-                f"expected={digest[:32]} charger={auth[:32]}",
-                file=sys.stderr)
-        print(f"adapter_id={adapter_id}")
-
-        pd_auth_payload = "01000000" if pd_auth else "00000000"
-        send_vdm(root, 6, pd_auth_payload, timeout=args.timeout, wait=False,
-                 settle=0.1)
-        if pd_auth:
-            try:
-                send_vdm(root, 8, digest[32:], timeout=args.timeout)
-                print("reverse_auth=1")
-            except UnsupportedChargerError as e:
-                print(f"warning: reverse_auth=0: {e}", file=sys.stderr)
-        else:
-            print("reverse_auth=0")
-        send_vdm(root, 7, pd_auth_payload, timeout=args.timeout, wait=False,
-                 settle=0.1)
-
-        # pd_verifed is the firmware's gate on the high-voltage charge path and
-        # is normally the outcome of the adapter authentication above.  Adapters
-        # that are not Xiaomi-branded can never compute the expected digest, so
-        # pd_auth stays 0 and plain PPS fast charging never engages even though
-        # PPS itself negotiated fine.  --allow-unverified-adapter is the explicit
-        # user opt-in that asserts the gate anyway.
-        if os.path.exists(os.path.join(root, "pd_verifed")):
-            gate = pd_auth
-            if not pd_auth and args.allow_unverified_adapter:
-                gate, reason = unverified_adapter_allowed(root)
-                print(f"unverified_adapter={'allowed' if gate else 'refused'}: {reason}")
-            write_node(root, "pd_verifed", "1" if gate else "0")
-            if gate and not pd_auth:
-                print("pd_verifed=1 (adapter authentication bypassed on request)")
-
-        print(f"pd_auth={1 if pd_auth else 0}")
-        print("MiPPS auth sequence completed")
-        print_status(root)
-        # The notification reports the real profile: MiPPS only when Xiaomi
-        # authentication succeeded, otherwise PPS/PD as negotiated.
-        notify_completed_charge(root, NOTIFICATION_STATE_FILE, pd_auth)
-    except UnsupportedChargerError as e:
-        notify_completed_charge(root, NOTIFICATION_STATE_FILE)
-        if attach_token and e.terminal:
-            write_state_file(args.state_file, attach_token)
+        root = args.sysfs or find_xiaomi_dir()
+    except FileNotFoundError:
+        if args.consume_event:
+            raise UnsupportedChargerError("charger interfaces not ready")
         raise
-    else:
-        if attach_token:
-            write_state_file(args.state_file, attach_token)
+    if args.battery_auth_only:
+        enable_battery_auth(root)
+        print("battery_auth_only=completed")
+        return
+    global ACTIVE_ATTACH
+    ACTIVE_ATTACH = current_attach_token()
+    try:
+        completed = False if args.force else auth_already_completed(root)
+        if completed is None:
+            print("MiPPS completed auth check deferred; preserving this attach's verdict")
+            return
+        if completed:
+            print("MiPPS auth sequence already completed for this attach")
+            report_completed_charge(root)
+            return
+        clear_verdict(root)
+        set_verify_process(root, False)
+        require_current_attach()
+        write_state_file(USB_ONLINE_STATE_FILE, "1")
+        # Also covers a manual invocation without the boot unit.
+        enable_battery_auth(root)
+        require_current_attach()
+        if args.once_per_attach and read_state_file(args.state_file) == ACTIVE_ATTACH and not args.force:
+            return
+        if not role_first_prelude(root, args):
+            return
+        if args.once_per_attach:
+            write_state_file(args.state_file, ACTIVE_ATTACH)
+        authenticate_adapter(root, args, ACTIVE_ATTACH)
+        print("MiPPS auth sequence completed")
+        report_completed_charge(root, status=True)
+    finally:
+        # A proof is published only after successful 7/6 writes, verify_process
+        # cleanup and the gate write. Once committed, diagnostic read failures
+        # or termination during reporting must not roll it back. Do not write
+        # verify_process again for a completed transaction on every notification.
+        keep_verdict = (bool(ACTIVE_ATTACH) and usb_is_online() is not False
+                        and current_attach_token() == ACTIVE_ATTACH
+                        and read_state_file(VERIFIED_STATE_FILE) == ACTIVE_ATTACH)
+        if not keep_verdict:
+            try:
+                set_verify_process(root, False)
+            finally:
+                clear_verdict(root)
+
 
 
 if __name__ == "__main__":
+    def interrupted(signum, _frame):
+        raise SystemExit(128 + signum)
+    signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGINT, interrupted)
     try:
         main()
     except UnsupportedChargerError as e:

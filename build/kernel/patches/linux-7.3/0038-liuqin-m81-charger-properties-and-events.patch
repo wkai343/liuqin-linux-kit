@@ -1,0 +1,82 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] Align M81 charger capabilities and vendor change events
+
+The shipping qti_battery_charger_main_m81.ko in OS2.0.6.0.VMYCNXM
+inserts blank_status and screen_cctog before SOC_DECIMAL. Its apdo_max_show
+requests property 45 (0x899c) and power_max_show requests 46 (0xd068).
+The older public enum instead reads unrelated properties 43 and 44.
+Module SHA256: b13b976e8a0d5ce2256df4f96368a6de0999aecf4dd311a9ded0f993e2cedf6b.
+
+Also restore the OEM's deferred KOBJ_CHANGE for notification 0x50 so
+userspace can observe charger capabilities arriving after USB attach.
+Keep standard battery/USB notifications separate. Cancel the worker after
+client teardown so no late RX can requeue it.
+
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -116,9 +116,10 @@
+ #define XM_PD_VERIFIED			19
+ #define XM_PDO2			20
+ #define XM_FASTCHG_MODE			38
+-#define XM_QUICK_CHARGE_TYPE		42
+-#define XM_APDO_MAX			43
+-#define XM_POWER_MAX			44
++/* M81 inserts BLANK_STATUS/SCREEN_CCTOG at 40/41 before SOC_DECIMAL. */
++#define XM_QUICK_CHARGE_TYPE		44
++#define XM_APDO_MAX			45
++#define XM_POWER_MAX			46
+ /* Additional XM properties used by the adapter/battery authentication path. */
+ #define XM_VERIFY_DIGEST		1
+ #define XM_VDM_CHARGER_VERSION		8
+@@ -446,6 +447,7 @@
+ 	bool xm_slave_fg;
+ 
+ 	struct work_struct enable_work;
++	struct work_struct xm_notify_work;
+ 	struct delayed_work refresh_work;
+ 
+ 	/*
+@@ -1976,6 +1978,15 @@
+ 	.get_property = qcom_battmgr_wls_get_property,
+ };
+ 
++/* Like the OEM xm_prop_change_work, publish vendor state outside GLINK RX. */
++static void qcom_battmgr_xm_notify_worker(struct work_struct *work)
++{
++	struct qcom_battmgr *battmgr = container_of(work, struct qcom_battmgr,
++						 xm_notify_work);
++
++	kobject_uevent(&battmgr->dev->kobj, KOBJ_CHANGE);
++}
++
+ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
+ 				      const struct qcom_battmgr_message *msg,
+ 				      int len)
+@@ -2006,8 +2017,10 @@
+ 		power_supply_changed(battmgr->wls_psy);
+ 		break;
+ 	case NOTIF_XM_PROPERTY:
+-		if (battmgr->variant == QCOM_BATTMGR_SM8475)
+-			break;
++		if (battmgr->variant == QCOM_BATTMGR_SM8475) {
++			schedule_work(&battmgr->xm_notify_work);
++			break;
++		}
+ 		fallthrough;
+ 	default:
+ 		dev_err(battmgr->dev, "unknown notification: %#x\n", notification);
+@@ -2693,6 +2706,14 @@
+ 	if (ret)
+ 		return ret;
+ 
++	/* Release the client before cancelling work so RX cannot requeue it. */
++	if (battmgr->variant == QCOM_BATTMGR_SM8475) {
++		ret = devm_work_autocancel(dev, &battmgr->xm_notify_work,
++					 qcom_battmgr_xm_notify_worker);
++		if (ret)
++			return ret;
++	}
++
+ 	battmgr->client = devm_pmic_glink_client_alloc(dev, PMIC_GLINK_OWNER_BATTMGR,
+ 						       qcom_battmgr_callback,
+ 						       qcom_battmgr_pdr_notify,

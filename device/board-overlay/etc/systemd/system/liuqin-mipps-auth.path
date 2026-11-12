@@ -1,0 +1,12 @@
+[Unit]
+Description=LiUQIN pending charger authentication events
+
+[Path]
+PathExists=/run/liuqin-mipps-auth/pending
+Unit=liuqin-mipps-auth.service
+# The worker consumes before I/O and bounds retries; a vendor event burst must
+# not permanently disable the watcher for the next cable attach.
+TriggerLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target

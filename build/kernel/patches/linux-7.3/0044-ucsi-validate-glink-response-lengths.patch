@@ -1,0 +1,116 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] Validate UCSI GLINK read and write response lengths
+
+Require the full read response for the negotiated UCSI layout before
+accessing the payload or return code. Version discovery can use either
+complete layout. Require the fixed write response size before reading
+its return code. Invalid lengths leave the request waiting for a valid
+response or its existing timeout.
+
+OEM reference for exact v1 read and write response sizes:
+https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/usb/typec/ucsi/ucsi_glink.c#L154-L195
+Upstream v2 buffer geometry:
+https://lkml.iu.edu/hypermail/linux/kernel/2510.2/09182.html
+
+diff --git a/drivers/usb/typec/ucsi/ucsi_glink.c b/drivers/usb/typec/ucsi/ucsi_glink.c
+index 3802b00..0091c90 100644
+--- a/drivers/usb/typec/ucsi/ucsi_glink.c
++++ b/drivers/usb/typec/ucsi/ucsi_glink.c
+@@ -33,15 +33,6 @@ struct ucsi_read_buf_req_msg {
+ 	struct pmic_glink_hdr   hdr;
+ };
+ 
+-struct __packed ucsi_read_buf_resp_msg {
+-	struct pmic_glink_hdr   hdr;
+-	union {
+-		u8 v2_buf[UCSI_BUF_V2_SIZE];
+-		u8 v1_buf[UCSI_BUF_V1_SIZE];
+-	} buf;
+-	u32                     ret_code;
+-};
+-
+ struct __packed ucsi_write_buf_req_msg {
+ 	struct pmic_glink_hdr   hdr;
+ 	union {
+@@ -245,46 +236,33 @@ static const struct ucsi_operations pmic_glink_ucsi_ops = {
+ 	.connector_status = pmic_glink_ucsi_connector_status,
+ };
+ 
+-static void pmic_glink_ucsi_read_ack(struct pmic_glink_ucsi *ucsi, const void *data, int len)
++static void pmic_glink_ucsi_read_ack(struct pmic_glink_ucsi *ucsi, const void *data, size_t len)
+ {
+-	u32 ret_code, resp_len, buf_len = 0;
+-	u8 *buf;
++	const size_t overhead = sizeof(struct pmic_glink_hdr) + sizeof(u32);
++	u16 version = READ_ONCE(ucsi->ucsi->version);
++	const u8 *buf = data;
++	size_t buf_len;
++	u32 ret_code;
+ 
+-	if (ucsi->ucsi->version) {
+-		if (ucsi->ucsi->version >= UCSI_VERSION_2_0) {
+-			buf = ((struct ucsi_read_buf_resp_msg *)data)->buf.v2_buf;
+-			buf_len = UCSI_BUF_V2_SIZE;
+-		} else {
+-			buf = ((struct ucsi_read_buf_resp_msg *)data)->buf.v1_buf;
+-			buf_len = UCSI_BUF_V1_SIZE;
+-		}
+-	} else if (!ucsi->ucsi_registered) {
+-		/*
+-		 * If UCSI version is not known yet because device is not registered, choose buffer
+-		 * size which best fits incoming data
+-		 */
+-		if (len > sizeof(struct pmic_glink_hdr) + UCSI_BUF_V2_SIZE) {
+-			buf = ((struct ucsi_read_buf_resp_msg *)data)->buf.v2_buf;
+-			buf_len = UCSI_BUF_V2_SIZE;
+-		} else {
+-			buf = ((struct ucsi_read_buf_resp_msg *)data)->buf.v1_buf;
+-			buf_len = UCSI_BUF_V1_SIZE;
+-		}
+-	} else {
++	if (!version && READ_ONCE(ucsi->ucsi_registered)) {
+ 		dev_err(ucsi->dev, "Device has been registered but UCSI version is still unknown\n");
+ 		return;
+ 	}
+ 
+-	resp_len = sizeof(struct pmic_glink_hdr) + buf_len + sizeof(u32);
++	/* Before the version is known, accept either complete response layout. */
++	if (version >= UCSI_VERSION_2_0 ||
++	    (!version && len == overhead + UCSI_BUF_V2_SIZE))
++		buf_len = UCSI_BUF_V2_SIZE;
++	else
++		buf_len = UCSI_BUF_V1_SIZE;
+ 
+-	if (len > resp_len)
++	if (len != overhead + buf_len) {
++		dev_warn_ratelimited(ucsi->dev, "Invalid UCSI read response length %zu\n", len);
+ 		return;
++	}
+ 
+-	/* Ensure that buffer_len leaves space for ret_code to be read back from memory */
+-	if (buf_len > len - sizeof(struct pmic_glink_hdr) - sizeof(u32))
+-		buf_len = len - sizeof(struct pmic_glink_hdr) - sizeof(u32);
+-
+-	memcpy(&ret_code, buf + buf_len, sizeof(u32));
++	buf += sizeof(struct pmic_glink_hdr);
++	memcpy(&ret_code, buf + buf_len, sizeof(ret_code));
+ 	if (ret_code)
+ 		return;
+ 
+@@ -292,10 +270,15 @@ static void pmic_glink_ucsi_read_ack(struct pmic_glink_ucsi *ucsi, const void *d
+ 	complete(&ucsi->read_ack);
+ }
+ 
+-static void pmic_glink_ucsi_write_ack(struct pmic_glink_ucsi *ucsi, const void *data, int len)
++static void pmic_glink_ucsi_write_ack(struct pmic_glink_ucsi *ucsi, const void *data, size_t len)
+ {
+ 	const struct ucsi_write_buf_resp_msg *resp = data;
+ 
++	if (len != sizeof(*resp)) {
++		dev_warn_ratelimited(ucsi->dev, "Invalid UCSI write response length %zu\n", len);
++		return;
++	}
++
+ 	if (resp->ret_code)
+ 		return;
+ 

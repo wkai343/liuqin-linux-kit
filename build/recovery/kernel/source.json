@@ -5,7 +5,7 @@
   "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
   "tag": "v7.3.4",
   "commit": "7595a62d45ee1a2297eafa5f2ef5d0a45142d84d",
-  "expected_source_tree": "ccef6c353798b84c0ee6054649f0326f5ec9884d",
+  "expected_source_tree": "c2361341a23f431773ffe3ee11be845834751bcc",
   "config": {
     "path": "build/recovery/kernel/7.3.4.config",
     "sha256": "84e4eeb8b0004d8f73c7cb956efe53e13bf9a6d580918a1214892bda95469f39"
@@ -104,6 +104,38 @@
       "sha256": "6db2252d5bf8a346f176c40ae5d1fd4759b662f7183668af39988de1960734e8"
     },
     {
+      "path": "build/kernel/patches/linux-7.3/0037-liuqin-refresh-fuel-gauge.patch",
+      "sha256": "dcc76ea70538fb9d67d4263a3114fd590a154fdc56da548ffd26b815fc43d4d1"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0038-liuqin-m81-charger-properties-and-events.patch",
+      "sha256": "1443715df269a4e73ff5aa59d05f3d9e891d6c4c56d7daaa72a64413ab333c24"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0039-liuqin-ucsi-partner-source-pdos.patch",
+      "sha256": "49711b6157b10191f7f8959597254351cebb61a9bf13c58a72d1bbaf59948541"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0040-ucsi-pps-power-supply.patch",
+      "sha256": "7fe3a3297afd07df9f52c97c2d47d818bcda130b611689f54a32a3c0c0a6ec2b"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0041-ucsi-refresh-partner-capabilities.patch",
+      "sha256": "5a4de3a06df0dee41000c98c657fd5919571491d7fa97d854b43ff22d55099eb"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0042-ucsi-recover-registration-failures.patch",
+      "sha256": "188f5472d326507d7ba7f496ee72e2adcecbf3ffaeaa1815587ac5f0344cd9ce"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0043-glink-retry-firmware-readiness.patch",
+      "sha256": "846bcc9cdc345d454689a3dbbd4d02ebd76df1c2614e248f4ec19b54119594a0"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0044-ucsi-validate-glink-response-lengths.patch",
+      "sha256": "eb6e1a955cbb696e3bc9447ae5def64c1be0b066f86de8bf17a520da9416039d"
+    },
+    {
       "path": "build/recovery/kernel/patches/linux-7.3/0001-recovery-peripheral-handoff.patch",
       "sha256": "ccb0f030fb1bed451301961d3d9c67d1b45060f67beb936a9aaf32a9db998f62"
     }
@@ -131,7 +163,7 @@
   "build_timestamp": "2026-11-11T00:00:00+00:00",
   "shared_kernel": {
     "path": "build/kernel/source.json",
-    "sha256": "b0a48b5cdb674ca61c3ec6a02aacfed1a3d09c5f50841cdc4e4f8a99ec1d3aba"
+    "sha256": "515f8404fafc3f44ce2cac52d595ca7767f782a778ae2d8049eb824e63a34a67"
   },
   "touch_patches": [
     {

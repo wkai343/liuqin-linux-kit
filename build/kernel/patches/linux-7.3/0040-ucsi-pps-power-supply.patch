@@ -1,0 +1,298 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] usb: typec: ucsi: decode PPS source supply properties
+
+The UCSI power-supply implementation shared by OEM Liuqin and upstream
+interprets every selected PDO/RDO as a fixed supply. PPS uses different
+bit fields and 20 mV / 50 mA request units. Decode PPS requests, publish
+PD_PPS / programmable online status and selected APDO limits, while
+retaining fixed-PD source capability semantics. These are negotiated
+values, not an ADC measurement or a writable charging policy.
+
+Validate the selected PDO index, reject unsupported or invalid request
+formats, and suppress input readings while detached or sourcing power.
+Clear detached capability caches and publish a complete PDO read only
+after every response succeeds. For the Liuqin UCSI 1.0 workaround, retain
+negotiated-power-change notifications despite the missing PDO_DETAILS bit
+so the cached RDO follows firmware voltage changes; other optional
+notifications stay capability-gated. OEM enabled this notification too.
+
+diff --git a/drivers/usb/typec/ucsi/psy.c b/drivers/usb/typec/ucsi/psy.c
+--- a/drivers/usb/typec/ucsi/psy.c
++++ b/drivers/usb/typec/ucsi/psy.c
+@@ -75,23 +75,87 @@
+ 	return 0;
+ }
+ 
++static bool ucsi_psy_is_sink(struct ucsi_connector *con)
++{
++	return UCSI_CONSTAT(con, CONNECTED) &&
++	       UCSI_CONSTAT(con, PWR_DIR) == TYPEC_SINK;
++}
++
++static bool ucsi_psy_is_pps(u32 pdo)
++{
++	return pdo_type(pdo) == PDO_TYPE_APDO &&
++	       pdo_apdo_type(pdo) == APDO_TYPE_PPS;
++}
++
++static int ucsi_psy_get_pd_request(struct ucsi_connector *con, u32 *pdo, u32 *rdo)
++{
++	unsigned int index;
++
++	if (!ucsi_psy_is_sink(con) ||
++	    UCSI_CONSTAT(con, PWR_OPMODE) != UCSI_CONSTAT_PWR_OPMODE_PD)
++		return -ENODATA;
++
++	*rdo = READ_ONCE(con->rdo);
++	index = rdo_index(*rdo);
++	if (con->num_pdos <= 0 || con->num_pdos > PDO_MAX_OBJECTS ||
++	    !index || index > (unsigned int)con->num_pdos)
++		return -ENODATA;
++
++	*pdo = con->src_pdos[index - 1];
++	return *pdo ? 0 : -ENODATA;
++}
++
++/* UCSI exposes the negotiated request, not measured bus voltage/current. */
++static int ucsi_psy_pps_request(u32 pdo, u32 rdo, bool voltage)
++{
++	unsigned int mv, ma;
++
++	mv = ((rdo >> RDO_PROG_VOLT_SHIFT) & RDO_PROG_VOLT_MASK) *
++	     RDO_PROG_VOLT_MV_STEP;
++	ma = ((rdo >> RDO_PROG_CURR_SHIFT) & RDO_PROG_CURR_MASK) *
++	     RDO_PROG_CURR_MA_STEP;
++	if (mv < pdo_pps_apdo_min_voltage(pdo) ||
++	    mv > pdo_pps_apdo_max_voltage(pdo) || !ma ||
++	    ma > pdo_pps_apdo_max_current(pdo))
++		return -ENODATA;
++
++	return (voltage ? mv : ma) * 1000;
++}
++
+ static int ucsi_psy_get_online(struct ucsi_connector *con,
+ 			       union power_supply_propval *val)
+ {
++	u32 pdo, rdo;
++
+ 	val->intval = UCSI_PSY_OFFLINE;
+-	if (UCSI_CONSTAT(con, CONNECTED) &&
+-	    (UCSI_CONSTAT(con, PWR_DIR) == TYPEC_SINK))
++	if (ucsi_psy_is_sink(con)) {
+ 		val->intval = UCSI_PSY_FIXED_ONLINE;
++		if (!ucsi_psy_get_pd_request(con, &pdo, &rdo) && ucsi_psy_is_pps(pdo))
++			val->intval = UCSI_PSY_PROG_ONLINE;
++	}
+ 	return 0;
+ }
+ 
+ static int ucsi_psy_get_voltage_min(struct ucsi_connector *con,
+ 				    union power_supply_propval *val)
+ {
+-	u32 pdo;
++	u32 pdo, rdo;
++
++	if (!ucsi_psy_is_sink(con)) {
++		val->intval = 0;
++		return 0;
++	}
+ 
+ 	switch (UCSI_CONSTAT(con, PWR_OPMODE)) {
+ 	case UCSI_CONSTAT_PWR_OPMODE_PD:
++		if (ucsi_psy_get_pd_request(con, &pdo, &rdo))
++			return -ENODATA;
++		if (ucsi_psy_is_pps(pdo)) {
++			val->intval = pdo_pps_apdo_min_voltage(pdo) * 1000;
++			break;
++		}
++		if (pdo_type(pdo) == PDO_TYPE_APDO)
++			return -ENODATA;
+ 		pdo = con->src_pdos[0];
+ 		val->intval = pdo_fixed_voltage(pdo) * 1000;
+ 		break;
+@@ -111,11 +175,24 @@
+ static int ucsi_psy_get_voltage_max(struct ucsi_connector *con,
+ 				    union power_supply_propval *val)
+ {
+-	u32 pdo;
++	u32 pdo, rdo;
+ 	int max_voltage = 0;
++
++	if (!ucsi_psy_is_sink(con)) {
++		val->intval = 0;
++		return 0;
++	}
+ 
+ 	switch (UCSI_CONSTAT(con, PWR_OPMODE)) {
+ 	case UCSI_CONSTAT_PWR_OPMODE_PD:
++		if (ucsi_psy_get_pd_request(con, &pdo, &rdo))
++			return -ENODATA;
++		if (ucsi_psy_is_pps(pdo)) {
++			val->intval = pdo_pps_apdo_max_voltage(pdo) * 1000;
++			break;
++		}
++		if (pdo_type(pdo) == PDO_TYPE_APDO)
++			return -ENODATA;
+ 		for (int i = 0; i < con->num_pdos; i++) {
+ 			int pdo_voltage = 0;
+ 
+@@ -143,17 +220,28 @@
+ static int ucsi_psy_get_voltage_now(struct ucsi_connector *con,
+ 				    union power_supply_propval *val)
+ {
+-	int index;
+-	u32 pdo;
++	u32 pdo, rdo;
++	int voltage;
++
++	if (!ucsi_psy_is_sink(con)) {
++		val->intval = 0;
++		return 0;
++	}
+ 
+ 	switch (UCSI_CONSTAT(con, PWR_OPMODE)) {
+ 	case UCSI_CONSTAT_PWR_OPMODE_PD:
+-		index = rdo_index(con->rdo);
+-		if (index > 0) {
+-			pdo = con->src_pdos[index - 1];
++		if (ucsi_psy_get_pd_request(con, &pdo, &rdo))
++			return -ENODATA;
++		if (ucsi_psy_is_pps(pdo)) {
++			voltage = ucsi_psy_pps_request(pdo, rdo, true);
++			if (voltage < 0)
++				return voltage;
++			val->intval = voltage;
++		} else if (pdo_type(pdo) == PDO_TYPE_FIXED) {
+ 			val->intval = pdo_fixed_voltage(pdo) * 1000;
+ 		} else {
+-			val->intval = 0;
++			/* Variable/battery PDOs do not report the operating voltage. */
++			return -ENODATA;
+ 		}
+ 		break;
+ 	case UCSI_CONSTAT_PWR_OPMODE_TYPEC3_0:
+@@ -172,16 +260,24 @@
+ static int ucsi_psy_get_current_max(struct ucsi_connector *con,
+ 				    union power_supply_propval *val)
+ {
+-	u32 pdo;
++	u32 pdo, rdo;
+ 	int max_current = 0;
+ 
+-	if (!UCSI_CONSTAT(con, CONNECTED)) {
++	if (!ucsi_psy_is_sink(con)) {
+ 		val->intval = 0;
+ 		return 0;
+ 	}
+ 
+ 	switch (UCSI_CONSTAT(con, PWR_OPMODE)) {
+ 	case UCSI_CONSTAT_PWR_OPMODE_PD:
++		if (ucsi_psy_get_pd_request(con, &pdo, &rdo))
++			return -ENODATA;
++		if (ucsi_psy_is_pps(pdo)) {
++			val->intval = pdo_pps_apdo_max_current(pdo) * 1000;
++			break;
++		}
++		if (pdo_type(pdo) == PDO_TYPE_APDO)
++			return -ENODATA;
+ 		for (int i = 0; i < con->num_pdos; i++) {
+ 			int pdo_current = 0;
+ 
+@@ -212,14 +308,29 @@
+ static int ucsi_psy_get_current_now(struct ucsi_connector *con,
+ 				    union power_supply_propval *val)
+ {
+-	if (!UCSI_CONSTAT(con, CONNECTED)) {
++	u32 pdo, rdo;
++	int current_ua;
++
++	if (!ucsi_psy_is_sink(con)) {
+ 		val->intval = 0;
+ 		return 0;
+ 	}
+ 
+ 	switch (UCSI_CONSTAT(con, PWR_OPMODE)) {
+ 	case UCSI_CONSTAT_PWR_OPMODE_PD:
+-		val->intval = rdo_op_current(con->rdo) * 1000;
++		if (ucsi_psy_get_pd_request(con, &pdo, &rdo))
++			return -ENODATA;
++		if (ucsi_psy_is_pps(pdo)) {
++			current_ua = ucsi_psy_pps_request(pdo, rdo, false);
++			if (current_ua < 0)
++				return current_ua;
++			val->intval = current_ua;
++		} else if (pdo_type(pdo) == PDO_TYPE_FIXED || pdo_type(pdo) == PDO_TYPE_VAR) {
++			val->intval = rdo_op_current(rdo) * 1000;
++		} else {
++			/* Battery RDOs encode power; other APDO formats are unsupported. */
++			return -ENODATA;
++		}
+ 		break;
+ 	case UCSI_CONSTAT_PWR_OPMODE_TYPEC1_5:
+ 		val->intval = UCSI_TYPEC_1_5_CURRENT * 1000;
+@@ -240,10 +351,15 @@
+ static int ucsi_psy_get_usb_type(struct ucsi_connector *con,
+ 				 union power_supply_propval *val)
+ {
++	u32 pdo, rdo;
++
+ 	val->intval = POWER_SUPPLY_USB_TYPE_C;
+ 	if (UCSI_CONSTAT(con, CONNECTED) &&
+-	    UCSI_CONSTAT(con, PWR_OPMODE) == UCSI_CONSTAT_PWR_OPMODE_PD)
++	    UCSI_CONSTAT(con, PWR_OPMODE) == UCSI_CONSTAT_PWR_OPMODE_PD) {
+ 		val->intval = POWER_SUPPLY_USB_TYPE_PD;
++		if (!ucsi_psy_get_pd_request(con, &pdo, &rdo) && ucsi_psy_is_pps(pdo))
++			val->intval = POWER_SUPPLY_USB_TYPE_PD_PPS;
++	}
+ 
+ 	return 0;
+ }
+diff --git a/drivers/usb/typec/ucsi/ucsi.c b/drivers/usb/typec/ucsi/ucsi.c
+--- a/drivers/usb/typec/ucsi/ucsi.c
++++ b/drivers/usb/typec/ucsi/ucsi.c
+@@ -922,12 +922,14 @@
+ 
+ static int ucsi_get_src_pdos(struct ucsi_connector *con)
+ {
+-	int ret;
+-
+-	ret = ucsi_get_pdos(con, TYPEC_SOURCE, 1, con->src_pdos);
++	u32 pdos[PDO_MAX_OBJECTS] = {};
++	int ret;
++
++	ret = ucsi_get_pdos(con, TYPEC_SOURCE, 1, pdos);
+ 	if (ret < 0)
+ 		return ret;
+ 
++	memcpy(con->src_pdos, pdos, sizeof(pdos));
+ 	con->num_pdos = ret;
+ 
+ 	ucsi_port_psy_changed(con);
+@@ -1324,6 +1326,10 @@
+ 
+ static void ucsi_unregister_partner(struct ucsi_connector *con)
+ {
++	con->rdo = 0;
++	con->num_pdos = 0;
++	memset(con->src_pdos, 0, sizeof(con->src_pdos));
++
+ 	if (!con->partner)
+ 		return;
+ 
+@@ -2084,9 +2090,13 @@
+ 	if (!(features & UCSI_CAP_ALT_MODE_DETAILS))
+ 		ntfy &= ~UCSI_ENABLE_NTFY_CAM_CHANGE;
+ 
+-	if (!(features & UCSI_CAP_PDO_DETAILS))
+-		ntfy &= ~(UCSI_ENABLE_NTFY_PWR_LEVEL_CHANGE |
+-			  UCSI_ENABLE_NTFY_CAP_CHANGE);
++	if (!(features & UCSI_CAP_PDO_DETAILS)) {
++		ntfy &= ~UCSI_ENABLE_NTFY_CAP_CHANGE;
++		/* M81 omits PDO_DETAILS but reports negotiated RDO changes. */
++		if (!(ucsi->quirks & UCSI_READ_PARTNER_SOURCE_PDOS) ||
++		    ucsi->version != UCSI_VERSION_1_0)
++			ntfy &= ~UCSI_ENABLE_NTFY_PWR_LEVEL_CHANGE;
++	}
+ 
+ 	if (!(features & UCSI_CAP_EXT_SUPPLY_NOTIFICATIONS))
+ 		ntfy &= ~UCSI_ENABLE_NTFY_EXT_PWR_SRC_CHANGE;

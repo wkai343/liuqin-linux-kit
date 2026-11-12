@@ -1,0 +1,494 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] Retry firmware readiness per PMIC GLINK service generation
+
+Retry transient notification subscription and synchronous UCSI registration
+failures at one-second intervals, at most ten attempts per service instance.
+Do not consume a new service's retry budget with an old request, or postpone
+its UP event with a stale delayed retry. Coalesced DOWN/UP must replace old
+UCSI ports even when the worker only sees the final UP state.
+
+Drain battery work before releasing its client on removal and probe unwind.
+Serialize UCSI connector notification dispatch with registration ownership,
+while preserving command completions needed to finish pending transactions.
+Reset the reused core's initialization budget and pending-event bit; publish
+ports only after the final CCI read succeeds so retries clean up partial ports.
+
+OEM reference (no automatic retry in these public implementations):
+https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/power/supply/qti_battery_charger.c
+https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/usb/typec/ucsi/ucsi_glink.c
+Built on the registration ownership fix already carried in patch 0042:
+https://github.com/yzddmr6/linux-sm8450-liuqin/commit/9f9cd5ac3bc1fade2c2584a051913a2b03d506d2
+Retry budgets and generation tracking are local Linux recovery policy.
+No firmware restart, PPM reset override or charging-policy write is added.
+
+diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
+index 6674b76a1..670353052 100644
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -20,11 +20,14 @@
+ #include <linux/property.h>
+ #include <linux/soc/qcom/pdr.h>
+ #include <linux/soc/qcom/pmic_glink.h>
++#include <linux/spinlock.h>
+ #include <linux/math.h>
+ #include <linux/units.h>
+ 
+ #define BATTMGR_CHEMISTRY_LEN	4
+ #define BATTMGR_STRING_LEN	128
++#define BATTMGR_ENABLE_ATTEMPTS	10
++#define BATTMGR_ENABLE_RETRY_DELAY	HZ
+ 
+ enum qcom_battmgr_variant {
+ 	QCOM_BATTMGR_SM8350,
+@@ -424,6 +427,11 @@ struct qcom_battmgr {
+ 	struct completion ack;
+ 
+ 	bool service_up;
++	bool stopping;
++	bool notifications_enabled;
++	spinlock_t state_lock;
++	u32 service_generation;
++	unsigned int enable_attempts;
+ 
+ 	struct qcom_battmgr_info info;
+ 	struct qcom_battmgr_status status;
+@@ -446,7 +454,7 @@ struct qcom_battmgr {
+ 	/* verify_slave_flag: selects the slave fuel gauge for verify_digest. */
+ 	bool xm_slave_fg;
+ 
+-	struct work_struct enable_work;
++	struct delayed_work enable_work;
+ 	struct work_struct xm_notify_work;
+ 	struct delayed_work refresh_work;
+ 
+@@ -2555,22 +2563,73 @@ static int qcom_battmgr_resume(struct device *dev)
+ 
+ static DEFINE_SIMPLE_DEV_PM_OPS(qcom_battmgr_pm_ops, NULL, qcom_battmgr_resume);
+ 
++static bool qcom_battmgr_enable_retry(int ret)
++{
++	return ret == -EAGAIN || ret == -EBUSY || ret == -ETIMEDOUT ||
++		ret == -ECONNRESET || ret == -ENOTCONN || ret == -ENODEV ||
++		ret == -EIO;
++}
++
+ static void qcom_battmgr_enable_worker(struct work_struct *work)
+ {
+-	struct qcom_battmgr *battmgr = container_of(work, struct qcom_battmgr, enable_work);
++	struct qcom_battmgr *battmgr = container_of(to_delayed_work(work),
++						 struct qcom_battmgr, enable_work);
+ 	struct qcom_battmgr_enable_request req = {
+ 		.hdr.owner = cpu_to_le32(PMIC_GLINK_OWNER_BATTMGR),
+ 		.hdr.type = cpu_to_le32(PMIC_GLINK_NOTIFY),
+ 		.hdr.opcode = cpu_to_le32(BATTMGR_REQUEST_NOTIFICATION),
+ 	};
++	unsigned long flags;
++	unsigned int attempt;
++	u32 generation;
++	bool valid, retry = false;
+ 	int ret;
+ 
++	spin_lock_irqsave(&battmgr->state_lock, flags);
++	if (!battmgr->service_up || battmgr->stopping ||
++	    battmgr->notifications_enabled ||
++	    battmgr->enable_attempts >= BATTMGR_ENABLE_ATTEMPTS) {
++		spin_unlock_irqrestore(&battmgr->state_lock, flags);
++		return;
++	}
++	generation = battmgr->service_generation;
++	attempt = ++battmgr->enable_attempts;
++	spin_unlock_irqrestore(&battmgr->state_lock, flags);
++
+ 	mutex_lock(&battmgr->lock);
+-	ret = qcom_battmgr_request(battmgr, &req, sizeof(req));
++	/* Waiting for another property request may span a firmware restart. */
++	spin_lock_irqsave(&battmgr->state_lock, flags);
++	valid = battmgr->service_up && !battmgr->stopping &&
++		  generation == battmgr->service_generation;
++	spin_unlock_irqrestore(&battmgr->state_lock, flags);
++	ret = valid ? qcom_battmgr_request(battmgr, &req, sizeof(req)) : -ENOTCONN;
+ 	mutex_unlock(&battmgr->lock);
+-	if (ret)
+-		dev_err(battmgr->dev, "failed to request power notifications\n");
+-	else {
++
++	spin_lock_irqsave(&battmgr->state_lock, flags);
++	valid = battmgr->service_up && !battmgr->stopping &&
++		  generation == battmgr->service_generation;
++	if (valid) {
++		if (!ret) {
++			battmgr->notifications_enabled = true;
++		} else if (qcom_battmgr_enable_retry(ret) &&
++			   attempt < BATTMGR_ENABLE_ATTEMPTS) {
++			/* Serialize with DOWN/UP so an old retry cannot delay a new UP. */
++			mod_delayed_work(system_wq, &battmgr->enable_work,
++					 BATTMGR_ENABLE_RETRY_DELAY);
++			retry = true;
++		}
++	}
++	spin_unlock_irqrestore(&battmgr->state_lock, flags);
++	if (!valid)
++		return;
++	if (ret) {
++		if (retry)
++			dev_dbg(battmgr->dev, "power notification attempt %u failed: %d\n",
++				attempt, ret);
++		else
++			dev_err(battmgr->dev, "power notifications unavailable after %u attempts: %d\n",
++				attempt, ret);
++	} else {
+ 		/* Re-publish an already-attached supply after the firmware client
+ 		 * is ready. Registration may have been observed while service_up
+ 		 * was false, and no new physical attach event is guaranteed.
+@@ -2590,12 +2649,40 @@ static void qcom_battmgr_enable_worker(struct work_struct *work)
+ static void qcom_battmgr_pdr_notify(void *priv, int state)
+ {
+ 	struct qcom_battmgr *battmgr = priv;
++	bool up = state == SERVREG_SERVICE_STATE_UP;
++	unsigned long flags;
++
++	/* PMIC GLINK invokes this callback under its client spinlock. */
++	spin_lock_irqsave(&battmgr->state_lock, flags);
++	if (!battmgr->stopping && up != battmgr->service_up) {
++		WRITE_ONCE(battmgr->service_up, up);
++		battmgr->service_generation++;
++		battmgr->enable_attempts = 0;
++		battmgr->notifications_enabled = false;
++		if (up)
++			mod_delayed_work(system_wq, &battmgr->enable_work, 0);
++		else
++			cancel_delayed_work(&battmgr->enable_work);
++	}
++	spin_unlock_irqrestore(&battmgr->state_lock, flags);
++}
+ 
+-	if (state == SERVREG_SERVICE_STATE_UP) {
+-		battmgr->service_up = true;
+-		schedule_work(&battmgr->enable_work);
+-	} else {
+-		battmgr->service_up = false;
++static void qcom_battmgr_stop(void *data)
++{
++	struct qcom_battmgr *battmgr = data;
++	unsigned long flags;
++
++	spin_lock_irqsave(&battmgr->state_lock, flags);
++	battmgr->stopping = true;
++	WRITE_ONCE(battmgr->service_up, false);
++	battmgr->service_generation++;
++	spin_unlock_irqrestore(&battmgr->state_lock, flags);
++
++	/* Drain requests while the client is still alive, including probe unwind. */
++	disable_delayed_work_sync(&battmgr->enable_work);
++	if (battmgr->variant == QCOM_BATTMGR_SM8475) {
++		disable_delayed_work_sync(&battmgr->refresh_work);
++		disable_work_sync(&battmgr->xm_notify_work);
+ 	}
+ }
+ 
+@@ -2640,6 +2727,7 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
+ 	psy_cfg_supply.num_supplicants = 1;
+ 
+ 	mutex_init(&battmgr->lock);
++	spin_lock_init(&battmgr->state_lock);
+ 	init_completion(&battmgr->ack);
+ 
+ 	match = of_match_device(qcom_battmgr_of_variants, dev->parent);
+@@ -2701,8 +2789,8 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
+ 					     "failed to register wireless charing power supply\n");
+ 	}
+ 
+-	ret = devm_work_autocancel(dev, &battmgr->enable_work,
+-				   qcom_battmgr_enable_worker);
++	ret = devm_delayed_work_autocancel(dev, &battmgr->enable_work,
++					 qcom_battmgr_enable_worker);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -2729,6 +2817,10 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
+ 			return ret;
+ 	}
+ 
++	ret = devm_add_action_or_reset(dev, qcom_battmgr_stop, battmgr);
++	if (ret)
++		return ret;
++
+ 	pmic_glink_client_register(battmgr->client);
+ 
+ 	if (battmgr->variant == QCOM_BATTMGR_SM8475) {
+diff --git a/drivers/usb/typec/ucsi/ucsi.c b/drivers/usb/typec/ucsi/ucsi.c
+index 72d376a86..71d93f94d 100644
+--- a/drivers/usb/typec/ucsi/ucsi.c
++++ b/drivers/usb/typec/ucsi/ucsi.c
+@@ -1627,7 +1627,8 @@ void ucsi_connector_change(struct ucsi *ucsi, u8 num)
+ {
+ 	struct ucsi_connector *con;
+ 
+-	if (!(ucsi->ntfy & UCSI_ENABLE_NTFY_CONNECTOR_CHANGE)) {
++	con = smp_load_acquire(&ucsi->connector);
++	if (!con || !(ucsi->ntfy & UCSI_ENABLE_NTFY_CONNECTOR_CHANGE)) {
+ 		dev_dbg(ucsi->dev, "Early connector change event\n");
+ 		return;
+ 	}
+@@ -1639,7 +1640,7 @@ void ucsi_connector_change(struct ucsi *ucsi, u8 num)
+ 		return;
+ 	}
+ 
+-	con = &ucsi->connector[num - 1];
++	con += num - 1;
+ 
+ 	if (!test_and_set_bit(EVENT_PENDING, &ucsi->flags))
+ 		schedule_work(&con->work);
+@@ -2241,14 +2242,15 @@ static int ucsi_init(struct ucsi *ucsi)
+ 	if (ret < 0)
+ 		goto err_unregister;
+ 
+-	ucsi->connector = connector;
+-	ucsi->ntfy = ntfy;
+-
+ 	mutex_lock(&ucsi->ppm_lock);
+ 	ret = ucsi->ops->read_cci(ucsi, &cci);
+ 	mutex_unlock(&ucsi->ppm_lock);
+ 	if (ret)
+-		return ret;
++		goto err_unregister;
++
++	/* Publish only a complete initialization; retries must not reuse ports. */
++	ucsi->ntfy = ntfy;
++	smp_store_release(&ucsi->connector, connector);
+ 	if (UCSI_CCI_CONNECTOR(cci))
+ 		ucsi_connector_change(ucsi, UCSI_CCI_CONNECTOR(cci));
+ 
+@@ -2457,6 +2459,10 @@ int ucsi_register(struct ucsi *ucsi)
+ 		UCSI_BCD_GET_MINOR(ucsi->version),
+ 		UCSI_BCD_GET_SUBMINOR(ucsi->version));
+ 
++	/* A reused interface gets a fresh asynchronous initialization budget. */
++	ucsi->work_count = 0;
++	WRITE_ONCE(ucsi->ntfy, 0);
++	clear_bit(EVENT_PENDING, &ucsi->flags);
+ 	queue_delayed_work(system_dfl_long_wq, &ucsi->work, 0);
+ 
+ 	ucsi_debugfs_register(ucsi);
+@@ -2482,6 +2488,7 @@ void ucsi_unregister(struct ucsi *ucsi)
+ 	ucsi_debugfs_unregister(ucsi);
+ 
+ 	/* Disable notifications */
++	WRITE_ONCE(ucsi->ntfy, 0);
+ 	ucsi->ops->async_control(ucsi, cmd);
+ 
+ 	if (!ucsi->connector)
+diff --git a/drivers/usb/typec/ucsi/ucsi_glink.c b/drivers/usb/typec/ucsi/ucsi_glink.c
+index ef176f7e4..3802b009f 100644
+--- a/drivers/usb/typec/ucsi/ucsi_glink.c
++++ b/drivers/usb/typec/ucsi/ucsi_glink.c
+@@ -16,6 +16,8 @@
+ #include "ucsi.h"
+ 
+ #define PMIC_GLINK_MAX_PORTS		3
++#define PMIC_GLINK_UCSI_REGISTER_ATTEMPTS	10
++#define PMIC_GLINK_UCSI_REGISTER_DELAY	HZ
+ 
+ #define UCSI_BUF_V1_SIZE		(UCSI_MESSAGE_OUT + (UCSI_MESSAGE_OUT - UCSI_MESSAGE_IN))
+ #define UCSI_BUF_V2_SIZE		(UCSIv2_MESSAGE_OUT + (UCSIv2_MESSAGE_OUT - UCSI_MESSAGE_IN))
+@@ -74,10 +76,14 @@ struct pmic_glink_ucsi {
+ 	struct mutex lock;	/* protects concurrent access to PMIC Glink interface */
+ 
+ 	struct work_struct notify_work;
+-	struct work_struct register_work;
++	struct delayed_work register_work;
+ 	spinlock_t state_lock;
+ 	bool ucsi_registered;
+ 	bool pd_running;
++	bool stopping;
++	u32 service_generation;
++	u32 registered_generation;
++	unsigned int register_attempts;
+ 
+ 	u8 read_buf[UCSI_BUF_V2_SIZE];
+ };
+@@ -299,6 +305,7 @@ static void pmic_glink_ucsi_write_ack(struct pmic_glink_ucsi *ucsi, const void *
+ static void pmic_glink_ucsi_notify(struct work_struct *work)
+ {
+ 	struct pmic_glink_ucsi *ucsi = container_of(work, struct pmic_glink_ucsi, notify_work);
++	unsigned long flags;
+ 	u32 cci;
+ 	int ret;
+ 
+@@ -308,30 +315,100 @@ static void pmic_glink_ucsi_notify(struct work_struct *work)
+ 		return;
+ 	}
+ 
++	spin_lock_irqsave(&ucsi->state_lock, flags);
++	/* Keep command completions flowing while old ports are being removed. */
++	if (!ucsi->ucsi_registered || !ucsi->pd_running || ucsi->stopping ||
++	    ucsi->registered_generation != ucsi->service_generation)
++		cci &= ~GENMASK(7, 1);
+ 	ucsi_notify_common(ucsi->ucsi, cci);
++	spin_unlock_irqrestore(&ucsi->state_lock, flags);
++}
++
++static void pmic_glink_ucsi_unregister(struct pmic_glink_ucsi *ucsi)
++{
++	unsigned long flags;
++	bool registered;
++
++	/* Exclude connector dispatch before freeing ports, without blocking ACKs. */
++	spin_lock_irqsave(&ucsi->state_lock, flags);
++	registered = ucsi->ucsi_registered;
++	ucsi->ucsi_registered = false;
++	spin_unlock_irqrestore(&ucsi->state_lock, flags);
++	if (registered)
++		ucsi_unregister(ucsi->ucsi);
++}
++
++static bool pmic_glink_ucsi_register_retry(int ret)
++{
++	/* A zero version (-ENODEV) also occurs before the PPM is ready. */
++	return ret == -EAGAIN || ret == -EBUSY || ret == -ETIMEDOUT ||
++		ret == -ECONNRESET || ret == -ENOTCONN || ret == -ENODEV ||
++		ret == -EIO;
+ }
+ 
+ static void pmic_glink_ucsi_register(struct work_struct *work)
+ {
+-	struct pmic_glink_ucsi *ucsi = container_of(work, struct pmic_glink_ucsi, register_work);
++	struct pmic_glink_ucsi *ucsi = container_of(to_delayed_work(work),
++						 struct pmic_glink_ucsi, register_work);
+ 	unsigned long flags;
+-	bool pd_running;
++	unsigned int attempt;
++	u32 generation;
++	bool pd_running, valid, retry = false;
+ 	int ret;
+ 
+ 	spin_lock_irqsave(&ucsi->state_lock, flags);
++	if (ucsi->stopping) {
++		spin_unlock_irqrestore(&ucsi->state_lock, flags);
++		return;
++	}
+ 	pd_running = ucsi->pd_running;
++	generation = ucsi->service_generation;
+ 	spin_unlock_irqrestore(&ucsi->state_lock, flags);
+ 
+-	if (!ucsi->ucsi_registered && pd_running) {
+-		ret = ucsi_register(ucsi->ucsi);
+-		if (ret) {
+-			dev_err(ucsi->dev, "UCSI registration failed: %d\n", ret);
+-			return;
+-		}
++	/* Even coalesced DOWN/UP must dispose of the previous service's ports. */
++	if (ucsi->ucsi_registered &&
++	    (!pd_running || ucsi->registered_generation != generation)) {
++		pmic_glink_ucsi_unregister(ucsi);
++	}
++
++	spin_lock_irqsave(&ucsi->state_lock, flags);
++	if (ucsi->stopping || !ucsi->pd_running || ucsi->ucsi_registered ||
++	    ucsi->register_attempts >= PMIC_GLINK_UCSI_REGISTER_ATTEMPTS) {
++		spin_unlock_irqrestore(&ucsi->state_lock, flags);
++		return;
++	}
++	generation = ucsi->service_generation;
++	attempt = ++ucsi->register_attempts;
++	spin_unlock_irqrestore(&ucsi->state_lock, flags);
++
++	ret = ucsi_register(ucsi->ucsi);
++	spin_lock_irqsave(&ucsi->state_lock, flags);
++	valid = !ucsi->stopping && ucsi->pd_running &&
++		generation == ucsi->service_generation;
++	if (!ret) {
++		/* Track ownership even for stale success, so it can be torn down. */
+ 		ucsi->ucsi_registered = true;
+-	} else if (ucsi->ucsi_registered && !pd_running) {
+-		ucsi_unregister(ucsi->ucsi);
+-		ucsi->ucsi_registered = false;
++		ucsi->registered_generation = generation;
++	} else if (valid && pmic_glink_ucsi_register_retry(ret) &&
++		   attempt < PMIC_GLINK_UCSI_REGISTER_ATTEMPTS) {
++		mod_delayed_work(system_wq, &ucsi->register_work,
++				 PMIC_GLINK_UCSI_REGISTER_DELAY);
++		retry = true;
++	}
++	spin_unlock_irqrestore(&ucsi->state_lock, flags);
++
++	if (!valid) {
++		if (!ret)
++			pmic_glink_ucsi_unregister(ucsi);
++		return;
++	}
++	if (ret) {
++		if (retry)
++			dev_dbg(ucsi->dev, "UCSI registration attempt %u failed: %d\n",
++				attempt, ret);
++		else
++			dev_err(ucsi->dev, "UCSI registration unavailable after %u attempts: %d\n",
++				attempt, ret);
+ 	}
+ }
+ 
+@@ -356,12 +433,18 @@ static void pmic_glink_ucsi_callback(const void *data, size_t len, void *priv)
+ static void pmic_glink_ucsi_pdr_notify(void *priv, int state)
+ {
+ 	struct pmic_glink_ucsi *ucsi = priv;
++	bool running = state == SERVREG_SERVICE_STATE_UP;
+ 	unsigned long flags;
+ 
+ 	spin_lock_irqsave(&ucsi->state_lock, flags);
+-	ucsi->pd_running = (state == SERVREG_SERVICE_STATE_UP);
++	if (!ucsi->stopping && running != ucsi->pd_running) {
++		ucsi->pd_running = running;
++		ucsi->service_generation++;
++		ucsi->register_attempts = 0;
++		/* DOWN cancels the retry delay; teardown needs process context. */
++		mod_delayed_work(system_wq, &ucsi->register_work, 0);
++	}
+ 	spin_unlock_irqrestore(&ucsi->state_lock, flags);
+-	schedule_work(&ucsi->register_work);
+ }
+ 
+ static void pmic_glink_ucsi_destroy(void *data)
+@@ -370,7 +453,7 @@ static void pmic_glink_ucsi_destroy(void *data)
+ 
+ 	/* Drain the work items before ucsi_destroy() frees the ucsi instance */
+ 	cancel_work_sync(&ucsi->notify_work);
+-	cancel_work_sync(&ucsi->register_work);
++	cancel_delayed_work_sync(&ucsi->register_work);
+ 
+ 	/* Protect to make sure we're not in a middle of a transaction from a glink callback */
+ 	mutex_lock(&ucsi->lock);
+@@ -413,7 +496,7 @@ static int pmic_glink_ucsi_probe(struct auxiliary_device *adev,
+ 	dev_set_drvdata(dev, ucsi);
+ 
+ 	INIT_WORK(&ucsi->notify_work, pmic_glink_ucsi_notify);
+-	INIT_WORK(&ucsi->register_work, pmic_glink_ucsi_register);
++	INIT_DELAYED_WORK(&ucsi->register_work, pmic_glink_ucsi_register);
+ 	init_completion(&ucsi->read_ack);
+ 	init_completion(&ucsi->write_ack);
+ 	spin_lock_init(&ucsi->state_lock);
+@@ -483,16 +566,20 @@ static int pmic_glink_ucsi_probe(struct auxiliary_device *adev,
+ static void pmic_glink_ucsi_remove(struct auxiliary_device *adev)
+ {
+ 	struct pmic_glink_ucsi *ucsi = dev_get_drvdata(&adev->dev);
++	unsigned long flags;
++
++	spin_lock_irqsave(&ucsi->state_lock, flags);
++	ucsi->stopping = true;
++	ucsi->pd_running = false;
++	ucsi->service_generation++;
++	spin_unlock_irqrestore(&ucsi->state_lock, flags);
+ 
+ 	/* Callbacks can queue work until devres releases the client */
+ 	disable_work_sync(&ucsi->notify_work);
+-	disable_work_sync(&ucsi->register_work);
++	disable_delayed_work_sync(&ucsi->register_work);
+ 
+ 	/* register_work may have unregistered the instance already */
+-	if (ucsi->ucsi_registered) {
+-		ucsi->ucsi_registered = false;
+-		ucsi_unregister(ucsi->ucsi);
+-	}
++	pmic_glink_ucsi_unregister(ucsi);
+ }
+ 
+ static const struct auxiliary_device_id pmic_glink_ucsi_id_table[] = {

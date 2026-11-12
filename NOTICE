@@ -13,6 +13,12 @@ Its COPYING, LICENSES directory, file-level SPDX identifiers and original
 authorship are retained. Exact sources are recorded in build/kernel/source.json
 and build/recovery/kernel/source.json.
 
+UCSI registration and connector-lifetime fixes in patch 0042 are adapted from
+yzddmr6 and Codex's linux-sm8450-liuqin commits, respectively:
+https://github.com/yzddmr6/linux-sm8450-liuqin/commit/9f9cd5ac3bc1fade2c2584a051913a2b03d506d2
+https://github.com/yzddmr6/linux-sm8450-liuqin/commit/f43a4aa7fa89c6e227c5ec763e695576e66e2eb7
+The kernel files' existing licenses apply.
+
 Sensor stack
 ------------
 
@@ -38,6 +44,9 @@ Charger authentication
   and the standard PPS switch (--allow-unverified-adapter) are by xiaoabiao,
   https://github.com/yzddmr6/xiaomipad-6pro-mainline/pull/7. The file is not
   covered by the project's MIT license.
+  Role-first sequencing by yumo666666 and current-attach verification are
+  adapted from xiaomipad-6pro-mainline commits 43aa1cb and 87f0250:
+  https://github.com/yzddmr6/xiaomipad-6pro-mainline.
 
 Desktop and build components
 ----------------------------

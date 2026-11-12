@@ -1,0 +1,121 @@
+From: Liuqin Linux Kit contributors
+Subject: [PATCH] Read Liuqin partner source PDOs despite missing capability bit
+
+The M81 UCSI 1.0 PPM reports features=1 (no PDO_DETAILS), but implements
+GET_PDOS for the attached source. This hides the first fixed PDO's USB
+communication flag from standard Type-C sysfs, forcing userspace to guess
+whether an unidentified PPS source is a charger or a USB data host.
+
+Enable only partner source PDO reads on Liuqin, while connected as a PD sink;
+leave local and sink capability queries gated by the advertised features.
+Keep the firmware notification mask unchanged. Reject truncated/oversize PDO
+responses and release an incomplete partner PD object so late capabilities
+can be retried. Existing partner lifetime removes the capabilities on detach.
+
+--- a/drivers/usb/typec/ucsi/ucsi.h
++++ b/drivers/usb/typec/ucsi/ucsi.h
+@@ -510,6 +510,8 @@
+ 
+ /* USB4 connection can imply that USB communcation is supported */
+ #define UCSI_USB4_IMPLIES_USB	BIT(2)
++/* Some PPMs implement partner source PDO reads without advertising them. */
++#define UCSI_READ_PARTNER_SOURCE_PDOS	BIT(3)
+ };
+ 
+ #define UCSI_MAX_DATA_LENGTH(u) (((u)->version < UCSI_VERSION_2_0) ? 0x10 : 0xff)
+--- a/drivers/usb/typec/ucsi/ucsi_glink.c
++++ b/drivers/usb/typec/ucsi/ucsi_glink.c
+@@ -7,6 +7,7 @@
+ #include <linux/module.h>
+ #include <linux/mutex.h>
+ #include <linux/of_device.h>
++#include <linux/platform_data/liuqin.h>
+ #include <linux/property.h>
+ #include <linux/soc/qcom/pdr.h>
+ #include <linux/usb/typec_mux.h>
+@@ -426,6 +427,12 @@
+ 	if (match)
+ 		ucsi->ucsi->quirks = *(unsigned long *)match->data;
+ 
++	/* Liuqin's M81 PPM omits PDO_DETAILS, but GET_PDOS for the attached
++	 * source works. Keep the workaround separate from local/sink PDOs.
++	 */
++	if (liuqin_board_quirks())
++		ucsi->ucsi->quirks |= UCSI_READ_PARTNER_SOURCE_PDOS;
++
+ 	ucsi_set_drvdata(ucsi->ucsi, ucsi);
+ 
+ 	device_for_each_child_node_scoped(dev, fwnode) {
+--- a/drivers/usb/typec/ucsi/ucsi.c
++++ b/drivers/usb/typec/ucsi/ucsi.c
+@@ -877,6 +877,8 @@
+ 	command |= is_source(role) ? UCSI_GET_PDOS_SRC_PDOS : 0;
+ 	ret = ucsi_send_command(ucsi, command, pdos + offset,
+ 				num_pdos * sizeof(u32));
++	if (ret >= 0 && ((size_t)ret > num_pdos * sizeof(u32) || ret % sizeof(u32)))
++		ret = -EPROTO;
+ 	if (ret < 0 && ret != -ETIMEDOUT)
+ 		dev_err(ucsi->dev, "UCSI_GET_PDOS failed (%d)\n", ret);
+ 
+@@ -890,8 +892,15 @@
+ 	u8 num_pdos;
+ 	int ret;
+ 
+-	if (!(ucsi->cap.features & UCSI_CAP_PDO_DETAILS))
+-		return 0;
++	if (!(ucsi->cap.features & UCSI_CAP_PDO_DETAILS)) {
++		if (!(ucsi->quirks & UCSI_READ_PARTNER_SOURCE_PDOS) ||
++		    ucsi->version != UCSI_VERSION_1_0 || !is_partner ||
++		    !is_source(role))
++			return 0;
++		if (!UCSI_CONSTAT(con, CONNECTED) || UCSI_CONSTAT(con, PWR_DIR) ||
++		    UCSI_CONSTAT(con, PWR_OPMODE) != UCSI_CONSTAT_PWR_OPMODE_PD)
++			return -ENODATA;
++	}
+ 
+ 	/* UCSI max payload means only getting at most 4 PDOs at a time */
+ 	ret = ucsi_read_pdos(con, role, is_partner, pdos, 0, UCSI_MAX_PDOS);
+@@ -1070,8 +1079,13 @@
+ 		return PTR_ERR(con->partner_pd);
+ 
+ 	cap = ucsi_get_pd_caps(con, TYPEC_SOURCE, true);
+-	if (IS_ERR(cap))
+-	    return PTR_ERR(cap);
++	if (IS_ERR(cap) ||
++	    (!cap && con->ucsi->quirks & UCSI_READ_PARTNER_SOURCE_PDOS)) {
++		/* A late source response must be retryable on this same partner. */
++		usb_power_delivery_unregister(con->partner_pd);
++		con->partner_pd = NULL;
++		return cap ? PTR_ERR(cap) : -ENODATA;
++	}
+ 
+ 	con->partner_source_caps = cap;
+ 
+@@ -1233,7 +1247,7 @@
+ 		typec_set_pwr_opmode(con->port, TYPEC_PWR_MODE_PD);
+ 		ucsi_partner_task(con, ucsi_get_src_pdos, 30, 0);
+ 		ucsi_partner_task(con, ucsi_check_altmodes, 30, HZ);
+-		ucsi_partner_task(con, ucsi_register_partner_pdos, 1, HZ);
++		ucsi_partner_task(con, ucsi_register_partner_pdos, 30, HZ);
+ 		ucsi_partner_task(con, ucsi_check_connector_capability, 1, HZ);
+ 		break;
+ 	case UCSI_CONSTAT_PWR_OPMODE_TYPEC1_5:
+@@ -1506,7 +1520,7 @@
+ 				ucsi_partner_task(con, ucsi_check_cable, 1, HZ);
+ 
+ 			if (UCSI_CONSTAT(con, PWR_OPMODE) == UCSI_CONSTAT_PWR_OPMODE_PD) {
+-				ucsi_partner_task(con, ucsi_register_partner_pdos, 1, HZ);
++				ucsi_partner_task(con, ucsi_register_partner_pdos, 30, HZ);
+ 				ucsi_partner_task(con, ucsi_check_connector_capability, 1, HZ);
+ 			}
+ 		} else {
+--- a/drivers/usb/typec/class.c
++++ b/drivers/usb/typec/class.c
+@@ -1004,6 +1004,7 @@
+ 	}
+ 
+ 	partner->pd = pd;
++	kobject_uevent(&partner->dev.kobj, KOBJ_CHANGE);
+ 
+ 	return 0;
+ }
