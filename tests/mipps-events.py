@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Exercise real systemd path activation with the fake charger, never hardware."""
+"""Exercise persistent inotify/systemd event handling with a fake charger."""
 from pathlib import Path
+import fcntl
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -35,20 +37,27 @@ def worker(directory, phase):
                 if real_now() >= deadline:
                     raise TimeoutError('event test controller did not release worker')
                 real_sleep(0.02)
-        if phase == 'during-auth':
-            case.cells.side_effect = lambda _root: barrier()
-        result = {'start_partner': case.partner()}
-        try:
-            case.run_main()
-        except fixture.auth.ChargerDisconnectedError as exc:
-            result['cancelled'] = str(exc)
-        result.update(commands=case.commands, gate=case.get('pd_verifed'))
-        with (directory / 'results').open('a') as stream:
-            stream.write(json.dumps(result) + '\n')
-        if phase == 'after-return':
-            # The authentication entry point has returned, but the service
-            # has not yet become inactive: an in-process loop cannot cover it.
-            barrier()
+        fixture.auth.AUTH_LOCK_FILE = str(directory / 'auth.lock')
+        calls = 0
+        def process():
+            nonlocal calls
+            first = calls == 0
+            calls += 1
+            case.cells.side_effect = (lambda _root: barrier()) if first and phase == 'during-auth' else None
+            offset = len(case.commands)
+            result = {'start_partner': case.partner(), 'pid': os.getpid()}
+            try:
+                case.run_main()
+            except fixture.auth.ChargerDisconnectedError as exc:
+                result['cancelled'] = str(exc)
+            result.update(commands=case.commands[offset:], gate=case.get('pd_verifed'))
+            with (directory / 'results').open('a') as stream:
+                stream.write(json.dumps(result) + '\n')
+            if first and phase == 'after-return':
+                # An event at the old oneshot exit boundary must also survive
+                # the resident worker returning from a transaction.
+                barrier()
+        fixture.auth.watch_auth_events(process)
     finally:
         case.doCleanups()
 
@@ -99,29 +108,38 @@ class EventTests(unittest.TestCase):
             elif line.startswith('TriggerLimitIntervalSec='):
                 properties.append('--path-property=' + line)
         subprocess.run(['systemd-run', '--user', '--quiet', '--unit=' + self.unit,
-                        '--property=Type=oneshot', '--property=StartLimitIntervalSec=0',
+                        '--property=Type=simple', '--property=StartLimitIntervalSec=0',
                         *properties, sys.executable, str(Path(__file__).resolve()),
                         '--worker', str(self.directory), phase], check=True,
                        capture_output=True, text=True, timeout=10)
         self.wait_for(lambda: (self.directory / 'ready').exists())
         self.assertFalse((self.directory / 'pending').exists())
+        with (self.directory / 'auth.lock').open('a') as lock:
+            with self.assertRaises(BlockingIOError):
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         (self.directory / 'partner').write_text('partner-2')
         (self.directory / 'pending').touch()
         for _ in range(3):
             self.ctl('--no-block', 'start', self.unit + '.service')
         (self.directory / 'release').touch()
         self.wait_for(lambda: len(self.results()) == 2)
-        self.wait_for(lambda: self.ctl('show', '--property=SubState', '--value',
-                                      self.unit + '.path') == 'waiting')
+        self.assertEqual(self.ctl('show', '--property=ActiveState', '--value', self.unit + '.service'), 'active')
         self.assertFalse((self.directory / 'pending').exists())
         first, second = self.results()
         self.assertEqual(first['start_partner'], 'partner-1')
         self.assertEqual(second['start_partner'], 'partner-2')
         self.assertEqual(second['commands'], [1, 2, 3, 4, 5, 7, 6])
         self.assertEqual(second['gate'], '1')
+        self.assertEqual(first['pid'], second['pid'])
+        self.assertEqual(int(self.ctl('show', '--property=MainPID', '--value', self.unit + '.service')), first['pid'])
+        # The resident process must release the authentication lock while idle.
+        with (self.directory / 'auth.lock').open('a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        time.sleep(0.1)
+        self.assertEqual(len(self.results()), 2)
         return first
 
-    def test_new_attach_during_auth_is_processed_after_old_worker_exits(self):
+    def test_new_attach_during_auth_is_processed_by_the_same_worker(self):
         first = self.exercise('during-auth')
         self.assertEqual(first['cancelled'], 'Type-C partner changed')
         self.assertEqual(first['commands'], [])
@@ -131,6 +149,18 @@ class EventTests(unittest.TestCase):
         first = self.exercise('after-return')
         self.assertEqual(first['commands'], [1, 2, 3, 4, 5, 7, 6])
         self.assertEqual(first['gate'], '1')
+
+    def test_repeated_events_reuse_the_worker_and_never_replay_authentication(self):
+        self.exercise('after-return')
+        initial = self.results()
+        for _ in range(30):
+            (self.directory / 'pending').touch()
+        self.wait_for(lambda: len(self.results()) > len(initial))
+        self.wait_for(lambda: not (self.directory / 'pending').exists())
+        results = self.results()
+        self.assertEqual({r['pid'] for r in results}, {initial[0]['pid']})
+        self.assertTrue(all(r['commands'] == [] and r['gate'] == '1' for r in results[len(initial):]))
+        self.assertEqual(self.ctl('show', '--property=NRestarts', '--value', self.unit + '.service'), '0')
 
 
 if __name__ == '__main__':

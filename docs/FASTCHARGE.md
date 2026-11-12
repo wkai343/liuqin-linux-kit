@@ -78,7 +78,7 @@ Rec 使用独立维护内核和固定 USB 设备模式，冷启动充电正常�
 
 `input_current_limit` 是固件报告的请求/限额，不是实际输入电流。满电时低输入可以正常；应观察输入是否随负载增加、电池是否持续补供，以及 Full/Charging 状态。满电短测不能代替低电量、高负载或其他充电器验收。
 
-实时输入观测使用 `qcom-battmgr-usb` 的 `voltage_now` / `current_now`，需要独立功率计确认实际功率。
+总输入观测使用 `liuqin-charge-status`，汇总 USB 主通路和两路电荷泵，见[总输入电流与功率](#总输入电流与功率)。
 UCSI 辅助电源节点提供当前协商电压和请求电流，不提供电流传感器采样；它们的乘积表示请求功率，
 不能当作实际输入功率。供电能力目录用于识别当前来源，不参与设定充电电压或电流。
 Type-C 的 `source-capabilities` 目录随完整 source PDO 集合变化而刷新，包含认证后的 APDO 上限。
@@ -153,7 +153,7 @@ PDO，忽略响应缓冲区未被本次回复覆盖的尾部。只有内容变�
 | 路径 | 作用 |
 | --- | --- |
 | `/usr/local/libexec/liuqin-mipps-auth` | 认证守护进程（Python，GPL-2.0-only，见 `NOTICE`） |
-| `/etc/systemd/system/liuqin-mipps-auth.service` | 运行守护进程的 oneshot 单元 |
+| `/etc/systemd/system/liuqin-mipps-auth.service` | 常驻等待充电事件，逐次串行处理认证 |
 | `/etc/systemd/system/liuqin-mipps-battery-auth.service` | 启动时先认证双电芯；适配器单元等待它完成 |
 | `/etc/udev/rules.d/90-liuqin-mipps-auth.rules` | Type-C 连接与 USB 供电上线时拉起单元 |
 
@@ -209,13 +209,17 @@ GLINK 写入失败、读取传输超时、身份变化或断线立即终止；�
 后续读数失败、通知失败或报告阶段中断不会撤销已完成的认证；实际断线仍会清除。
 PDO 数据能力保护、连接凭据和等待总时限为本项目适配；与原厂的具体差异见[原厂依据](FASTCHARGE-SOURCES.md#等待与失败处理的边界)。
 udev 只记录待处理标记并启动 `liuqin-mipps-auth.path`，不做充电接口 I/O。
-该 path 单元监视 `/run/liuqin-mipps-auth/pending`；oneshot 工作进程在读取充电接口之前取走标记，
-执行期间的新事件重新留下标记。systemd 在工作进程退出后重新检查路径，因此认证中途或退出窗口
-收到的重插、能力变化事件会再次调度，不依赖下一条固件通知。启动与路径触发不施加频率封锁，
-执行由 `flock` 串行化，握手次数与等待预算仍按连接限制；没有无条件自动重启循环。
-路径单元随设备支持包启用，udev 触发也会启动它。接口尚未出现时先消费事件再退出，避免残留标记反复启动。
+该 path 单元监视 `/run/liuqin-mipps-auth/pending`，在首个事件到来时启动常驻进程。
+进程使用 inotify 等待后续标记，空闲时不轮询充电接口，也不持有认证锁。
+每次处理在读取充电接口之前取走标记，执行期间的新事件重新留下标记，返回后立即补处理。
+认证中途或返回窗口收到的重插、能力变化事件均保留；已有标记时合并通知，不重复调用 systemd 启动。
+每轮处理仍使用同一 `flock` 与电芯认证串行化，握手次数和等待预算继续按连接限制。
+监听先于初次状态检查建立；事件队列溢出时重新核对状态，监听目录失效时由 systemd 重启服务。
+普通认证失败结束当前事务，进程继续等待事件；新进程复核本次连接凭据，不能重放已尝试的握手。
+路径单元随设备支持包启用，udev 触发也会启动它。接口尚未出现时先消费事件再等待，避免残留标记反复处理。
 
-适配器单元总时限 120 秒，电芯启动单元总时限 80 秒。默认不安装旧的
+适配器每轮锁等待最多 35 秒、认证处理最多 120 秒，空闲等待不计入认证时限；超时仍执行原有清理。
+电芯启动单元总时限 80 秒。默认不安装旧的
 `10-allow-unverified-adapter.conf`；RPM 升级移除包自带的旧覆盖，个人额外配置须自行核对。
 
 ### 身份发现与供电能力
@@ -254,6 +258,32 @@ PDO2 为零、身份未知、传输失败、挑战应答缺失/格式错误及 I
 代码来源与署名保留在 [NOTICE](../NOTICE)。桌面通知中的瓦数仅为固件报告的最大能力。
 MiPPS 提示还要求本次连接认证通过且 `fastchg_mode` 开启。
 
+## 总输入电流与功率
+
+原厂将 USB 主通路电流与两路电荷泵的总线电流分开导出。电荷泵工作时，
+`qcom-battmgr-usb/current_now` 可以接近零，不能单独代表整个设备的输入电流。
+`liuqin-charge-status` 保留这些接口的原始含义，提供只读汇总：
+
+- 总输入电流 = USB 主通路电流 + 主电荷泵电流 + 从电荷泵电流。
+- 输入功率估算 = USB 电压 × USB 主通路电流 + 电荷泵总线电压 × 两路电荷泵电流之和。
+
+USB 节点使用微伏、微安，电荷泵原始节点使用毫伏、毫安。JSON 中的总电流和功率分别为
+`total_input_current_ua`（µA）、`estimated_input_power_uw`（µW），`components` 保留分路数值。
+两路电荷泵使用原厂公开的共用总线电压；读取是顺序采样，功率是估算值，不能替代外部功率计。
+汇总不使用 `power_max`、输入电流限额或 UCSI 请求值作为实测电流、功率。
+
+拔线或处于 source 供电角色时汇总为零，不使用残留电荷泵读数。
+任一必要通路不可读、数据无效或采样期间检测到连接替换时，该次结果标为不可用；
+不把失败通路当成零，也不发布部分总数。原厂依据见[总输入观测](FASTCHARGE-SOURCES.md#总输入观测)。
+
+```sh
+liuqin-charge-status
+liuqin-charge-status --json --count 150 --interval 2
+```
+
+默认读取一次；多次采样输出每次的结果，发生读取失败时继续采样并最终返回非零退出码。
+无需重启内核，命令随设备支持包安装。
+
 ## 验证
 
 ```sh
@@ -264,13 +294,13 @@ cat /sys/class/typec/port0/data_role
 cat /sys/class/power_supply/qcom-battmgr-usb/voltage_now
 cat /sys/class/power_supply/qcom-battmgr-usb/current_now
 cat /sys/class/power_supply/qcom-battmgr-bat/current_now
+liuqin-charge-status --json
 ```
 
 USB 的 `voltage_now` / `current_now` 单位分别为微伏、微安，其乘积除以 `10^12` 得到
-输入功率的瓦数估计。它与电池侧功率不同，也不是 `voltage_max` 与 `current_max` 的乘积。
-电荷泵工作时 USB 的 `current_now` 可能不覆盖全部充电电流，须同时观察电池侧功率与
-`bq2597x_bus_current` / `bq2597x_slave_bus_current`。节点分次读取且可能存在采样延迟，
-应连续观察；需要精确确认峰值时使用兼容所测协议的功率计。
+USB 主通路的功率估算，不包含另行导出的双电荷泵通路。
+总输入功率、电池侧功率和 UCSI 协商功率是不同的观测对象。
+节点分次读取且可能存在采样延迟，应连续观察；精确的外部输入测量使用兼容所测协议的功率计。
 
 固件按电量与温度调整充电档位。验证最高功率应在较低电量、正常温度下进行；满电时低功率
 不能证明快充不支持。当前没有足够依据将固定电量阈值或未认证时的固定电压作为所有适配器的规律。

@@ -4,8 +4,8 @@ Description=LiUQIN pending charger authentication events
 [Path]
 PathExists=/run/liuqin-mipps-auth/pending
 Unit=liuqin-mipps-auth.service
-# The worker consumes before I/O and bounds retries; a vendor event burst must
-# not permanently disable the watcher for the next cable attach.
+# Start the persistent worker for the first event. Its inotify listener handles
+# subsequent markers, including those arriving during a transaction.
 TriggerLimitIntervalSec=0
 
 [Install]

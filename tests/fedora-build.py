@@ -93,6 +93,10 @@ class FedoraTests(unittest.TestCase):
         charger=(root/'etc/systemd/system/liuqin-mipps-auth.service').read_text()
         self.assertIn('After=liuqin-mipps-battery-auth.service',charger)
         self.assertIn('--role-first',charger)
+        self.assertIn('--watch',charger)
+        observer=root/'usr/local/bin/liuqin-charge-status'
+        self.assertTrue(observer.stat().st_mode & 0o111)
+        self.assertEqual(observer.read_bytes(),(PROJECT/'device/board-overlay/usr/local/bin/liuqin-charge-status').read_bytes())
         for name in ('usr/local/sbin/liuqin-gnome-usb-rescue','usr/local/sbin/liuqin-rescue',
                      'usr/local/bin/liuqin-shell','etc/systemd/system/liuqin-gnome-usb-rescue.service'):
             self.assertFalse((root/name).exists(),name)

@@ -124,6 +124,8 @@ jobs:
           python3 tests/rtc.py
           python3 tests/login-ready.py
           python3 tests/mipps-startup.py
+          python3 tests/charge-status.py
+          python3 tests/mipps-events.py
           python3 tests/storage-scope.py
           python3 tests/mkbootimg-fetch.py
           python3 tests/initramfs-inputs.py

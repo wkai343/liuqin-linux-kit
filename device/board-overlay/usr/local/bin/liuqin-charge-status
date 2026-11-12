@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+"""Read M81 USB and dual charge-pump input telemetry without changing policy."""
+import argparse
+import json
+import math
+from pathlib import Path
+import sys
+import time
+
+
+class Unavailable(ValueError):
+    pass
+
+
+def number(path, scale=1):
+    value = int(path.read_text().strip(), 10)
+    if value < 0 or value * scale > 0x7fffffff:
+        raise Unavailable(f"invalid measurement: {path.name}")
+    return value * scale
+
+
+def identity(path):
+    try:
+        st = path.stat()
+    except FileNotFoundError:
+        return None
+    return st.st_dev, st.st_ino, st.st_ctime_ns
+
+
+def connection(sysfs):
+    usb = sysfs / 'class/power_supply/qcom-battmgr-usb'
+    online = number(usb / 'online')
+    if online not in (0, 1):
+        raise Unavailable('invalid USB online state')
+    role = None
+    partners = []
+    for port in sorted((sysfs / 'class/typec').glob('port*')):
+        if not (port / 'power_role').exists():
+            continue
+        text = (port / 'power_role').read_text().strip()
+        active = [word[1:-1] for word in text.split() if word.startswith('[') and word.endswith(']')]
+        active = active or ([text] if text in ('sink', 'source') else [])
+        if len(active) != 1 or active[0] not in ('sink', 'source') or role is not None:
+            raise Unavailable('ambiguous Type-C power role')
+        role = active[0]
+        partners.append(identity(port.with_name(port.name + '-partner')))
+    if online and role is None:
+        raise Unavailable('Type-C power role is not available')
+    return online, role, tuple(partners), identity(usb)
+
+
+def sample(sysfs=Path('/sys')):
+    started = time.monotonic()
+    before = connection(sysfs)
+    result = {'schema_version': 1, 'time': time.time(), 'valid': True,
+              'online': bool(before[0]), 'power_role': before[1],
+              'total_input_current_ua': 0, 'estimated_input_power_uw': 0,
+              'components': None}
+    if before[0] and before[1] == 'sink':
+        roots = list((sysfs / 'devices/platform/pmic-glink').glob('*/xiaomi'))
+        if len(roots) != 1:
+            raise Unavailable('M81 charger interface is not available or is ambiguous')
+        xm = roots[0]
+        xm_identity = identity(xm)
+        usb = sysfs / 'class/power_supply/qcom-battmgr-usb'
+        # OEM USB_CURR_NOW is separate from the two XM bus-current channels.
+        # USB measurements use micro-units; XM bus measurements use milli-units.
+        usb_v = number(usb / 'voltage_now')
+        usb_i = number(usb / 'current_now')
+        pump_v = number(xm / 'bq2597x_bus_voltage', 1000)
+        main_i = number(xm / 'bq2597x_bus_current', 1000)
+        slave_i = number(xm / 'bq2597x_slave_bus_current', 1000)
+        if (usb_i and not usb_v) or ((main_i or slave_i) and not pump_v):
+            raise Unavailable('nonzero input current without a bus voltage')
+        current = usb_i + main_i + slave_i
+        usb_power = usb_v * usb_i // 1000000
+        pump_power = pump_v * (main_i + slave_i) // 1000000
+        if max(current, usb_power + pump_power) > 0x7fffffff:
+            raise Unavailable('aggregate measurement is out of range')
+        if identity(xm) != xm_identity:
+            raise Unavailable('charger interface changed while reading')
+        result.update(total_input_current_ua=current,
+                      estimated_input_power_uw=usb_power + pump_power,
+                      components={
+                          'usb': {'voltage_uv': usb_v, 'current_ua': usb_i,
+                                  'estimated_power_uw': usb_power},
+                          'charge_pumps': {'voltage_uv': pump_v,
+                                           'main_current_ua': main_i,
+                                           'slave_current_ua': slave_i,
+                                           'estimated_power_uw': pump_power}})
+    if connection(sysfs) != before:
+        raise Unavailable('USB connection changed while reading')
+    result['read_seconds'] = round(time.monotonic() - started, 6)
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--json', action='store_true', help='one JSON object per sample')
+    parser.add_argument('--count', type=int, default=1, help='number of samples (default: 1)')
+    parser.add_argument('--interval', type=float, default=2, help='sample interval in seconds (minimum: 1)')
+    parser.add_argument('--sysfs', type=Path, default=Path('/sys'), help='sysfs mount to read')
+    args = parser.parse_args()
+    if args.count < 1 or not math.isfinite(args.interval) or args.interval < 1:
+        parser.error('count must be positive and interval must be at least one second')
+    failed = False
+    for index in range(args.count):
+        started = time.monotonic()
+        try:
+            result = sample(args.sysfs)
+        except (OSError, ValueError) as exc:
+            failed = True
+            result = {'schema_version': 1, 'time': time.time(), 'valid': False, 'error': str(exc)}
+        if args.json:
+            print(json.dumps(result), flush=True)
+        elif not result['valid']:
+            print('Input measurement unavailable: ' + result['error'], flush=True)
+        else:
+            print(f"USB input: {result['total_input_current_ua'] / 1e6:.3f} A, "
+                  f"{result['estimated_input_power_uw'] / 1e6:.2f} W (estimate); "
+                  f"online={int(result['online'])}, role={result['power_role']}", flush=True)
+        if index + 1 < args.count:
+            time.sleep(max(0, args.interval - (time.monotonic() - started)))
+    return int(failed)
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)

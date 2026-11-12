@@ -9,6 +9,7 @@ from contextlib import ExitStack, redirect_stdout, redirect_stderr
 from pathlib import Path
 import errno
 import io
+import signal
 import sys
 import tempfile
 import types
@@ -52,7 +53,7 @@ class Tests(unittest.TestCase):
         for name in ('ATTEMPT_STATE_FILE', 'AUTHENTICATED_STATE_FILE', 'VERIFIED_STATE_FILE',
                      'READY_STATE_FILE', 'USB_ONLINE_STATE_FILE',
                      'NOTIFICATION_STATE_FILE', 'CHARGE_PROFILE_STATE_FILE',
-                     'PENDING_EVENT_FILE'):
+                     'PENDING_EVENT_FILE', 'AUTH_LOCK_FILE'):
             self.stack.enter_context(patch.object(auth, name, str(self.root / name)))
         self.online = self.mock('usb_is_online', return_value=True)
         self.partner = self.mock('current_attach_token', return_value='partner-1')
@@ -136,6 +137,9 @@ class Tests(unittest.TestCase):
         unit = PROJECT / 'device/board-overlay/etc/systemd/system/liuqin-mipps-auth.service'
         import shlex
         flags = shlex.split(unit.read_text().split('/usr/local/libexec/liuqin-mipps-auth ', 1)[1].splitlines()[0])
+        # Exercise one transaction here; the actual resident event loop has
+        # separate integration tests with real inotify and systemd.
+        flags = [flag for flag in flags if flag != '--watch']
         with patch.object(sys, 'argv', ['mipps', *flags, '--sysfs', str(self.root), '--seed-index', '0', *extra]):
             return auth.main()
 
@@ -914,7 +918,11 @@ class Tests(unittest.TestCase):
         read = self.mock('read_node')
         self.run_main('--xm-property-trigger')
         self.run_main('--clear-notification')
-        self.assertEqual(self.start.call_count, 2)
+        # Offline cleanup remains immediate, while both events share one
+        # pending marker and do not issue duplicate systemd start requests.
+        self.assertEqual(self.start.call_count, 1)
+        self.assertTrue(Path(auth.PENDING_EVENT_FILE).exists())
+        self.assertEqual(Path(auth.VERIFIED_STATE_FILE).read_text().strip(), 'none')
         read.assert_not_called()
         self.write.assert_not_called()
         self.cells.assert_not_called()
@@ -970,6 +978,58 @@ class Tests(unittest.TestCase):
         self.run_main()
         self.run_main()
         self.write.assert_not_called()
+
+    def test_event_worker_does_not_spin_on_an_unconsumed_marker(self):
+        def fail():
+            raise PermissionError('cannot consume marker')
+        old_handler = signal.getsignal(signal.SIGALRM)
+        with self.assertRaisesRegex(PermissionError, 'cannot consume'):
+            auth.watch_auth_events(fail)
+        self.assertTrue(Path(auth.PENDING_EVENT_FILE).exists())
+        self.assertEqual(signal.getsignal(signal.SIGALRM), old_handler)
+        self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0, 0))
+
+    def test_event_worker_keeps_a_new_marker_after_a_failed_transaction(self):
+        class StopWatch(BaseException):
+            pass
+        calls = []
+        def process():
+            calls.append(1)
+            auth.consume_auth_event()
+            if len(calls) == 1:
+                auth.mark_auth_event()
+                raise OSError(errno.EIO, 'temporary failure')
+            raise StopWatch()
+        with self.assertRaises(StopWatch):
+            auth.watch_auth_events(process)
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(Path(auth.PENDING_EVENT_FILE).exists())
+
+    def test_event_worker_deadline_cleans_up_without_replaying_the_attempt(self):
+        class StopWatch(BaseException):
+            pass
+        self.role.side_effect = lambda *_args: signal.raise_signal(signal.SIGALRM)
+        self.stack.enter_context(patch.object(auth.select, 'select', side_effect=StopWatch))
+        with self.assertRaises(StopWatch):
+            auth.watch_auth_events(self.run_main)
+        self.assertEqual(self.get('verify_process'), '0')
+        self.assertEqual(self.get('pd_verifed'), '0')
+        self.assertEqual(self.role.call_count, 1)
+        self.assertEqual(self.commands, [])
+        self.assertEqual(signal.getitimer(signal.ITIMER_REAL), (0, 0))
+
+    def test_event_worker_deadline_is_not_swallowed_as_a_failed_property_read(self):
+        class StopWatch(BaseException):
+            pass
+        results = []
+        def process():
+            auth.consume_auth_event()
+            results.append(auth.current_int_value(str(self.root), 'power_max'))
+        self.mock('read_node', side_effect=lambda *_args: signal.raise_signal(signal.SIGALRM))
+        self.stack.enter_context(patch.object(auth.select, 'select', side_effect=StopWatch))
+        with self.assertRaises(StopWatch):
+            auth.watch_auth_events(process)
+        self.assertEqual(results, [])
 
     def test_authentication_without_fastchg_does_not_announce_mipps(self):
         self.mock('current_battery_capacity', return_value=50)

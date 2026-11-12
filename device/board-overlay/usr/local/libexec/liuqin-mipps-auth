@@ -16,7 +16,9 @@
 # yumo666666 / xiaomipad-6pro-mainline commits 43aa1cb and 87f0250.
 
 import argparse
+import ctypes
 import errno
+import fcntl
 import json
 import glob
 import hashlib
@@ -25,7 +27,9 @@ import os
 import pwd
 import random
 import secrets
+import select
 import signal
+import struct
 import subprocess
 import sys
 import time
@@ -75,6 +79,7 @@ USB_ONLINE_STATE_FILE = "/run/liuqin-mipps-auth/usb-online"
 SYSTEMD_UNIT = "liuqin-mipps-auth.service"
 SYSTEMD_PATH_UNIT = "liuqin-mipps-auth.path"
 PENDING_EVENT_FILE = "/run/liuqin-mipps-auth/pending"
+AUTH_LOCK_FILE = "/run/liuqin-mipps-auth.lock"
 READINESS_ATTEMPTS = 3
 READINESS_RETRY_DELAY = 2.0
 # OS2.0.6.0.VMYCNXM /vendor/bin/batterysecret, usbpd_conmunication()
@@ -95,6 +100,12 @@ class UnsupportedChargerError(Exception):
         self.terminal = terminal
 
 class ChargerDisconnectedError(UnsupportedChargerError):
+    pass
+
+
+class EventProcessingTimeout(RuntimeError):
+    # Keep the transaction deadline separate from recoverable OSError reads.
+    # TimeoutError inherits OSError and could be swallowed by those helpers.
     pass
 
 
@@ -377,13 +388,20 @@ def start_systemd_unit(unit):
                    timeout=2, check=True)
 
 
-def queue_auth_event():
-    # A level-triggered path survives StartUnit coalescing and the worker's
-    # exit window. systemd rechecks it after the service becomes inactive.
+def mark_auth_event():
+    # The marker remains authoritative even if several inotify events merge.
     os.makedirs(os.path.dirname(PENDING_EVENT_FILE), exist_ok=True)
-    fd = os.open(PENDING_EVENT_FILE, os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    try:
+        fd = os.open(PENDING_EVENT_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
+    except FileExistsError:
+        return False
     os.close(fd)
-    start_systemd_unit(SYSTEMD_PATH_UNIT)
+    return True
+
+
+def queue_auth_event():
+    if mark_auth_event():
+        start_systemd_unit(SYSTEMD_PATH_UNIT)
 
 
 def consume_auth_event():
@@ -393,6 +411,79 @@ def consume_auth_event():
         os.unlink(PENDING_EVENT_FILE)
     except FileNotFoundError:
         pass
+
+
+def watch_auth_events(process):
+    """Keep one process waiting for markers; never poll charger I/O while idle."""
+    directory = os.path.dirname(PENDING_EVENT_FILE)
+    os.makedirs(directory, exist_ok=True)
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.inotify_init1.argtypes = [ctypes.c_int]
+    libc.inotify_init1.restype = ctypes.c_int
+    libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+    libc.inotify_add_watch.restype = ctypes.c_int
+    fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+    if fd < 0:
+        raise OSError(ctypes.get_errno(), 'inotify_init1')
+
+    def expired(_signum, _frame):
+        raise EventProcessingTimeout('charger event processing deadline expired')
+
+    old_alarm = signal.signal(signal.SIGALRM, expired)
+
+    def pending_identity():
+        try:
+            st = os.stat(PENDING_EVENT_FILE)
+            return st.st_dev, st.st_ino, st.st_ctime_ns
+        except FileNotFoundError:
+            return None
+
+    try:
+        # CLOSE_WRITE / MOVED_TO / CREATE plus watch invalidation. Watching the
+        # directory before checking/creating pending closes the startup race.
+        if libc.inotify_add_watch(fd, os.fsencode(directory), 0x8 | 0x80 | 0x100 | 0x400 | 0x800) < 0:
+            raise OSError(ctypes.get_errno(), 'inotify_add_watch')
+        mark_auth_event()  # Reconcile existing state once after a service restart.
+        while True:
+            marker = pending_identity()
+            if marker is not None:
+                try:
+                    with open(AUTH_LOCK_FILE, 'a') as lock:
+                        signal.setitimer(signal.ITIMER_REAL, 35)
+                        fcntl.flock(lock, fcntl.LOCK_EX)
+                        signal.setitimer(signal.ITIMER_REAL, 120)
+                        # The transaction consumes before I/O. An event arriving
+                        # during processing remains pending for the next pass.
+                        process()
+                except UnsupportedChargerError as exc:
+                    print(f'MiPPS auth skipped: {exc}', flush=True)
+                except Exception as exc:
+                    print(f'charger event failed: {exc}', file=sys.stderr, flush=True)
+                    # A failed lock/open/unlink must not busy-loop on the same
+                    # unconsumed marker. Let systemd restart after its backoff.
+                    if pending_identity() == marker:
+                        raise
+                finally:
+                    signal.setitimer(signal.ITIMER_REAL, 0)
+                continue
+            select.select([fd], [], [])
+            while True:
+                try:
+                    data = os.read(fd, 65536)
+                except BlockingIOError:
+                    break
+                offset = 0
+                while offset < len(data):
+                    _wd, mask, _cookie, length = struct.unpack_from('iIII', data, offset)
+                    offset += 16 + length
+                    if mask & (0x400 | 0x800 | 0x8000):
+                        raise RuntimeError('charger event directory watch was invalidated')
+                    if mask & 0x4000:  # IN_Q_OVERFLOW: recheck state instead of losing it.
+                        mark_auth_event()
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_alarm)
+        os.close(fd)
 
 
 def parse_power_watts(value):
@@ -1141,6 +1232,8 @@ def main():
     parser.add_argument("--xm-property-trigger", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--typec-trigger", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--consume-event", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--watch", action="store_true",
+                        help="wait for pending charger events in one persistent process")
     parser.add_argument("--ready-timeout", type=float, default=12.0,
                         help="seconds to wait for SNK_Ready and PD capabilities (max 12)")
     parser.add_argument("--timeout", type=float, default=2.0,
@@ -1149,6 +1242,8 @@ def main():
     args = parser.parse_args()
     if not (0 < args.timeout <= 4 and 0 < args.ready_timeout <= 12):
         parser.error("timeout must be in (0,4], ready-timeout in (0,12]")
+    if args.watch and (args.force or args.battery_auth_only or not args.consume_event):
+        parser.error("watch requires consume-event and cannot force or run battery-only authentication")
 
     if args.clear_notification:
         write_state_file(NOTIFICATION_STATE_FILE, "none")
@@ -1180,6 +1275,12 @@ def main():
         print("usb_online_trigger=started")
         return
 
+    if args.watch:
+        return watch_auth_events(lambda: process_auth_event(args))
+    return process_auth_event(args)
+
+
+def process_auth_event(args):
     if args.consume_event and not args.battery_auth_only:
         consume_auth_event()
     try:

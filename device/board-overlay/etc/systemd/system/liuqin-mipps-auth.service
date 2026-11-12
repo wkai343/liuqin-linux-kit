@@ -3,15 +3,16 @@ Description=LiUQIN MiPPS/PPS charger authentication
 Documentation=https://github.com/wkai343/liuqin-linux-kit/blob/main/docs/FASTCHARGE.md
 Wants=liuqin-mipps-battery-auth.service
 After=liuqin-mipps-battery-auth.service
-# Vendor property events can exceed systemd's default start burst. The worker
-# serializes execution and bounds attempts per attach; valid events must not
-# block a later cable attach through the service manager's rate limit.
+# A service restart must not block the next cable attach. Authentication
+# attempts remain bounded per connection by the worker.
 StartLimitIntervalSec=0
 
 [Service]
-Type=oneshot
-ExecStart=/usr/bin/flock -w 35 /run/liuqin-mipps-auth.lock \
-          /usr/local/libexec/liuqin-mipps-auth --timeout 4 --role-first --consume-event
-# Includes fallback cell verification, bounded DR_SWAP retries, the stock
-# per-command response budgets and cleanup of verify_process/pd_verifed.
-TimeoutStartSec=120
+Type=simple
+ExecStart=/usr/local/libexec/liuqin-mipps-auth --timeout 4 --role-first --consume-event --watch
+# One process waits on inotify between events. Each transaction takes the shared
+# authentication lock and retains its own 120-second timeout and cleanup.
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=20
+Environment=PYTHONUNBUFFERED=1
