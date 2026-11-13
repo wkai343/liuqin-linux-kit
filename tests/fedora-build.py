@@ -325,17 +325,19 @@ class FedoraTests(unittest.TestCase):
         devices=self.work/'device-rpms';devices.mkdir();(devices/'liuqin-device.rpm').write_bytes(b'device')
         stats=self.work/'liuqin-ksystemstats-gpu.rpm';stats.write_bytes(b'stats')
         fingerprint=self.work/'liuqin-fingerprint.rpm';fingerprint.write_bytes(b'fingerprint')
+        libclc=self.work/'libclc22-spirv.rpm';libclc.write_bytes(b'libclc')
         def stage(_name,_inputs,build,_artifacts):
             output=self.work/'stage';output.mkdir();build(output);return output
         with patch.object(flow,'target_runtime_root',return_value=archive), \
              patch.object(flow,'device_debs',return_value=devices), \
              patch.object(flow,'stats_rpm',return_value=stats), \
              patch.object(flow,'fingerprint_rpm',return_value=fingerprint), \
+             patch.object(flow,'libclc_rpm',return_value=libclc), \
              patch.object(flow,'stage',side_effect=stage),patch.object(flow,'target_action') as action:
             flow.apps()
         self.assertEqual(action.call_args.args[0],'apps')
         rpms=action.call_args.kwargs['rpms']
-        self.assertEqual(sorted(p.name for p in rpms.iterdir()),['liuqin-device.rpm','liuqin-fingerprint.rpm','liuqin-ksystemstats-gpu.rpm'])
+        self.assertEqual(sorted(p.name for p in rpms.iterdir()),['libclc22-spirv.rpm','liuqin-device.rpm','liuqin-fingerprint.rpm','liuqin-ksystemstats-gpu.rpm'])
         self.assertIn('Fedora 官方 plasma-setup 软件包',flow.plan()['steps'])
 
     def test_official_setup_installation_follows_first_boot_recipe(self):

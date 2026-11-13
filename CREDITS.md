@@ -70,6 +70,13 @@ Fedora 的 GPU 使用率监测使用 KDE 的 [KSystemStats](https://invent.kde.o
 上游许可证、带补丁的对应源码归档、本项目适配源码、构建脚本和对应来源记录；
 这些组件按各自文件的 GPL 等声明分发。
 
+Rusticl 的 SPIR-V 内建函数使用 Karol Herbst 维护的
+[Mesa libclc](https://gitlab.freedesktop.org/karolherbst/mesa-libclc) 分支，源自 LLVM libclc。
+固定来源与官方发布文件摘要见 `build/rootfs/mesa-libclc-source.json`。软件包保留对应源码归档、
+`LICENSE.TXT`、`CREDITS.TXT` 与作者声明，遵循上游 Apache-2.0 WITH LLVM-exception、NCSA、MIT
+等文件级许可。Khronos [OpenCL-CTS](https://github.com/KhronosGroup/OpenCL-CTS) 用于设备兼容性验证；
+测试源码和日志保存在忽略的 `out/` 目录，不作为项目自有实现或认证声明。
+
 NanoSic 键盘连接状态适配保留主线驱动作者与 GPL 声明；协议参考 Xiaomi 开源内核
 `pipa-t-oss` 的 `drivers/input/keyboard/nanosic_driver_v2/nano_i2c.c`，
 提交 `77dc8e2290f3f5f15861821564f68d30ea193449`，原作者 Nanosic Inc. / Bin.yuan，GPL-2.0。

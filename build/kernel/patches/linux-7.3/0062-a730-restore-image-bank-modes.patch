@@ -1,0 +1,37 @@
+From 38678cf7b36776a08a28070b13c252044c6f824b Mon Sep 17 00:00:00 2001
+From: Codex <codex@local>
+Date: Fri, 13 Nov 2026 20:10:27 +0800
+Subject: [PATCH] drm/msm/a730: restore texture and shader bank modes across
+ preemption
+
+---
+ drivers/gpu/drm/msm/adreno/a6xx_gpu.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_gpu.c b/drivers/gpu/drm/msm/adreno/a6xx_gpu.c
+index 081e79ea4..a1f9c4e5e 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_gpu.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_gpu.c
+@@ -842,6 +842,19 @@ static void a7xx_patch_pwrup_reglist(struct msm_gpu *gpu)
+ 		*dest++ = gpu_read(gpu, reglist->regs[i]);
+ 	}
+ 
++	/*
++	 * A730's firmware restores these non-context registers when switching
++	 * rings, as well as after IFPC. Keep the programmed bank layout in both
++	 * the texture and shader paths, matching the GEN7 power-up list.
++	 */
++	if (adreno_is_a730(adreno_gpu)) {
++		*dest++ = REG_A6XX_TPL1_NC_MODE_CNTL;
++		*dest++ = gpu_read(gpu, REG_A6XX_TPL1_NC_MODE_CNTL);
++		*dest++ = REG_A6XX_SP_NC_MODE_CNTL;
++		*dest++ = gpu_read(gpu, REG_A6XX_SP_NC_MODE_CNTL);
++		lock->preemption_list_len += 2;
++	}
++
+ 	/*
+ 	 * The overall register list is composed of
+ 	 * 1. Static IFPC-only registers
+-- 
+2.56.0
+

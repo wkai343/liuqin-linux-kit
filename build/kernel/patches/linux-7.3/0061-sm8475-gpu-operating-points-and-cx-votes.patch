@@ -1,0 +1,301 @@
+From 5c029ad8a062bca00334c263eb178552b4937cbb Mon Sep 17 00:00:00 2001
+From: wk <58632380+wkai343@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 17:41:06 +0800
+Subject: [PATCH] arm64: qcom: restore Cape GPU OPPs with GMU CX dependencies
+
+Use the 13 SM8475 operating points from the fixed Liuqin OEM DT, including
+GX voltage corners, independent CX floors and ACD droop controls. Remove
+the inherited SM8450 OPP table before defining the replacement.
+
+The GEN7 HFI GX performance entry has a CX corner index in its second
+word, which was previously named acd and always disabled. Translate the
+optional per-OPP CX levels using cx.lvl and preserve the disabled value
+for every existing platform without the property. Reject partial or
+unsupported tables and propagate power-table initialization failures.
+
+Sources: MiCode kernel_devicetree 1c507816, Xiaomi_Kernel_OpenSource
+eb49e100 (liuqin-t-oss), and OS2.0.6.0 vendor_boot DTB 02. The voltage
+values are RPMh corners, not guessed microvolts. GMU 200/500 MHz OPPs
+and the existing 12-level A730 bandwidth table already match the OEM.
+---
+ .../bindings/opp/opp-v2-qcom-adreno.yaml      | 10 +++
+ arch/arm64/boot/dts/qcom/sm8475.dtsi          | 46 ++++++++++++-
+ drivers/gpu/drm/msm/adreno/a6xx_gmu.c         | 68 ++++++++++++++++++-
+ drivers/gpu/drm/msm/adreno/a6xx_gmu.h         |  1 +
+ drivers/gpu/drm/msm/adreno/a6xx_hfi.c         |  2 +-
+ drivers/gpu/drm/msm/adreno/a6xx_hfi.h         |  3 +-
+ 6 files changed, 124 insertions(+), 6 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/opp/opp-v2-qcom-adreno.yaml b/Documentation/devicetree/bindings/opp/opp-v2-qcom-adreno.yaml
+index 0bd7d6b69..58c2a5cc2 100644
+--- a/Documentation/devicetree/bindings/opp/opp-v2-qcom-adreno.yaml
++++ b/Documentation/devicetree/bindings/opp/opp-v2-qcom-adreno.yaml
+@@ -36,6 +36,16 @@ patternProperties:
+ 
+       opp-supported-hw: true
+ 
++      qcom,opp-cx-level:
++        description: |
++          Minimum CX voltage corner required while the GPU uses this OPP.
++          On A730 the GMU performance table carries the CX corner index
++          separately from the GX/MX vote. The driver translates this RPMh
++          voltage level through the platform's cx.lvl command database.
++          When used, every GPU OPP must specify this property. Without it,
++          the driver preserves the firmware's existing CX dependency policy.
++        $ref: /schemas/types.yaml#/definitions/uint32
++
+       qcom,opp-acd-level:
+         description: |
+           A positive value representing the ACD (Adaptive Clock Distribution,
+diff --git a/arch/arm64/boot/dts/qcom/sm8475.dtsi b/arch/arm64/boot/dts/qcom/sm8475.dtsi
+index c650983a2..90e9263ae 100644
+--- a/arch/arm64/boot/dts/qcom/sm8475.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8475.dtsi
+@@ -5,6 +5,7 @@
+ 
+ #include "sm8450.dtsi"
+ 
++/delete-node/ &gpu_opp_table;
+ /delete-node/ &usb_1_hsphy;
+ /delete-node/ &ufs_mem_phy;
+ 
+@@ -62,62 +63,101 @@ &gcc {
+ };
+ 
+ &gpu {
+-/*
++	/* Cape GPU voltage corners and droop settings from the OEM power table. */
+ 	gpu_opp_table: opp-table {
+-		compatible = "operating-points-v2";
++		compatible = "operating-points-v2-adreno", "operating-points-v2";
++
+ 		opp-900000000 {
+ 			opp-hz = /bits/ 64 <900000000>;
+ 			opp-level = <RPMH_REGULATOR_LEVEL_TURBO_L1>;
++			qcom,opp-cx-level = <RPMH_REGULATOR_LEVEL_TURBO_L1>;
++			qcom,opp-acd-level = <0x882b5ffd>;
+ 		};
++
+ 		opp-862000000 {
+ 			opp-hz = /bits/ 64 <862000000>;
+ 			opp-level = <RPMH_REGULATOR_LEVEL_TURBO>;
++			qcom,opp-cx-level = <RPMH_REGULATOR_LEVEL_TURBO>;
++			qcom,opp-acd-level = <0x882b5ffd>;
+ 		};
++
+ 		opp-815000000 {
+ 			opp-hz = /bits/ 64 <815000000>;
+ 			opp-level = <RPMH_REGULATOR_LEVEL_NOM_L1>;
++			qcom,opp-cx-level = <RPMH_REGULATOR_LEVEL_NOM_L1>;
++			qcom,opp-acd-level = <0x882b5ffd>;
+ 		};
++
+ 		opp-765000000 {
+ 			opp-hz = /bits/ 64 <765000000>;
+ 			opp-level = <RPMH_REGULATOR_LEVEL_NOM>;
++			qcom,opp-cx-level = <RPMH_REGULATOR_LEVEL_NOM>;
++			qcom,opp-acd-level = <0x882c5ffd>;
+ 		};
++
+ 		opp-710000000 {
+ 			opp-hz = /bits/ 64 <710000000>;
+ 			opp-level = <RPMH_REGULATOR_LEVEL_SVS_L2>;
++			qcom,opp-cx-level = <RPMH_REGULATOR_LEVEL_NOM>;
++			qcom,opp-acd-level = <0x882c5ffd>;
+ 		};
++
+ 		opp-645000000 {
+ 			opp-hz = /bits/ 64 <645000000>;
+ 			opp-level = <RPMH_REGULATOR_LEVEL_SVS_L1>;
++			qcom,opp-cx-level = <RPMH_REGULATOR_LEVEL_SVS_L1>;
++			qcom,opp-acd-level = <0x882d5ffd>;
+ 		};
++
+ 		opp-580000000 {
+ 			opp-hz = /bits/ 64 <580000000>;
+ 			opp-level = <RPMH_REGULATOR_LEVEL_SVS_L0>;
++			qcom,opp-cx-level = <RPMH_REGULATOR_LEVEL_SVS_L1>;
++			qcom,opp-acd-level = <0x882e5ffd>;
+ 		};
++
+ 		opp-515000000 {
+ 			opp-hz = /bits/ 64 <515000000>;
+ 			opp-level = <RPMH_REGULATOR_LEVEL_SVS>;
++			qcom,opp-cx-level = <RPMH_REGULATOR_LEVEL_SVS>;
++			qcom,opp-acd-level = <0x882e5ffd>;
+ 		};
++
+ 		opp-439000000 {
+ 			opp-hz = /bits/ 64 <439000000>;
+ 			opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS_L2>;
++			qcom,opp-cx-level = <RPMH_REGULATOR_LEVEL_SVS>;
++			qcom,opp-acd-level = <0xc0285ffd>;
+ 		};
++
+ 		opp-364000000 {
+ 			opp-hz = /bits/ 64 <364000000>;
+ 			opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS_L1>;
++			qcom,opp-cx-level = <RPMH_REGULATOR_LEVEL_SVS>;
++			qcom,opp-acd-level = <0xc0285ffd>;
+ 		};
++
+ 		opp-324000000 {
+ 			opp-hz = /bits/ 64 <324000000>;
+ 			opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS>;
++			qcom,opp-cx-level = <RPMH_REGULATOR_LEVEL_LOW_SVS>;
++			qcom,opp-acd-level = <0xc02a5ffd>;
+ 		};
++
+ 		opp-285000000 {
+ 			opp-hz = /bits/ 64 <285000000>;
+ 			opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS_D1>;
++			qcom,opp-cx-level = <RPMH_REGULATOR_LEVEL_LOW_SVS>;
++			qcom,opp-acd-level = <0xc02c5ffd>;
+ 		};
++
+ 		opp-220000000 {
+ 			opp-hz = /bits/ 64 <220000000>;
+ 			opp-level = <RPMH_REGULATOR_LEVEL_MIN_SVS>;
++			qcom,opp-cx-level = <RPMH_REGULATOR_LEVEL_LOW_SVS>;
++			qcom,opp-acd-level = <0xc8285ffd>;
+ 		};
+-	};*/
++	};
+ };
+ 
+ &gpucc {
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_gmu.c b/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
+index be97598d5..1de052a26 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
+@@ -1851,6 +1851,66 @@ static int a6xx_gmu_rpmh_dep_votes_init(struct device *dev, u32 *votes,
+  * and BCM parameters to build the votes.
+  */
+ 
++static int a6xx_gmu_rpmh_gx_cx_votes_init(struct a6xx_gmu *gmu)
++{
++	struct a6xx_gpu *a6xx_gpu = container_of(gmu, struct a6xx_gpu, gmu);
++	struct adreno_gpu *adreno_gpu = &a6xx_gpu->base;
++	struct device *dev = &adreno_gpu->base.pdev->dev;
++	u32 levels[GMU_MAX_GX_FREQS] = { 0 };
++	const u16 *cx;
++	size_t size, count;
++	int i, j, ret, present = 0;
++
++	/* Keep the existing wire value for platforms without a CX dependency. */
++	memset(gmu->gx_cx_votes, 0xff, sizeof(gmu->gx_cx_votes));
++	for (i = 1; i < gmu->nr_gpu_freqs; i++) {
++		struct dev_pm_opp *opp;
++		struct device_node *np;
++
++		opp = dev_pm_opp_find_freq_exact(dev, gmu->gpu_freqs[i], true);
++		if (IS_ERR(opp))
++			return PTR_ERR(opp);
++		np = dev_pm_opp_get_of_node(opp);
++		if (!of_property_present(np, "qcom,opp-cx-level")) {
++			of_node_put(np);
++			dev_pm_opp_put(opp);
++			continue;
++		}
++		ret = of_property_read_u32(np, "qcom,opp-cx-level", &levels[i]);
++		of_node_put(np);
++		dev_pm_opp_put(opp);
++		if (ret)
++			return ret;
++		present++;
++	}
++	if (!present)
++		return 0;
++
++	/* Only A730's GEN7 HFI contract is verified for this optional field. */
++	if (!adreno_is_a730(adreno_gpu) || present != gmu->nr_gpu_freqs - 1)
++		return dev_err_probe(dev, -EINVAL, "incomplete or unsupported GPU CX table\n");
++
++	cx = cmd_db_read_aux_data("cx.lvl", &size);
++	if (IS_ERR(cx))
++		return PTR_ERR(cx);
++	if (!cx || !size || size % sizeof(*cx))
++		return -EINVAL;
++	count = size / sizeof(*cx);
++
++	/* Include the off entry, which must release the GPU's CX vote. */
++	for (i = 0; i < gmu->nr_gpu_freqs; i++) {
++		for (j = 0; j < count; j++)
++			if (cx[j] >= levels[i])
++				break;
++		if (j == count)
++			return dev_err_probe(dev, -EINVAL, "unsupported GPU CX corner %u\n",
++					     levels[i]);
++		gmu->gx_cx_votes[i] = j;
++	}
++
++	return 0;
++}
++
+ static int a6xx_gmu_rpmh_votes_init(struct a6xx_gmu *gmu)
+ {
+ 	struct a6xx_gpu *a6xx_gpu = container_of(gmu, struct a6xx_gpu, gmu);
+@@ -1861,6 +1921,10 @@ static int a6xx_gmu_rpmh_votes_init(struct a6xx_gmu *gmu)
+ 	const u16 *gmxc;
+ 	int ret;
+ 
++	ret = a6xx_gmu_rpmh_gx_cx_votes_init(gmu);
++	if (ret)
++		return ret;
++
+ 	gmxc = cmd_db_read_aux_data("gmxc.lvl", NULL);
+ 	if (gmxc == ERR_PTR(-EPROBE_DEFER))
+ 		return -EPROBE_DEFER;
+@@ -2468,7 +2532,9 @@ int a6xx_gmu_init(struct a6xx_gpu *a6xx_gpu, struct device_node *node)
+ 	gmu->gxpd = dev_pm_domain_attach_by_name(gmu->dev, "gx");
+ 
+ 	/* Get the power levels for the GMU and GPU */
+-	a6xx_gmu_pwrlevels_probe(gmu);
++	ret = a6xx_gmu_pwrlevels_probe(gmu);
++	if (ret)
++		goto detach_gxpd;
+ 
+ 	ret = a6xx_gmu_acd_probe(gmu);
+ 	if (ret)
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_gmu.h b/drivers/gpu/drm/msm/adreno/a6xx_gmu.h
+index 3f96b10b5..4b44e4291 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_gmu.h
++++ b/drivers/gpu/drm/msm/adreno/a6xx_gmu.h
+@@ -98,6 +98,7 @@ struct a6xx_gmu {
+ 	int nr_gpu_freqs;
+ 	unsigned long gpu_freqs[GMU_MAX_GX_FREQS];
+ 	u32 gx_arc_votes[GMU_MAX_GX_FREQS];
++	u32 gx_cx_votes[GMU_MAX_GX_FREQS];
+ 	u32 dep_arc_votes[GMU_MAX_GX_FREQS];
+ 	struct a6xx_hfi_acd_table acd_table;
+ 
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_hfi.c b/drivers/gpu/drm/msm/adreno/a6xx_hfi.c
+index 186a73c0b..5c54a1ffd 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_hfi.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_hfi.c
+@@ -341,7 +341,7 @@ static int a6xx_hfi_send_perf_table(struct a6xx_gmu *gmu)
+ 
+ 	for (i = 0; i < gmu->nr_gpu_freqs; i++) {
+ 		msg.gx_votes[i].vote = gmu->gx_arc_votes[i];
+-		msg.gx_votes[i].acd = 0xffffffff;
++		msg.gx_votes[i].cx_vote = gmu->gx_cx_votes[i];
+ 		msg.gx_votes[i].freq = gmu->gpu_freqs[i] / 1000;
+ 	}
+ 
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_hfi.h b/drivers/gpu/drm/msm/adreno/a6xx_hfi.h
+index e10d32ce9..fe0a9768e 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_hfi.h
++++ b/drivers/gpu/drm/msm/adreno/a6xx_hfi.h
+@@ -110,7 +110,8 @@ struct perf_level {
+ 
+ struct perf_gx_level {
+ 	u32 vote;
+-	u32 acd;
++	/* A7xx GX-to-CX dependency index; 0xffffffff disables the vote. */
++	u32 cx_vote;
+ 	u32 freq;
+ } __packed;
+ 
+-- 
+2.56.0
+

@@ -99,7 +99,9 @@ Fedora 保留 `CONFIG_QCOM_ICC_BWMON=m`，由模块加载后接管；Rec 只构�
 因此将其改为 `CONFIG_QCOM_ICC_BWMON=y`，避免新增节点没有可用驱动。
 
 GPU 带宽由 Adreno GMU 管理。当前 A730 驱动仍有 `a730_build_bw_table()` 回退路径，
-不能仅因 GPU 节点缺少普通 `interconnects` 就判定没有带宽请求；GPU 频率与 GMU 表保持原配置。
+不能仅因 GPU 节点缺少普通 `interconnects` 就判定没有带宽请求。SM8475 的 GPU 频率、
+GX/CX 等级和 ACD 参数按原厂 13 档表补齐至 900 MHz；GMU 200/500 MHz 与既有
+12 档带宽表已一致，详见 [GPU 与 OpenCL](GPU.md)。
 
 原厂 L3 控制器位于 `0x17d90000`，共享投票偏移为 `0x90`，与主线 EPSS L3 接口有对应关系。
 但仅添加提供者无法建立完整的消费策略。原厂 memlat 表是采样阈值，既不是硬件全部 CPU 档位，

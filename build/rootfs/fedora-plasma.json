@@ -10,6 +10,7 @@
     "curl", "wget", "rsync", "nano", "less", "fastfetch", "podman",
     "zip", "xz", "bzip2",
     "libatomic",
+    "mesa-libOpenCL", "ocl-icd", "clinfo",
     "plymouth", "plymouth-theme-spinner", "plymouth-plugin-script", "fontconfig",
     "openssh-clients", "openssh-server",
     "man-db", "man-pages", "mandoc",

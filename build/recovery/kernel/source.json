@@ -5,7 +5,7 @@
   "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
   "tag": "v7.3.4",
   "commit": "7595a62d45ee1a2297eafa5f2ef5d0a45142d84d",
-  "expected_source_tree": "8b5a83861244c1511988f26cb4cc0ffb3b439365",
+  "expected_source_tree": "cc568d19495084e6b62e377f87e6b081791759b1",
   "config": {
     "path": "build/recovery/kernel/7.3.4.config",
     "sha256": "84e4eeb8b0004d8f73c7cb956efe53e13bf9a6d580918a1214892bda95469f39"
@@ -200,6 +200,18 @@
       "sha256": "daba54965782f10c6262f0167ce0f62f6c309b920358dbea9845fae0de5eba78"
     },
     {
+      "path": "build/kernel/patches/linux-7.3/0061-sm8475-gpu-operating-points-and-cx-votes.patch",
+      "sha256": "55b94975982c02dc6f0ce1d2d838a5c48fd358e84bc247ea3f51824379ceb165"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0062-a730-restore-image-bank-modes.patch",
+      "sha256": "02ba8efd7a84685d6c4a5f5cd221237c17f7d2e918c1076b5087ae88d85d55a8"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0063-liuqin-a730-compute-hangcheck-period.patch",
+      "sha256": "60a51d9d0d32b0d3f2c63fbace9a0324d56bed51e26ebe827536496419176329"
+    },
+    {
       "path": "build/recovery/kernel/patches/linux-7.3/0001-recovery-peripheral-handoff.patch",
       "sha256": "ccb0f030fb1bed451301961d3d9c67d1b45060f67beb936a9aaf32a9db998f62"
     }
@@ -227,7 +239,7 @@
   "build_timestamp": "2026-11-11T00:00:00+00:00",
   "shared_kernel": {
     "path": "build/kernel/source.json",
-    "sha256": "7d9b95ed709eeaab30221cd3a25913c76074e62b1ceabc59c44badef25ecaaa5"
+    "sha256": "6a6073b9e306b8f98036f5024da5159d3f4821b2fd5c886d2a2ea8f82a1e3489"
   },
   "touch_patches": [
     {

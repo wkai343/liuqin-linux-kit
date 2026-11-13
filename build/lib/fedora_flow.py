@@ -8,6 +8,7 @@ import sys
 from source_flow import Flow, load_module
 from source_build import PROJECT, download, sha, tree_identity
 from storage_scope import inputs as storage_scope_inputs
+import mesa_libclc
 
 
 class FedoraFlow(Flow):
@@ -119,8 +120,19 @@ class FedoraFlow(Flow):
             interfaces=sha(PROJECT/'shared/liuqin_kernel.py'),refresh=self.refresh),
             build,['assembled/'+name])/'assembled'/name
 
+    def libclc_rpm(self):
+        if 'mesa-libOpenCL' not in self.recipe['packages']:return None
+        record=mesa_libclc.record();sources=mesa_libclc.sources(record)
+        name=mesa_libclc.filename(record)
+        def build(out):mesa_libclc.build(out/'rpms',info=record,files=sources)
+        return self.stage('fedora-mesa-libclc',dict(source_lock=sha(mesa_libclc.LOCK),
+            files={name:sha(path) for name,path in sources.items()},
+            builder=sha(PROJECT/'build/lib/mesa_libclc.py'),
+            packager=sha(PROJECT/'build/lib/rpm_package.py')),build,['rpms/'+name])/'rpms'/name
+
     def apps(self):
         archive=self.target_runtime_root();devices=self.device_debs();stats=self.stats_rpm();fingerprint=self.fingerprint_rpm()
+        libclc=self.libclc_rpm()
         inputs=dict(base=sha(archive),rpms=tree_identity(devices),recipe=self.recipe,
             builder=sha(PROJECT/'build/scripts/build-fedora-root.py'),
             input_env=sha(PROJECT/'build/rootfs/fedora-input-env.sh'),
@@ -129,12 +141,14 @@ class FedoraFlow(Flow):
             theme=tree_identity(PROJECT/'device/boot/splash'),refresh=self.refresh)
         inputs['stats_rpm']=sha(stats)
         inputs['fingerprint_rpm']=sha(fingerprint)
+        if libclc:inputs['libclc_rpm']=sha(libclc)
         if self.recipe.get('overlay'):inputs['overlay']=tree_identity(self.recipe['overlay'])
         if self.recipe.get('password_file'):inputs['password_sha256']=sha(self.recipe['password_file'])
         def build(out):
             rpms=out/'rpms';shutil.copytree(devices,rpms)
             shutil.copyfile(stats,rpms/stats.name)
             shutil.copyfile(fingerprint,rpms/fingerprint.name)
+            if libclc:shutil.copyfile(libclc,rpms/libclc.name)
             snapshot=dict(self.recipe)
             if snapshot.get('overlay'):
                 target=out/'overlay';shutil.copytree(snapshot['overlay'],target,symlinks=True)

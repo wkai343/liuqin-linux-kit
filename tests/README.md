@@ -21,6 +21,27 @@ RPM 工具和 pyelftools，已接入 Devbox 测试与 CI。
 `adreno-stats.py` 另用 Qt6Core 编译真实 sysfs 读取函数，并在固定源码归档存在时验证补丁。
 这两项离线检查不代替设备上的插件加载、实际 GPU 负载和睡眠恢复测试。
 
+`gpu-sm8475.py --source /path/to/kernel` 执行实际 GMU CX 电源等级转换和 HFI 性能表
+C 函数，覆盖旧平台兼容、完整/不完整 OPP 表、命令数据库错误及协议布局。
+可用 `--dtb` 和 `--stock-base` 分别核对编译后的 13 档 GPU/GMU 表和固定原厂 DTB。
+`opencl-smoke.py` 在真机的 FD730 GPU 上编译、运行并回读校验向量运算、局部内存、
+barrier 和 libclc 数学函数；它是设备检查，不加入无 GPU 的离线入口，也不代表 CTS。
+参数来源与验收方法见 [GPU 与 OpenCL](../docs/GPU.md)。
+
+`gpu-reglist.py --source /path/to/kernel` 执行实际 A7xx 寄存器列表构造函数，检查
+A730 的 SP/TPL1 恢复项、其他 GPU 的既有布局、固件计数字段及动态三元组边界。
+
+`mesa-libclc.py` 检查所有固定输入的篡改拒绝、符号链接拒绝、Mesa SPIR-V 标记、
+发布文件字节保留，以及实际 RPM 的路径、版本和 Fedora 精确依赖兼容能力；已接入
+Devbox 与 CI。
+
+OpenCL CTS 须在平板执行，不加入无 GPU 的离线入口。按问题选择
+[图像和复制定向回归](../docs/GPU.md#图像和复制定向回归)或
+[长计算与故障恢复](../docs/GPU.md#长计算与故障恢复)；单个用例保持原始规模。
+完整兼容性验收另用[上游 full 清单](../docs/GPU.md#完整-opencl-cts)。
+运行时调整超时的对照、修复内核的复现验证与完整 CTS 要分别记录，不能相互替代。
+实际镜像、软件包、环境、错误及结果记录保存在忽略的 `out/` 目录。
+
 `device-overlays.py` 检查通用板级文件、缺失来源、已有目标文件与父路径保护。
 `source-build.py` 另覆盖通用 DEB 打包，以及 Fedora 包的板级内容和装配代码缓存失效；补丁合并回归检查最终源码树相同，但生成新来源缓存与派生提交，再次构建可复用新缓存。
 `busybox-runtime.py --busybox /path/to/busybox` 使用 QEMU 执行真实 ARM64 BusyBox，检查静态链接、

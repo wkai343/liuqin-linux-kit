@@ -1,0 +1,27 @@
+{
+  "package_name": "libclc22-spirv",
+  "version": "22.1.8.3",
+  "package_release": "1.liuqin",
+  "upstream": "https://gitlab.freedesktop.org/karolherbst/mesa-libclc",
+  "commit": "87f66007242ff10e9e84bf32be84f9057f6abc75",
+  "release_url": "https://gitlab.freedesktop.org/karolherbst/mesa-libclc/-/releases/22.1.8.3",
+  "fedora_compatibility": "libclc22-spirv(aarch-64) = 22.1.8-3.fc45",
+  "files": {
+    "mesa-libclc-22.1.8.3.tar.gz": {
+      "url": "https://gitlab.freedesktop.org/karolherbst/mesa-libclc/-/archive/87f66007242ff10e9e84bf32be84f9057f6abc75/mesa-libclc-87f66007242ff10e9e84bf32be84f9057f6abc75.tar.gz",
+      "sha256": "198f498014fe5d4752d427e5e557981ec007778587e84f483c9ffd2d845ac35b"
+    },
+    "spirv-mesa3d-.spv": {
+      "url": "https://gitlab.freedesktop.org/api/v4/projects/27606/packages/generic/mesa-libclc/22.1.8.3/spirv-mesa3d-.spv",
+      "sha256": "59552f9e22ec221061e9939fc90a46e4159d1400b2e1f85eff46924489d532aa"
+    },
+    "spirv64-mesa3d-.spv": {
+      "url": "https://gitlab.freedesktop.org/api/v4/projects/27606/packages/generic/mesa-libclc/22.1.8.3/spirv64-mesa3d-.spv",
+      "sha256": "728cdfa747a1857829c104291984964971783a301a62e9468a3d5a4f1750c949"
+    },
+    "mesa-libclc.pc.in": {
+      "url": "https://gitlab.freedesktop.org/api/v4/projects/27606/packages/generic/mesa-libclc/22.1.8.3/mesa-libclc.pc.in",
+      "sha256": "84f479ff8ac759315aff18bb572f5ed96ad58a1b49869825cc1cb3e730ce22c6"
+    }
+  }
+}

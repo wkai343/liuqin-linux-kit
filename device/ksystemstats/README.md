@@ -1,5 +1,8 @@
 # Adreno GPU 统计
 
+GPU 频率、电源参数及计算接口见 [GPU 与 OpenCL](../../docs/GPU.md)。本页说明监测插件；
+频率范围由正在运行的内核提供，插件不限定最高频率。
+
 为 KDE KSystemStats 补充高通平台设备，继续提供默认系统监视器使用的 `gpu/all/usage`。
 单设备传感器为 `gpu/gpu0/usage`；内核同时提供 devfreq 频率时还注册
 `gpu/gpu0/coreFrequency`，单位 MHz。设备编号避开已有 GPU，兼容概览与历史页的默认选择规则。

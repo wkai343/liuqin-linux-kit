@@ -1,0 +1,52 @@
+From 9b072c20d875c32212fbac663a447fe8198745d1 Mon Sep 17 00:00:00 2001
+From: wk <58632380+wkai343@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 22:48:38 +0800
+Subject: [PATCH] drm/msm/a730: allow bounded desktop compute dispatches on
+ Liuqin
+
+A valid 1024-cubed OpenCL dispatch using a 1x1024x1 workgroup takes
+several seconds on Liuqin. The CP waits for shader completion without
+advancing its IB position, so the default 250 ms progress interval
+incorrectly resets the job and Rusticl returns CL_OUT_OF_RESOURCES.
+
+Use a 5000 ms hangcheck interval only for the A730 on Liuqin, after
+msm_gpu_init has set its default. Preserve progress retries, hardware
+fault handling, preemption and recovery. Recognize the board with the
+existing helper, including the identifiers rewritten by ABL.
+---
+ drivers/gpu/drm/msm/adreno/a6xx_gpu.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_gpu.c b/drivers/gpu/drm/msm/adreno/a6xx_gpu.c
+index a1f9c4e5e..253f25c09 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_gpu.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_gpu.c
+@@ -11,6 +11,7 @@
+ 
+ #include <linux/bitfield.h>
+ #include <linux/devfreq.h>
++#include <linux/platform_data/liuqin.h>
+ #include <linux/pm_domain.h>
+ #include <linux/soc/qcom/llcc-qcom.h>
+ 
+@@ -2766,6 +2767,17 @@ static struct msm_gpu *a6xx_gpu_init(struct drm_device *dev)
+ 		return ERR_PTR(ret);
+ 	}
+ 
++	/*
++	 * Liuqin runs desktop compute workloads as well as graphics. A large
++	 * strided atomic dispatch can legitimately take several seconds while
++	 * the CP waits for the shader, leaving its IB position unchanged. The
++	 * default 250 ms progress interval can reset such a job prematurely.
++	 * Keep bounded hang detection and recovery, but allow these dispatches
++	 * to finish. Apply this after msm_gpu_init() selects its default.
++	 */
++	if (adreno_is_a730(adreno_gpu) && liuqin_board_quirks())
++		priv->hangcheck_period = 5000;
++
+ 	/* Set the speedbin value that is passed to userspace */
+ 	if (a6xx_read_speedbin(&pdev->dev, a6xx_gpu, info, &speedbin) || !speedbin)
+ 		speedbin = 0xffff;
+-- 
+2.56.0
+
