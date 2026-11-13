@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+"""Bounded resume-only DPMS compensation for Liuqin's active Plasma session."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import stat
+import subprocess
+import time
+
+SUCCESS = Path('/sys/power/suspend_stats/success')
+WAKE_IRQ = Path('/sys/power/pm_wakeup_irq')
+INTERRUPTS = Path('/proc/interrupts')
+INPUT_WAKE_SOURCES = {'pmic_pwrkey', 'nanosic-data', 'nanosic-wakeup'}
+WAIT_SECONDS = 4.0
+VERIFY_SECONDS = 2.0
+
+
+def log(event, **fields):
+    print(json.dumps(dict(event=event, **fields), ensure_ascii=False), flush=True)
+
+
+def wake_source(irq, interrupts):
+    """Resolve this suspend's IRQ by its action name, never by a fixed number."""
+    if not irq.strip().isdecimal() or int(irq) <= 0:
+        return None
+    for line in interrupts.splitlines():
+        number, sep, rest = line.partition(':')
+        if sep and number.strip() == str(int(irq)):
+            name = rest.split()[-1] if rest.split() else ''
+            return name if name in INPUT_WAKE_SOURCES else None
+    return None
+
+
+def posture(text):
+    pairs = [word.split('=', 1) for word in text.split()]
+    values = dict(pairs)
+    required = {'folded', 'lid_closed', 'input_muted', 'tablet_mode'}
+    if len(values) != len(pairs) or set(values) != required or any(v not in ('0', '1') for v in values.values()):
+        raise ValueError('invalid folio posture')
+    return {k: v == '1' for k, v in values.items()}
+
+
+def require_internal_only(config):
+    outputs = config.get('outputs')
+    if not isinstance(outputs, list):
+        raise ValueError('missing Wayland output configuration')
+    names = [o.get('name') for o in outputs]
+    if any(not isinstance(n, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', n) for n in names) or len(set(names)) != len(names):
+        raise ValueError('ambiguous output names')
+    internal = [o for o in outputs if o['name'] == 'DSI-1' and o.get('connected') is True and o.get('enabled') is True]
+    if len(internal) != 1:
+        raise ValueError('internal output is not ready')
+    if any(o['name'] != 'DSI-1' and o.get('connected') is True for o in outputs):
+        raise ValueError('external output connected; leave display policy to Plasma')
+
+
+class Controller:
+    """One request per observed sleep/resume; readiness polling exists only then."""
+    def __init__(self, backend, *, clock=time.monotonic, emit=log):
+        self.backend, self.clock, self.emit = backend, clock, emit
+        self.armed = None
+        self.pending = None
+
+    def cancel(self, reason):
+        if self.pending is not None:
+            self.emit('cancelled', reason=reason)
+        self.pending = None
+
+    def prepare(self, sleeping):
+        self.cancel('new sleep transition')
+        if sleeping:
+            self.armed = None
+            try:
+                session = self.backend.session()
+                if session in (None, 'other-session'):
+                    self.emit('not-armed', reason='no active local desktop session')
+                    return
+                self.armed = (self.backend.success(), session)
+            except Exception as exc:
+                self.emit('not-armed', reason=str(exc))
+            return
+        armed, self.armed = self.armed, None
+        if armed is None:
+            return  # Starting/restarting the service must never light the display.
+        try:
+            count, session = armed
+            if self.backend.success() != count + 1:
+                self.emit('skipped', reason='no single completed suspend')
+                return
+            source = self.backend.source()
+            if source not in INPUT_WAKE_SOURCES:
+                self.emit('skipped', reason='background or unknown wake source')
+                return
+            self.pending = dict(session=session, source=source, deadline=self.clock() + WAIT_SECONDS, sent=False)
+            self.emit('resume', source=source, session=session)
+        except Exception as exc:
+            self.emit('skipped', reason=str(exc))
+
+    def tick(self):
+        p = self.pending
+        if p is None:
+            return False
+        if self.clock() >= p['deadline']:
+            if p.get('last_error'):
+                self.emit('last-error', reason=p['last_error'])
+            self.cancel('verification timeout' if p['sent'] else 'output readiness timeout')
+            return False
+        try:
+            if self.backend.lid_closed() or not self.backend.source_allowed(p['source']):
+                self.cancel('lid closed or keyboard muted')
+                return False
+            current = self.backend.session()
+            if current is None:
+                return True  # logind may briefly have no active session during resume.
+            if current != p['session']:
+                self.cancel('active session changed')
+                return False
+            if self.backend.is_on():
+                self.emit('complete' if p['sent'] else 'already-on', source=p['source'])
+                self.pending = None
+                return False
+            if p['sent']:
+                return True  # Never re-send after a possible intentional turn-off.
+            self.backend.ready_outputs()
+            # Recheck policy after the asynchronous compositor query.
+            if self.backend.session() != p['session'] or self.backend.lid_closed() or not self.backend.source_allowed(p['source']):
+                self.cancel('policy changed while querying outputs')
+                return False
+            if self.clock() >= p['deadline']:
+                self.cancel('output readiness timeout')
+                return False
+            if self.backend.is_on():
+                self.emit('already-on', source=p['source'])
+                self.pending = None
+                return False
+            # Mark before calling the compositor: even a client timeout may have
+            # delivered the request. A second request could override user intent.
+            p['sent'] = True
+            p['deadline'] = self.clock() + VERIFY_SECONDS
+            self.backend.turn_on()
+            self.emit('dpms-on-sent', source=p['source'])
+        except Exception as exc:
+            if p['sent'] and p.get('last_error') != str(exc):
+                self.emit('request-error', reason=str(exc))
+            p['last_error'] = str(exc)
+            # Missing outputs and transient session/Wayland failures are retried
+            # only before sending, within the original bounded readiness window.
+        return self.pending is not None
+
+
+class Backend:
+    def __init__(self, bus):
+        import dbus
+        self.dbus, self.bus = dbus, bus
+        self.uid = os.getuid()
+        if self.uid == 0:
+            raise ValueError('must run in the ordinary desktop user session')
+        panels = [p for p in Path('/sys/bus/mipi-dsi/devices').glob('*/esd_status')
+                  if b'xiaomi,liuqin-nt36532' in (p.parent / 'of_node/compatible').read_bytes().split(b'\0')]
+        if len(panels) != 1:
+            raise ValueError('unique Liuqin panel unavailable')
+        folios = list(Path('/sys/bus/i2c/devices').glob('*/folio_posture'))
+        if len(folios) != 1:
+            raise ValueError('unique Liuqin folio status unavailable')
+        self.folio = folios[0]
+        self.panel = panels[0]
+        self.backlight = Path('/sys/class/backlight/ktz8866-backlight')
+        connectors = list(Path('/sys/class/drm').glob('card*-DSI-1'))
+        if len(connectors) != 1:
+            raise ValueError('unique internal DRM connector unavailable')
+        self.connector = connectors[0]
+
+    def props(self, service, path, interface):
+        obj = self.bus.get_object(service, path)
+        return self.dbus.Interface(obj, 'org.freedesktop.DBus.Properties').GetAll(interface, timeout=1)
+
+    def session(self):
+        seat = self.props('org.freedesktop.login1', '/org/freedesktop/login1/seat/seat0', 'org.freedesktop.login1.Seat')
+        sid, path = seat['ActiveSession']
+        if not sid or path == '/':
+            return None
+        p = self.props('org.freedesktop.login1', path, 'org.freedesktop.login1.Session')
+        if (int(p['User'][0]) != self.uid or str(p['Type']) != 'wayland' or str(p['Class']) != 'user'
+                or bool(p['Remote']) or str(p['Seat'][0]) != 'seat0'):
+            return 'other-session'
+        if not bool(p['Active']):
+            return None
+        return str(sid)
+
+    def success(self):
+        return int(SUCCESS.read_text().strip())
+
+    def source(self):
+        return wake_source(WAKE_IRQ.read_text(), INTERRUPTS.read_text())
+
+    def lid_closed(self):
+        lid = self.props('org.freedesktop.UPower', '/org/freedesktop/UPower', 'org.freedesktop.UPower')
+        return bool(lid['LidIsClosed']) or posture(self.folio.read_text())['lid_closed']
+
+    def source_allowed(self, source):
+        if source == 'pmic_pwrkey':
+            return True
+        p = posture(self.folio.read_text())
+        status = dict(word.split('=', 1) for word in (self.folio.parent / 'keyboard_status').read_text().split())
+        return (status.get('known') == '1' and status.get('connected') == '1'
+                and not p['folded'] and not p['input_muted'])
+
+    def is_on(self):
+        return ((self.connector / 'dpms').read_text().strip() == 'On'
+                and (self.connector / 'enabled').read_text().strip() == 'enabled'
+                and (self.backlight / 'bl_power').read_text().strip() == '0')
+
+    def environment(self):
+        runtime = Path('/run/user') / str(self.uid)
+        if runtime.is_symlink() or runtime.stat().st_uid != self.uid:
+            raise ValueError('invalid runtime directory')
+        sockets = [p for p in runtime.glob('wayland-*') if not p.is_symlink()
+                   and stat.S_ISSOCK(p.stat().st_mode) and p.stat().st_uid == self.uid]
+        if len(sockets) != 1 or not stat.S_ISSOCK((runtime / 'bus').stat().st_mode):
+            raise ValueError('unique Wayland session unavailable')
+        # A session socket alone does not prove it is Plasma.
+        session_bus = self.dbus.bus.BusConnection('unix:path=' + str(runtime / 'bus'))
+        if not session_bus.name_has_owner('org.kde.KWin'):
+            raise ValueError('KWin unavailable')
+        return dict(os.environ, XDG_RUNTIME_DIR=str(runtime), WAYLAND_DISPLAY=sockets[0].name,
+                    DBUS_SESSION_BUS_ADDRESS='unix:path=' + str(runtime / 'bus'), QT_QPA_PLATFORM='wayland')
+
+    def ready_outputs(self):
+        if (self.connector / 'status').read_text().strip() != 'connected':
+            raise ValueError('internal connector unavailable')
+        result = subprocess.run(['/usr/bin/kscreen-doctor', '--json'], env=self.environment(),
+                                capture_output=True, text=True, timeout=1, check=True)
+        require_internal_only(json.loads(result.stdout))
+        self.require_no_external_connector()
+
+    def require_no_external_connector(self):
+        for p in Path('/sys/class/drm').glob('card*-*/status'):
+            name = p.parent.name.split('-', 1)[1]
+            if name != 'DSI-1' and not name.startswith('Writeback-') and p.read_text().strip() == 'connected':
+                raise ValueError('external DRM connector connected')
+
+    def turn_on(self):
+        # Plasma 6.8 has global DPMS and removed --dpms-excluded. Only act
+        # with the internal output alone, and recheck physical hotplug here.
+        self.require_no_external_connector()
+        result = subprocess.run(['/usr/bin/kscreen-doctor', '--dpms', 'on'], env=self.environment(),
+                                capture_output=True, text=True, timeout=2)
+        if result.returncode:
+            raise RuntimeError('kscreen-doctor: ' + (result.stderr or result.stdout)[-512:].strip())
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--check', action='store_true', help='read-only device and session preflight')
+    args = parser.parse_args()
+    import dbus
+    from dbus.mainloop.glib import DBusGMainLoop
+    from gi.repository import GLib, GLibUnix
+    DBusGMainLoop(set_as_default=True)
+    backend = Backend(dbus.SystemBus())
+    if args.check:
+        session = backend.session()
+        if session in (None, 'other-session'):
+            raise ValueError('active local desktop session unavailable')
+        backend.ready_outputs()
+        log('check', session=session, lid_closed=backend.lid_closed(), success=backend.success(),
+            internal_only=True, dpms_performed=False)
+        return
+    controller = Controller(backend)
+    loop = GLib.MainLoop()
+    timer = None
+
+    def tick():
+        nonlocal timer
+        again = controller.tick()
+        if not again:
+            timer = None
+        return again
+
+    def prepare(sleeping):
+        nonlocal timer
+        if timer is not None:
+            GLib.source_remove(timer)
+            timer = None
+        controller.prepare(bool(sleeping))
+        if controller.pending is not None:
+            timer = GLib.timeout_add(150, tick)
+
+    backend.bus.add_signal_receiver(prepare, signal_name='PrepareForSleep', dbus_interface='org.freedesktop.login1.Manager',
+                                    bus_name='org.freedesktop.login1', path='/org/freedesktop/login1')
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, sig, lambda: (loop.quit(), False)[1])
+    log('monitor-start', readiness_timeout_seconds=WAIT_SECONDS, requests_per_resume=1)
+    loop.run()
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as exc:
+        log('unavailable', reason=str(exc))
+        raise SystemExit(1)

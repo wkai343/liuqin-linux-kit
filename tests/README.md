@@ -85,6 +85,7 @@ OpenCL CTS 须在平板执行，不加入无 GPU 的离线入口。按问题选�
 | `display-brightness-minimum.py` | 当前 7.3 内核的最低非零亮度、原厂曲线其余档位、直接写零与关屏后的恢复 |
 | `display-oem-backlight.py` | 执行指定源码中的背光初始化与亮灭逻辑：默认亮度、单/双芯片 I2C 故障、失败清理与重试；需候选和基线源码 |
 | `display-policy.py`、`display-recovery.py` | CABC 配置、活动会话、恢复限流、失败与退出处理 |
+| `resume-display.py` | 可选唤醒补偿服务的输出晚于恢复、单次请求、合盖/会话取消、超时、后台来源过滤与外屏连接拒绝 |
 | `backlight-default.py`、`boot-splash.py` | 亮度量程、初始化等待、背光/显示时钟装载顺序、充电与动画退出；动画与 UFS 并行、准入前等待完成，以及动画/存储分别失败时的处理 |
 | `splash-handoff.py`、`splash-logo.py`、`splash-orientation.py` | 帧缓冲边界、绘制进程隔离与回退、四向特征识别、关机方向缓存及 systemd 直接入口 |
 | `storage-seal.py`、`storage-ready.py`、`storage-paths.py` | 批量只读设置、UFS/GPT 就绪证明、原厂 LUN 3/5 备份头兼容边界、路径替换及回退 |

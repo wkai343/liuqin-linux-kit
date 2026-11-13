@@ -262,6 +262,14 @@ tr ' ' '\n' </sys/bus/spi/devices/spi0.0/touch_state |
 
 ### 自动恢复与启动日志
 
+睡眠后系统已恢复、但内屏仍为 `DPMS Off`，与面板告警恢复不同。
+PowerDevil 的亮屏请求可能早于 KWin 重建真实输出，随后没有重试。
+可选的 [liuqin-resume-display 用户服务](../device/resume-display/README.md)
+仅在已观测到完整睡眠、来源为电源键/磁吸键盘唤醒中断、同一活动本地
+Plasma 会话、未合盖且未接外屏时，等待真实内屏就绪后补发一次亮屏请求。
+它以独立 RPM 安装，不替换或锁定 Fedora PowerDevil/KWin/Mesa；
+源码、启用、移除与定向验收方法见该服务说明。普通熄屏及后台/未知唤醒不补偿。
+
 内核校准恢复与面板告警会话服务独立。后者只操作当前活动 Wayland 会话，核对 GPIO 电平后关闭、重新开启输出，
 每用户每 10 分钟最多两次、间隔至少 60 秒；关屏时不触发，也不把 CABC 下 PWM 为零单独视为故障。
 

@@ -1,0 +1,18 @@
+[Unit]
+Description=Liuqin input-wake display compensation
+PartOf=graphical-session.target
+After=graphical-session-pre.target
+ConditionUser=!root
+ConditionPathExists=/usr/bin/kscreen-doctor
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/liuqin-resume-display
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+UMask=0077
+
+[Install]
+WantedBy=graphical-session.target
