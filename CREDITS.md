@@ -39,6 +39,10 @@ CPU 容量、动态功耗系数及 CPU/LLCC 带宽监测参数参考同一提交
 并与固定 OS2.0.6.0 原厂 ROM 核对，按主线 OPP、能耗模型及 interconnect 绑定表达；
 具体移植范围和验证边界见[设备树对照](docs/DEVICE-TREE.md)。
 四档在线刷新率切换的时序双缓冲与主从更新顺序还参考了 [Qualcomm display-drivers](https://android.googlesource.com/kernel/msm-extra/display-drivers/+/e7ab2aa8bd2f6f27b311ccada3722d20dee4bcef/msm/dsi/dsi_display.c)，面板时序与扫描命令继续按固定 M81 ROM 核对。
+共享 CTL 的视频提交修复参考 Marijn Suijten 与 Dmitry Baryshkov 的
+[双路 DSI/DSC 上游讨论](https://lore.kernel.org/all/mrg3m7awzvozhyg2zwwbawfa6cb6xo7obzooiq3iph6mu3ybfc@b5h2pzxvcjvf/)，
+区分“一次 CTL 提交”和“两路接口均需更新”两个要求；本地补丁位于
+`build/kernel/patches/linux-7.3/0064-drm-msm-dpu-single-flush-bonded-video.patch`。
 这些适配补丁继续遵循所修改内核文件的许可，不由项目根目录的 MIT 许可替代。
 
 ## 第三方组件

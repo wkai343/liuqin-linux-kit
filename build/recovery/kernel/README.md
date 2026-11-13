@@ -2,7 +2,7 @@
 
 Rec 独立使用 kernel.org 源码和本仓库补丁，不再获取原作者的内核仓库，也不需要从旧 Recovery 镜像提取内核、配置或 DTB。桌面内核配方仍在 `build/kernel/source.json`。
 
-默认配方为 [source.json](source.json)，版本为 **7.3.4**，与 Fedora 使用同一 kernel.org 提交和 `build/kernel/source.json` 中的 50 个公共补丁文件。独立的 [7.3.4.config](7.3.4.config) 从原 Rec 配置迁移；Rec 不使用桌面配置或启动参数。公共源码中的音频恢复改动不代表 Rec 开启了音频，也不替代当前源码配方的 Rec 实机验证。
+默认配方为 [source.json](source.json)，版本为 **7.3.4**，与 Fedora 使用同一 kernel.org 提交和 `build/kernel/source.json` 中的 51 个公共补丁文件。独立的 [7.3.4.config](7.3.4.config) 从原 Rec 配置迁移；Rec 不使用桌面配置或启动参数。公共源码中的音频恢复改动不代表 Rec 开启了音频，也不替代当前源码配方的 Rec 实机验证。
 
 CPU 功耗系数与两级 BWMON 共享桌面的设备树配置；Rec 将 `CONFIG_QCOM_ICC_BWMON` 内置，
 不依赖未打包的带宽监测模块。新增配置在 Rec 侧仅完成源码、配置和 DTB 离线校验；

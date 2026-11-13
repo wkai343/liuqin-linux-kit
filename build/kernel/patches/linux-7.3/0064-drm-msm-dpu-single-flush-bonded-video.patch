@@ -1,0 +1,59 @@
+From 98bb6acb1aa7feaa1aea302aee77d53a845347b7 Mon Sep 17 00:00:00 2001
+From: wk <58632380+wkai343@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 00:53:57 +0800
+Subject: [PATCH] drm/msm/dpu: flush bonded video interfaces once on active CTL
+
+DPU 5.x and newer assign one CTL to both physical encoders of a bonded
+video output. The video needs_single_flush callback currently excludes
+these generations, so kickoff writes the same child and top-level flush
+registers twice. A vblank between the writes can consume the DSC child
+request while the second top-level DSC flush remains asserted.
+
+Keep bonded video outputs on the existing combined flush path, including
+active-CTL hardware. Preserve both master and slave INTF update bits on
+active-CTL hardware; only the older split-display path skips the slave
+INTF update. Solo video and the legacy combined path keep their behavior.
+
+The pending kickoff accounting, 50 ms commit deadline, IRQ handling and
+teardown flush are unchanged. Reproduced on SM8475 bonded DSI with
+CTL_FLUSH=0x400000 while CTL_DSC_FLUSH=0 and both interfaces advancing.
+
+Related discussion: https://lore.kernel.org/all/mrg3m7awzvozhyg2zwwbawfa6cb6xo7obzooiq3iph6mu3ybfc@b5h2pzxvcjvf/
+---
+ drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
+index ba810f26e..38767f1e4 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder_phys_vid.c
+@@ -379,8 +379,8 @@ static void dpu_encoder_phys_vid_underrun_irq(void *arg)
+ static bool dpu_encoder_phys_vid_needs_single_flush(
+ 		struct dpu_encoder_phys *phys_enc)
+ {
+-	return !(phys_enc->dpu_kms->catalog->mdss_ver->core_major_ver >= 5) &&
+-		phys_enc->split_role != ENC_ROLE_SOLO;
++	/* Bonded interfaces share a CTL on active-CTL hardware too. */
++	return phys_enc->split_role != ENC_ROLE_SOLO;
+ }
+ 
+ static void dpu_encoder_phys_vid_atomic_mode_set(
+@@ -467,11 +467,11 @@ static void dpu_encoder_phys_vid_enable(struct dpu_encoder_phys *phys_enc)
+ 	dpu_encoder_phys_vid_setup_timing_engine(phys_enc);
+ 
+ 	/*
+-	 * For single flush cases (dual-ctl or pp-split), skip setting the
+-	 * flush bit for the slave intf, since both intfs use same ctl
+-	 * and HW will only flush the master.
++	 * Active-CTL hardware needs both interface bits in the shared CTL.
++	 * Older split-display hardware flushes the slave through the master.
+ 	 */
+-	if (dpu_encoder_phys_vid_needs_single_flush(phys_enc) &&
++	if (phys_enc->dpu_kms->catalog->mdss_ver->core_major_ver < 5 &&
++		dpu_encoder_phys_vid_needs_single_flush(phys_enc) &&
+ 		!dpu_encoder_phys_vid_is_master(phys_enc))
+ 		goto skip_flush;
+ 
+-- 
+2.56.0
+

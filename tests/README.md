@@ -82,6 +82,7 @@ OpenCL CTS 须在平板执行，不加入无 GPU 的离线入口。按问题选�
 | `display-clock.py` | 补丁中的时钟取整、频率边界和 CCF 约束 |
 | `display-refresh-rates.py` | 从默认 7.3 配方重建并执行模式枚举、面板扫描命令与命令扫描行计算。可追加在线切换、主机时钟及固定 ROM 检查 |
 | `display-live-refresh.py` | 执行四档在线切换的实际 C 函数；双面板 24 个有向切换及 57 项故障、范围和回退检查。指定 `--source` 时追加 32 种 DPU 残留请求与关闭超时复现 |
+| `display-single-flush.py --source /path/to/kernel` | 执行视频使能和 CTL 提交函数；14 种版本/拓扑组合、主从接口位、单次提交与完成计数、禁用接口跳过，以及旧逻辑重复提交的负向对照 |
 | `display-brightness-minimum.py` | 当前 7.3 内核的最低非零亮度、原厂曲线其余档位、直接写零与关屏后的恢复 |
 | `display-oem-backlight.py` | 执行指定源码中的背光初始化与亮灭逻辑：默认亮度、单/双芯片 I2C 故障、失败清理与重试；需候选和基线源码 |
 | `display-policy.py`、`display-recovery.py` | CABC 配置、活动会话、恢复限流、失败与退出处理 |
