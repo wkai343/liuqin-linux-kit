@@ -1,0 +1,167 @@
+Subject: [PATCH] ASoC: liuqin: route all four analog microphones and track TX channels
+
+The shipping Cape mixer overlay uses AMIC1/3/4/5. Match its bias
+wiring and ADC gains with the mainline fixed SoundWire port map. Use
+four contiguous TX decimators and a four-channel codec-DMA backend.
+
+Track the complete TX mixer mask: repeated enable/disable operations
+must not leak counts, and stream mute must cover every active channel.
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+@@ -995,17 +995,21 @@
+ 	model = "Xiaomi-Pad-6-Pro";
+ 
+ 	/*
+-	 * Onboard-mic capture routing.  Mainline wcd938x pins ADC1 to its TX
+-	 * slave port1/channel0 (wcd938x_sdw_tx_ch_info) and qcom,tx-port-mapping
+-	 * <1 1 2 3> lands that on SoundWire master port 1 channel 0, which the
+-	 * TX macro exposes as "TX SWR_INPUT0" (SMIC mux value SWR_MIC0) -- the
+-	 * same wiring as sm8450-hdk.  The vendor's SWR_MIC4 only works with its
+-	 * "ADC1 ChMap" override, which mainline does not have.  MIC BIAS1 feeds
+-	 * AMIC1 (vendor amic1 path).  See docs/features/audio-mic.zh-CN.md.
++	 * OEM Cape bias routing and the Liuqin mixer overlay use AMIC1/3/4/5.
++	 * Mainline WCD938x maps ADC1/2 to slave port 1 and ADC3/4 to port 2.
++	 * Use separate master ports, with the OEM TX inputs 4/5/8/9.
++	 * Do not copy the vendor's runtime ADC ChMap overrides into UCM:
++	 * mainline uses the fixed SoundWire mapping, as on SM8450-HDK.
+ 	 */
+ 	audio-routing =
+ 		"AMIC1", "MIC BIAS1",
+-		"TX SWR_INPUT0", "ADC1_OUTPUT";
++		"AMIC3", "MIC BIAS3",
++		"AMIC4", "MIC BIAS3",
++		"AMIC5", "MIC BIAS4",
++		"TX SWR_INPUT4", "ADC1_OUTPUT",
++		"TX SWR_INPUT5", "ADC2_OUTPUT",
++		"TX SWR_INPUT8", "ADC3_OUTPUT",
++		"TX SWR_INPUT9", "ADC4_OUTPUT";
+ 
+ 	pinctrl-names = "default", "sleep";
+ 	pinctrl-0 = <&tert_tdm_clk_active>, <&tert_tdm_ws_active>,
+@@ -1117,15 +1121,22 @@
+ &swr2 {
+ 	status = "okay";
+ 
++	/* Shipping Liuqin 9.6 MHz ADC transport: slave port 1 uses lane 1 / offset 0,
++	 * slave port 2 uses lane 2 / offset 0. Map them to separate master
++	 * ports 2 and 3 as in the shipping amic1/3/4/5 mixer paths.
++	 */
++	qcom,ports-sinterval-low = /bits/ 8 <0x01 0x01 0x01 0x03>;
++	qcom,ports-offset1 = /bits/ 8 <0x00 0x00 0x00 0x01>;
++	qcom,ports-lane-control = /bits/ 8 <0x01 0x01 0x02 0x00>;
++
+ 	wcd_tx: wcd9380-tx@0,3 {
+ 		compatible = "sdw20217010d00";
+ 		reg = <0 3>;
+-		/*
+-		 * Vendor qcom,tx_swr_ch_map decoded: WCD TX slave ports 0 and 1
+-		 * land on SWR master port 1, slave port 2 on master port 2,
+-		 * slave port 3 on master port 3 (docs/features/audio-mic.zh-CN.md).
++		/* ADC1/2 and ADC3/4 cannot share the same master port:
++		 * mainline keeps both slave channel masks in bits 0/1.
++		 * The two unused digital-mic ports have distinct assignments.
+ 		 */
+-		qcom,tx-port-mapping = <1 1 2 3>;
++		qcom,tx-port-mapping = <2 3 1 4>;
+ 	};
+ };
+ 
+diff --git a/sound/soc/qcom/sc8280xp.c b/sound/soc/qcom/sc8280xp.c
+--- a/sound/soc/qcom/sc8280xp.c
++++ b/sound/soc/qcom/sc8280xp.c
+@@ -4,6 +4,7 @@
+ #include <dt-bindings/sound/qcom,q6afe.h>
+ #include <linux/module.h>
+ #include <linux/platform_device.h>
++#include <linux/platform_data/liuqin.h>
+ #include <sound/soc.h>
+ #include <sound/soc-dapm.h>
+ #include <sound/pcm.h>
+@@ -243,6 +244,13 @@
+ 	struct snd_mask *fmt = hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT);
+ 
+ 	rate->min = rate->max = 48000;
++	/* Four physical analog microphones, carried in ADC1/2/3/4 order. */
++	if (liuqin_board_quirks() && cpu_dai->id == TX_CODEC_DMA_TX_3) {
++		channels->min = channels->max = 4;
++		snd_mask_none(fmt);
++		snd_mask_set_format(fmt, SNDRV_PCM_FORMAT_S16_LE);
++		return 0;
++	}
+ 	snd_mask_set_format(fmt, SNDRV_PCM_FORMAT_S16_LE);
+ 	channels->min = 2;
+ 	channels->max = 2;
+diff --git a/sound/soc/codecs/lpass-tx-macro.c b/sound/soc/codecs/lpass-tx-macro.c
+--- a/sound/soc/codecs/lpass-tx-macro.c
++++ b/sound/soc/codecs/lpass-tx-macro.c
+@@ -272,7 +272,6 @@
+ 	struct tx_mute_work tx_mute_dwork[NUM_DECIMATORS];
+ 	unsigned long active_ch_mask[TX_MACRO_MAX_DAIS];
+ 	unsigned long active_ch_cnt[TX_MACRO_MAX_DAIS];
+-	int active_decimator[TX_MACRO_MAX_DAIS];
+ 	struct regmap *regmap;
+ 	struct clk *mclk;
+ 	struct clk *npl;
+@@ -889,19 +888,17 @@
+ 	struct tx_macro *tx = snd_soc_component_get_drvdata(component);
+ 
+ 	if (enable) {
+-		if (tx->active_decimator[dai_id] == dec_id)
++		if (test_bit(dec_id, &tx->active_ch_mask[dai_id]))
+ 			return 0;
+ 
+ 		set_bit(dec_id, &tx->active_ch_mask[dai_id]);
+ 		tx->active_ch_cnt[dai_id]++;
+-		tx->active_decimator[dai_id] = dec_id;
+ 	} else {
+-		if (tx->active_decimator[dai_id] == -1)
++		if (!test_bit(dec_id, &tx->active_ch_mask[dai_id]))
+ 			return 0;
+ 
+ 		tx->active_ch_cnt[dai_id]--;
+ 		clear_bit(dec_id, &tx->active_ch_mask[dai_id]);
+-		tx->active_decimator[dai_id] = -1;
+ 	}
+ 	snd_soc_dapm_mixer_update_power(widget->dapm, kcontrol, enable, update);
+ 
+@@ -1192,22 +1189,12 @@
+ {
+ 	struct snd_soc_component *component = dai->component;
+ 	struct tx_macro *tx = snd_soc_component_get_drvdata(component);
+-	u8 decimator;
+-
+-	/* active decimator not set yet */
+-	if (tx->active_decimator[dai->id] == -1)
+-		return 0;
+-
+-	decimator = tx->active_decimator[dai->id];
+-
+-	if (mute)
++	unsigned long decimator;
++
++	for_each_set_bit(decimator, &tx->active_ch_mask[dai->id], TX_MACRO_DEC_MAX)
+ 		snd_soc_component_write_field(component,
+ 					      CDC_TXn_TX_PATH_CTL(decimator),
+-					      CDC_TXn_PGA_MUTE_MASK, 0x1);
+-	else
+-		snd_soc_component_update_bits(component,
+-					      CDC_TXn_TX_PATH_CTL(decimator),
+-					      CDC_TXn_PGA_MUTE_MASK, 0x0);
++					      CDC_TXn_PGA_MUTE_MASK, !!mute);
+ 
+ 	return 0;
+ }
+@@ -2314,11 +2301,6 @@
+ 
+ 	tx->dev = dev;
+ 
+-	/* Set active_decimator default value */
+-	tx->active_decimator[TX_MACRO_AIF1_CAP] = -1;
+-	tx->active_decimator[TX_MACRO_AIF2_CAP] = -1;
+-	tx->active_decimator[TX_MACRO_AIF3_CAP] = -1;
+-
+ 	/* set MCLK and NPL rates */
+ 	ret = clk_set_rate(tx->mclk, MCLK_FREQ);
+ 	if (ret)

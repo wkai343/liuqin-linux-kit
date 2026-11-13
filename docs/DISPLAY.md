@@ -62,6 +62,70 @@ initramfs 动画准备与 UFS 校验并行，在根系统准入前等待动画�
 [RTC 采样](RTC.md)和 WLAN 模块在根系统早期并行初始化，配套要求见
 [启动与设备适配](BUILD.md#启动与设备适配)。
 
+### USB-C DisplayPort
+
+板级 DP 链路速率上限沿用原厂 Liuqin DTBO 的 HBR2（每条通道 5.4 Gbit/s）。
+纯 DP 的 Type-C C/E 分配允许四条通道，和 USB 3 共用的 D/F 分配允许两条。
+驱动同时受显示器、链路中继器和已生效的 QMP 复用器状态限制，无法确认四条可用时按两条处理。
+每次连接都从两条 RBR 通道初始化 AUX，再按接收端能力和复用器状态训练链路。
+
+连接后可用 `journalctl -k -b -g 'DP: using'` 查看驱动用于筛选模式的通道数和速率上限，
+用 `kscreen-doctor -o` 查看 Plasma 提供的模式和当前选择。通道数和速率上限还需与训练结果核对。
+
+DP 音频由声卡中的 `DISPLAY_PORT_RX_0` 后端连接到 `mdss_dp0` 的 HDMI codec。
+[板级 AudioReach 拓扑](../device/audio-topology/liuqin-speakers.m4) 用独立的
+`MultiMedia3` 前端驱动 DSP 的 DisplayPort sink（`0x07001069`），固定为
+48 kHz、S16_LE、双声道；受保护的四通道扬声器仍使用 `MultiMedia1`。
+该参数与原厂 `backend_conf.xml` 的 `DISPLAY_PORT-RX` 一致；设备树接法沿用
+主线 Qualcomm 声卡的 DP 后端，见 `sm8650-ayaneo-pocket-s2.dts`。
+
+[UCM](../device/board-overlay/usr/share/alsa/ucm2/Qualcomm/sm8450/Xiaomi-Pad-6-Pro/HiFi.conf)
+在 DP mixer 存在时添加 DisplayPort 输出，使用 PCM 2 和 `DP0 Jack` 插拔检测。
+路由在 HiFi verb 阶段建立，以便 PipeWire 探测 PCM；DSP 增益固定为 unity（8192），
+桌面使用软件音量。旧拓扑没有该控件时不会声明不存在的 DP PCM。
+
+关闭与恢复参考 Qualcomm 下游驱动将显示会话和音频引擎分开管理的做法：
+[`dp_audio.c`](https://github.com/LineageOS/android_kernel_xiaomi_sm8450-modules/blob/3b30ba7df6608c97c0ba2d55d679a6b5987c4c66/qcom/opensource/display-drivers/msm/dp/dp_audio.c)
+与 [`dp_display.c`](https://github.com/LineageOS/android_kernel_xiaomi_sm8450-modules/blob/3b30ba7df6608c97c0ba2d55d679a6b5987c4c66/qcom/opensource/display-drivers/msm/dp/dp_display.c)。
+该参考不证明与出厂 M81 模块源码完全一致。`0048` 通过 HDMI codec 的同步链路通知，
+在 PUSH_IDLE 或 PHY 关闭前停掉 DPCM 音频后端，DPU 确认首次显示提交完成后为仍然打开的前端
+重新执行后端的参数配置、prepare 和启动。仅恢复 SDP/ACR 不足以恢复被链路复位打断的
+AudioReach DMA。后端可用性与 DPCM 路由共用声卡 PCM 锁；已经关闭的前端不会重新启动。
+显示侧另用互斥锁协调 ALSA prepare/shutdown 和已上电的音频寄存器访问。
+桥接器 enable 早于 DPU kickoff，不能在其中同步启动 DSP；显示提交失败不恢复音频，
+拔出或再次关闭会取消待恢复状态。启用链路管理的播放流将 HDMI 音频引擎关闭延后到
+component close，等 CPU DAI shutdown 停止 DSP 图后再执行。PCM trigger 中不等待同步
+DSP 停止应答：音频周期通知与应答共用接收工作线程，前者可能正在等待 PCM 锁。
+普通模式切换保留 Jack 状态，物理拔插仍上报连接变化；未使用链路通知的驱动和录音
+保留原关闭时序，DPCM 路由筛选不作用于静态 PCM。
+
+单台外屏的临时内核验证覆盖 ALSA 48 kHz、16 bit 双声道实际出声、停止后重新播放，
+以及 ALSA 和桌面默认 DisplayPort 输出在播放中切换 2560 × 1600 的 120/144 Hz。
+切换时声音短暂停顿，随后自动恢复；桌面默认输出在物理拔插后也能自动恢复。
+这些检查中未出现 `audio comp timeout`、DSP 命令超时或 `Unexpected DP AUX IRQ`。
+这不代表无缝播放；其他外屏、双通道扩展坞、长时间往返及睡眠恢复仍待验证。
+
+没有外屏时，链路管理会排除尚不可用的 DP 后端，但桌面仍会探测其 PCM。
+若前端返回 `no backend DAIs enabled`，PipeWire 会将整个 HiFi 配置判为不可用，
+连带隐藏内置扬声器和麦克风。现在对“有效路由但链路被明确暂停”的播放前端允许
+独立打开，后端继续保持关闭，等待链路恢复后再连接；真正缺失的路由和连接错误仍报错。
+离线检查已覆盖该区分；配套 UCM 下，未接外屏的临时启动和默认内核普通重启
+均可识别板载扬声器、四路麦克风及 DP PCM。
+该启动场景下之后接入外屏仍需复测。
+
+核验时使用每秒变调、有间隔的测试音，先确认拔出或切换前有声，再检查操作后的实际
+声音、播放指针和内核日志；最后停止并重新播放，确认关闭没有额外等待或影响下次启动。
+不能仅凭 RUNNING 或画面恢复判断通过。使用 `pw-cat` 测试桌面默认输出时省略
+`--target`；`--target 0` 会禁止自动连接。
+
+```sh
+aplay -l
+amixer -c XiaomiPad6Pro cget "iface=CARD,name='DP0 Jack'"
+cat /proc/asound/card0/pcm2p/sub0/hw_params
+cat /proc/asound/card0/pcm2p/sub0/status
+journalctl -k -b -g 'audio comp timeout|Unexpected DP AUX IRQ|APM|ASoC|audio backend'
+```
+
 ## 默认配置
 
 ### 刷新率
@@ -96,6 +160,15 @@ HFP 为完整双路图像宽度；DSC 只压缩有效像素，表中的 DRM 时�
 `msm.liuqin_cmd_dma_schedule=1`，保持 `msm.liuqin_oem_clk_gating=0`。
 未知面板或缺少双 DSI 能力接口时使用完整模式切换。
 
+DPU 关闭链路时，先清空软件缓存中的上一帧刷新请求，再构造本次关闭所需的更新。
+硬件已经消费上一帧，并不代表软件缓存也已清空；停止时序后重放旧请求，可能让
+CTL 的刷新位无法消退并触发 `vblank timeout`。此处采用
+[上游修复及审查](https://lists.openwall.net/linux-kernel/2026/09/13/976)
+中的处理顺序，保留硬件复位、本次关闭提交和后续帧完成检查。
+`tests/display-live-refresh.py --source /path/to/assembled-kernel` 执行实际关闭和提交等待函数，模拟 32 种残留请求组合；
+移除入口清理后，同一模型应重新报提交超时。实机仍需结合全系统睡眠、桌面熄屏恢复、
+帧计数推进与内核日志验证，单次未出现超时不能证明所有唤醒场景均已覆盖。
+
 ### 亮度与 CABC
 
 逻辑亮度 0–4095 按原厂曲线映射到背光 0–2047；最低非零值 `1` 映射为 `17`。
@@ -118,6 +191,7 @@ sudo liuqin-display-policy set ui --save
 | 四档在线切换 | 一台天马屏通过全部 12 个方向；画面与连续手指输入正常，面板初始化、固件重载、看门狗、ESD 和 underrun 均未增加 |
 | 实际刷新率 | 约 60.002 / 89.902 / 120.004 / 143.749 Hz，已核对实际帧率而非仅看桌面档位 |
 | 亮灭屏 | 天马 90/120/144 Hz 普通换档及熄屏恢复、首帧后唤醒、手动亮度可用；命令调度另有普通重启和冷启动检查 |
+| 关闭刷新状态 | 清理残留请求后，单台天马屏在 120 Hz 的重复 s2idle 和桌面熄屏恢复中，帧计数继续推进，CTL/DSC 刷新位清零，未复现提交超时，用户确认画面正常；仍属于短时验证 |
 | 启动默认亮度 | 取消初始关闭背光后，Fedora 与 Rec 均通过 Fastboot 临时启动，用户确认画面和手指触控正常；长期与冷启动待验证 |
 | 手写笔 | 戴尔 PN7522W 在 120 Hz 和在线切入的 60 Hz 有坐标、落笔和压感；90/144 Hz 未收到笔事件 |
 | 离线回归 | 双面板 24 个切换方向、57 项故障/范围检查及 84 项显示与触控初始化检查通过；源码树合并前后一致 |

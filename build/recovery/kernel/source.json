@@ -5,7 +5,7 @@
   "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
   "tag": "v7.3.4",
   "commit": "7595a62d45ee1a2297eafa5f2ef5d0a45142d84d",
-  "expected_source_tree": "c2361341a23f431773ffe3ee11be845834751bcc",
+  "expected_source_tree": "8b5a83861244c1511988f26cb4cc0ffb3b439365",
   "config": {
     "path": "build/recovery/kernel/7.3.4.config",
     "sha256": "84e4eeb8b0004d8f73c7cb956efe53e13bf9a6d580918a1214892bda95469f39"
@@ -136,6 +136,70 @@
       "sha256": "eb6e1a955cbb696e3bc9447ae5def64c1be0b066f86de8bf17a520da9416039d"
     },
     {
+      "path": "build/kernel/patches/linux-7.3/0045-liuqin-negotiate-dp-lanes.patch",
+      "sha256": "11f383760219e9a7d085acc17f187bdafa3d78f3b85c70585c5dbb92ac1faabe"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0046-drm-msm-dp-handle-idle-pll-unlock.patch",
+      "sha256": "9a3e5305301fe257fe6663bbcb13fbe29e785953cdc096ee66352b05901248e7"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0047-liuqin-dp-audio-link.patch",
+      "sha256": "89b67450d0cf811531efb454adf3b1a2ccafc6220ba273ca4d7c6250e40edbc4"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0048-drm-msm-dp-restore-audio-after-link-reset.patch",
+      "sha256": "2bb33880dc40465655e7fa523b77ce6f74300fa72b19e33c90eb488df2b5c48c"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0049-liuqin-four-microphone-capture.patch",
+      "sha256": "bed61ae6d928ef16085ad576a27dc46073acb9a915035add018149b2e6f04dbe"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0050-asoc-probe-disconnected-display-pcm.patch",
+      "sha256": "40e9c49a2f5cf5f60aec009e5548bfa48a2adeddc75fa1d95df53751c4b5e7e5"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0051-asoc-q6apm-map-liuqin-microphone-channels.patch",
+      "sha256": "9d1dd9d6b21a4d0745ebd6cacb981c3aa2491e4c6445b3fa5f6d934101efa92f"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0052-asoc-wcd938x-use-tx-register-interrupt.patch",
+      "sha256": "7df22f3d0b8fee96a328cb61cb739e6e7caa0c5e62281545d3f2d95e94be3b28"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0053-soundwire-qcom-quiesce-irq-before-clock-stop.patch",
+      "sha256": "6ae3cda12826e50d28bb096015ba272520098c2caa3c96f0fe1beafa340044f2"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0054-soundwire-qcom-use-v17-cpu1-command-fifo.patch",
+      "sha256": "25c7454b332bde610d9977c841787b863e61ef1dba00c6b79fe690949c255937"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0055-power-supply-m81-cache-valid-readings.patch",
+      "sha256": "f351c6aaaabe3da3037b10d4f5ef29e7627721fbacda4cfa0030ffc87eeb4b24"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0056-liuqin-audio-sleep-and-dsp-recovery.patch",
+      "sha256": "70bf5e8d05ff852f6a00d472b6551373627cd195f90cb6974e39c45948e741d5"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0057-liuqin-microphone-clock-and-offline-lifecycle.patch",
+      "sha256": "5333d26ea6c87b7dc51a72ff68bd24ecf5f3597723e3ea565c3bbedb173f9309"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0058-asoc-q6apm-retire-offline-graphs.patch",
+      "sha256": "d93b1279b4b73fc3bef262921135682b7b06cbdd45002399192cc913a5c0b9b8"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0059-drm-msm-dpu-clear-stale-teardown-flush.patch",
+      "sha256": "df8306c48a709237038c5fb9b54291e3b92f4fa8d8f8fd9fa557e0716a4a02ef"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0060-nanosic-service-awake-status-irq.patch",
+      "sha256": "daba54965782f10c6262f0167ce0f62f6c309b920358dbea9845fae0de5eba78"
+    },
+    {
       "path": "build/recovery/kernel/patches/linux-7.3/0001-recovery-peripheral-handoff.patch",
       "sha256": "ccb0f030fb1bed451301961d3d9c67d1b45060f67beb936a9aaf32a9db998f62"
     }
@@ -163,7 +227,7 @@
   "build_timestamp": "2026-11-11T00:00:00+00:00",
   "shared_kernel": {
     "path": "build/kernel/source.json",
-    "sha256": "515f8404fafc3f44ce2cac52d595ca7767f782a778ae2d8049eb824e63a34a67"
+    "sha256": "7d9b95ed709eeaab30221cd3a25913c76074e62b1ceabc59c44badef25ecaaa5"
   },
   "touch_patches": [
     {

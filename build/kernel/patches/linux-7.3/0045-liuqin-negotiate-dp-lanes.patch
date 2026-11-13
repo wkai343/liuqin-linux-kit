@@ -1,0 +1,239 @@
+Subject: [PATCH] Limit Liuqin DisplayPort lanes by the Type-C assignment
+
+Expose the four routed lanes in the board graph and keep the OEM HBR2
+ceiling. The QMP mux already distinguishes DP-only C/E assignments from
+shared D/F assignments. Clamp the sink capabilities to the applied mux
+mode before advertising modes and recheck the assignment at PHY power-on.
+Start each AUX session with provisional two-lane RBR options.
+
+ arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts |  3 +-
+ drivers/gpu/drm/msm/dp/dp_ctrl.c                  |  6 ++++
+ drivers/gpu/drm/msm/dp/dp_display.c               |  3 +-
+ drivers/gpu/drm/msm/dp/dp_panel.c                 | 22 +++++++++++++--
+ drivers/gpu/drm/msm/dp/dp_panel.h                 |  4 ++-
+ drivers/phy/qualcomm/phy-qcom-qmp-combo.c         | 34 +++++++++++++++++++++++
+ 6 files changed, 66 insertions(+), 6 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+index 643435f..9b9c8b7 100644
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+@@ -1232,7 +1232,8 @@
+ };
+ 
+ &mdss_dp0_out {
+-	data-lanes = <0 1>;
++	data-lanes = <0 1 2 3>;
++	link-frequencies = /bits/ 64 <1620000000 2700000000 5400000000>;
+ };
+ 
+ /*
+diff --git a/drivers/gpu/drm/msm/dp/dp_ctrl.c b/drivers/gpu/drm/msm/dp/dp_ctrl.c
+index e3137a3..1fe20ed 100644
+--- a/drivers/gpu/drm/msm/dp/dp_ctrl.c
++++ b/drivers/gpu/drm/msm/dp/dp_ctrl.c
+@@ -11,6 +11,7 @@
+ #include <linux/delay.h>
+ #include <linux/iopoll.h>
+ #include <linux/phy/phy.h>
++#include <linux/platform_data/liuqin.h>
+ #include <linux/phy/phy-dp.h>
+ #include <linux/pm_opp.h>
+ #include <linux/rational.h>
+@@ -2038,6 +2039,11 @@ int msm_dp_ctrl_phy_init(struct msm_dp_ctrl *msm_dp_ctrl)
+ 	 * Conservative RBR/2-lane options here; the real link parameters are
+ 	 * applied later by msm_dp_ctrl_enable_mainlink_clocks().
+ 	 */
++	if (liuqin_board_quirks())
++		ctrl->phy_opts.dp = (struct phy_configure_opts_dp) {
++			.lanes = 2,
++			.link_rate = 1620,
++		};
+ 	if (!ctrl->phy_opts.dp.lanes)
+ 		ctrl->phy_opts.dp.lanes = 2;
+ 	if (!ctrl->phy_opts.dp.link_rate)
+diff --git a/drivers/gpu/drm/msm/dp/dp_display.c b/drivers/gpu/drm/msm/dp/dp_display.c
+index fbdcc3f..b4a8386 100644
+--- a/drivers/gpu/drm/msm/dp/dp_display.c
++++ b/drivers/gpu/drm/msm/dp/dp_display.c
+@@ -575,7 +575,8 @@ static int msm_dp_init_sub_modules(struct msm_dp_display_private *dp)
+ 		goto error_link;
+ 	}
+ 
+-	dp->panel = msm_dp_panel_get(dev, dp->aux, dp->link, dp->link_base, dp->p0_base);
++	dp->panel = msm_dp_panel_get(dev, dp->aux, dp->link, phy,
++				      dp->link_base, dp->p0_base);
+ 	if (IS_ERR(dp->panel)) {
+ 		rc = PTR_ERR(dp->panel);
+ 		DRM_ERROR("failed to initialize panel, rc = %d\n", rc);
+diff --git a/drivers/gpu/drm/msm/dp/dp_panel.c b/drivers/gpu/drm/msm/dp/dp_panel.c
+index e76dad0..c16a3ca 100644
+--- a/drivers/gpu/drm/msm/dp/dp_panel.c
++++ b/drivers/gpu/drm/msm/dp/dp_panel.c
+@@ -13,6 +13,8 @@
+ #include <drm/drm_print.h>
+ 
+ #include <linux/io.h>
++#include <linux/phy/phy.h>
++#include <linux/platform_data/liuqin.h>
+ #include <linux/types.h>
+ #include <asm/byteorder.h>
+ 
+@@ -24,6 +26,7 @@ struct msm_dp_panel_private {
+ 	struct msm_dp_panel msm_dp_panel;
+ 	struct drm_dp_aux *aux;
+ 	struct msm_dp_link *link;
++	struct phy *phy;
+ 	void __iomem *link_base;
+ 	void __iomem *p0_base;
+ 	bool panel_on;
+@@ -85,7 +88,7 @@ static void msm_dp_panel_read_psr_cap(struct msm_dp_panel_private *panel)
+ 	}
+ }
+ 
+-static int msm_dp_panel_read_dpcd(struct msm_dp_panel *msm_dp_panel)
++static int msm_dp_panel_read_dpcd(struct msm_dp_panel *msm_dp_panel, bool is_edp)
+ {
+ 	int rc, max_lttpr_lanes, max_lttpr_rate;
+ 	struct msm_dp_panel_private *panel;
+@@ -197,6 +200,17 @@ static int msm_dp_panel_read_dpcd(struct msm_dp_panel *msm_dp_panel)
+ 	if (max_lttpr_lanes && max_lttpr_lanes < link_info->num_lanes)
+ 		link_info->num_lanes = max_lttpr_lanes;
+ 
++	if (!is_edp && liuqin_board_quirks()) {
++		union phy_configure_opts opts = { .dp.lanes = link_info->num_lanes };
++
++		/* The PHY knows which lanes the Type-C mux allocated to DP. */
++		if (phy_validate(panel->phy, PHY_MODE_DP, PHY_SUBMODE_DP, &opts))
++			opts.dp.lanes = min(opts.dp.lanes, 2U);
++		link_info->num_lanes = opts.dp.lanes;
++		dev_info(panel->dev, "DP: using %u lanes at up to %u kHz (sink: %u lanes)\n",
++			 link_info->num_lanes, link_info->rate, drm_dp_max_lane_count(dpcd));
++	}
++
+ 	drm_dbg_dp(panel->drm_dev, "version: %d.%d\n", major, minor);
+ 	drm_dbg_dp(panel->drm_dev, "link_rate=%d\n", link_info->rate);
+ 	drm_dbg_dp(panel->drm_dev, "link_rate_set=%d\n", link_info->rate_set);
+@@ -246,7 +260,8 @@ int msm_dp_panel_read_link_caps(struct msm_dp_panel *msm_dp_panel,
+ 
+ 	panel = container_of(msm_dp_panel, struct msm_dp_panel_private, msm_dp_panel);
+ 
+-	rc = msm_dp_panel_read_dpcd(msm_dp_panel);
++	rc = msm_dp_panel_read_dpcd(msm_dp_panel,
++				    connector->connector_type == DRM_MODE_CONNECTOR_eDP);
+ 	if (rc) {
+ 		DRM_ERROR("read dpcd failed %d\n", rc);
+ 		return rc;
+@@ -699,7 +714,7 @@ int msm_dp_panel_init_panel_info(struct msm_dp_panel *msm_dp_panel,
+ }
+ 
+ struct msm_dp_panel *msm_dp_panel_get(struct device *dev, struct drm_dp_aux *aux,
+-			      struct msm_dp_link *link,
++			      struct msm_dp_link *link, struct phy *phy,
+ 			      void __iomem *link_base,
+ 			      void __iomem *p0_base)
+ {
+@@ -718,6 +733,7 @@ struct msm_dp_panel *msm_dp_panel_get(struct device *dev, struct drm_dp_aux *aux
+ 	panel->dev = dev;
+ 	panel->aux = aux;
+ 	panel->link = link;
++	panel->phy = phy;
+ 	panel->link_base = link_base;
+ 	panel->p0_base = p0_base;
+ 
+diff --git a/drivers/gpu/drm/msm/dp/dp_panel.h b/drivers/gpu/drm/msm/dp/dp_panel.h
+index 4519ac3..d6b4070 100644
+--- a/drivers/gpu/drm/msm/dp/dp_panel.h
++++ b/drivers/gpu/drm/msm/dp/dp_panel.h
+@@ -88,8 +88,10 @@ static inline bool is_lane_count_valid(u32 lane_count)
+ 		lane_count == 4);
+ }
+ 
++struct phy;
++
+ struct msm_dp_panel *msm_dp_panel_get(struct device *dev, struct drm_dp_aux *aux,
+-			      struct msm_dp_link *link,
++			      struct msm_dp_link *link, struct phy *phy,
+ 			      void __iomem *link_base,
+ 			      void __iomem *p0_base);
+ #endif /* _DP_PANEL_H_ */
+diff --git a/drivers/phy/qualcomm/phy-qcom-qmp-combo.c b/drivers/phy/qualcomm/phy-qcom-qmp-combo.c
+index 7898aa2..eed70aa 100644
+--- a/drivers/phy/qualcomm/phy-qcom-qmp-combo.c
++++ b/drivers/phy/qualcomm/phy-qcom-qmp-combo.c
+@@ -15,6 +15,7 @@
+ #include <linux/of_address.h>
+ #include <linux/of_graph.h>
+ #include <linux/phy/phy.h>
++#include <linux/platform_data/liuqin.h>
+ #include <linux/platform_device.h>
+ #include <linux/regulator/consumer.h>
+ #include <linux/reset.h>
+@@ -2672,6 +2673,7 @@ struct qmp_combo {
+ 	struct mutex phy_mutex;
+ 	int init_count;
+ 	enum qmpphy_mode qmpphy_mode;
++	enum qmpphy_mode typec_mode;
+ 
+ 	struct phy *usb_phy;
+ 	enum phy_mode phy_mode;
+@@ -4145,6 +4147,28 @@ static int qmp_v8_configure_dp_phy(struct qmp_combo *qmp)
+ 	return 0;
+ }
+ 
++static unsigned int qmp_combo_dp_lane_limit(struct qmp_combo *qmp)
++{
++	lockdep_assert_held(&qmp->phy_mutex);
++
++	/* Both the requested and applied mux modes must permit four lanes. */
++	return qmp->typec_mode == QMPPHY_MODE_DP_ONLY &&
++	       qmp->qmpphy_mode == QMPPHY_MODE_DP_ONLY ? 4 : 2;
++}
++
++static int qmp_combo_dp_validate(struct phy *phy, enum phy_mode mode,
++				 int submode, union phy_configure_opts *opts)
++{
++	struct qmp_combo *qmp = phy_get_drvdata(phy);
++
++	if (mode != PHY_MODE_DP || submode != PHY_SUBMODE_DP || !liuqin_board_quirks())
++		return -EOPNOTSUPP;
++
++	guard(mutex)(&qmp->phy_mutex);
++	opts->dp.lanes = min(opts->dp.lanes, qmp_combo_dp_lane_limit(qmp));
++	return 0;
++}
++
+ static int qmp_combo_dp_configure(struct phy *phy, union phy_configure_opts *opts)
+ {
+ 	const struct phy_configure_opts_dp *dp_opts = &opts->dp;
+@@ -4386,6 +4410,13 @@ static int qmp_combo_dp_power_on(struct phy *phy)
+ 
+ 	mutex_lock(&qmp->phy_mutex);
+ 
++	/* Recheck under the mux lock if the assignment changed since DPCD. */
++	if (qmp->dp_opts.lanes > 2 && liuqin_board_quirks() &&
++	    qmp->dp_opts.lanes > qmp_combo_dp_lane_limit(qmp)) {
++		mutex_unlock(&qmp->phy_mutex);
++		return -EAGAIN;
++	}
++
+ 	serdes_ret = qmp_combo_dp_serdes_init(qmp);
+ 	if (serdes_ret)
+ 		goto out_unlock;
+@@ -4579,6 +4610,7 @@ static const struct phy_ops qmp_combo_usb_phy_ops = {
+ static const struct phy_ops qmp_combo_dp_phy_ops = {
+ 	.init		= qmp_combo_dp_init,
+ 	.configure	= qmp_combo_dp_configure,
++	.validate	= qmp_combo_dp_validate,
+ 	.power_on	= qmp_combo_dp_power_on,
+ 	.calibrate	= qmp_combo_dp_calibrate,
+ 	.power_off	= qmp_combo_dp_power_off,
+@@ -5066,6 +5098,8 @@ static int qmp_combo_typec_mux_set(struct typec_mux_dev *mux, struct typec_mux_s
+ 		new_mode = QMPPHY_MODE_USB3_ONLY;
+ 	}
+ 
++	qmp->typec_mode = new_mode;
++
+ 	if (new_mode == qmp->qmpphy_mode) {
+ 		dev_dbg(qmp->dev, "typec_mux_set: same qmpphy mode, bail out\n");
+ 		return 0;

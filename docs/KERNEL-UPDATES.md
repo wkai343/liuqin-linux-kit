@@ -3,8 +3,10 @@
 [项目首页](../README.md) ｜ [构建指南](BUILD.md) ｜ [硬件支持](HARDWARE.md)
 
 项目通过版本化 RPM 交付配套 boot 与模块，允许保留旧内核。
-安装软件包、Fastboot 临时启动、A 槽固定与回读已验证；
-**系统内自动写引导尚未真机验收，默认停用，也未提供在线内核仓库。**
+安装软件包、Fastboot 临时启动、A 槽固定与回读已验证。
+系统内手动 `apply`、普通重启和 `confirm` 已在单台设备的多系统 ext4 默认根上验证；
+RPM 事务钩子的自动写入、故障恢复及其他布局仍需分别验收。
+**自动写引导默认停用，尚未提供在线内核仓库。**
 
 ## 配套要求
 
@@ -54,9 +56,16 @@ devbox run build -- --target packages
 
 1. 把同批软件包复制到平板，执行 `sudo dnf install ./*.rpm`。
    默认只安装文件，不写 boot。
-2. 经电脑 Fastboot 临时启动新 boot，验证桌面和硬件后，再固定 A 槽并回读。
-   保留上一版 boot、模块和恢复材料，且备份到平板之外。
-3. 运行配套内核后，可用 `sudo liuqin-boot-update plan <release>` 只读检查后续更新计划。
+2. 按[已有系统临时启动要求](BUILD.md#当前构建产物)绑定独立测试镜像，经电脑 Fastboot
+   验证桌面和硬件后，正常重启回已安装的默认内核。更新器要求运行内核与 `boot_a` 匹配。
+3. 执行 `sudo liuqin-boot-update check <release>` 与
+   `sudo liuqin-boot-update plan <release>`，核对目标版本及写入范围。
+   保留上一版 boot、模块和恢复材料；将完整旧 boot、多系统 `linux_boot` 内容、
+   当前根绑定及需更换的设备配置备份到平板之外，并校验备份。
+4. 需要写入默认内核时，执行 `sudo liuqin-boot-update enable`，再执行
+   `sudo liuqin-boot-update apply <release>`。成功后普通重启，核对实际版本、配套硬件，
+   并执行 `sudo liuqin-boot-update confirm`。若此前停用自动写入，再执行
+   `sudo liuqin-boot-update disable` 恢复设置。
 
 多系统更新使用软件包中**尚未绑定系统**的发布镜像。更新器为当前默认项生成新的绑定版本，
 保留旧镜像，并同步 `linux_boot` 中的系统清单、根分区槽位、默认版本和内核更新记录。
@@ -67,7 +76,24 @@ devbox run build -- --target packages
 日常 `dnf upgrade` 主要更新用户态。发行版通用内核不能直接替代设备适配内核，
 `update-initramfs` 也不会更新平板的启动分区。
 
-### 系统内自动更新（待真机验收）
+### 普通重启后的核验
+
+确认实际运行的 `uname -r` 与目标 release 相同，模块检查通过，`status` 的事务对应本次更新，
+再检查桌面和本次改动涉及的设备，最后执行 `confirm`。`confirm` 会核对运行内核和
+`boot_a`；临时启动通过、RPM 安装成功或 `apply` 完成回读都不能替代普通重启后的确认。
+
+包含 DP 音频和四路麦克风的内核还需要配套的版本化拓扑与 UCM，见
+[音频配套要求](AUDIO.md#拓扑与桌面)。重启后核对 Speaker、Mic、DisplayPort PCM
+及实际采集数据；未接外屏时的设备识别不能替代外屏实际出声测试。
+键盘改动检查状态中断、输入及睡眠恢复，方法见
+[键盘状态中断与睡眠](HARDWARE.md#键盘状态中断与睡眠)。
+
+多系统更新会生成新的 `boot_generation`。更新后再次临时启动时，须重新读取当前
+`/etc/liuqin-boot-target` 并生成测试副本；更新前保存的绑定镜像已经过期。
+精确 release、启动目标、文件摘要和实测日志保存在忽略的 `out/` 目录，
+文档只记录更新方法、验证范围和限制。
+
+### 系统内更新与自动写入
 
 `sudo liuqin-boot-update enable` 绑定当前设备和布局，启用后软件包事务钩子才会写 boot。
 默认构建不启用此入口。

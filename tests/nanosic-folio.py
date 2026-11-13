@@ -8,6 +8,8 @@ import re
 import subprocess
 import tempfile
 
+from kernel_test import run_c
+
 PROJECT = Path(__file__).resolve().parents[1]
 PATCHES = PROJECT / 'build/kernel/patches/linux-7.3'
 DRIVER = 'drivers/hid/hid-nanosic.c'
@@ -197,6 +199,157 @@ int main(void){
 '''
 
 
+WAKE_STUBS = r'''
+#include <assert.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+typedef uint64_t u64; typedef int irqreturn_t;
+#define IRQ_HANDLED 1
+#define IRQF_ONESHOT 0x2000
+#define EPROBE_DEFER 517
+#define READ_ONCE(v) (v)
+#define WRITE_ONCE(p,v) ((p)=(v))
+#define system_dfl_wq NULL
+#define msecs_to_jiffies(v) (v)
+struct work_struct {bool pending;};
+struct delayed_work {struct work_struct work;bool pending;};
+struct device {void *data;};
+struct i2c_client {struct device dev;};
+struct nanosic {
+ struct i2c_client *client;int lock,*wake_gpio;
+ int data_irq,wakeup_irq;bool data_irq_wake_enabled;
+ bool suspended,awake,data_pending,caps_lock_valid,led_transport_ready;
+ u64 irq_count,wakeup_irq_count;
+ struct delayed_work posture_work,idle_work,status_work,led_work;
+ struct work_struct lid_work;unsigned int status_attempts;
+};
+static int held,wake_level,wake_events,reads,raises,enable_calls,disable_calls;
+static int enable_error,disable_error,wake_depth;
+static bool may_wakeup;
+static void (*cancel_hook)(void);
+struct test_guard {bool active;};
+static struct test_guard take(int *p){(void)p;assert(!held);held=1;return (struct test_guard){true};}
+static void drop(struct test_guard *g){if(g->active){assert(held);held=0;g->active=false;}}
+#define guard(type) struct test_guard guard_ __attribute__((cleanup(drop))) = take
+#define scoped_guard(type,p) for(struct test_guard g_ __attribute__((cleanup(drop)))=take(p);g_.active;drop(&g_))
+static void *dev_get_drvdata(struct device *d){return d->data;}
+static bool device_may_wakeup(struct device *d){(void)d;return may_wakeup;}
+static void pm_wakeup_event(struct device *d,int ms){(void)d;assert(held&&ms==1000);wake_events++;}
+static void nanosic_wake(struct nanosic *n){assert(held&&!n->suspended);n->awake=true;wake_level=1;raises++;n->idle_work.pending=true;}
+static void nanosic_receive_frame(struct nanosic *n){assert(held&&!n->suspended);reads++;}
+static void nanosic_release_inputs(struct nanosic *n){assert(held&&n->suspended);}
+static void nanosic_refresh_posture(struct nanosic *n){assert(held&&!n->suspended);}
+static void nanosic_queue_led(struct nanosic *n){assert(held&&!n->suspended);n->led_work.pending=true;}
+static void mod_delayed_work(void *q,struct delayed_work *w,unsigned long delay){(void)q;assert(held&&delay==200);w->pending=true;}
+static void cancel_delayed_work_sync(struct delayed_work *w){assert(!held);w->pending=false;if(cancel_hook){void (*fn)(void)=cancel_hook;cancel_hook=NULL;fn();}}
+static void cancel_work_sync(struct work_struct *w){assert(!held);w->pending=false;}
+static void gpiod_set_value_cansleep(int *p,int v){assert(held);*p=v;}
+static int enable_irq_wake(int irq){assert(!held&&irq==50);enable_calls++;if(enable_error)return enable_error;wake_depth++;return 0;}
+static int disable_irq_wake(int irq){assert(!held&&irq==50&&wake_depth==1);disable_calls++;if(disable_error)return disable_error;wake_depth--;return 0;}
+static int data_lookup,wakeup_lookup;
+static void *dev_fwnode(struct device *d){return d;}
+static int fwnode_irq_get_byname(void *node,const char *name){(void)node;if(!strcmp(name,"data"))return data_lookup;assert(!strcmp(name,"wakeup"));return wakeup_lookup;}
+#define dev_err_probe(dev,ret,...) ((void)(dev),(ret))
+/* Model resources owned by I2C core separately from reverse-order devres. */
+static int pm_irq,owner,request_error,attach_error,action_error;
+static int actions[4],action_count,clear_count;
+static irqreturn_t (*status_handler)(int,void *);
+static void dev_pm_clear_wake_irq(struct device *dev){(void)dev;clear_count++;if(owner==1)owner=0;pm_irq=0;}
+static int devm_request_threaded_irq(struct device *dev,int irq,void *hard,
+ irqreturn_t (*thread)(int,void *),unsigned long flags,const char *name,void *arg){
+ assert(dev==&((struct nanosic*)arg)->client->dev&&irq==46&&!hard);
+ assert(flags==IRQF_ONESHOT&&!strcmp(name,"nanosic-wakeup"));
+ assert(!owner&&!pm_irq);if(request_error)return request_error;
+ owner=2;status_handler=thread;actions[action_count++]=1;return 0;
+}
+static int devm_pm_set_wake_irq(struct device *dev,int irq){
+ assert(irq==46&&owner==2&&!pm_irq);if(attach_error)return attach_error;
+ pm_irq=irq;if(action_error){dev_pm_clear_wake_irq(dev);return action_error;}
+ actions[action_count++]=2;return 0;
+}
+static void release_resources(struct device *dev){
+ while(action_count){int a=actions[--action_count];if(a==2)dev_pm_clear_wake_irq(dev);
+ else {assert(a==1&&owner==2&&!pm_irq);owner=0;status_handler=NULL;}}
+ /* I2C probe failure/remove also clears the wake IRQ after devres. */
+ dev_pm_clear_wake_irq(dev);assert(!owner&&!pm_irq&&!action_count);
+}
+'''
+
+WAKE_CASES = r'''
+static struct nanosic n;static struct i2c_client c;
+static void init(void){
+ memset(&n,0,sizeof(n));memset(&c,0,sizeof(c));n.client=&c;c.dev.data=&n;
+ n.wake_gpio=&wake_level;n.data_irq=50;n.wakeup_irq=46;n.awake=true;
+ wake_level=1;wake_events=reads=raises=enable_calls=disable_calls=0;
+ enable_error=disable_error=wake_depth=held=0;may_wakeup=true;cancel_hook=NULL;
+ pm_irq=46;owner=1;request_error=attach_error=action_error=0;action_count=clear_count=0;
+ status_handler=NULL;data_lookup=50;wakeup_lookup=46;
+}
+static void transition_irq(void){
+ assert(n.suspended);nanosic_wakeup_irq(46,&n);nanosic_data_irq(50,&n);
+ assert(!reads&&!raises&&!wake_level&&n.data_pending);
+}
+int main(void){int cases=0;
+ init();assert(!nanosic_irqs_get(&n)&&n.data_irq==50&&n.wakeup_irq==46);cases++;
+ init();data_lookup=-EPROBE_DEFER;assert(nanosic_irqs_get(&n)==-EPROBE_DEFER);cases++;
+ init();wakeup_lookup=-EPROBE_DEFER;assert(nanosic_irqs_get(&n)==-EPROBE_DEFER);cases++;
+ init();wakeup_lookup=-ENXIO;assert(nanosic_irqs_get(&n)==-ENXIO);cases++;
+ init();wakeup_lookup=50;assert(nanosic_irqs_get(&n)==-EINVAL);cases++;
+ init();assert(!nanosic_request_wakeup_irq(&n));assert(owner==2&&pm_irq==46&&clear_count==1);
+ assert(status_handler&&status_handler(46,&n)==IRQ_HANDLED);
+ assert(n.wakeup_irq_count==1&&!wake_events&&!reads&&!raises);
+ release_resources(&c.dev);assert(clear_count==3);cases++;
+ init();request_error=-EBUSY;assert(nanosic_request_wakeup_irq(&n)==-EBUSY);
+ release_resources(&c.dev);cases++;
+ init();attach_error=-ENOMEM;assert(nanosic_request_wakeup_irq(&n)==-ENOMEM);
+ release_resources(&c.dev);cases++;
+ init();action_error=-ENOMEM;assert(nanosic_request_wakeup_irq(&n)==-ENOMEM);
+ release_resources(&c.dev);cases++;
+ init();pm_irq=owner=0;assert(!nanosic_request_wakeup_irq(&n));release_resources(&c.dev);cases++;
+ /* Awake status edges neither hold the bridge awake nor fabricate input. */
+ init();n.awake=false;wake_level=0;
+ for(int i=0;i<8;i++)assert(nanosic_wakeup_irq(46,&n)==IRQ_HANDLED);
+ assert(n.wakeup_irq_count==8&&!wake_events&&!reads&&!raises&&!wake_level);cases++;
+ init();assert(nanosic_data_irq(50,&n)==IRQ_HANDLED);assert(reads==1&&raises==1&&!wake_events);cases++;
+ init();assert(!nanosic_suspend(&c.dev));assert(n.suspended&&!n.awake&&!wake_level&&wake_depth==1);
+ nanosic_wakeup_irq(46,&n);assert(wake_events==1&&!reads&&!raises&&!n.data_pending);
+ assert(!nanosic_resume(&c.dev)&&!n.suspended&&!wake_depth&&disable_calls==1);
+ assert(!reads&&raises==1);cases++;
+ init();assert(!nanosic_suspend(&c.dev));nanosic_data_irq(50,&n);
+ assert(n.data_pending&&wake_events==1&&!reads&&!raises);
+ assert(!nanosic_resume(&c.dev));assert(!n.data_pending&&reads==1&&raises==1&&!wake_depth);cases++;
+ init();may_wakeup=false;assert(!nanosic_suspend(&c.dev));transition_irq();
+ assert(!wake_events&&!enable_calls&&!wake_depth);assert(!nanosic_resume(&c.dev));
+ assert(reads==1&&!disable_calls);cases++;
+ /* Edges between the suspend flag and IRQ arming must avoid suspended I2C. */
+ init();cancel_hook=transition_irq;assert(!nanosic_suspend(&c.dev));
+ assert(wake_events==2&&!reads&&!raises);assert(!nanosic_resume(&c.dev));assert(reads==1);cases++;
+ init();cancel_hook=transition_irq;enable_error=-EIO;assert(nanosic_suspend(&c.dev)==-EIO);
+ assert(!n.suspended&&!n.data_pending&&!wake_depth&&reads==1&&raises==1);
+ assert(n.status_work.pending&&n.led_work.pending);cases++;
+ init();for(int i=0;i<6;i++){assert(!nanosic_suspend(&c.dev));assert(!nanosic_resume(&c.dev));}
+ assert(enable_calls==6&&disable_calls==6&&!wake_depth);cases++;
+ /* Preserve resume errors rather than claiming successful wake disarm. */
+ init();assert(!nanosic_suspend(&c.dev));disable_error=-EIO;
+ assert(nanosic_resume(&c.dev)==-EIO&&!n.suspended);cases++;
+ assert(!held);printf("PASS: %d actual-driver IRQ and suspend scenarios (hardware not exercised)\n",cases);
+ return 0;
+}
+'''
+
+
+def check_wakeup(code):
+    names = ('nanosic_data_irq', 'nanosic_wakeup_irq', 'nanosic_irqs_get',
+             'nanosic_request_wakeup_irq', 'nanosic_suspend', 'nanosic_resume')
+    output = run_c(WAKE_STUBS + '\n'.join(function(code, name) for name in names) + WAKE_CASES,
+                   flags=('-Wno-unused-parameter', '-fsanitize=address,undefined'))
+    print(output, end='')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path)
@@ -218,6 +371,7 @@ def main():
                         '-Wno-misleading-indentation', '-fsanitize=address,undefined',
                         '-fno-sanitize-recover=all', str(source), '-o', str(binary)], check=True)
         subprocess.run([str(binary)], check=True, timeout=15)
+        check_wakeup(code)
 
 
 if __name__ == '__main__':

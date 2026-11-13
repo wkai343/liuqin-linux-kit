@@ -1,0 +1,29 @@
+From 3c116805595c450ed703fdcbb67ba6ddd3c4bca6 Mon Sep 17 00:00:00 2001
+From: Saim Shujah <saimzst@gmail.com>
+Date: Fri, 13 Nov 2026 15:20:44 +0800
+Subject: [PATCH] drm/msm/dpu: clear pending flush state before physical
+ cleanup
+
+Discard the previous frame software flush masks before assembling the pipeline teardown. Otherwise the teardown trigger may replay already consumed frame updates after video timing has stopped. Hardware reset and the new teardown flush remain in order.
+
+Upstream submission: https://lore.kernel.org/all/20260826182459.1506522-1-saimzst@gmail.com/
+Reviewed upstream by Dmitry Baryshkov: https://lists.openwall.net/linux-kernel/2026/09/13/976
+---
+ drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
+index e9c79ae16..8a1c41ff5 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
+@@ -2541,6 +2541,7 @@ void dpu_encoder_helper_phys_cleanup(struct dpu_encoder_phys *phys_enc)
+ 
+ 	dpu_enc = to_dpu_encoder_virt(phys_enc->parent);
+ 
++	ctl->ops.clear_pending_flush(ctl);
+ 	ctl->ops.reset(ctl);
+ 
+ 	dpu_encoder_helper_reset_mixers(phys_enc);
+-- 
+2.56.0
+

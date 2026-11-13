@@ -1,0 +1,613 @@
+From a9d4f80a89f029e86ba9c7e39f7f11991ade239f Mon Sep 17 00:00:00 2001
+From: wk <58632380+wkai343@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 14:45:01 +0800
+Subject: [PATCH] ASoC: liuqin: fix shared microphone clocks, HPF timing and
+ offline cleanup
+
+Follow OEM last-ADC ownership for WCD analog clocks and the Bolero TX sample-rate delay between HPF gate writes. Keep all four codec-DMA capture slots clocked while any physical input remains active, retaining inactive-slot mute across stream unmute. Retire ADC and MICBIAS votes in cache after ADSP loss, skip the offline volatile bank-rate register, and drain unmute/HPF work before channel or card removal.
+
+OEM reference: xiaomi-sm8450-kernel/android_vendor_qcom_opensource_audio-kernel at 721c4fb115d50aea74a2dec9ee864bf0f12682c8.
+---
+ sound/soc/codecs/lpass-tx-macro.c | 223 +++++++++++++++++++++++++++---
+ sound/soc/codecs/wcd938x.c        | 125 ++++++++++++++---
+ 2 files changed, 309 insertions(+), 39 deletions(-)
+
+diff --git a/sound/soc/codecs/lpass-tx-macro.c b/sound/soc/codecs/lpass-tx-macro.c
+index 5d99800c7..c89263039 100644
+--- a/sound/soc/codecs/lpass-tx-macro.c
++++ b/sound/soc/codecs/lpass-tx-macro.c
+@@ -253,6 +253,7 @@ struct hpf_work {
+ 	struct tx_macro *tx;
+ 	u8 decimator;
+ 	u8 hpf_cut_off_freq;
++	bool restore_pending;
+ 	struct delayed_work dwork;
+ };
+ 
+@@ -282,6 +283,8 @@ struct tx_macro {
+ 	struct clk *fsgen;
+ 	struct clk_hw hw;
+ 	bool dec_active[NUM_DECIMATORS];
++	unsigned long dec_clock_mask;
++	bool four_channel_clock;
+ 	int tx_mclk_users;
+ 	bool bcs_enable;
+ 	int dec_mode[NUM_DECIMATORS];
+@@ -674,24 +677,69 @@ static bool is_amic_enabled(struct snd_soc_component *component,
+ 	return false;
+ }
+ 
+-static void tx_macro_tx_hpf_corner_freq_callback(struct work_struct *work)
++static int tx_macro_capture_prepare(struct tx_macro *tx, bool enable)
+ {
+-	struct delayed_work *hpf_delayed_work;
+-	struct hpf_work *hpf_work;
+-	struct tx_macro *tx;
+-	struct snd_soc_component *component;
+-	u16 dec_cfg_reg, hpf_gate_reg;
+-	u8 hpf_cut_off_freq;
++	if (!liuqin_board_quirks() || liuqin_audio_transport_ready())
++		return 0;
++	if (enable)
++		return -ENETRESET;
+ 
+-	hpf_delayed_work = to_delayed_work(work);
+-	hpf_work = container_of(hpf_delayed_work, struct hpf_work, dwork);
+-	tx = hpf_work->tx;
+-	component = tx->component;
+-	hpf_cut_off_freq = hpf_work->hpf_cut_off_freq;
++	regcache_cache_only(tx->regmap, true);
++	regcache_mark_dirty(tx->regmap);
++	return 0;
++}
++
++static void tx_macro_amic_hpf_delay(struct snd_soc_component *component, u8 decimator)
++{
++	/* OEM waits one sample period between the two analog HPF gate writes. */
++	switch (snd_soc_component_read_field(component, CDC_TXn_TX_PATH_CTL(decimator),
++					     CDC_TXn_PCM_RATE_MASK)) {
++	case 0:
++		usleep_range(125, 130);
++		break;
++	case 1:
++		usleep_range(62, 65);
++		break;
++	case 3:
++		usleep_range(31, 32);
++		break;
++	case 4:
++		usleep_range(20, 21);
++		break;
++	case 5:
++		usleep_range(10, 11);
++		break;
++	case 6:
++		usleep_range(5, 6);
++		break;
++	default:
++		usleep_range(125, 130);
++		break;
++	}
++}
++
++static void tx_macro_restore_hpf(struct hpf_work *hpf_work)
++{
++	struct tx_macro *tx = hpf_work->tx;
++	struct snd_soc_component *component = tx->component;
++	u16 dec_cfg_reg, hpf_gate_reg;
++	u8 hpf_cut_off_freq = hpf_work->hpf_cut_off_freq;
+ 
+ 	dec_cfg_reg = CDC_TXn_TX_PATH_CFG0(hpf_work->decimator);
+ 	hpf_gate_reg = CDC_TXn_TX_PATH_SEC2(hpf_work->decimator);
+ 
++	if (liuqin_board_quirks() && !liuqin_audio_transport_ready()) {
++		/* Retire the temporary 150 Hz setting in cache, without a HW pulse. */
++		tx_macro_capture_prepare(tx, false);
++		snd_soc_component_write_field(component, dec_cfg_reg,
++					      CDC_TXn_HPF_CUT_FREQ_MASK, hpf_cut_off_freq);
++		snd_soc_component_update_bits(component, hpf_gate_reg,
++					      CDC_TXn_HPF_F_CHANGE_MASK |
++					      CDC_TXn_HPF_ZERO_GATE_MASK, 0x01);
++		hpf_work->restore_pending = false;
++		return;
++	}
++
+ 	if (is_amic_enabled(component, tx, hpf_work->decimator)) {
+ 		snd_soc_component_write_field(component,
+ 				dec_cfg_reg,
+@@ -701,6 +749,8 @@ static void tx_macro_tx_hpf_corner_freq_callback(struct work_struct *work)
+ 					      CDC_TXn_HPF_F_CHANGE_MASK |
+ 					      CDC_TXn_HPF_ZERO_GATE_MASK,
+ 					      0x02);
++		if (liuqin_board_quirks())
++			tx_macro_amic_hpf_delay(component, hpf_work->decimator);
+ 		snd_soc_component_update_bits(component, hpf_gate_reg,
+ 					      CDC_TXn_HPF_F_CHANGE_MASK |
+ 					      CDC_TXn_HPF_ZERO_GATE_MASK,
+@@ -716,6 +766,19 @@ static void tx_macro_tx_hpf_corner_freq_callback(struct work_struct *work)
+ 		snd_soc_component_write_field(component, hpf_gate_reg,
+ 					      CDC_TXn_HPF_F_CHANGE_MASK, 0x0);
+ 	}
++	hpf_work->restore_pending = false;
++}
++
++static void tx_macro_tx_hpf_corner_freq_callback(struct work_struct *work)
++{
++	struct hpf_work *hpf_work = container_of(to_delayed_work(work),
++					       struct hpf_work, dwork);
++
++	/* DAPM teardown will restore the saved cutoff in cache while offline. */
++	if (liuqin_board_quirks() && !liuqin_audio_transport_ready())
++		return;
++
++	tx_macro_restore_hpf(hpf_work);
+ }
+ 
+ static void tx_macro_mute_update_callback(struct work_struct *work)
+@@ -726,6 +789,9 @@ static void tx_macro_mute_update_callback(struct work_struct *work)
+ 	struct delayed_work *delayed_work;
+ 	u8 decimator;
+ 
++	if (liuqin_board_quirks() && !liuqin_audio_transport_ready())
++		return;
++
+ 	delayed_work = to_delayed_work(work);
+ 	tx_mute_dwork = container_of(delayed_work, struct tx_mute_work, dwork);
+ 	tx = tx_mute_dwork->tx;
+@@ -907,6 +973,76 @@ static int tx_macro_tx_mixer_put(struct snd_kcontrol *kcontrol,
+ 	return 1;
+ }
+ 
++static int tx_macro_dec_clock(struct tx_macro *tx, u8 decimator, bool enable)
++{
++	struct snd_soc_component *component = tx->component;
++	unsigned long clocks = BIT(decimator), old_clocks = tx->dec_clock_mask;
++	bool old_group = tx->four_channel_clock, active = false;
++	unsigned long i;
++	int ret, error = 0;
++
++	if (!liuqin_board_quirks()) {
++		snd_soc_component_write_field(component, CDC_TXn_TX_PATH_CTL(decimator),
++					      CDC_TXn_CLK_EN_MASK, enable);
++		return 0;
++	}
++
++	if (enable) {
++		if (decimator < 4 &&
++		    tx->active_ch_mask[TX_MACRO_AIF1_CAP] == GENMASK(3, 0))
++			tx->four_channel_clock = true;
++		if (decimator < 4 && tx->four_channel_clock)
++			clocks = GENMASK(3, 0);
++
++		/* Codec DMA consumes four slots even when one physical ADC is off. */
++		for_each_set_bit(i, &clocks, NUM_DECIMATORS) {
++			unsigned int mask = CDC_TXn_CLK_EN_MASK;
++
++			if (!tx->dec_active[i])
++				mask |= CDC_TXn_PGA_MUTE_MASK;
++			ret = snd_soc_component_update_bits(component, CDC_TXn_TX_PATH_CTL(i),
++							    mask, mask);
++			if (ret < 0)
++				goto rollback;
++			set_bit(i, &tx->dec_clock_mask);
++		}
++		tx->dec_active[decimator] = true;
++		return 0;
++	}
++
++	tx->dec_active[decimator] = false;
++	if (decimator < 4 && tx->four_channel_clock) {
++		for (i = 0; i < 4; i++)
++			active |= tx->dec_active[i];
++		if (active) {
++			ret = snd_soc_component_write_field(component,
++						CDC_TXn_TX_PATH_CTL(decimator),
++						CDC_TXn_PGA_MUTE_MASK, 1);
++			return ret < 0 ? ret : 0;
++		}
++		clocks = GENMASK(3, 0);
++		tx->four_channel_clock = false;
++	}
++	for_each_set_bit(i, &clocks, NUM_DECIMATORS) {
++		ret = snd_soc_component_update_bits(component, CDC_TXn_TX_PATH_CTL(i),
++						    CDC_TXn_CLK_EN_MASK | CDC_TXn_PGA_MUTE_MASK, 0);
++		if (ret < 0)
++			error = error ?: ret;
++		else
++			clear_bit(i, &tx->dec_clock_mask);
++	}
++	return error;
++
++rollback:
++	clocks = tx->dec_clock_mask & ~old_clocks;
++	for_each_set_bit(i, &clocks, NUM_DECIMATORS)
++		snd_soc_component_update_bits(component, CDC_TXn_TX_PATH_CTL(i),
++					      CDC_TXn_CLK_EN_MASK | CDC_TXn_PGA_MUTE_MASK, 0);
++	tx->dec_clock_mask = old_clocks;
++	tx->four_channel_clock = old_group;
++	return ret;
++}
++
+ static int tx_macro_enable_dec(struct snd_soc_dapm_widget *w,
+ 			       struct snd_kcontrol *kcontrol, int event)
+ {
+@@ -919,6 +1055,11 @@ static int tx_macro_enable_dec(struct snd_soc_dapm_widget *w,
+ 	u16 adc_mux_reg, adc_reg, adc_n, dmic;
+ 	u16 dmic_clk_reg;
+ 	struct tx_macro *tx = snd_soc_component_get_drvdata(component);
++	int ret;
++
++	ret = tx_macro_capture_prepare(tx, SND_SOC_DAPM_EVENT_ON(event));
++	if (ret)
++		return ret;
+ 
+ 	decimator = w->shift;
+ 	tx_vol_ctl_reg = CDC_TXn_TX_PATH_CTL(decimator);
+@@ -950,8 +1091,9 @@ static int tx_macro_enable_dec(struct snd_soc_dapm_widget *w,
+ 					      CDC_TXn_PGA_MUTE_MASK, 0x1);
+ 		break;
+ 	case SND_SOC_DAPM_POST_PMU:
+-		snd_soc_component_write_field(component, tx_vol_ctl_reg,
+-					     CDC_TXn_CLK_EN_MASK, 0x1);
++		ret = tx_macro_dec_clock(tx, decimator, true);
++		if (ret)
++			return ret;
+ 		if (!is_amic_enabled(component, tx, decimator)) {
+ 			snd_soc_component_update_bits(component, hpf_gate_reg, 0x01, 0x00);
+ 			/* Minimum 1 clk cycle delay is required as per HW spec */
+@@ -962,6 +1104,8 @@ static int tx_macro_enable_dec(struct snd_soc_dapm_widget *w,
+ 
+ 		tx->tx_hpf_work[decimator].hpf_cut_off_freq =
+ 						hpf_cut_off_freq;
++		tx->tx_hpf_work[decimator].restore_pending =
++				hpf_cut_off_freq != CF_MIN_3DB_150HZ;
+ 
+ 		if (hpf_cut_off_freq != CF_MIN_3DB_150HZ)
+ 			snd_soc_component_write_field(component, dec_cfg_reg,
+@@ -1010,6 +1154,16 @@ static int tx_macro_enable_dec(struct snd_soc_dapm_widget *w,
+ 		}
+ 		break;
+ 	case SND_SOC_DAPM_PRE_PMD:
++		if (liuqin_board_quirks()) {
++			/* Join unmute first, so it cannot undo the shutdown mute. */
++			cancel_delayed_work_sync(&tx->tx_mute_dwork[decimator].dwork);
++			cancel_delayed_work_sync(&tx->tx_hpf_work[decimator].dwork);
++			snd_soc_component_write_field(component, tx_vol_ctl_reg,
++						      CDC_TXn_PGA_MUTE_MASK, 0x1);
++			if (tx->tx_hpf_work[decimator].restore_pending)
++				tx_macro_restore_hpf(&tx->tx_hpf_work[decimator]);
++			break;
++		}
+ 		hpf_cut_off_freq =
+ 			tx->tx_hpf_work[decimator].hpf_cut_off_freq;
+ 		snd_soc_component_write_field(component, tx_vol_ctl_reg,
+@@ -1048,12 +1202,15 @@ static int tx_macro_enable_dec(struct snd_soc_dapm_widget *w,
+ 		cancel_delayed_work_sync(&tx->tx_mute_dwork[decimator].dwork);
+ 		break;
+ 	case SND_SOC_DAPM_POST_PMD:
+-		snd_soc_component_write_field(component, tx_vol_ctl_reg,
+-					      CDC_TXn_CLK_EN_MASK, 0x0);
++		ret = tx_macro_dec_clock(tx, decimator, false);
++		if (ret)
++			return ret;
+ 		snd_soc_component_write_field(component, dec_cfg_reg,
+ 					      CDC_TXn_ADC_MODE_MASK, 0x0);
+ 		snd_soc_component_write_field(component, tx_vol_ctl_reg,
+-					      CDC_TXn_PGA_MUTE_MASK, 0x0);
++					      CDC_TXn_PGA_MUTE_MASK,
++					      liuqin_board_quirks() &&
++					      test_bit(decimator, &tx->dec_clock_mask));
+ 		if (tx->bcs_enable) {
+ 			snd_soc_component_write_field(component, dec_cfg_reg,
+ 						      CDC_TXn_PH_EN_MASK, 0x0);
+@@ -1196,7 +1353,10 @@ static int tx_macro_digital_mute(struct snd_soc_dai *dai, int mute, int stream)
+ 	for_each_set_bit(decimator, &tx->active_ch_mask[dai->id], TX_MACRO_DEC_MAX)
+ 		snd_soc_component_write_field(component,
+ 					      CDC_TXn_TX_PATH_CTL(decimator),
+-					      CDC_TXn_PGA_MUTE_MASK, !!mute);
++					      CDC_TXn_PGA_MUTE_MASK,
++					      mute || (liuqin_board_quirks() &&
++					      tx->four_channel_clock && decimator < 4 &&
++					      !tx->dec_active[decimator]));
+ 
+ 	return 0;
+ }
+@@ -2117,6 +2277,11 @@ static int tx_macro_component_probe(struct snd_soc_component *comp)
+ 	int i, ret;
+ 
+ 	tx_macro_reset_capture_routes(tx);
++	if (liuqin_board_quirks()) {
++		memset(tx->dec_active, 0, sizeof(tx->dec_active));
++		tx->dec_clock_mask = 0;
++		tx->four_channel_clock = false;
++	}
+ 	ret = tx_macro_component_extend(comp);
+ 	if (ret)
+ 		return ret;
+@@ -2126,6 +2291,7 @@ static int tx_macro_component_probe(struct snd_soc_component *comp)
+ 	for (i = 0; i < NUM_DECIMATORS; i++) {
+ 		tx->tx_hpf_work[i].tx = tx;
+ 		tx->tx_hpf_work[i].decimator = i;
++		tx->tx_hpf_work[i].restore_pending = false;
+ 		INIT_DELAYED_WORK(&tx->tx_hpf_work[i].dwork,
+ 			tx_macro_tx_hpf_corner_freq_callback);
+ 	}
+@@ -2149,6 +2315,26 @@ static int tx_macro_component_probe(struct snd_soc_component *comp)
+ 	return 0;
+ }
+ 
++static void tx_macro_component_remove(struct snd_soc_component *comp)
++{
++	struct tx_macro *tx = snd_soc_component_get_drvdata(comp);
++	int i;
++
++	if (!liuqin_board_quirks())
++		return;
++
++	/* The macro survives APM card removal, but no work may retain that card. */
++	for (i = 0; i < NUM_DECIMATORS; i++) {
++		cancel_delayed_work_sync(&tx->tx_mute_dwork[i].dwork);
++		cancel_delayed_work_sync(&tx->tx_hpf_work[i].dwork);
++		if (tx->tx_hpf_work[i].restore_pending)
++			tx_macro_restore_hpf(&tx->tx_hpf_work[i]);
++		tx_macro_capture_prepare(tx, false);
++		tx_macro_dec_clock(tx, i, false);
++	}
++	tx->component = NULL;
++}
++
+ static int swclk_gate_enable(struct clk_hw *hw)
+ {
+ 	struct tx_macro *tx = to_tx_macro(hw);
+@@ -2245,6 +2431,7 @@ static int tx_macro_register_mclk_output(struct tx_macro *tx)
+ static const struct snd_soc_component_driver tx_macro_component_drv = {
+ 	.name = "TX-MACRO",
+ 	.probe = tx_macro_component_probe,
++	.remove = tx_macro_component_remove,
+ 	.controls = tx_macro_snd_controls,
+ 	.num_controls = ARRAY_SIZE(tx_macro_snd_controls),
+ 	.dapm_widgets = tx_macro_dapm_widgets,
+diff --git a/sound/soc/codecs/wcd938x.c b/sound/soc/codecs/wcd938x.c
+index 8d0aaf670..4b03a3141 100644
+--- a/sound/soc/codecs/wcd938x.c
++++ b/sound/soc/codecs/wcd938x.c
+@@ -325,6 +325,7 @@ static int wcd938x_set_swr_clk_rate(struct snd_soc_component *component, int rat
+ {
+ 	u8 mask = (bank ? 0xF0 : 0x0F);
+ 	u8 val = 0;
++	int ret;
+ 
+ 	switch (rate) {
+ 	case SWR_CLK_RATE_0P6MHZ:
+@@ -344,10 +345,10 @@ static int wcd938x_set_swr_clk_rate(struct snd_soc_component *component, int rat
+ 		val = 0x00;
+ 		break;
+ 	}
+-	snd_soc_component_update_bits(component, WCD938X_DIGITAL_SWR_TX_CLK_RATE,
+-				      mask, val);
++	ret = snd_soc_component_update_bits(component, WCD938X_DIGITAL_SWR_TX_CLK_RATE,
++					  mask, val);
+ 
+-	return 0;
++	return ret < 0 ? ret : 0;
+ }
+ 
+ static int wcd938x_io_init(struct wcd938x_priv *wcd938x)
+@@ -1095,6 +1096,24 @@ static int wcd938x_codec_enable_dmic(struct snd_soc_dapm_widget *w,
+ 	return 0;
+ }
+ 
++static int wcd938x_capture_prepare(struct wcd938x_priv *wcd938x, bool enable)
++{
++	if (!liuqin_board_quirks() || liuqin_audio_transport_ready())
++		return 0;
++	if (enable)
++		return -ENETRESET;
++
++	/* Still retire votes and cached enables after ADSP has gone away. */
++	regcache_cache_only(wcd938x->regmap, true);
++	regcache_mark_dirty(wcd938x->regmap);
++	return 0;
++}
++
++static bool wcd938x_adcs_active(struct wcd938x_priv *wcd938x)
++{
++	return wcd938x->status_mask & GENMASK(WCD_ADC4, WCD_ADC1);
++}
++
+ static int wcd938x_tx_swr_ctrl(struct snd_soc_dapm_widget *w,
+ 			       struct snd_kcontrol *kcontrol, int event)
+ {
+@@ -1102,6 +1121,11 @@ static int wcd938x_tx_swr_ctrl(struct snd_soc_dapm_widget *w,
+ 	struct wcd938x_priv *wcd938x = snd_soc_component_get_drvdata(component);
+ 	int bank;
+ 	int rate;
++	int ret;
++
++	/* The banked rate register is volatile and cannot be retired in cache. */
++	if (liuqin_board_quirks() && !liuqin_audio_transport_ready())
++		return event == SND_SOC_DAPM_PRE_PMU ? -ENETRESET : 0;
+ 
+ 	bank = sdw_slave_get_current_bank(wcd938x->sdw_priv[AIF1_CAP]->sdev);
+ 
+@@ -1128,16 +1152,26 @@ static int wcd938x_tx_swr_ctrl(struct snd_soc_dapm_widget *w,
+ 				}
+ 			}
+ 			rate = wcd938x_get_clk_rate(i);
+-			wcd938x_set_swr_clk_rate(component, rate, bank);
++			ret = wcd938x_set_swr_clk_rate(component, rate, bank);
++			if (ret && liuqin_board_quirks())
++				return ret;
+ 			/* Copy clk settings to active bank */
+-			wcd938x_set_swr_clk_rate(component, rate, !bank);
++			ret = wcd938x_set_swr_clk_rate(component, rate, !bank);
++			if (ret && liuqin_board_quirks())
++				return ret;
+ 		}
+ 		break;
+ 	case SND_SOC_DAPM_POST_PMD:
++		if (liuqin_board_quirks() && wcd938x_adcs_active(wcd938x))
++			break;
+ 		if (strnstr(w->name, "ADC", sizeof("ADC"))) {
+ 			rate = wcd938x_get_clk_rate(ADC_MODE_INVALID);
+-			wcd938x_set_swr_clk_rate(component, rate, !bank);
+-			wcd938x_set_swr_clk_rate(component, rate, bank);
++			ret = wcd938x_set_swr_clk_rate(component, rate, !bank);
++			if (ret && liuqin_board_quirks())
++				return ret;
++			ret = wcd938x_set_swr_clk_rate(component, rate, bank);
++			if (ret && liuqin_board_quirks())
++				return ret;
+ 		}
+ 		break;
+ 	}
+@@ -1183,9 +1217,26 @@ static int wcd938x_codec_enable_adc(struct snd_soc_dapm_widget *w,
+ {
+ 	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
+ 	struct wcd938x_priv *wcd938x = snd_soc_component_get_drvdata(component);
++	int ret;
++
++	ret = wcd938x_capture_prepare(wcd938x, event == SND_SOC_DAPM_PRE_PMU);
++	if (ret)
++		return ret;
+ 
+ 	switch (event) {
+ 	case SND_SOC_DAPM_PRE_PMU:
++		if (liuqin_board_quirks()) {
++			ret = snd_soc_component_update_bits(component,
++					WCD938X_DIGITAL_CDC_ANA_CLK_CTL,
++					WCD938X_ANA_TX_CLK_EN_MASK |
++					WCD938X_ANA_TX_DIV2_CLK_EN_MASK,
++					WCD938X_ANA_TX_CLK_EN_MASK |
++					WCD938X_ANA_TX_DIV2_CLK_EN_MASK);
++			if (ret < 0)
++				return ret;
++			set_bit(w->shift, &wcd938x->status_mask);
++			break;
++		}
+ 		snd_soc_component_write_field(component,
+ 					      WCD938X_DIGITAL_CDC_ANA_CLK_CTL,
+ 					      WCD938X_ANA_TX_CLK_EN_MASK, 1);
+@@ -1195,8 +1246,10 @@ static int wcd938x_codec_enable_adc(struct snd_soc_dapm_widget *w,
+ 		set_bit(w->shift, &wcd938x->status_mask);
+ 		break;
+ 	case SND_SOC_DAPM_POST_PMD:
+-		snd_soc_component_write_field(component, WCD938X_DIGITAL_CDC_ANA_CLK_CTL,
+-					      WCD938X_ANA_TX_CLK_EN_MASK, 0);
++		/* REQ retires the shared clocks after the last ADC's mode. */
++		if (!liuqin_board_quirks())
++			snd_soc_component_write_field(component, WCD938X_DIGITAL_CDC_ANA_CLK_CTL,
++						      WCD938X_ANA_TX_CLK_EN_MASK, 0);
+ 		clear_bit(w->shift, &wcd938x->status_mask);
+ 		break;
+ 	}
+@@ -1239,6 +1292,11 @@ static int wcd938x_adc_enable_req(struct snd_soc_dapm_widget *w,
+ 	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
+ 	struct wcd938x_priv *wcd938x = snd_soc_component_get_drvdata(component);
+ 	int mode;
++	int ret;
++
++	ret = wcd938x_capture_prepare(wcd938x, event == SND_SOC_DAPM_PRE_PMU);
++	if (ret)
++		return ret;
+ 
+ 	switch (event) {
+ 	case SND_SOC_DAPM_PRE_PMU:
+@@ -1330,16 +1388,27 @@ static int wcd938x_adc_enable_req(struct snd_soc_dapm_widget *w,
+ 		default:
+ 			break;
+ 		}
+-		snd_soc_component_write_field(component,
+-				WCD938X_DIGITAL_CDC_ANA_CLK_CTL,
+-				WCD938X_ANA_TX_DIV2_CLK_EN_MASK, 0);
++		if (liuqin_board_quirks()) {
++			if (wcd938x_adcs_active(wcd938x))
++				break;
++			ret = snd_soc_component_update_bits(component,
++					WCD938X_DIGITAL_CDC_ANA_CLK_CTL,
++					WCD938X_ANA_TX_CLK_EN_MASK |
++					WCD938X_ANA_TX_DIV2_CLK_EN_MASK, 0);
++			if (ret < 0)
++				return ret;
++		} else {
++			snd_soc_component_write_field(component,
++					WCD938X_DIGITAL_CDC_ANA_CLK_CTL,
++					WCD938X_ANA_TX_DIV2_CLK_EN_MASK, 0);
++		}
+ 		break;
+ 	}
+ 
+ 	return 0;
+ }
+ 
+-static int wcd938x_micbias_control(struct snd_soc_component *component,
++static int wcd938x_micbias_control_unlocked(struct snd_soc_component *component,
+ 				   int micb_num, int req, bool is_dapm)
+ {
+ 	struct wcd938x_priv *wcd938x = snd_soc_component_get_drvdata(component);
+@@ -1439,6 +1508,24 @@ static int wcd938x_micbias_control(struct snd_soc_component *component,
+ 	return 0;
+ }
+ 
++static int wcd938x_micbias_control(struct snd_soc_component *component,
++				   int micb_num, int req, bool is_dapm)
++{
++	struct wcd938x_priv *wcd938x = snd_soc_component_get_drvdata(component);
++	int ret;
++
++	if (!liuqin_board_quirks())
++		return wcd938x_micbias_control_unlocked(component, micb_num, req, is_dapm);
++
++	guard(mutex)(&wcd938x->micb_lock);
++	ret = wcd938x_capture_prepare(wcd938x,
++				req == MICB_ENABLE || req == MICB_PULLUP_ENABLE);
++	if (ret)
++		return ret;
++
++	return wcd938x_micbias_control_unlocked(component, micb_num, req, is_dapm);
++}
++
+ static int wcd938x_codec_enable_micbias(struct snd_soc_dapm_widget *w,
+ 					struct snd_kcontrol *kcontrol,
+ 					int event)
+@@ -1448,15 +1535,13 @@ static int wcd938x_codec_enable_micbias(struct snd_soc_dapm_widget *w,
+ 
+ 	switch (event) {
+ 	case SND_SOC_DAPM_PRE_PMU:
+-		wcd938x_micbias_control(component, micb_num, MICB_ENABLE, true);
+-		break;
++		return wcd938x_micbias_control(component, micb_num, MICB_ENABLE, true);
+ 	case SND_SOC_DAPM_POST_PMU:
+ 		/* 1 msec delay as per HW requirement */
+ 		usleep_range(1000, 1100);
+ 		break;
+ 	case SND_SOC_DAPM_POST_PMD:
+-		wcd938x_micbias_control(component, micb_num, MICB_DISABLE, true);
+-		break;
++		return wcd938x_micbias_control(component, micb_num, MICB_DISABLE, true);
+ 	}
+ 
+ 	return 0;
+@@ -1471,17 +1556,15 @@ static int wcd938x_codec_enable_micbias_pullup(struct snd_soc_dapm_widget *w,
+ 
+ 	switch (event) {
+ 	case SND_SOC_DAPM_PRE_PMU:
+-		wcd938x_micbias_control(component, micb_num,
++		return wcd938x_micbias_control(component, micb_num,
+ 					MICB_PULLUP_ENABLE, true);
+-		break;
+ 	case SND_SOC_DAPM_POST_PMU:
+ 		/* 1 msec delay as per HW requirement */
+ 		usleep_range(1000, 1100);
+ 		break;
+ 	case SND_SOC_DAPM_POST_PMD:
+-		wcd938x_micbias_control(component, micb_num,
++		return wcd938x_micbias_control(component, micb_num,
+ 					MICB_PULLUP_DISABLE, true);
+-		break;
+ 	}
+ 
+ 	return 0;
+-- 
+2.56.0
+

@@ -1,0 +1,97 @@
+Subject: [PATCH] power: supply: retain valid M81 readings across charger transport loss
+
+ADSP hosts both audio and the charger service. Returning transport errors
+for every battery property during ADSP recovery makes UPower present an
+empty battery and triggers a spurious critical-battery notification.
+
+Retain each valid SM8475 reading across transient transport failures,
+following the OEM last-known property behavior. Mark cached charging state
+unknown. Do not fabricate initial data or conceal real low percentages,
+format/overflow errors, or charge-control readback failures. Live reads
+replace the cache as soon as the service returns.
+
+Link: https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/power/supply/qti_battery_charger.c
+
+diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
+index 670353052..b544a05ad 100644
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -410,6 +410,11 @@ struct qcom_battmgr_wireless {
+ 	unsigned int current_max;
+ };
+ 
++struct qcom_battmgr_cached_property {
++	union power_supply_propval value;
++	bool valid;
++};
++
+ struct qcom_battmgr {
+ 	struct device *dev;
+ 	struct pmic_glink_client *client;
+@@ -438,6 +443,7 @@ struct qcom_battmgr {
+ 	struct qcom_battmgr_ac ac;
+ 	struct qcom_battmgr_usb usb;
+ 	struct qcom_battmgr_wireless wireless;
++	struct qcom_battmgr_cached_property bat_cache[BATT_CHG_CTRL_END_THR + 1];
+ 
+ 	/* Last vendor/raw property response, serialized by @lock. */
+ 	unsigned int raw_opcode;
+@@ -1290,7 +1296,7 @@ static int qcom_battmgr_sm8475_charge_value(u32 raw, u32 scale, int *value)
+ 	return 0;
+ }
+ 
+-static int qcom_battmgr_bat_get_property(struct power_supply *psy,
++static int qcom_battmgr_bat_get_live_property(struct power_supply *psy,
+ 					 enum power_supply_property psp,
+ 					 union power_supply_propval *val)
+ {
+@@ -1455,6 +1461,49 @@ static int qcom_battmgr_bat_get_property(struct power_supply *psy,
+ 	return 0;
+ }
+ 
++static int qcom_battmgr_bat_get_property(struct power_supply *psy,
++				      enum power_supply_property psp,
++				      union power_supply_propval *val)
++{
++	struct qcom_battmgr *battmgr = power_supply_get_drvdata(psy);
++	struct qcom_battmgr_cached_property *cached;
++	unsigned long flags;
++	int ret;
++
++	ret = qcom_battmgr_bat_get_live_property(psy, psp, val);
++	if (battmgr->variant != QCOM_BATTMGR_SM8475 ||
++	    (unsigned int)psp >= ARRAY_SIZE(sm8350_bat_prop_map) ||
++	    psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_START_THRESHOLD ||
++	    psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD ||
++	    (psp != POWER_SUPPLY_PROP_STATUS && !sm8350_bat_prop_map[psp]))
++		return ret;
++
++	/*
++	 * Keep the OEM last-known reading across ADSP/charger transport loss.
++	 * Userspace otherwise turns a temporarily unreadable fuel gauge into 0%.
++	 * Never fabricate an initial reading, or hide a property/format error.
++	 */
++	if (ret && ret != -EAGAIN && ret != -EBUSY && ret != -ETIMEDOUT &&
++	    ret != -ECONNRESET && ret != -ENETRESET && ret != -ENOTCONN &&
++	    ret != -ENODEV && ret != -EIO)
++		return ret;
++
++	cached = &battmgr->bat_cache[sm8350_bat_prop_map[psp]];
++	spin_lock_irqsave(&battmgr->state_lock, flags);
++	if (!ret) {
++		cached->value = *val;
++		cached->valid = true;
++	} else if (cached->valid) {
++		*val = cached->value;
++		/* A retained percentage does not imply charging is still active. */
++		if (psp == POWER_SUPPLY_PROP_STATUS)
++			val->intval = POWER_SUPPLY_STATUS_UNKNOWN;
++		ret = 0;
++	}
++	spin_unlock_irqrestore(&battmgr->state_lock, flags);
++	return ret;
++}
++
+ static int qcom_battmgr_set_charge_control(struct qcom_battmgr *battmgr,
+ 					   u32 target_soc, u32 delta_soc)
+ {

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 #
-# Four-channel 48 kHz S24_LE topology for Xiaomi Pad 6 Pro.
+# Xiaomi Pad 6 Pro: protected speakers, onboard capture and DisplayPort.
 # The builder selects the firmware's legacy TDM sink (0x0700100e) after
 # expansion with linux-msm/audioreach-topology commit 2af1f1e.
 
@@ -43,12 +43,12 @@ dnl calibration records in the vendor ACDB, so unlike the TDM sink no
 dnl legacy MID rewrite is needed here.
 STREAM_SG_PCM_ADD(`audioreach/subgraph-stream-capture.m4',
 	FRONTEND_DAI_MULTIMEDIA2,
-	`S16_LE', 48000, 48000, 1, 2,
+	`S16_LE', 48000, 48000, 4, 4,
 	0x00004011, 0x00004011, 0x00006011, `110000')
 
 DEVICE_SG_ADD(`audioreach/subgraph-device-codec-dma-capture.m4',
 	`TX_CODEC_DMA_TX_3', TX_CODEC_DMA_TX_3,
-	`S16_LE', 48000, 48000, 1, 2,
+	`S16_LE', 48000, 48000, 4, 4,
 	LPAIF_INTF_TYPE_RXTX, CODEC_INTF_IDX_TX3, 0, DATA_FORMAT_FIXED_POINT,
 	0x00004012, 0x00004012, 0x00006031)
 
@@ -59,3 +59,22 @@ STREAM_DEVICE_CAPTURE_ROUTE(FRONTEND_DAI_MULTIMEDIA2,
 	``MultiMedia2 Mixer'',
 	``TX_CODEC_DMA_TX_3, device120.logger1'')
 
+dnl DisplayPort has its own stereo FE. Do not reuse the four-channel speaker
+dnl PCM: the OEM DISPLAY_PORT-RX backend and DP0 machine driver use S16_LE.
+STREAM_SG_PCM_ADD(`audioreach/subgraph-stream-vol-playback.m4',
+	FRONTEND_DAI_MULTIMEDIA3,
+	`S16_LE', 48000, 48000, 2, 2,
+	0x00004021, 0x00004021, 0x00006041, `110000')
+
+DEVICE_SG_ADD(`audioreach/subgraph-device-display-port-playback.m4',
+	`DISPLAY_PORT_RX_0', DISPLAY_PORT_RX_0,
+	`S16_LE', 48000, 48000, 2, 2,
+	0, 0, 0, DATA_FORMAT_FIXED_POINT,
+	0x00004022, 0x00004022, 0x00006060, `DISPLAY_PORT_RX_0')
+
+STREAM_DEVICE_PLAYBACK_MIXER(DISPLAY_PORT_RX_0,
+	``DISPLAY_PORT_RX_0'', ``MultiMedia3'')
+
+STREAM_DEVICE_PLAYBACK_ROUTE(DISPLAY_PORT_RX_0,
+	``DISPLAY_PORT_RX_0 Audio Mixer'',
+	``MultiMedia3, stream2.logger1'')

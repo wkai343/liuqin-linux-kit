@@ -17,9 +17,14 @@ CS35L41 的保护程序及四路通用调音另从同版原厂 ROM 的 `vendor/f
 - 使用 `build/scripts/build-liuqin-firmware-prep.sh` 从原厂 Fastboot ROM
   `OS2.0.6.0.VMYCNXM`（liuqin_images_15.0_cn）离线提取。
   每个文件的 SHA256 锁定于 `firmware.manifest`，该清单 SHA256 为
-  `68c946c4f11d0cd8faa13ecbf28ef7ab5dd46ac6d499a6b5027c384153733af0`。
+  `6162565154d5cd250b35c6f5639ec537c974553478e39cb65e15811170a8c25c`。
 - `ath11k/WCN6855/*/board-2.bin*` 由项目通过
   `build/scripts/build-liuqin-wlan.py` 从厂商组合生成。
+- `qcom/sm8450/Xiaomi-Pad-6-Pro-tplg.bin` 由
+  [板级拓扑源码](../audio-topology/liuqin-speakers.m4) 和锁定版本的
+  `linux-msm/audioreach-topology` 生成；构建入口为
+  `build/scripts/build-liuqin-audio-topology.sh`。它包含受保护的四通道扬声器、
+  48 kHz、S16_LE 四路板载麦克风及独立的 48 kHz、S16_LE 双声道 DP 播放路径，需配套声卡设备树。
 - 这些文件适用于同型号设备，不包含每台平板独有的扬声器保护校准、传感器
   注册表、WLAN MAC 或蓝牙地址。这些私有信息在安装时由
   `device/installer/provision-liuqin-from-persist.sh` 从本机 persist 读取。

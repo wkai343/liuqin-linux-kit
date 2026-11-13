@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import tempfile
 
+from kernel_test import function
+
 PROJECT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('refresh', Path(__file__).with_name('display-refresh-rates.py'))
 refresh = importlib.util.module_from_spec(spec)
@@ -334,6 +336,113 @@ int main(void) {
 '''
 
 
+def check_teardown(args):
+    root = args.source / 'drivers/gpu/drm/msm/disp/dpu1'
+    cleanup = function((root / 'dpu_encoder.c').read_text(), 'dpu_encoder_helper_phys_cleanup')
+    wait = function((root / 'dpu_encoder_phys_vid.c').read_text(), 'dpu_encoder_phys_vid_wait_for_commit_done')
+    prefix = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <errno.h>
+typedef uint32_t u32;
+#define BIT(n) (1U<<(n))
+#define PINGPONG_NONE 0
+#define BLEND_3D_NONE 0
+#define wait_event_timeout(wq,condition,timeout) ((condition)?1:0)
+#define msecs_to_jiffies(n) (n)
+#define DPU_ERROR(...) do {errors++;} while(0)
+struct dpu_hw_ctl;
+struct dpu_hw_intf;
+struct dpu_hw_wb;
+struct dpu_hw_cdm;
+struct dpu_hw_merge_3d;
+struct dpu_hw_pingpong;
+struct dpu_hw_intf_cfg {unsigned int stream_sel,mode_3d,dsc,cwb,intf,wb,merge_3d;};
+struct dpu_hw_ctl {u32 pending,hardware,dsc_pending;bool teardown_dsc;
+ struct {void (*clear_pending_flush)(struct dpu_hw_ctl *);void (*reset)(struct dpu_hw_ctl *);
+ void (*update_pending_flush_wb)(struct dpu_hw_ctl *,unsigned int);
+ void (*update_pending_flush_intf)(struct dpu_hw_ctl *,unsigned int);
+ void (*update_pending_flush_merge_3d)(struct dpu_hw_ctl *,unsigned int);
+ void (*update_pending_flush_cdm)(struct dpu_hw_ctl *,unsigned int);
+ void (*reset_intf_cfg)(struct dpu_hw_ctl *,struct dpu_hw_intf_cfg *);
+ void (*trigger_flush)(struct dpu_hw_ctl *);void (*trigger_start)(struct dpu_hw_ctl *);
+ u32 (*get_flush_register)(struct dpu_hw_ctl *);} ops;};
+struct dpu_hw_intf {unsigned int idx;struct {void (*bind_pingpong_blk)(struct dpu_hw_intf *,int);} ops;};
+struct dpu_hw_wb {unsigned int idx;struct {void (*bind_pingpong_blk)(struct dpu_hw_wb *,int);} ops;};
+struct dpu_hw_cdm {unsigned int idx;struct {void (*bind_pingpong_blk)(struct dpu_hw_cdm *,int);} ops;};
+struct dpu_hw_merge_3d {unsigned int idx;struct {void (*setup_3d_mode)(struct dpu_hw_merge_3d *,int);} ops;};
+struct dpu_hw_pingpong {struct dpu_hw_merge_3d *merge_3d;struct {void (*setup_dither)(struct dpu_hw_pingpong *,void *);} ops;};
+struct dpu_encoder_virt;
+struct dpu_encoder_phys {struct dpu_encoder_virt *parent;struct dpu_hw_ctl *hw_ctl;
+ struct dpu_hw_intf *hw_intf;struct dpu_hw_wb *hw_wb;struct dpu_hw_cdm *hw_cdm;struct dpu_hw_pingpong *hw_pp;
+ int pending_kickoff_wq;};
+struct dpu_encoder_virt {int num_phys_encs;struct dpu_encoder_phys *phys_encs[2];void *dsc;unsigned int cwb_mask,dsc_mask;};
+static int errors,flushes,starts,resets;static u32 submitted,child_submitted;
+static struct dpu_encoder_virt *to_dpu_encoder_virt(struct dpu_encoder_virt *p){return p;}
+static void clear(struct dpu_hw_ctl *c){c->pending=0;c->dsc_pending=0;}
+static void reset(struct dpu_hw_ctl *c){resets++;c->hardware=0;c->teardown_dsc=false;}
+static void reset_mixers(struct dpu_encoder_phys *p){p->hw_ctl->pending|=BIT(6);}
+#define dpu_encoder_helper_reset_mixers reset_mixers
+static void mark_intf(struct dpu_hw_ctl *c,unsigned int i){c->pending|=BIT(31);}
+static void mark_wb(struct dpu_hw_ctl *c,unsigned int i){c->pending|=BIT(16);}
+static void reset_intf(struct dpu_hw_ctl *c,struct dpu_hw_intf_cfg *cfg){assert(cfg->dsc<=3);}
+static void bind_intf(struct dpu_hw_intf *p,int target){assert(target==PINGPONG_NONE);}
+static void bind_wb(struct dpu_hw_wb *p,int target){assert(target==PINGPONG_NONE);}
+static unsigned int dpu_encoder_helper_get_3d_blend_mode(struct dpu_encoder_phys *p){return 0;}
+static unsigned int dpu_encoder_helper_get_dsc(struct dpu_encoder_phys *p){return p->parent->dsc_mask;}
+static void dpu_encoder_helper_phys_setup_cwb(struct dpu_encoder_phys *p,bool enable){assert(!enable);}
+static void dpu_encoder_unprep_dsc(struct dpu_encoder_virt *e){
+ struct dpu_hw_ctl *c=e->phys_encs[0]->hw_ctl;c->pending|=BIT(22);c->dsc_pending|=e->dsc_mask;c->teardown_dsc=true;
+}
+static void flush(struct dpu_hw_ctl *c){
+ flushes++;submitted=c->pending;child_submitted=c->dsc_pending;
+ /* Timing is stopped. Replayed source/unused-DSC updates cannot be consumed. */
+ c->hardware=c->pending & (BIT(11)|BIT(29)|(c->teardown_dsc?0:BIT(22)));
+}
+static void start(struct dpu_hw_ctl *c){starts++;}
+static u32 get_flush(struct dpu_hw_ctl *c){return c->hardware;}
+'''
+    suffix = r'''
+int main(void){
+ for(int dsc=0;dsc<2;dsc++)for(int wb=0;wb<2;wb++)for(int stale=0;stale<8;stale++){
+  struct dpu_hw_ctl ctl={.pending=((stale&1)?BIT(11):0)|((stale&2)?BIT(22):0)|((stale&4)?BIT(29):0),
+   .dsc_pending=(stale&2)?BIT(3):0,
+   .ops={.clear_pending_flush=clear,.reset=reset,.update_pending_flush_intf=mark_intf,
+         .update_pending_flush_wb=mark_wb,.reset_intf_cfg=reset_intf,.trigger_flush=flush,.trigger_start=start,.get_flush_register=get_flush}};
+  struct dpu_hw_intf intfs[2]={{.idx=2,.ops={bind_intf}},{.idx=3,.ops={bind_intf}}};
+  struct dpu_hw_wb writeback={.idx=1,.ops={bind_wb}};
+  struct dpu_encoder_virt enc={.num_phys_encs=2,.dsc=dsc?&enc:NULL,.dsc_mask=dsc?3:0};
+  struct dpu_encoder_phys phys[2]={{.parent=&enc,.hw_ctl=&ctl,.hw_intf=&intfs[0],.hw_wb=wb?&writeback:NULL},
+                                 {.parent=&enc,.hw_ctl=&ctl,.hw_intf=&intfs[1]}};
+  enc.phys_encs[0]=&phys[0];enc.phys_encs[1]=&phys[1];
+  dpu_encoder_helper_phys_cleanup(&phys[0]);
+  if(dpu_encoder_phys_vid_wait_for_commit_done(&phys[0]))return 20;
+  assert(submitted==(BIT(6)|(wb?BIT(16):BIT(31))|(dsc?BIT(22):0)));
+  assert(child_submitted==(dsc?3:0) && !ctl.pending && !ctl.dsc_pending && !enc.dsc);
+ }
+ assert(flushes==32 && starts==32 && resets==32 && !errors);
+ return 0;
+}
+'''
+    anchor = '\tctl->ops.clear_pending_flush(ctl);\n'
+    assert cleanup.count(anchor) == 2
+    with tempfile.TemporaryDirectory(prefix='liuqin-display-teardown-') as tmp:
+        for name, body, expected in [('fixed', cleanup, 0), ('old-cache', cleanup.replace(anchor, '', 1), 20)]:
+            path = Path(tmp) / (name+'.c')
+            path.write_text(prefix+body+'\n'+wait+'\n'+suffix)
+            binary = path.with_suffix('')
+            subprocess.run(['cc', '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter',
+                            '-fsanitize=undefined', '-fno-sanitize-recover=all', str(path), '-o', str(binary)], check=True)
+            result = subprocess.run([str(binary)], timeout=15)
+            assert result.returncode == expected, (name, result.returncode, expected)
+    result = {'status': 'PASS', 'actual_kernel_functions_executed': True, 'cases': 32,
+              'stale_frame_requests_not_replayed': True, 'new_teardown_flush_preserved': True,
+              'original_cache_replay_causes_commit_timeout': True}
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path)
@@ -353,6 +462,8 @@ def main():
             if marker not in patch.read_text():
                 continue
             section = patch.read_text().split(marker, 1)[1].split('\ndiff --git ', 1)[0]
+            # A format-patch signature is metadata, not a removed hunk line.
+            section = section.split('\n-- \n', 1)[0]
             hunks = re.split(r'^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@[^\n]*\n', section, flags=re.M)
             delta = 0
             for offset in range(1, len(hunks), 3):
@@ -439,6 +550,8 @@ def main():
         subprocess.run([args.cc,'-std=gnu11','-Wall','-Wextra','-Werror','-O2','-fsanitize=undefined',
                         '-fno-sanitize-recover=all',str(source),'-o',str(binary)],check=True)
         subprocess.run([str(binary)],check=True,timeout=15)
+    if args.source:
+        print(json.dumps(check_teardown(args)))
 
 
 if __name__ == '__main__':

@@ -64,6 +64,19 @@ M81 充电固件需要主机周期读取小米扩展属性 `XM_THERMAL_TEMP`（�
 离线回归由 `tests/kernel-common-fixes.py --source <完整适配源码>` 覆盖刷新请求、
 服务离线、超时后重试及平台限定的唤醒行为；电池单位换算仍由 `tests/battery-readings.py` 覆盖。
 
+ADSP 同时承载音频与充电服务。整块 ADSP 重启时，短暂读不到电量不代表电池已经耗尽：
+UPower 曾将这段通信故障转成 0% 和 0 Wh，触发 Plasma 的低电量提示。
+M81 电池读取现保留各属性最后一次有效结果，在服务离线或传输失败时返回缓存；
+充电状态标为未知，通信恢复后的新读数替换缓存。这沿用原厂
+[`battery_chg_write()`](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/power/supply/qti_battery_charger.c#L678)
+在 GLINK 离线时保留已有属性的思路。
+
+缓存不能表示故障期间仍有实时测量：首次没有有效读数时继续返回错误，真实的低电量或
+0% 不会被替换；属性格式错误、溢出及充电控制阈值读写不走该回退。
+`tests/battery-readings.py` 检查这些边界。实机验证需同时观察 sysfs 和
+`upower --monitor-detail` 中的当前百分比、能量与告警级别，不能把历史记录中的旧 0%
+误当成新故障，也不能用重启 ADSP 代替正常充电恢复。
+
 ## 初始化与普通重启
 
 USB、充电和显示保持内建；Qualcomm 音频通信、时钟与声卡由根文件系统加载，避免早期音频资源请求与充电固件初始化重叠。完整音频功能和电芯认证保留，启动时不执行 PD 硬复位。

@@ -1,0 +1,103 @@
+Subject: [PATCH] ASoC: wcd938x: keep codec register interrupts on TX
+
+The OEM wcd938x_bind installs the codec IRQ domain only on tx_swr_dev,
+which owns the register map. RX is a data interface with no CSR regmap.
+Do not request implementation-defined RX interrupts or dispatch an RX
+alert through regmap_read(NULL). Keep SoundWire parity/clash reporting.
+
+Validate the IRQ resources and handle read failures. Bound status draining
+so a failed or stuck device cannot hold the SoundWire IRQ thread forever.
+
+Reference: xiaomi-sm8450-kernel/android_vendor_qcom_opensource_audio-kernel
+commit 721c4fb115d50aea74a2dec9ee864bf0f12682c8, wcd938x_bind.
+
+diff --git a/sound/soc/codecs/wcd938x-sdw.c b/sound/soc/codecs/wcd938x-sdw.c
+--- a/sound/soc/codecs/wcd938x-sdw.c
++++ b/sound/soc/codecs/wcd938x-sdw.c
+@@ -144,6 +144,10 @@
+ 				      struct sdw_slave_intr_status *status)
+ {
+ 	struct wcd938x_sdw_priv *wcd = dev_get_drvdata(&slave->dev);
++
++	/* The codec register IRQ belongs to TX; RX has no CSR regmap. */
++	if (!wcd->is_tx || !(status->control_port & SDW_SCP_INT1_IMPL_DEF))
++		return 0;
+ 
+ 	return wcd_interrupt_callback(slave, wcd->slave_irq, WCD938X_DIGITAL_INTR_STATUS_0,
+ 				WCD938X_DIGITAL_INTR_STATUS_1, WCD938X_DIGITAL_INTR_STATUS_2);
+@@ -1181,8 +1185,7 @@
+ 	wcd->sdev = pdev;
+ 	dev_set_drvdata(dev, wcd);
+ 
+-	pdev->prop.scp_int1_mask = SDW_SCP_INT1_IMPL_DEF |
+-					SDW_SCP_INT1_BUS_CLASH |
++	pdev->prop.scp_int1_mask = SDW_SCP_INT1_BUS_CLASH |
+ 					SDW_SCP_INT1_PARITY;
+ 	pdev->prop.lane_control_support = true;
+ 	pdev->prop.simple_clk_stop_capable = true;
+@@ -1191,6 +1194,7 @@
+ 		pdev->prop.src_dpn_prop = wcd938x_dpn_prop;
+ 		wcd->ch_info = &wcd938x_sdw_tx_ch_info[0];
+ 		pdev->prop.wake_capable = true;
++		pdev->prop.scp_int1_mask |= SDW_SCP_INT1_IMPL_DEF;
+ 	} else {
+ 		pdev->prop.sink_ports = GENMASK(WCD938X_MAX_SWR_PORTS - 1, 0);
+ 		pdev->prop.sink_dpn_prop = wcd938x_dpn_prop;
+diff --git a/sound/soc/codecs/wcd938x.c b/sound/soc/codecs/wcd938x.c
+--- a/sound/soc/codecs/wcd938x.c
++++ b/sound/soc/codecs/wcd938x.c
+@@ -3402,7 +3402,7 @@
+ 		goto err_remove_rx_link;
+ 	}
+ 
+-	wcd938x->sdw_priv[AIF1_PB]->slave_irq = wcd938x->virq;
++	/* As in the OEM driver, only TX owns the codec register IRQ. */
+ 	wcd938x->sdw_priv[AIF1_CAP]->slave_irq = wcd938x->virq;
+ 
+ 	wcd938x_set_micbias_data(dev, wcd938x);
+diff --git a/sound/soc/codecs/wcd-common.c b/sound/soc/codecs/wcd-common.c
+--- a/sound/soc/codecs/wcd-common.c
++++ b/sound/soc/codecs/wcd-common.c
+@@ -127,16 +127,34 @@
+ {
+ 	struct regmap *regmap = dev_get_regmap(&slave->dev, NULL);
+ 	u32 sts1, sts2, sts3;
++	unsigned int irq;
++	int ret, tries;
+ 
+-	do {
+-		handle_nested_irq(irq_find_mapping(slave_irq, 0));
+-		regmap_read(regmap, wcd_intr_status0, &sts1);
+-		regmap_read(regmap, wcd_intr_status1, &sts2);
+-		regmap_read(regmap, wcd_intr_status2, &sts3);
++	if (!regmap || !slave_irq)
++		return -ENODEV;
++	irq = irq_find_mapping(slave_irq, 0);
++	if (!irq)
++		return -ENXIO;
+ 
+-	} while (sts1 || sts2 || sts3);
+-
+-	return IRQ_HANDLED;
++	/* A failed bus read or stuck status must not pin the IRQ thread. */
++	for (tries = 0; tries < 8; tries++) {
++		handle_nested_irq(irq);
++		ret = regmap_read(regmap, wcd_intr_status0, &sts1);
++		if (ret)
++			goto error;
++		ret = regmap_read(regmap, wcd_intr_status1, &sts2);
++		if (ret)
++			goto error;
++		ret = regmap_read(regmap, wcd_intr_status2, &sts3);
++		if (ret)
++			goto error;
++		if (!(sts1 || sts2 || sts3))
++			return IRQ_HANDLED;
++	}
++	ret = -ETIMEDOUT;
++error:
++	dev_err_ratelimited(&slave->dev, "codec IRQ status failed: %d\n", ret);
++	return ret;
+ }
+ EXPORT_SYMBOL_GPL(wcd_interrupt_callback);
+ 

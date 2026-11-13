@@ -41,7 +41,7 @@ uv run --project installer installer/install-gui.py \
 
 ## 构建与交付
 
-默认 Rec 内核使用 kernel.org 的 **7.3.4**，复用 Fedora 的 31 个公共补丁，另加 Rec 专用补丁和独立配置，保留 simplefb、手指触控、固定 USB peripheral、ADB 与存储封存路径。不获取原作者内核仓库，也不依赖旧 Rec 基础镜像。源码锁、从零构建及排查方法见[Rec 内核构建](../build/recovery/kernel/README.md)。
+默认 Rec 内核使用 kernel.org 的 **7.3.4**，复用 Fedora 的 47 个公共补丁，另加 Rec 专用补丁和独立配置，保留 simplefb、手指触控、固定 USB peripheral、ADB 与存储封存路径。不获取原作者内核仓库，也不依赖旧 Rec 基础镜像。源码锁、从零构建及排查方法见[Rec 内核构建](../build/recovery/kernel/README.md)。
 
 Rec 工具集采用 [Buildroot + musl](../build/runtime/README.md)，包含静态 BusyBox、Python、GNU tar 和 GPT/ext4/Btrfs/F2FS 工具；不需要 Ubuntu Base 或 APT。内核、LVGL 和 adbd 仍分别构建。
 

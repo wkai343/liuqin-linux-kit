@@ -1,0 +1,179 @@
+From dd369e538631cd733270aeb52d8d664456a362d6 Mon Sep 17 00:00:00 2001
+From: wk <58632380+wkai343@users.noreply.github.com>
+Date: Fri, 13 Nov 2026 16:22:18 +0800
+Subject: [PATCH] HID: nanosic: service the status interrupt while awake
+
+The WN8030 status line also produces edges during normal operation. The
+shipping OEM driver requests it with RISING | ONESHOT, continuously enabled,
+while the I2C core dedicated wake handler only unmasks it around sleep.
+
+Keep the existing firmware names, release that dedicated handler, and
+request a normal threaded status handler. Attach it as an ordinary managed
+wake IRQ so system PM still arms it according to power/wakeup. Data IRQ
+wake handling remains separate. Awake status edges do not access I2C,
+inject keys or keep the bridge awake. Suspend-time handlers avoid I2C and
+respect disabled wake policy on both lines.
+
+The occasional early wake observed on Liuqin has not been reproduced
+reliably; this aligns IRQ ownership with the OEM rather than claiming a
+confirmed hardware root cause. Do not discard pending IRQs at suspend.
+
+Reference: https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/77dc8e2290f3f5f15861821564f68d30ea193449/drivers/input/keyboard/nanosic_driver_v2/nano_gpio.c
+---
+ .../bindings/input/nanosic,wn8030.yaml        |  3 +-
+ drivers/hid/hid-nanosic.c                     | 70 +++++++++++++++++--
+ 2 files changed, 66 insertions(+), 7 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/input/nanosic,wn8030.yaml b/Documentation/devicetree/bindings/input/nanosic,wn8030.yaml
+index 50fff3b07..9d443cd55 100644
+--- a/Documentation/devicetree/bindings/input/nanosic,wn8030.yaml
++++ b/Documentation/devicetree/bindings/input/nanosic,wn8030.yaml
+@@ -38,7 +38,8 @@ properties:
+     description: >
+       The data interrupt is asserted when the bridge has HID reports to hand
+       over. The wakeup interrupt is the bridge's status line, asserted to wake
+-      the host while the screen is off.
++      the host while the screen is off. Status edges also occur while awake
++      and must be serviced during normal operation.
+ 
+   reset-gpios:
+     maxItems: 1
+diff --git a/drivers/hid/hid-nanosic.c b/drivers/hid/hid-nanosic.c
+index a6b4cd7ee..068f6ad6d 100644
+--- a/drivers/hid/hid-nanosic.c
++++ b/drivers/hid/hid-nanosic.c
+@@ -45,6 +45,7 @@
+ #include <linux/mod_devicetable.h>
+ #include <linux/module.h>
+ #include <linux/mutex.h>
++#include <linux/pm_wakeirq.h>
+ #include <linux/property.h>
+ #include <linux/regulator/consumer.h>
+ #include <linux/slab.h>
+@@ -487,9 +488,11 @@ struct nanosic {
+ 	bool data_pending;
+ 
+ 	int data_irq;
++	int wakeup_irq;
+ 	bool data_irq_wake_enabled;
+ 
+ 	u64 irq_count;
++	u64 wakeup_irq_count;
+ 	u64 i2c_transfer_count;
+ 	u64 i2c_error_count;
+ 	u64 last_i2c_error_transfer;
+@@ -1280,7 +1283,8 @@ static irqreturn_t nanosic_data_irq(int irq, void *data)
+ 
+ 	if (READ_ONCE(nano->suspended)) {
+ 		nano->data_pending = true;
+-		pm_wakeup_event(&nano->client->dev, 1000);
++		if (device_may_wakeup(&nano->client->dev))
++			pm_wakeup_event(&nano->client->dev, 1000);
+ 		return IRQ_HANDLED;
+ 	}
+ 
+@@ -1290,6 +1294,25 @@ static irqreturn_t nanosic_data_irq(int irq, void *data)
+ 	return IRQ_HANDLED;
+ }
+ 
++static irqreturn_t nanosic_wakeup_irq(int irq, void *data)
++{
++	struct nanosic *nano = data;
++	struct device *dev = &nano->client->dev;
++
++	guard(mutex)(&nano->lock);
++	nano->wakeup_irq_count++;
++
++	/*
++	 * The OEM keeps this status IRQ live while awake too. Acknowledge those
++	 * edges without I2C or synthetic key reports; only the data IRQ means
++	 * there is a frame to read. During suspend, the bus may already be off.
++	 */
++	if (nano->suspended && device_may_wakeup(dev))
++		pm_wakeup_event(dev, 1000);
++
++	return IRQ_HANDLED;
++}
++
+ static ssize_t firmware_version_show(struct device *dev,
+ 				     struct device_attribute *attr, char *buf)
+ {
+@@ -1317,6 +1340,8 @@ static ssize_t bridge_health_show(struct device *dev,
+ 
+ 	len += sysfs_emit_at(buf, len, "irq=%llu\n",
+ 			     (unsigned long long)nano->irq_count);
++	len += sysfs_emit_at(buf, len, "wakeup_irq=%llu\n",
++			     (unsigned long long)nano->wakeup_irq_count);
+ 	len += sysfs_emit_at(buf, len, "i2c_transfers=%llu\n",
+ 			     (unsigned long long)nano->i2c_transfer_count);
+ 	len += sysfs_emit_at(buf, len, "i2c_errors=%llu\n",
+@@ -1588,11 +1613,10 @@ static int nanosic_power_on(struct nanosic *nano)
+  * The bridge brings out two interrupts. "data" is the one that matters: the
+  * line idles high while the bridge runs and dips for about a millisecond to
+  * announce a frame, so the rising edge at the end of that dip is the event.
+- * "wakeup" fires from the status line while the system is suspended. The I2C
+- * core claims that named IRQ as the device's dedicated wake IRQ before probe;
+- * requesting it again here would fail with -EBUSY and roll the whole probe
+- * back. The driver owns only the data IRQ and lets the PM core arm the
+- * dedicated wake IRQ around suspend.
++ * "wakeup" is the status line. Like the OEM, handle it while awake as well
++ * as using it for system wakeup, so awake edges are not left pending until
++ * suspend. The I2C core's dedicated wake IRQ must be released before the
++ * driver requests its own handler (see nanosic_request_wakeup_irq()).
+  */
+ static int nanosic_irqs_get(struct nanosic *nano)
+ {
+@@ -1605,9 +1629,39 @@ static int nanosic_irqs_get(struct nanosic *nano)
+ 
+ 	nano->data_irq = ret;
+ 
++	ret = fwnode_irq_get_byname(dev_fwnode(dev), "wakeup");
++	if (ret < 0)
++		return dev_err_probe(dev, ret, "failed to get wakeup irq\n");
++	if (ret == nano->data_irq)
++		return dev_err_probe(dev, -EINVAL, "data and wakeup irqs must differ\n");
++
++	nano->wakeup_irq = ret;
++
+ 	return 0;
+ }
+ 
++static int nanosic_request_wakeup_irq(struct nanosic *nano)
++{
++	struct device *dev = &nano->client->dev;
++	int ret;
++
++	/*
++	 * Keep the existing DT names, but replace the I2C core's normally masked
++	 * dedicated handler. The ordinary wake-IRQ attachment only arms wakeup
++	 * around system sleep; it does not mask this IRQ during normal use.
++	 * Managed cleanup detaches it before freeing our handler. The I2C core's
++	 * later dev_pm_clear_wake_irq() is then a no-op, including probe failure.
++	 */
++	dev_pm_clear_wake_irq(dev);
++	ret = devm_request_threaded_irq(dev, nano->wakeup_irq, NULL,
++					nanosic_wakeup_irq, IRQF_ONESHOT,
++					"nanosic-wakeup", nano);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to request wakeup irq\n");
++
++	return devm_pm_set_wake_irq(dev, nano->wakeup_irq);
++}
++
+ static int nanosic_probe(struct i2c_client *client)
+ {
+ 	struct device *dev = &client->dev;
+@@ -1713,6 +1767,10 @@ static int nanosic_probe(struct i2c_client *client)
+ 	if (ret)
+ 		return ret;
+ 
++	ret = nanosic_request_wakeup_irq(nano);
++	if (ret)
++		return ret;
++
+ 	/* Attribute reads are the only path which issues a version request. */
+ 	ret = sysfs_create_group(&dev->kobj, &nanosic_attr_group);
+ 	if (!ret) {
+-- 
+2.56.0
+

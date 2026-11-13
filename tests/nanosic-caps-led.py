@@ -79,6 +79,7 @@ static unsigned long jiffies;
 #define msecs_to_jiffies(v) (v)
 static void mod_delayed_work(void *q,struct delayed_work *w,unsigned long delay){(void)q;w->pending=true;w->delay=delay;}
 static void cancel_delayed_work_sync(struct delayed_work *w){assert(!held);w->pending=false;}
+static void cancel_work_sync(struct work_struct *w){(void)w;assert(!held);}
 struct device {void *data;int kobj;};
 struct i2c_client {unsigned short addr;void *adapter;struct device dev;};
 struct i2c_msg {unsigned short addr,flags,len;u8 *buf;};
@@ -88,6 +89,7 @@ enum nanosic_i2c_operation {NANOSIC_I2C_NONE,NANOSIC_I2C_DATA_READ,NANOSIC_I2C_V
 struct nanosic {
  struct i2c_client *client;void *vdd;int *wake_gpio,*reset_gpio;int lock;
  struct hid_device *hid[NANOSIC_HID_COUNT];struct delayed_work idle_work,status_work,led_work;
+ struct delayed_work posture_work;struct work_struct lid_work;
  unsigned long wake_deadline;bool awake,suspended,data_pending;
  int data_irq;bool data_irq_wake_enabled;
  u64 i2c_transfer_count,i2c_error_count,last_i2c_error_transfer,reset_recovery_count;

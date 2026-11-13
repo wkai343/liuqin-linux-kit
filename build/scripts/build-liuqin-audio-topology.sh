@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: BSD-3-Clause
-# Build the tablet speaker topology without accessing an audio device.
+# Build the tablet speaker, capture and DP topology without an audio device.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$(realpath -- "$0")")/../.." && pwd)
@@ -75,6 +75,49 @@ for capture_value in \
 	grep -Fq "$capture_value" "$tmp/candidate.decoded.conf" ||
 		die "decoded topology lacks capture element: $capture_value"
 done
+
+# Validate the capture FE itself; speaker capability values must not make
+# a two-channel or incorrectly formatted microphone topology pass.
+awk '
+	/^SectionPCMCapabilities/ { caps = 1 }
+	caps && /\047MultiMedia2 Capture\047 \{/ { mic = 1; next }
+	mic && /formats \047S16_LE\047/ { format++ }
+	mic && /rate_min 48000/ { rmin++ }
+	mic && /rate_max 48000/ { rmax++ }
+	mic && /channels_min 4/ { cmin++ }
+	mic && /channels_max 4/ { cmax++ }
+	mic && /}/ { mic = 0; caps = 0 }
+	END { exit format == 1 && rmin == 1 && rmax == 1 && cmin == 1 && cmax == 1 ? 0 : 1 }
+' "$tmp/candidate.decoded.conf" || die 'Mic PCM is not 48 kHz S16_LE four-channel'
+
+# DP0 has a separate stereo FE and the firmware's display-port sink
+# (0x07001069), rather than sharing the four-channel protected speaker PCM.
+dp_mid=117444713
+awk -v expected="$dp_mid" '
+	$1 == "token200" && $2 == expected { count++ }
+	END { exit count == 1 ? 0 : 1 }
+' "$tmp/candidate.decoded.conf" ||
+	die 'decoded topology lacks exactly one display-port sink MID'
+for dp_value in \
+	"stream_name 'MultiMedia3 Playback'" \
+	"'DISPLAY_PORT_RX_0 Audio Mixer, MultiMedia3, stream2.logger1'" \
+	"'DISPLAY_PORT_RX_0 Playback, , device104.display_port_rx1'"; do
+	grep -Fq "$dp_value" "$tmp/candidate.decoded.conf" ||
+		die "decoded topology lacks DP element: $dp_value"
+done
+# Check the dedicated FE capabilities, not a matching value elsewhere in
+# the file (the microphone also uses S16_LE).
+awk '
+	/^SectionPCMCapabilities/ { caps = 1 }
+	caps && /\047MultiMedia3 Playback\047 \{/ { dp = 1; next }
+	dp && /formats \047S16_LE\047/ { format++ }
+	dp && /rate_min 48000/ { rmin++ }
+	dp && /rate_max 48000/ { rmax++ }
+	dp && /channels_min 2/ { cmin++ }
+	dp && /channels_max 2/ { cmax++ }
+	dp && /}/ { dp = 0; caps = 0 }
+	END { exit format == 1 && rmin == 1 && rmax == 1 && cmin == 1 && cmax == 1 ? 0 : 1 }
+' "$tmp/candidate.decoded.conf" || die 'DP PCM is not 48 kHz S16_LE stereo'
 
 mkdir -p "$(dirname -- "$output")"
 install -m 0644 "$tmp/candidate.bin" "$output"

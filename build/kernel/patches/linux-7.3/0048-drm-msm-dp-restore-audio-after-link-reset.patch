@@ -1,0 +1,927 @@
+From: Liuqin Linux Kit <liuqin@localhost>
+Subject: [PATCH] drm/msm/dp: synchronize DPCM audio with link teardown and restore
+
+The Qualcomm downstream driver stops its audio backend before disabling
+the stream. Mainline waits for userspace PCM closure after PUSH_IDLE.
+A jack notification does not acknowledge DSP teardown, and restoring only
+SDP/ACR after resetting the link leaves AudioReach DMA stalled.
+
+Add a synchronous HDMI-codec link notification, separate from jack state.
+DPCM excludes playback backends with an unavailable codec link, closes
+them before returning, then reapplies parameters and restarts backends
+for still-open frontends when the link is ready. Serialize availability
+and route changes with the card PCM mutex. Forward runtime-update errors
+instead of losing backend start/stop failures. Legacy callers and static
+PCM links keep their existing behavior; capture paths are unaffected.
+
+MSM DP sends this notification before PUSH_IDLE or PHY teardown and after
+DPU confirms the first frame, not inside the pre-kickoff bridge enable.
+Cancel pending restoration on teardown. For link-managed playback, defer
+HDMI engine shutdown until component close, after CPU DAI shutdown has
+stopped the DSP graph. Leave DSP commands out of PCM trigger to avoid
+blocking period callbacks sharing the response worker. Legacy and capture
+shutdown timing is unchanged. Serialize the remaining ALSA/MMIO state with an
+audio mutex, cache deferred preparation and cancel it on shutdown. Retain
+physical jack notifications without synthesizing unplug during modesets,
+and remove the userspace-close completion timeout.
+
+Reference: LineageOS/android_kernel_xiaomi_sm8450-modules
+3b30ba7df6608c97c0ba2d55d679a6b5987c4c66, msm/dp/dp_audio.c, dp_display.c,
+and audio-kernel/asoc/codecs/msm_hdmi_codec_rx.c. This is a Qualcomm
+downstream reference, not proof of shipping M81 source identity.
+
+diff --git a/drivers/gpu/drm/display/drm_hdmi_audio_helper.c b/drivers/gpu/drm/display/drm_hdmi_audio_helper.c
+--- a/drivers/gpu/drm/display/drm_hdmi_audio_helper.c
++++ b/drivers/gpu/drm/display/drm_hdmi_audio_helper.c
+@@ -127,6 +127,55 @@
+ 	mutex_unlock(&connector->hdmi_audio.lock);
+ }
+ EXPORT_SYMBOL(drm_connector_hdmi_audio_plugged_notify);
++
++static int drm_connector_hdmi_audio_hook_link_cb(struct device *dev, void *data,
++						hdmi_codec_link_cb fn,
++						struct device *codec_dev)
++{
++	struct drm_connector *connector = data;
++	int ret = 0;
++
++	guard(mutex)(&connector->hdmi_audio.lock);
++	if (fn)
++		ret = fn(codec_dev, connector->hdmi_audio.last_link_state);
++	if (ret)
++		return ret;
++
++	connector->hdmi_audio.link_cb = fn;
++	connector->hdmi_audio.link_cb_dev = codec_dev;
++	return 0;
++}
++
++/**
++ * drm_connector_hdmi_audio_link_notify - synchronize an audio link reset
++ * @connector: connector whose stream is being stopped or restored
++ * @active: false before link teardown, true after successful stream enable
++ *
++ * DPCM backends are stopped synchronously before returning from a false
++ * notification, and reopened with their existing frontend parameters on true.
++ * This does not change jack status. The caller must not hold locks acquired
++ * by its audio prepare/shutdown callbacks. Drivers that do not call this
++ * function retain their existing backend lifecycle.
++ *
++ * Return: 0 on success or a negative backend error.
++ */
++int drm_connector_hdmi_audio_link_notify(struct drm_connector *connector,
++					bool active)
++{
++	int ret = 0;
++
++	guard(mutex)(&connector->hdmi_audio.lock);
++	if (connector->hdmi_audio.last_link_state == active)
++		return 0;
++
++	if (connector->hdmi_audio.link_cb)
++		ret = connector->hdmi_audio.link_cb(connector->hdmi_audio.link_cb_dev,
++						    active);
++	if (!ret)
++		connector->hdmi_audio.last_link_state = active;
++	return ret;
++}
++EXPORT_SYMBOL_GPL(drm_connector_hdmi_audio_link_notify);
+ 
+ static const struct hdmi_codec_ops drm_connector_hdmi_audio_ops = {
+ 	.audio_startup = drm_connector_hdmi_audio_startup,
+@@ -136,6 +185,7 @@
+ 	.get_eld = drm_connector_hdmi_audio_get_eld,
+ 	.get_dai_id = drm_connector_hdmi_audio_get_dai_id,
+ 	.hook_plugged_cb = drm_connector_hdmi_audio_hook_plugged_cb,
++	.hook_link_cb = drm_connector_hdmi_audio_hook_link_cb,
+ };
+ 
+ /**
+@@ -178,6 +228,7 @@
+ 	    !funcs->shutdown)
+ 		return -EINVAL;
+ 
++	connector->hdmi_audio.last_link_state = true;
+ 	connector->hdmi_audio.funcs = funcs;
+ 	connector->hdmi_audio.dai_port = dai_port;
+ 
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
+@@ -294,6 +294,16 @@
+ 	return false;
+ }
+ 
++void dpu_encoder_complete_dp_audio(struct drm_encoder *drm_enc)
++{
++	struct dpu_encoder_virt *dpu_enc = to_dpu_encoder_virt(drm_enc);
++	struct msm_drm_private *priv = drm_enc->dev->dev_private;
++	const struct msm_display_info *info = &dpu_enc->disp_info;
++
++	if (info->intf_type == INTF_DP)
++		msm_dp_audio_complete_frame(priv->kms->dp[info->h_tile_instance[0]]);
++}
++
+ /**
+  * dpu_encoder_is_dsc_enabled - indicate whether dsc is enabled
+  *				for the encoder.
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.h b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.h
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.h
+@@ -72,6 +72,7 @@
+ int dpu_encoder_get_vsync_count(struct drm_encoder *drm_enc);
+ 
+ bool dpu_encoder_is_widebus_enabled(const struct drm_encoder *drm_enc);
++void dpu_encoder_complete_dp_audio(struct drm_encoder *drm_enc);
+ 
+ bool dpu_encoder_is_dsc_enabled(const struct drm_encoder *drm_enc);
+ 
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
+@@ -638,8 +638,10 @@
+ 			DPU_ERROR("wait for commit done returned %d\n", ret);
+ 			break;
+ 		}
+-		if (!ret)
++		if (!ret) {
+ 			dpu_kms_complete_panel_first_frame(encoder);
++			dpu_encoder_complete_dp_audio(encoder);
++		}
+ 	}
+ }
+ 
+diff --git a/drivers/gpu/drm/msm/dp/dp_audio.c b/drivers/gpu/drm/msm/dp/dp_audio.c
+--- a/drivers/gpu/drm/msm/dp/dp_audio.c
++++ b/drivers/gpu/drm/msm/dp/dp_audio.c
+@@ -7,6 +7,7 @@
+ #define pr_fmt(fmt)	"[drm-dp] %s: " fmt, __func__
+ 
+ #include <linux/platform_device.h>
++#include <linux/mutex.h>
+ 
+ #include <drm/display/drm_dp_helper.h>
+ #include <drm/drm_edid.h>
+@@ -23,6 +24,11 @@
+ 	struct drm_device *drm_dev;
+ 	void __iomem *link_base;
+ 
++	/* ALSA owns prepared; DRM owns link_on. All state and MMIO share lock. */
++	struct mutex lock;
++	bool prepared;
++	bool link_on;
++	bool enabled;
+ 	u32 channels;
+ 
+ 	struct msm_dp_audio msm_dp_audio;
+@@ -265,74 +271,87 @@
+ 	return container_of(msm_dp_audio, struct msm_dp_audio_private, msm_dp_audio);
+ }
+ 
++/* Caller holds audio->lock and has an active, clocked mainlink. */
++static void msm_dp_audio_start(struct msm_dp_audio_private *audio)
++{
++	msm_dp_audio_setup_sdp(audio);
++	msm_dp_audio_setup_acr(audio);
++	msm_dp_audio_safe_to_exit_level(audio);
++	msm_dp_audio_enable(audio, true);
++	audio->enabled = true;
++}
++
++void msm_dp_audio_link_enable(struct msm_dp_audio *dp_audio, u32 bw_code,
++			      u32 lane_count)
++{
++	struct msm_dp_audio_private *audio;
++
++	audio = container_of(dp_audio, struct msm_dp_audio_private, msm_dp_audio);
++	guard(mutex)(&audio->lock);
++
++	dp_audio->bw_code = bw_code;
++	dp_audio->lane_count = lane_count;
++	audio->link_on = true;
++
++	/* Reapply SDP/ACR after a modeset, even if ALSA kept the PCM open. */
++	if (audio->prepared)
++		msm_dp_audio_start(audio);
++}
++
++void msm_dp_audio_link_disable(struct msm_dp_audio *dp_audio)
++{
++	struct msm_dp_audio_private *audio;
++
++	audio = container_of(dp_audio, struct msm_dp_audio_private, msm_dp_audio);
++	guard(mutex)(&audio->lock);
++
++	/* Quiesce the engine before PUSH_IDLE, PHY shutdown or clock removal. */
++	if (audio->enabled)
++		msm_dp_audio_enable(audio, false);
++	audio->enabled = false;
++	audio->link_on = false;
++}
++
+ int msm_dp_audio_prepare(struct drm_bridge *bridge,
+ 			 struct drm_connector *connector,
+ 			 struct hdmi_codec_daifmt *daifmt,
+ 			 struct hdmi_codec_params *params)
+ {
+-	int rc = 0;
+-	struct msm_dp_audio_private *audio;
+-	struct msm_dp *msm_dp_display;
+-
+-	msm_dp_display = to_dp_bridge(bridge)->msm_dp_display;
+-
+-	/*
+-	 * there could be cases where sound card can be opened even
+-	 * before OR even when DP is not connected . This can cause
+-	 * unclocked access as the audio subsystem relies on the DP
+-	 * driver to maintain the correct state of clocks. To protect
+-	 * such cases check for connection status and bail out if not
+-	 * connected.
+-	 */
+-	if (!msm_dp_display->power_on)
+-		goto end;
++	struct msm_dp_audio_private *audio;
++	struct msm_dp *msm_dp_display = to_dp_bridge(bridge)->msm_dp_display;
+ 
+ 	audio = msm_dp_audio_get_data(msm_dp_display);
+-	if (IS_ERR(audio)) {
+-		rc = PTR_ERR(audio);
+-		goto end;
+-	}
+-
++	if (IS_ERR(audio))
++		return PTR_ERR(audio);
++
++	guard(mutex)(&audio->lock);
++
++	/* A PCM may be prepared before hotplug or while DRM rebuilds the link. */
+ 	audio->channels = params->channels;
+-
+-	msm_dp_audio_setup_sdp(audio);
+-	msm_dp_audio_setup_acr(audio);
+-	msm_dp_audio_safe_to_exit_level(audio);
+-	msm_dp_audio_enable(audio, true);
+-	msm_dp_display_signal_audio_start(msm_dp_display);
+-	msm_dp_display->audio_enabled = true;
+-
+-end:
+-	return rc;
++	audio->prepared = true;
++	if (audio->link_on)
++		msm_dp_audio_start(audio);
++
++	return 0;
+ }
+ 
+ void msm_dp_audio_shutdown(struct drm_bridge *bridge,
+-			   struct drm_connector *connecter)
+-{
+-	struct msm_dp_audio_private *audio;
+-	struct msm_dp *msm_dp_display;
+-
+-	msm_dp_display = to_dp_bridge(bridge)->msm_dp_display;
++			   struct drm_connector *connector)
++{
++	struct msm_dp_audio_private *audio;
++	struct msm_dp *msm_dp_display = to_dp_bridge(bridge)->msm_dp_display;
++
+ 	audio = msm_dp_audio_get_data(msm_dp_display);
+-	if (IS_ERR(audio)) {
+-		DRM_ERROR("failed to get audio data\n");
++	if (IS_ERR(audio))
+ 		return;
+-	}
+-
+-	/*
+-	 * if audio was not enabled there is no need
+-	 * to execute the shutdown and we can bail out early.
+-	 * This also makes sure that we dont cause an unclocked
+-	 * access when audio subsystem calls this without DP being
+-	 * connected. is_connected cannot be used here as its set
+-	 * to false earlier than this call
+-	 */
+-	if (!msm_dp_display->audio_enabled)
+-		return;
+-
+-	msm_dp_audio_enable(audio, false);
+-	/* signal the dp display to safely shutdown clocks */
+-	msm_dp_display_signal_audio_complete(msm_dp_display);
++
++	guard(mutex)(&audio->lock);
++
++	/* Cancel a deferred prepare even when the DP clocks are already off. */
++	audio->prepared = false;
++	if (audio->enabled)
++		msm_dp_audio_enable(audio, false);
++	audio->enabled = false;
+ }
+ 
+ struct msm_dp_audio *msm_dp_audio_get(struct platform_device *pdev,
+@@ -354,6 +373,7 @@
+ 		goto error;
+ 	}
+ 
++	mutex_init(&audio->lock);
+ 	audio->pdev = pdev;
+ 	audio->link_base = link_base;
+ 
+diff --git a/drivers/gpu/drm/msm/dp/dp_audio.h b/drivers/gpu/drm/msm/dp/dp_audio.h
+--- a/drivers/gpu/drm/msm/dp/dp_audio.h
++++ b/drivers/gpu/drm/msm/dp/dp_audio.h
+@@ -45,6 +45,11 @@
+  */
+ void msm_dp_audio_put(struct msm_dp_audio *msm_dp_audio);
+ 
++/* DRM calls these with link clocks on, before any clock/PHY teardown. */
++void msm_dp_audio_link_enable(struct msm_dp_audio *audio, u32 bw_code,
++			      u32 lane_count);
++void msm_dp_audio_link_disable(struct msm_dp_audio *audio);
++
+ int msm_dp_audio_prepare(struct drm_bridge *bridge,
+ 			 struct drm_connector *connector,
+ 			 struct hdmi_codec_daifmt *daifmt,
+diff --git a/drivers/gpu/drm/msm/dp/dp_display.c b/drivers/gpu/drm/msm/dp/dp_display.c
+--- a/drivers/gpu/drm/msm/dp/dp_display.c
++++ b/drivers/gpu/drm/msm/dp/dp_display.c
+@@ -65,8 +65,9 @@
+ 
+ 	struct msm_dp msm_dp_display;
+ 
+-	/* wait for audio signaling */
+-	struct completion audio_comp;
++	/* Serialize first-frame audio restoration against link teardown. */
++	struct mutex audio_link_lock;
++	bool audio_link_pending;
+ 
+ 	/* HPD IRQ handling */
+ 	spinlock_t irq_thread_lock;
+@@ -184,24 +185,6 @@
+ 	return container_of(dp, struct msm_dp_display_private, msm_dp_display);
+ }
+ 
+-void msm_dp_display_signal_audio_start(struct msm_dp *msm_dp_display)
+-{
+-	struct msm_dp_display_private *dp;
+-
+-	dp = container_of(msm_dp_display, struct msm_dp_display_private, msm_dp_display);
+-
+-	reinit_completion(&dp->audio_comp);
+-}
+-
+-void msm_dp_display_signal_audio_complete(struct msm_dp *msm_dp_display)
+-{
+-	struct msm_dp_display_private *dp;
+-
+-	dp = container_of(msm_dp_display, struct msm_dp_display_private, msm_dp_display);
+-
+-	complete_all(&dp->audio_comp);
+-}
+-
+ static int msm_dp_display_bind(struct device *dev, struct device *master,
+ 			   void *data)
+ {
+@@ -459,6 +442,20 @@
+ 							plugged);
+ }
+ 
++static void msm_dp_display_audio_link_disable(struct msm_dp_display_private *dp)
++{
++	int ret;
++
++	guard(mutex)(&dp->audio_link_lock);
++	WRITE_ONCE(dp->audio_link_pending, false);
++	if (dp->audio_supported) {
++		ret = drm_connector_hdmi_audio_link_notify(dp->msm_dp_display.connector, false);
++		if (ret)
++			drm_err(dp->drm_dev, "DP audio backend stop failed: %d\n", ret);
++	}
++	msm_dp_audio_link_disable(dp->audio);
++}
++
+ static int msm_dp_hpd_unplug_handle(struct msm_dp_display_private *dp)
+ {
+ 	struct platform_device *pdev = dp->msm_dp_display.pdev;
+@@ -474,6 +471,8 @@
+ 	guard(mutex)(&dp->plugged_lock);
+ 	if (!dp->plugged)
+ 		return 0;
++
++	msm_dp_display_audio_link_disable(dp);
+ 
+ 	/* Don't forget modes for eDP */
+ 	if (!dp->msm_dp_display.is_edp)
+@@ -690,15 +689,13 @@
+ static int msm_dp_display_post_enable(struct msm_dp *msm_dp_display)
+ {
+ 	struct msm_dp_display_private *dp;
+-	u32 rate;
+ 
+ 	dp = container_of(msm_dp_display, struct msm_dp_display_private, msm_dp_display);
+ 
+-	rate = dp->link->link_params.rate;
+-
+ 	if (dp->audio_supported) {
+-		dp->audio->bw_code = drm_dp_link_rate_to_bw_code(rate);
+-		dp->audio->lane_count = dp->link->link_params.num_lanes;
++		guard(mutex)(&dp->audio_link_lock);
++		/* DPU has not kicked off yet. Restore after its first frame. */
++		WRITE_ONCE(dp->audio_link_pending, true);
+ 	}
+ 
+ 	/* signal the connect event late to synchronize video and display */
+@@ -710,26 +707,38 @@
+ 	return 0;
+ }
+ 
+-static void msm_dp_display_audio_notify_disable(struct msm_dp_display_private *dp)
+-{
+-	struct msm_dp *msm_dp_display = &dp->msm_dp_display;
+-
+-	/* wait only if audio was enabled */
+-	if (msm_dp_display->audio_enabled) {
+-		/* signal the disconnect event */
+-		msm_dp_display_handle_plugged_change(msm_dp_display, false);
+-		if (!wait_for_completion_timeout(&dp->audio_comp,
+-				HZ * 5))
+-			DRM_ERROR("audio comp timeout\n");
+-	}
+-
+-	msm_dp_display->audio_enabled = false;
++void msm_dp_audio_complete_frame(struct msm_dp *msm_dp_display)
++{
++	struct msm_dp_display_private *dp;
++	int ret;
++
++	if (!msm_dp_display)
++		return;
++	dp = container_of(msm_dp_display, struct msm_dp_display_private, msm_dp_display);
++	if (!READ_ONCE(dp->audio_link_pending))
++		return;
++
++	guard(mutex)(&dp->audio_link_lock);
++	if (!dp->audio_link_pending)
++		return;
++	WRITE_ONCE(dp->audio_link_pending, false);
++	if (!READ_ONCE(dp->plugged) || !msm_dp_display->power_on || !dp->audio_supported)
++		return;
++
++	msm_dp_audio_link_enable(dp->audio,
++				drm_dp_link_rate_to_bw_code(dp->link->link_params.rate),
++				dp->link->link_params.num_lanes);
++	ret = drm_connector_hdmi_audio_link_notify(msm_dp_display->connector, true);
++	if (ret)
++		drm_err(dp->drm_dev, "DP audio backend restart failed: %d\n", ret);
+ }
+ 
+ static int msm_dp_display_disable(struct msm_dp_display_private *dp,
+ 				  struct msm_dp_panel *msm_dp_panel)
+ {
+ 	struct msm_dp *msm_dp_display = &dp->msm_dp_display;
++
++	msm_dp_display_audio_link_disable(dp);
+ 
+ 	if (!msm_dp_display->power_on)
+ 		return 0;
+@@ -1241,6 +1250,7 @@
+ 	dp->hpd_isr_status = 0;
+ 
+ 	mutex_init(&dp->plugged_lock);
++	mutex_init(&dp->audio_link_lock);
+ 
+ 	rc = msm_dp_display_get_io(dp);
+ 	if (rc)
+@@ -1254,8 +1264,6 @@
+ 
+ 	/* Store DP audio handle inside DP display */
+ 	dp->msm_dp_display.msm_dp_audio = dp->audio;
+-
+-	init_completion(&dp->audio_comp);
+ 
+ 	platform_set_drvdata(pdev, &dp->msm_dp_display);
+ 
+@@ -1428,6 +1436,12 @@
+ 	}
+ 
+ 	msm_dp_priv->panel->connector = msm_dp_display->connector;
++	/* An attached sink is not ready for audio until DPU completes a frame. */
++	if (!msm_dp_display->is_edp) {
++		ret = drm_connector_hdmi_audio_link_notify(msm_dp_display->connector, false);
++		if (ret)
++			return ret;
++	}
+ 
+ 	return 0;
+ }
+@@ -1469,8 +1483,10 @@
+ 	}
+ 
+ 	rc = msm_dp_display_enable(dp, dp->panel);
+-	if (rc)
++	if (rc) {
+ 		DRM_ERROR("DP display enable failed, rc=%d\n", rc);
++		return;
++	}
+ 
+ 	rc = msm_dp_display_post_enable(msm_dp_display);
+ 	if (rc) {
+@@ -1501,6 +1517,7 @@
+ 	if (!dp->power_on)
+ 		return;
+ 
++	msm_dp_display_audio_link_disable(msm_dp_display);
+ 	msm_dp_ctrl_push_idle(msm_dp_display->ctrl);
+ }
+ 
+@@ -1521,8 +1538,6 @@
+ 
+ 	if (dp->is_edp)
+ 		msm_dp_hpd_unplug_handle(msm_dp_display);
+-
+-	msm_dp_display_audio_notify_disable(msm_dp_display);
+ 
+ 	msm_dp_display_disable(msm_dp_display, msm_dp_display->panel);
+ 
+diff --git a/drivers/gpu/drm/msm/dp/dp_display.h b/drivers/gpu/drm/msm/dp/dp_display.h
+--- a/drivers/gpu/drm/msm/dp/dp_display.h
++++ b/drivers/gpu/drm/msm/dp/dp_display.h
+@@ -17,7 +17,6 @@
+ 	struct drm_connector *connector;
+ 	struct drm_bridge *next_bridge;
+ 	struct drm_bridge *bridge;
+-	bool audio_enabled;
+ 	bool power_on;
+ 	unsigned int connector_type;
+ 	bool is_edp;
+@@ -29,8 +28,6 @@
+ int msm_dp_display_get_modes(struct msm_dp *msm_dp_display);
+ bool msm_dp_display_check_video_test(struct msm_dp *msm_dp_display);
+ int msm_dp_display_get_test_bpp(struct msm_dp *msm_dp_display);
+-void msm_dp_display_signal_audio_start(struct msm_dp *msm_dp_display);
+-void msm_dp_display_signal_audio_complete(struct msm_dp *msm_dp_display);
+ void msm_dp_display_set_psr(struct msm_dp *dp, bool enter);
+ void msm_dp_display_debugfs_init(struct msm_dp *msm_dp_display, struct dentry *dentry, bool is_edp);
+ void msm_dp_display_atomic_post_disable(struct msm_dp *dp_display);
+diff --git a/drivers/gpu/drm/msm/msm_drv.h b/drivers/gpu/drm/msm/msm_drv.h
+--- a/drivers/gpu/drm/msm/msm_drv.h
++++ b/drivers/gpu/drm/msm/msm_drv.h
+@@ -394,6 +394,7 @@
+ bool msm_dp_needs_periph_flush(const struct msm_dp *dp_display,
+ 			       const struct drm_display_mode *mode);
+ bool msm_dp_wide_bus_available(const struct msm_dp *dp_display);
++void msm_dp_audio_complete_frame(struct msm_dp *dp_display);
+ 
+ #else
+ static inline int __init msm_dp_register(void)
+@@ -424,6 +425,10 @@
+ static inline bool msm_dp_wide_bus_available(const struct msm_dp *dp_display)
+ {
+ 	return false;
++}
++
++static inline void msm_dp_audio_complete_frame(struct msm_dp *dp_display)
++{
+ }
+ 
+ #endif
+diff --git a/include/drm/display/drm_hdmi_audio_helper.h b/include/drm/display/drm_hdmi_audio_helper.h
+--- a/include/drm/display/drm_hdmi_audio_helper.h
++++ b/include/drm/display/drm_hdmi_audio_helper.h
+@@ -20,4 +20,7 @@
+ void drm_connector_hdmi_audio_plugged_notify(struct drm_connector *connector,
+ 					     bool plugged);
+ 
++int drm_connector_hdmi_audio_link_notify(struct drm_connector *connector,
++					bool active);
++
+ #endif
+diff --git a/include/drm/drm_connector.h b/include/drm/drm_connector.h
+--- a/include/drm/drm_connector.h
++++ b/include/drm/drm_connector.h
+@@ -1993,7 +1993,7 @@
+ 	/**
+ 	 * @lock:
+ 	 *
+-	 * Mutex to protect @last_state, @plugged_cb and @plugged_cb_dev.
++	 * Mutex to protect jack/link state and both codec callbacks.
+ 	 */
+ 	struct mutex lock;
+ 
+@@ -2020,6 +2020,13 @@
+ 	 * report the state to @plugged_cb().
+ 	 */
+ 	bool last_state;
++
++	/** @link_cb: Synchronous DPCM backend link readiness callback. */
++	int (*link_cb)(struct device *dev, bool active);
++	/** @link_cb_dev: Codec device protected by @lock. */
++	struct device *link_cb_dev;
++	/** @last_link_state: Link readiness; true until a driver opts in. */
++	bool last_link_state;
+ 
+ 	/**
+ 	 * @dai_port:
+diff --git a/include/sound/hdmi-codec.h b/include/sound/hdmi-codec.h
+--- a/include/sound/hdmi-codec.h
++++ b/include/sound/hdmi-codec.h
+@@ -55,6 +55,9 @@
+ 				      bool plugged);
+ 
+ struct hdmi_codec_pdata;
++/* Synchronously quiesce/restore the audio backend around a link reset. */
++typedef int (*hdmi_codec_link_cb)(struct device *dev, bool active);
++
+ struct hdmi_codec_ops {
+ 	/*
+ 	 * Called when ASoC starts an audio stream setup.
+@@ -115,6 +118,15 @@
+ 	int (*hook_plugged_cb)(struct device *dev, void *data,
+ 			       hdmi_codec_plugged_cb fn,
+ 			       struct device *codec_dev);
++
++	/*
++	 * Optional synchronous link readiness callback, independent of jack
++	 * detection. Call with false before stopping link clocks and true
++	 * after the stream is ready. Do not hold an audio prepare/shutdown
++	 * lock while calling it: DPCM may invoke those operations here.
++	 */
++	int (*hook_link_cb)(struct device *dev, void *data,
++			    hdmi_codec_link_cb fn, struct device *codec_dev);
+ };
+ 
+ /* HDMI codec initalization data */
+diff --git a/include/sound/soc-component.h b/include/sound/soc-component.h
+--- a/include/sound/soc-component.h
++++ b/include/sound/soc-component.h
+@@ -206,6 +206,10 @@
+ };
+ 
+ struct snd_soc_component {
++	/* External playback link unavailable; protected by card PCM mutex. */
++	bool dpcm_link_blocked;
++	/* Set when a display opts in to synchronous playback link control. */
++	bool dpcm_link_managed;
+ 	const char *name;
+ 	const char *name_prefix;
+ 	struct device *dev;
+diff --git a/include/sound/soc-dpcm.h b/include/sound/soc-dpcm.h
+--- a/include/sound/soc-dpcm.h
++++ b/include/sound/soc-dpcm.h
+@@ -13,6 +13,7 @@
+ #include <sound/pcm.h>
+ 
+ struct snd_soc_pcm_runtime;
++struct snd_soc_component;
+ 
+ /*
+  * Types of runtime_update to perform. e.g. originated from FE PCM ops
+@@ -120,6 +121,7 @@
+ 
+ /* update audio routing between PCMs and any DAI links */
+ int snd_soc_dpcm_runtime_update(struct snd_soc_card *card);
++int snd_soc_dpcm_set_link_state(struct snd_soc_component *component, bool active);
+ 
+ #ifdef CONFIG_DEBUG_FS
+ void soc_dpcm_debugfs_add(struct snd_soc_pcm_runtime *rtd);
+diff --git a/sound/soc/codecs/hdmi-codec.c b/sound/soc/codecs/hdmi-codec.c
+--- a/sound/soc/codecs/hdmi-codec.c
++++ b/sound/soc/codecs/hdmi-codec.c
+@@ -280,6 +280,8 @@
+ };
+ 
+ struct hdmi_codec_priv {
++	struct snd_soc_component *component;
++	bool shutdown_pending;
+ 	struct hdmi_codec_pdata hcd;
+ 	uint8_t eld[MAX_ELD_BYTES];
+ 	struct snd_parsed_hdmi_eld eld_parsed;
+@@ -503,10 +505,31 @@
+ 		return;
+ 
+ 	hcp->chmap_idx = HDMI_CODEC_CHMAP_IDX_UNKNOWN;
+-	hcp->hcd.ops->audio_shutdown(dai->dev->parent, hcp->hcd.data);
++	if (tx && dai->component->dpcm_link_managed)
++		hcp->shutdown_pending = true;
++	else
++		hcp->hcd.ops->audio_shutdown(dai->dev->parent, hcp->hcd.data);
+ 
+ 	guard(mutex)(&hcp->lock);
+ 	hcp->busy = false;
++}
++
++static int hdmi_codec_pcm_close(struct snd_soc_component *component,
++				struct snd_pcm_substream *substream)
++{
++	struct hdmi_codec_priv *hcp = snd_soc_component_get_drvdata(component);
++
++	/*
++	 * Component close follows all DAI shutdown callbacks. The CPU DAI has
++	 * now stopped/closed its DSP graph, so it is safe to stop the engine.
++	 * Do not move a synchronous DSP stop into PCM trigger: period callbacks
++	 * and command responses may share a worker blocked on the PCM lock.
++	 */
++	if (hcp->shutdown_pending) {
++		hcp->shutdown_pending = false;
++		hcp->hcd.ops->audio_shutdown(component->dev->parent, hcp->hcd.data);
++	}
++	return 0;
+ }
+ 
+ static int hdmi_codec_fill_codec_params(struct snd_soc_dai *dai,
+@@ -1086,10 +1109,26 @@
+ 	return ret;
+ }
+ 
++static int hdmi_codec_link_state(struct device *dev, bool active)
++{
++	struct hdmi_codec_priv *hcp = dev_get_drvdata(dev);
++
++	return snd_soc_dpcm_set_link_state(hcp->component, active);
++}
++
+ static int hdmi_probe(struct snd_soc_component *component)
+ {
+ 	struct hdmi_codec_priv *hcp = snd_soc_component_get_drvdata(component);
+ 	int ret = 0;
++
++	hcp->component = component;
++	if (hcp->hcd.ops->hook_link_cb) {
++		ret = hcp->hcd.ops->hook_link_cb(component->dev->parent,
++						 hcp->hcd.data, hdmi_codec_link_state,
++						 component->dev);
++		if (ret)
++			return ret;
++	}
+ 
+ 	if (hcp->hcd.ops->hook_plugged_cb) {
+ 		ret = hcp->hcd.ops->hook_plugged_cb(component->dev->parent,
+@@ -1098,6 +1137,9 @@
+ 						    component->dev);
+ 	}
+ 
++	if (ret && hcp->hcd.ops->hook_link_cb)
++		hcp->hcd.ops->hook_link_cb(component->dev->parent,
++					 hcp->hcd.data, NULL, NULL);
+ 	return ret;
+ }
+ 
+@@ -1105,6 +1147,9 @@
+ {
+ 	struct hdmi_codec_priv *hcp = snd_soc_component_get_drvdata(component);
+ 
++	if (hcp->hcd.ops->hook_link_cb)
++		hcp->hcd.ops->hook_link_cb(component->dev->parent,
++					 hcp->hcd.data, NULL, NULL);
+ 	if (hcp->hcd.ops->hook_plugged_cb)
+ 		hcp->hcd.ops->hook_plugged_cb(component->dev->parent,
+ 					      hcp->hcd.data, NULL, NULL);
+@@ -1113,6 +1158,7 @@
+ static const struct snd_soc_component_driver hdmi_driver = {
+ 	.probe			= hdmi_probe,
+ 	.remove			= hdmi_remove,
++	.close			= hdmi_codec_pcm_close,
+ 	.dapm_widgets		= hdmi_widgets,
+ 	.num_dapm_widgets	= ARRAY_SIZE(hdmi_widgets),
+ 	.of_xlate_dai_id	= hdmi_of_xlate_dai_id,
+diff --git a/sound/soc/soc-pcm.c b/sound/soc/soc-pcm.c
+--- a/sound/soc/soc-pcm.c
++++ b/sound/soc/soc-pcm.c
+@@ -1659,6 +1659,17 @@
+ 	return false;
+ }
+ 
++static bool dpcm_be_link_available(struct snd_soc_pcm_runtime *be)
++{
++	struct snd_soc_dai *dai;
++	int i;
++
++	for_each_rtd_codec_dais(be, i, dai)
++		if (dai->component->dpcm_link_blocked)
++			return false;
++	return true;
++}
++
+ static int dpcm_prune_paths(struct snd_soc_pcm_runtime *fe, int stream,
+ 			    struct snd_soc_dapm_widget_list **list_)
+ {
+@@ -1667,7 +1678,9 @@
+ 
+ 	/* Destroy any old FE <--> BE connections */
+ 	for_each_dpcm_be(fe, stream, dpcm) {
+-		if (dpcm_be_is_active(dpcm, stream, *list_))
++		if ((stream != SNDRV_PCM_STREAM_PLAYBACK ||
++		     dpcm_be_link_available(dpcm->be)) &&
++		    dpcm_be_is_active(dpcm, stream, *list_))
+ 			continue;
+ 
+ 		dev_dbg(fe->dev, "ASoC: pruning %s BE %s for %s\n",
+@@ -1719,6 +1732,9 @@
+ 				widget->name);
+ 			continue;
+ 		}
++
++		if (stream == SNDRV_PCM_STREAM_PLAYBACK && !dpcm_be_link_available(be))
++			continue;
+ 
+ 		/*
+ 		 * Filter for systems with 'component_chaining' enabled.
+@@ -2765,7 +2781,7 @@
+ {
+ 	struct snd_soc_dapm_widget_list *list;
+ 	int stream;
+-	int count, paths;
++	int count, paths, ret;
+ 
+ 	if (!fe->dai_link->dynamic)
+ 		return 0;
+@@ -2794,6 +2810,7 @@
+ 		    !snd_soc_dai_stream_active(snd_soc_rtd_to_codec(fe, 0), stream))
+ 			continue;
+ 
++		ret = 0;
+ 		paths = dpcm_path_get(fe, stream, &list);
+ 		if (paths < 0)
+ 			return paths;
+@@ -2810,9 +2827,9 @@
+ 		if (count) {
+ 			dpcm_set_fe_update_state(fe, stream, SND_SOC_DPCM_UPDATE_BE);
+ 			if (new)
+-				dpcm_run_update_startup(fe, stream);
++				ret = dpcm_run_update_startup(fe, stream);
+ 			else
+-				dpcm_run_update_shutdown(fe, stream);
++				ret = dpcm_run_update_shutdown(fe, stream);
+ 			dpcm_set_fe_update_state(fe, stream, SND_SOC_DPCM_UPDATE_NO);
+ 
+ 			dpcm_clear_pending_state(fe, stream);
+@@ -2820,6 +2837,8 @@
+ 		}
+ 
+ 		dpcm_path_put(&list);
++		if (ret < 0)
++			return ret;
+ 	}
+ 
+ 	return 0;
+@@ -2828,12 +2847,12 @@
+ /* Called by DAPM mixer/mux changes to update audio routing between PCMs and
+  * any DAI links.
+  */
+-int snd_soc_dpcm_runtime_update(struct snd_soc_card *card)
++static int soc_dpcm_runtime_update(struct snd_soc_card *card)
+ {
+ 	struct snd_soc_pcm_runtime *fe;
+ 	int ret = 0;
+ 
+-	snd_soc_dpcm_mutex_lock(card);
++	snd_soc_dpcm_mutex_assert_held(card);
+ 	/* shutdown all old paths first */
+ 	for_each_card_rtds(card, fe) {
+ 		ret = soc_dpcm_fe_runtime_update(fe, 0);
+@@ -2849,11 +2868,45 @@
+ 	}
+ 
+ out:
++	return snd_soc_ret(card->dev, ret, "%s() failed\n", __func__);
++}
++
++int snd_soc_dpcm_runtime_update(struct snd_soc_card *card)
++{
++	int ret;
++
++	snd_soc_dpcm_mutex_lock(card);
++	ret = soc_dpcm_runtime_update(card);
+ 	snd_soc_dpcm_mutex_unlock(card);
+-
+-	return snd_soc_ret(card->dev, ret, "%s() failed\n", __func__);
++	return ret;
+ }
+ EXPORT_SYMBOL_GPL(snd_soc_dpcm_runtime_update);
++
++/**
++ * snd_soc_dpcm_set_link_state - quiesce/restore external playback backends
++ * @component: codec whose external link is being reset
++ * @active: whether the link can accept audio
++ *
++ * Keep frontend PCMs open while synchronously closing unavailable backends.
++ * When the link returns, DPCM reapplies hw_params/prepare and starts the DSP
++ * backend for each still-active frontend. A closed frontend is not restarted.
++ * Static PCM links and capture routing are unaffected.
++ */
++int snd_soc_dpcm_set_link_state(struct snd_soc_component *component, bool active)
++{
++	struct snd_soc_card *card = component->card;
++	int ret = 0;
++
++	snd_soc_dpcm_mutex_lock(card);
++	component->dpcm_link_blocked = !active;
++	if (!active)
++		component->dpcm_link_managed = true;
++	if (snd_soc_card_is_instantiated(card))
++		ret = soc_dpcm_runtime_update(card);
++	snd_soc_dpcm_mutex_unlock(card);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(snd_soc_dpcm_set_link_state);
+ 
+ static void dpcm_fe_dai_cleanup(struct snd_pcm_substream *fe_substream)
+ {

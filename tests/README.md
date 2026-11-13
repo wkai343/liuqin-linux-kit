@@ -47,7 +47,7 @@ RPM 工具和 pyelftools，已接入 Devbox 测试与 CI。
 | `multiboot.py`、`boot-store.py`、`boot-retention.py` | 多系统绑定、引导存储结构、默认切换和当前/上一版材料的保留与清理 |
 
 更新器真机 `plan` 只检查计划；Fastboot 固定引导不能替代 `apply`/`rollback` 的验收。
-支持范围和验收限制见[系统内自动更新](../docs/KERNEL-UPDATES.md#系统内自动更新待真机验收)。
+支持范围和验收限制见[系统内更新与自动写入](../docs/KERNEL-UPDATES.md#系统内更新与自动写入)。
 
 ## Rec 用户态
 
@@ -60,7 +60,7 @@ RPM 工具和 pyelftools，已接入 Devbox 测试与 CI。
 | `login-ready.py` | 内屏、渲染节点、触摸、电源键和背光的就绪条件；动态编号、缺失设备、错误机型、设备号不符、udev 失败和检查期间设备消失；只等待必要设备完成初始化 |
 | `display-clock.py` | 补丁中的时钟取整、频率边界和 CCF 约束 |
 | `display-refresh-rates.py` | 从默认 7.3 配方重建并执行模式枚举、面板扫描命令与命令扫描行计算。可追加在线切换、主机时钟及固定 ROM 检查 |
-| `display-live-refresh.py` | 执行四档在线切换的实际 C 函数；双面板 24 个有向切换及 57 项故障、范围和回退检查，模拟 DPU/DSI 寄存器、帧边界和字节时钟舍入 |
+| `display-live-refresh.py` | 执行四档在线切换的实际 C 函数；双面板 24 个有向切换及 57 项故障、范围和回退检查。指定 `--source` 时追加 32 种 DPU 残留请求与关闭超时复现 |
 | `display-brightness-minimum.py` | 当前 7.3 内核的最低非零亮度、原厂曲线其余档位、直接写零与关屏后的恢复 |
 | `display-oem-backlight.py` | 执行指定源码中的背光初始化与亮灭逻辑：默认亮度、单/双芯片 I2C 故障、失败清理与重试；需候选和基线源码 |
 | `display-policy.py`、`display-recovery.py` | CABC 配置、活动会话、恢复限流、失败与退出处理 |
@@ -165,6 +165,9 @@ devbox run -- python3 tests/battery-readings.py \
 
 该测试执行当前源码中的 getter，覆盖四种平台、单位、溢出、传输选择及错误返回；
 不修改输入源码。它验证软件换算，不证明电量计刷新及时或待机测量准确。
+同一入口还执行缓存包装函数，
+覆盖 0–100% 真实电量及八类传输故障、首次无有效读数、恢复后的新读数、未知充电状态，
+以及其他平台和充电控制错误不被缓存隐藏。UPower 与 Plasma 的实际表现仍需实机观察。
 
 首帧背光另用
 `tests/kernel73-first-frame.py --source /path/to/kernel-7.3 --report out/test-reports/first-frame.json`，
@@ -176,13 +179,40 @@ devbox run -- python3 tests/battery-readings.py \
 `tests/kernel73-device-lifecycle.py` 使用相同的 `--source`、`--baseline` 参数，
 检查扬声器格式约束、USB 独立电源循环和共享时钟的失败清理，以及新版工作队列声明。
 `tests/kernel73-dp-lifecycle.py` 使用相同参数，检查未连接端口、PHY 初始化失败和已被其他路径
-使用时的探测清理，以及 DP 上电失败后的状态；旧版反例需复现。
+使用时的探测清理，以及 DP 上电失败后的状态；旧版反例需复现。包含 `0045` 的源码另覆盖
+Type-C 申请与生效状态、接收端通道数限制，以及分配变化后拒绝四通道上电。
 `tests/nanosic-caps-led.py` 使用相同参数，执行键盘 LED 报文转换、合并状态、有限重试及
 接回、睡眠、复位、移除路径，检查原有描述符和只读请求接口保持一致。
+`devbox run -- python3 tests/nanosic-folio.py` 从默认补丁配方重建驱动，执行实际 C 函数，
+检查 GPIO46 常开状态中断的接管与失败清理、唤醒开关、睡眠边界上的双中断、
+总线休眠时不访问 I2C、恢复后的待处理帧，以及反复睡眠的唤醒引用配对。
+可用 `--source /path/to/assembled-kernel-source` 指定已装配源码；实际唤醒仍需硬件验证。
 `tests/display-panel-margins.py --source /path/to/candidate --baseline-source /path/to/before`
 执行面板 prepare 与复位函数，覆盖三个等待开关、机型与身份限制及失败清理；
 同时检查原厂命令表和其他面板代码未变；默认引导通过三个独立参数省去额外等待。
 这些测试需要实际源码，不在普通离线入口中。
+
+### 音频源码检查
+
+按功能运行以下四组测试，均执行指定内核中的实际 C 函数，使用 UBSan 和故障注入。
+共同参数为 `--source /path/to/assembled-kernel-source`，可加
+`--report out/test-reports/<name>.json` 保存汇总结果。`kernel_test.py` 只提供共享的
+函数提取、编译执行和报告辅助，不单独运行。检查按功能维护，不再为每个内部函数另建脚本。
+
+| 测试 | 保留的回归覆盖 |
+| --- | --- |
+| `dp-audio.py` | DP 音频与 ALSA 并发、关链路前停止后端、首帧后恢复、拔线取消恢复、CPU DAI 与 DP 引擎关闭顺序；断开显示器时的前端探测与失败清理 |
+| `microphones.py` | 四路 ADC 接线与通道映射、TX mixer/mute、声卡重建后的路由初始化；360 种 ADC 子集和关闭顺序、共享时钟、静音占位、离线收尾及高通滤波延时与任务竞态 |
+| `soundwire.py` | WCD TX 中断归属、延迟 IRQ 与停钟顺序；1.3/1.7/2.0 FIFO 和完成中断、真实错误保留；ADSP 恢复后的引脚配置、重新枚举、codec 复位和失败重试 |
+| `audio-recovery.py` | APR/APM/PRM 服务及设备恢复顺序、时钟投票与端口回滚、播放队列重新准备、声卡回调清理、内置与模块共用代次、macro 复位，以及离线 graph 关闭和引用释放 |
+
+`microphones.py` 可追加 `--baseline /path/to/old-source` 复现 ADC 主端口冲突；
+`--stock-overlay /path/to/entry.15` 从固定摘要的原厂 DTBO 读取实际传输参数。
+`soundwire.py` 同时追加 `--dtb /path/to/sm8475-xiaomi-liuqin.dtb` 和
+`--stock-overlay /path/to/entry.15` 时，还比较编译后两条总线的工作/休眠引脚状态与原厂配置。
+
+离线检查不能替代四路实际录音、DP 出声、播放中刷新率切换与热插拔，或全系统睡眠和
+ADSP 重启后的实际数据推进。对应实机验收方法见[音频](../docs/AUDIO.md)与[显示](../docs/DISPLAY.md)。
 
 ### 显示与触摸初始化
 

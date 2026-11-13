@@ -1,0 +1,52 @@
+Subject: [PATCH] ASoC: q6apm: preserve all four raw Liuqin microphone channels
+
+The codec-DMA capture endpoint exposes consecutive channel identities
+1/2/3/4. The quad playback default 1/2/4/5 causes the capture MFC to
+omit physical microphone 3 and emit silence for channel 5. Use the
+consecutive map only for four-channel capture on Liuqin, preserving
+quad speaker playback and all other boards.
+
+diff --git a/sound/soc/qcom/qdsp6/q6apm-dai.c b/sound/soc/qcom/qdsp6/q6apm-dai.c
+--- a/sound/soc/qcom/qdsp6/q6apm-dai.c
++++ b/sound/soc/qcom/qdsp6/q6apm-dai.c
+@@ -6,6 +6,7 @@
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
++#include <linux/platform_data/liuqin.h>
+ #include <linux/slab.h>
+ #include <sound/soc.h>
+ #include <sound/soc-dapm.h>
+@@ -211,6 +212,23 @@
+ 	}
+ }
+ 
++/* The codec-DMA source numbers raw microphone channels consecutively. */
++static void q6apm_dai_set_channel_mapping(struct audioreach_module_config *cfg)
++{
++	int i;
++
++	audioreach_set_default_channel_mapping(cfg->channel_map, cfg->num_channels);
++	if (!liuqin_board_quirks() || cfg->direction != SNDRV_PCM_STREAM_CAPTURE ||
++	    cfg->num_channels != 4)
++		return;
++
++	/* Quad playback uses 1/2/4/5; requesting it from raw 1/2/3/4 capture
++	 * drops the third microphone and synthesizes a silent fifth channel.
++	 */
++	for (i = 0; i < cfg->num_channels; i++)
++		cfg->channel_map[i] = i + 1;
++}
++
+ static int q6apm_dai_prepare(struct snd_soc_component *component,
+ 			     struct snd_pcm_substream *substream)
+ {
+@@ -235,7 +253,7 @@
+ 	cfg.num_channels = runtime->channels;
+ 	cfg.bit_width = prtd->bits_per_sample;
+ 	cfg.fmt = SND_AUDIOCODEC_PCM;
+-	audioreach_set_default_channel_mapping(cfg.channel_map, runtime->channels);
++	q6apm_dai_set_channel_mapping(&cfg);
+ 	if (prtd->state) {
+ 		/* clear the previous setup if any  */
+ 		q6apm_graph_stop(prtd->graph);

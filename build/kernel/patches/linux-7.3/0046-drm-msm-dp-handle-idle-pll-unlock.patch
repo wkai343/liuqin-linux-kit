@@ -1,0 +1,22 @@
+Subject: [PATCH] drm/msm/dp: Handle a PLL unlock interrupt while AUX is idle
+
+Reinitializing the DP PHY during a modeset can raise PLL_UNLOCKED while
+no AUX transfer is pending. The controller already acknowledged the
+interrupt before dispatching it. Return IRQ_HANDLED for this standalone
+status without logging an AUX error or signaling transfer completion.
+Keep the existing handling for all other statuses.
+
+diff --git a/drivers/gpu/drm/msm/dp/dp_aux.c b/drivers/gpu/drm/msm/dp/dp_aux.c
+--- a/drivers/gpu/drm/msm/dp/dp_aux.c
++++ b/drivers/gpu/drm/msm/dp/dp_aux.c
+@@ -465,6 +465,10 @@ irqreturn_t msm_dp_aux_isr(struct drm_dp_aux *msm_dp_aux, u32 isr)
+ 	aux = container_of(msm_dp_aux, struct msm_dp_aux_private, msm_dp_aux);
+ 
+ 	if (!aux->cmd_busy) {
++		/* The controller already acknowledged the PHY's PLL status. */
++		if (isr == DP_INTR_PLL_UNLOCKED)
++			return IRQ_HANDLED;
++
+ 		DRM_ERROR("Unexpected DP AUX IRQ %#010x when not busy\n", isr);
+ 		return IRQ_NONE;
+ 	}

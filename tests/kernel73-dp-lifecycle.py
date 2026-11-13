@@ -10,7 +10,7 @@ import tempfile
 
 
 def function(text, name):
-    match = re.search(r'^(?:static )?(?:int|void|enum drm_connector_status)\s+'
+    match = re.search(r'^(?:static )?(?:int|unsigned int|void|enum drm_connector_status)\s+'
                       + name + r'\([^;{]*\)\s*\{', text, re.M)
     if not match:
         raise ValueError(name)
@@ -135,7 +135,12 @@ int main(void){
 struct qmp_combo;
 struct qmp_phy_cfg {void *dp_tx_tbl;int dp_tx_tbl_num;
  void (*configure_dp_tx)(struct qmp_combo*);int (*configure_dp_phy)(struct qmp_combo*);};
-struct qmp_combo {const struct qmp_phy_cfg *cfg;void *dp_tx,*dp_tx2,*dp_dp_phy;int phy_mutex;bool dp_powered_on;};
+enum qmpphy_mode {QMPPHY_MODE_USB3DP, QMPPHY_MODE_DP_ONLY, QMPPHY_MODE_USB3_ONLY};
+enum phy_mode {PHY_MODE_DP, PHY_MODE_OTHER};
+enum {PHY_SUBMODE_DP, PHY_SUBMODE_EDP};
+union phy_configure_opts {struct {unsigned int lanes;} dp;};
+struct qmp_combo {const struct qmp_phy_cfg *cfg;void *dp_tx,*dp_tx2,*dp_dp_phy;int phy_mutex;
+ bool dp_powered_on;enum qmpphy_mode qmpphy_mode,typec_mode;struct {unsigned int lanes;} dp_opts;};
 struct phy {struct qmp_combo *qmp;};
 static int serdes_error,config_error,tx_calls,config_calls,depth;
 #define phy_get_drvdata(p) ((p)->qmp)
@@ -148,6 +153,20 @@ static void writel(uint32_t v,void *p){*(uint32_t*)p=v;}
 static void config_tx(struct qmp_combo *q){(void)q;tx_calls++;}
 static int config_phy(struct qmp_combo *q){(void)q;config_calls++;return config_error;}
 '''
+    lane_policy = 'qmp_combo_dp_validate(' in new
+    if lane_policy:
+        power += r'''
+static bool liuqin;
+static bool liuqin_board_quirks(void){return liuqin;}
+static int *take_mutex(int *mutex){mutex_lock(mutex);return mutex;}
+static void drop_mutex(int **mutex){mutex_unlock(*mutex);}
+#define guard(kind) __attribute__((cleanup(drop_mutex))) int *held = take_mutex
+#define lockdep_assert_held(lock) do{(void)(lock);assert(depth==1);}while(0)
+#define min(a,b) ((a)<(b)?(a):(b))
+'''
+        power += function(new, 'qmp_combo_dp_lane_limit') + '\n'
+        power += function(new, 'qmp_combo_dp_validate') + '\n'
+        power += '#define CHECK_LANE_POLICY 1\n'
     power += function(old, 'qmp_combo_dp_power_on').replace('qmp_combo_dp_power_on(', 'old_power_on(', 1)
     power += function(new, 'qmp_combo_dp_power_on')
     power += r'''
@@ -165,6 +184,26 @@ int main(void){
   assert(pd==(stage?DP_PHY_PD_CTL_PSR_PWRDN:0));
   assert(tx_calls==(stage!=1)&&config_calls==(stage!=1));cases++;
  }
+#ifdef CHECK_LANE_POLICY
+ union phy_configure_opts opts = { .dp.lanes = 4 };
+ assert(qmp_combo_dp_validate(&phy,PHY_MODE_DP,PHY_SUBMODE_DP,&opts)==-EOPNOTSUPP);
+ liuqin=true;
+ assert(qmp_combo_dp_validate(&phy,PHY_MODE_DP,PHY_SUBMODE_EDP,&opts)==-EOPNOTSUPP);
+ assert(opts.dp.lanes==4&&!depth);cases+=2;
+ for(int requested=0;requested<3;requested++)for(int applied=0;applied<3;applied++){
+  q.typec_mode=requested;q.qmpphy_mode=applied;
+  bool dp_only=requested==QMPPHY_MODE_DP_ONLY&&applied==QMPPHY_MODE_DP_ONLY;
+  for(unsigned int sink=1;sink<=4;sink*=2){
+   opts.dp.lanes=sink;
+   assert(!qmp_combo_dp_validate(&phy,PHY_MODE_DP,PHY_SUBMODE_DP,&opts));
+   assert(opts.dp.lanes==(dp_only?sink:min(sink,2U))&&!depth);cases++;
+  }
+  q.dp_opts.lanes=4; q.dp_powered_on=false;
+  pd=0;serdes_error=config_error=tx_calls=config_calls=0;
+  assert(qmp_combo_dp_power_on(&phy)==(dp_only?0:-EAGAIN));
+  assert(q.dp_powered_on==dp_only&&tx_calls==dp_only&&config_calls==dp_only&&!depth&&!pd);cases++;
+ }
+#endif
  printf("%d\n",cases);return 0;
 }
 '''
@@ -174,7 +213,8 @@ int main(void){
                  'power_failure': execute(root, 'power', power)}
     report = {'all_passed': True, 'actual_source_functions_executed': True,
               'cases': cases, 'old_ownership_and_error_bugs_reproduced': True,
-              'unplugged_port_skips_phy': True, 'hardware_validated': False}
+              'unplugged_port_skips_phy': True, 'typec_lane_policy_checked': lane_policy,
+              'hardware_validated': False}
     if args.report:
         args.report.write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(report, indent=2))

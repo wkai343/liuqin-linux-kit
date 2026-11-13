@@ -1,0 +1,2275 @@
+Subject: [PATCH] liuqin: preserve audio lifecycle across system sleep and DSP restart
+
+Stop DSP graphs outside PCM locks before system sleep and restore SoundWire
+ports before codec power-up. Disable data ports before DAPM drops their
+clock votes, and reset the playback queue when ALSA prepares a suspended PCM. Retain the PRM clock provider and cancel commands
+when its audio service is down; replay resource votes before clocks and card
+creation. Quiesce retained consumers before their providers on service loss.
+Restore LPASS pin states, SoundWire enumeration and codec state on recovery.
+A recreated card starts with disconnected NOPM capture mixer paths, so reset
+the surviving TX macro's per-card channel masks before UCM enables the routes.
+
+The PM/reset ordering follows the OEM Bolero macros, SoundWire controller and
+WCD938x lifecycle. Board-specific behavior uses liuqin_board_quirks(), including
+ABL's replacement root identifiers. Firmware readiness and failed recovery
+remain errors; unrelated codec and AUX errors are not suppressed.
+
+OEM audio source:
+https://github.com/xiaomi-sm8450-kernel/android_vendor_qcom_opensource_audio-kernel/tree/721c4fb115d50aea74a2dec9ee864bf0f12682c8
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+index 81181c20aaedc60e0c76542c7575b6499e616a59..31e8dc7fd7a4babe367b527e59f6356f0aee6f09 100644
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+@@ -1098,6 +1098,51 @@ &vamacro {
+ /* SWR pinctrl states live under the LPASS-local TLMM; it must probe first. */
+ &lpass_tlmm {
+ 	status = "okay";
++
++	/* OEM low-power states also let SSR reapply the active pin settings. */
++	liuqin_rx_swr_sleep: rx-swr-sleep-state {
++		clk-pins {
++			pins = "gpio3";
++			function = "swr_rx_clk";
++			drive-strength = <2>;
++			input-enable;
++			bias-pull-down;
++		};
++
++		data-pins {
++			pins = "gpio4", "gpio5";
++			function = "swr_rx_data";
++			drive-strength = <2>;
++			input-enable;
++			bias-pull-down;
++		};
++	};
++
++	liuqin_tx_swr_sleep: tx-swr-sleep-state {
++		clk-pins {
++			pins = "gpio0";
++			function = "swr_tx_clk";
++			drive-strength = <2>;
++			input-enable;
++			bias-pull-down;
++		};
++
++		data0-pins {
++			pins = "gpio1";
++			function = "swr_tx_data";
++			drive-strength = <2>;
++			input-enable;
++			bias-bus-hold;
++		};
++
++		data12-pins {
++			pins = "gpio2", "gpio14";
++			function = "swr_tx_data";
++			drive-strength = <2>;
++			input-enable;
++			bias-pull-down;
++		};
++	};
+ };
+ 
+ &rxmacro {
+@@ -1109,6 +1154,8 @@ &txmacro {
+ };
+ 
+ &swr1 {
++	pinctrl-1 = <&liuqin_rx_swr_sleep>;
++	pinctrl-names = "default", "sleep";
+ 	status = "okay";
+ 
+ 	wcd_rx: wcd9380-rx@0,4 {
+@@ -1119,6 +1166,8 @@ wcd_rx: wcd9380-rx@0,4 {
+ };
+ 
+ &swr2 {
++	pinctrl-1 = <&liuqin_tx_swr_sleep>;
++	pinctrl-names = "default", "sleep";
+ 	status = "okay";
+ 
+ 	/* Shipping Liuqin 9.6 MHz ADC transport: slave port 1 uses lane 1 / offset 0,
+diff --git a/drivers/pinctrl/qcom/pinctrl-lpass-lpi.c b/drivers/pinctrl/qcom/pinctrl-lpass-lpi.c
+index 5fd4a4eba654de5efacd7aa9ee3f1d59cf60c8c9..fb7a97425a0116ce150db646364fe32801433e7f 100644
+--- a/drivers/pinctrl/qcom/pinctrl-lpass-lpi.c
++++ b/drivers/pinctrl/qcom/pinctrl-lpass-lpi.c
+@@ -10,6 +10,7 @@
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
++#include <linux/platform_data/liuqin-audio.h>
+ #include <linux/seq_file.h>
+ #include <linux/cleanup.h>
+ 
+@@ -578,6 +579,9 @@ int lpi_pinctrl_probe(struct platform_device *pdev)
+ 		goto err_pinctrl;
+ 	}
+ 
++	ret = devm_liuqin_audio_pm_register(dev, LIUQIN_AUDIO_PINCTRL);
++	if (ret)
++		goto err_pinctrl;
+ 	return 0;
+ 
+ err_pinctrl:
+diff --git a/drivers/pinctrl/qcom/pinctrl-sm8450-lpass-lpi.c b/drivers/pinctrl/qcom/pinctrl-sm8450-lpass-lpi.c
+index 834eee8dcce92a172beb78f296e2172abc069c1d..06f4e792c1fbbafe887146be390f133f258ec20d 100644
+--- a/drivers/pinctrl/qcom/pinctrl-sm8450-lpass-lpi.c
++++ b/drivers/pinctrl/qcom/pinctrl-sm8450-lpass-lpi.c
+@@ -8,6 +8,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/pm_clock.h>
+ #include <linux/pm_runtime.h>
++#include <linux/platform_data/liuqin-audio.h>
+ 
+ #include "pinctrl-lpass-lpi.h"
+ 
+@@ -205,7 +206,7 @@ static const struct of_device_id lpi_pinctrl_of_match[] = {
+ MODULE_DEVICE_TABLE(of, lpi_pinctrl_of_match);
+ 
+ static const struct dev_pm_ops lpi_pinctrl_pm_ops = {
+-	RUNTIME_PM_OPS(pm_clk_suspend, pm_clk_resume, NULL)
++	RUNTIME_PM_OPS(pm_clk_suspend, liuqin_audio_clk_resume, NULL)
+ };
+ 
+ static struct platform_driver lpi_pinctrl_driver = {
+diff --git a/drivers/remoteproc/qcom_q6v5_pas.c b/drivers/remoteproc/qcom_q6v5_pas.c
+index fe06aedef00dce40ac3bcd043760b0ebaab372aa..f924f291c3bbf45f52b1a6dfaa92bdd9c5aa8517 100644
+--- a/drivers/remoteproc/qcom_q6v5_pas.c
++++ b/drivers/remoteproc/qcom_q6v5_pas.c
+@@ -13,12 +13,16 @@
+ #include <linux/interrupt.h>
+ #include <linux/iommu.h>
+ #include <linux/kernel.h>
++#include <linux/list.h>
++#include <linux/mutex.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/of_address.h>
+ #include <linux/of_platform.h>
+ #include <linux/of_reserved_mem.h>
+ #include <linux/platform_device.h>
++#include <linux/platform_data/liuqin-audio.h>
++#include <linux/spinlock.h>
+ #include <linux/pm_domain.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/firmware/qcom/qcom_pas.h>
+@@ -34,6 +38,151 @@
+ #include "qcom_q6v5.h"
+ #include "remoteproc_internal.h"
+ 
++/*
++ * SoundWire is built in, while PRM is modular. PAS owns both the retained
++ * clock device and this state, so consumers never depend on an absent module.
++ * Before the first PRM probe, missing clock providers defer the consumers.
++ */
++static DEFINE_SPINLOCK(liuqin_audio_state_lock);
++static bool liuqin_audio_online = true;
++static unsigned int liuqin_audio_epoch;
++static void liuqin_audio_cache_devices(void);
++
++bool liuqin_audio_transport_ready(void)
++{
++	return !liuqin_board_quirks() || smp_load_acquire(&liuqin_audio_online);
++}
++EXPORT_SYMBOL_GPL(liuqin_audio_transport_ready);
++
++unsigned int liuqin_audio_generation(void)
++{
++	return liuqin_board_quirks() ? READ_ONCE(liuqin_audio_epoch) : 0;
++}
++EXPORT_SYMBOL_GPL(liuqin_audio_generation);
++
++void liuqin_audio_set_ready(bool ready)
++{
++	unsigned long flags;
++
++	if (!liuqin_board_quirks())
++		return;
++	spin_lock_irqsave(&liuqin_audio_state_lock, flags);
++	if (ready && !liuqin_audio_online)
++		WRITE_ONCE(liuqin_audio_epoch, liuqin_audio_epoch + 1);
++	smp_store_release(&liuqin_audio_online, ready);
++	spin_unlock_irqrestore(&liuqin_audio_state_lock, flags);
++	if (!ready)
++		liuqin_audio_cache_devices();
++}
++EXPORT_SYMBOL_GPL(liuqin_audio_set_ready);
++
++struct liuqin_audio_pm_device {
++	struct list_head node;
++	struct device *dev;
++	enum liuqin_audio_pm_order order;
++	bool quiesced;
++};
++
++static DEFINE_MUTEX(liuqin_audio_pm_lock);
++static LIST_HEAD(liuqin_audio_pm_devices);
++
++static void liuqin_audio_cache_devices(void)
++{
++	struct liuqin_audio_pm_device *entry;
++	struct regmap *map;
++
++	guard(mutex)(&liuqin_audio_pm_lock);
++	/* A crash may already have removed clocks before card teardown runs. */
++	list_for_each_entry(entry, &liuqin_audio_pm_devices, node) {
++		map = dev_get_regmap(entry->dev, NULL);
++		if (map) {
++			regcache_cache_only(map, true);
++			regcache_mark_dirty(map);
++		}
++	}
++}
++
++static void liuqin_audio_pm_unregister(void *data)
++{
++	struct liuqin_audio_pm_device *entry = data;
++
++	guard(mutex)(&liuqin_audio_pm_lock);
++	list_del(&entry->node);
++	/* Balance the PM disable before the driver's remaining devres cleanup. */
++	if (entry->quiesced)
++		pm_runtime_force_resume(entry->dev);
++}
++
++int devm_liuqin_audio_pm_register(struct device *dev, enum liuqin_audio_pm_order order)
++{
++	struct liuqin_audio_pm_device *entry, *pos;
++	struct list_head *before = &liuqin_audio_pm_devices;
++
++	if (!liuqin_board_quirks())
++		return 0;
++	entry = devm_kzalloc(dev, sizeof(*entry), GFP_KERNEL);
++	if (!entry)
++		return -ENOMEM;
++	entry->dev = dev;
++	entry->order = order;
++	mutex_lock(&liuqin_audio_pm_lock);
++	list_for_each_entry(pos, &liuqin_audio_pm_devices, node) {
++		if (pos->order > order) {
++			before = &pos->node;
++			break;
++		}
++	}
++	list_add_tail(&entry->node, before);
++	mutex_unlock(&liuqin_audio_pm_lock);
++	return devm_add_action_or_reset(dev, liuqin_audio_pm_unregister, entry);
++}
++EXPORT_SYMBOL_GPL(devm_liuqin_audio_pm_register);
++
++void liuqin_audio_suspend_devices(void)
++{
++	struct liuqin_audio_pm_device *entry;
++	int ret;
++
++	if (!liuqin_board_quirks())
++		return;
++	guard(mutex)(&liuqin_audio_pm_lock);
++	/* Called after the old card is gone and firmware commands are disabled. */
++	list_for_each_entry_reverse(entry, &liuqin_audio_pm_devices, node) {
++		if (entry->quiesced || !pm_runtime_enabled(entry->dev))
++			continue;
++		ret = pm_runtime_force_suspend(entry->dev);
++		if (ret)
++			dev_err(entry->dev, "audio restart suspend failed: %d\n", ret);
++		else
++			entry->quiesced = true;
++	}
++}
++EXPORT_SYMBOL_GPL(liuqin_audio_suspend_devices);
++
++int liuqin_audio_resume_devices(void)
++{
++	struct liuqin_audio_pm_device *entry;
++	int ret, error = 0;
++
++	if (!liuqin_board_quirks())
++		return 0;
++	guard(mutex)(&liuqin_audio_pm_lock);
++	/* PRM is ready; drop every matching PM disable even if one resume fails. */
++	list_for_each_entry(entry, &liuqin_audio_pm_devices, node) {
++		if (!entry->quiesced)
++			continue;
++		ret = pm_runtime_force_resume(entry->dev);
++		entry->quiesced = false;
++		if (ret) {
++			dev_err(entry->dev, "audio restart resume failed: %d\n", ret);
++			if (!error)
++				error = ret;
++		}
++	}
++	return error;
++}
++EXPORT_SYMBOL_GPL(liuqin_audio_resume_devices);
++
+ #define QCOM_PAS_DECRYPT_SHUTDOWN_DELAY_MS	100
+ 
+ #define MAX_ASSIGN_COUNT 3
+@@ -124,6 +273,7 @@ struct qcom_pas {
+ 	struct qcom_rproc_ssr ssr_subdev;
+ 	struct qcom_sysmon *sysmon;
+ 	struct platform_device *bam_dmux;
++	struct platform_device *prm_clocks;
+ 
+ 	struct qcom_pas_context *pas_ctx;
+ 	struct qcom_pas_context *dtb_pas_ctx;
+@@ -822,6 +972,28 @@ static void qcom_pas_unassign_memory_region(struct qcom_pas *pas)
+ 	}
+ }
+ 
++static int liuqin_create_prm_clocks(struct qcom_pas *pas)
++{
++	struct device_node *edge __free(device_node) = NULL;
++	struct device_node *gpr __free(device_node) = NULL;
++	struct device_node *prm __free(device_node) = NULL;
++	struct device_node *clocks __free(device_node) = NULL;
++
++	if (!liuqin_board_quirks() || !pas->info_name || strcmp(pas->info_name, "adsp"))
++		return 0;
++
++	edge = of_get_child_by_name(pas->dev->of_node, "glink-edge");
++	gpr = of_get_compatible_child(edge, "qcom,gpr");
++	prm = of_get_compatible_child(gpr, "qcom,q6prm");
++	clocks = of_get_compatible_child(prm, "qcom,q6prm-lpass-clocks");
++	if (!clocks)
++		return -ENODEV;
++
++	/* GPR devices disappear on SSR; the remoteproc device does not. */
++	pas->prm_clocks = of_platform_device_create(clocks, NULL, pas->dev);
++	return pas->prm_clocks ? 0 : -ENOMEM;
++}
++
+ static int qcom_pas_probe(struct platform_device *pdev)
+ {
+ 	const struct qcom_pas_data *desc;
+@@ -937,16 +1109,23 @@ static int qcom_pas_probe(struct platform_device *pdev)
+ 	if (desc->early_boot)
+ 		pas->rproc->state = RPROC_DETACHED;
+ 
+-	ret = rproc_add(rproc);
++	ret = liuqin_create_prm_clocks(pas);
+ 	if (ret)
+ 		goto remove_ssr_sysmon;
+ 
++	ret = rproc_add(rproc);
++	if (ret)
++		goto remove_prm_clocks;
++
+ 	node = of_get_compatible_child(pdev->dev.of_node, "qcom,bam-dmux");
+ 	pas->bam_dmux = of_platform_device_create(node, NULL, &pdev->dev);
+ 	of_node_put(node);
+ 
+ 	return 0;
+ 
++remove_prm_clocks:
++	if (pas->prm_clocks)
++		of_platform_device_destroy(&pas->prm_clocks->dev, NULL);
+ remove_ssr_sysmon:
+ 	qcom_remove_ssr_subdev(rproc, &pas->ssr_subdev);
+ 	qcom_remove_sysmon_subdev(pas->sysmon);
+@@ -973,6 +1152,8 @@ static void qcom_pas_remove(struct platform_device *pdev)
+ 		of_platform_device_destroy(&pas->bam_dmux->dev, NULL);
+ 
+ 	rproc_del(pas->rproc);
++	if (pas->prm_clocks)
++		of_platform_device_destroy(&pas->prm_clocks->dev, NULL);
+ 
+ 	qcom_q6v5_deinit(&pas->q6v5);
+ 	qcom_pas_unassign_memory_region(pas);
+diff --git a/drivers/soc/qcom/apr.c b/drivers/soc/qcom/apr.c
+index ea7f83916d8d8dcbaebcbd594e479d0ce4eb6ec7..d2a498dca83831daaddcd2ffcec7f698f97cc811 100644
+--- a/drivers/soc/qcom/apr.c
++++ b/drivers/soc/qcom/apr.c
+@@ -5,6 +5,8 @@
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+ #include <linux/device.h>
++#include <linux/debugfs.h>
++#include <linux/platform_data/liuqin-audio.h>
+ #include <linux/spinlock.h>
+ #include <linux/idr.h>
+ #include <linux/slab.h>
+@@ -33,6 +35,9 @@ struct packet_router {
+ 	int dest_domain_id;
+ 	int type;
+ 	struct pdr_handle *pdr;
++	struct pdr_service *audio_pd;
++	bool audio_online;
++	struct dentry *debugfs;
+ 	struct workqueue_struct *rxwq;
+ 	struct work_struct rx_work;
+ 	struct list_head rx_list;
+@@ -83,6 +88,8 @@ void gpr_free_port(gpr_port_t *port)
+ 	idr_remove(&gpr->svcs_idr, port->id);
+ 	spin_unlock_irqrestore(&gpr->svcs_lock, flags);
+ 
++	/* A queued reply may already have looked up this port. */
++	flush_workqueue(gpr->rxwq);
+ 	kfree(port);
+ }
+ EXPORT_SYMBOL_GPL(gpr_free_port);
+@@ -123,6 +130,15 @@ gpr_port_t *gpr_alloc_port(struct apr_device *gdev, struct device *dev,
+ }
+ EXPORT_SYMBOL_GPL(gpr_alloc_port);
+ 
++bool gpr_service_up(struct pkt_router_svc *svc)
++{
++	struct packet_router *pr = svc->pr;
++
++	return !liuqin_board_quirks() || !pr->audio_pd ||
++		READ_ONCE(pr->audio_online);
++}
++EXPORT_SYMBOL_GPL(gpr_service_up);
++
+ static int pkt_router_send_svc_pkt(struct pkt_router_svc *svc, const struct gpr_pkt *pkt)
+ {
+ 	struct packet_router *pr = svc->pr;
+@@ -132,6 +148,8 @@ static int pkt_router_send_svc_pkt(struct pkt_router_svc *svc, const struct gpr_
+ 
+ 	hdr = &pkt->hdr;
+ 
++	if (!gpr_service_up(svc))
++		return -ENETRESET;
+ 	spin_lock_irqsave(&svc->lock, flags);
+ 	ret = rpmsg_trysend(pr->ch, pkt, hdr->pkt_size);
+ 	spin_unlock_irqrestore(&svc->lock, flags);
+@@ -263,6 +281,7 @@ static int gpr_do_rx_callback(struct packet_router *gpr, struct apr_rx_buf *abuf
+ {
+ 	uint16_t hdr_size, ver;
+ 	struct pkt_router_svc *svc = NULL;
++	gpr_port_cb callback;
+ 	struct gpr_resp_pkt resp;
+ 	struct gpr_hdr *hdr;
+ 	unsigned long flags;
+@@ -306,8 +325,9 @@ static int gpr_do_rx_callback(struct packet_router *gpr, struct apr_rx_buf *abuf
+ 		return -EINVAL;
+ 	}
+ 
+-	if (svc->callback)
+-		svc->callback(&resp, svc->priv, 0);
++	callback = READ_ONCE(svc->callback);
++	if (callback && gpr_service_up(svc))
++		callback(&resp, svc->priv, 0);
+ 
+ 	return 0;
+ }
+@@ -361,6 +381,25 @@ static int apr_device_match(struct device *dev, const struct device_driver *drv)
+ 	return 0;
+ }
+ 
++static void gpr_disable_callback(void *data)
++{
++	struct apr_device *adev = data;
++	struct packet_router *apr = adev->svc.pr;
++
++	WRITE_ONCE(adev->svc.callback, NULL);
++	flush_workqueue(apr->rxwq);
++}
++
++/* Call after initializing driver data, before probing synchronous clients. */
++int gpr_enable_callback(gpr_device_t *gdev)
++{
++	struct apr_driver *adrv = to_apr_driver(gdev->dev.driver);
++
++	WRITE_ONCE(gdev->svc.callback, adrv->gpr_callback);
++	return devm_add_action_or_reset(&gdev->dev, gpr_disable_callback, gdev);
++}
++EXPORT_SYMBOL_GPL(gpr_enable_callback);
++
+ static int apr_device_probe(struct device *dev)
+ {
+ 	struct apr_device *adev = to_apr_device(dev);
+@@ -369,7 +408,7 @@ static int apr_device_probe(struct device *dev)
+ 
+ 	ret = adrv->probe(adev);
+ 	if (!ret)
+-		adev->svc.callback = adrv->gpr_callback;
++		WRITE_ONCE(adev->svc.callback, adrv->gpr_callback);
+ 
+ 	return ret;
+ }
+@@ -506,6 +545,8 @@ static int of_apr_add_pd_lookups(struct device *dev)
+ 			dev_err(dev, "pdr add lookup failed: %ld\n", PTR_ERR(pds));
+ 			return PTR_ERR(pds);
+ 		}
++		if (!IS_ERR(pds) && !strcmp(service_path, "msm/adsp/audio_pd"))
++			apr->audio_pd = pds;
+ 	}
+ 
+ 	return 0;
+@@ -580,14 +621,32 @@ static void apr_pd_status(int state, char *svc_path, void *priv)
+ 
+ 	switch (state) {
+ 	case SERVREG_SERVICE_STATE_UP:
++		if (!strcmp(svc_path, "msm/adsp/audio_pd"))
++			WRITE_ONCE(apr->audio_online, true);
+ 		of_register_apr_devices(apr->dev, svc_path);
+ 		break;
+ 	case SERVREG_SERVICE_STATE_DOWN:
++		if (!strcmp(svc_path, "msm/adsp/audio_pd")) {
++			WRITE_ONCE(apr->audio_online, false);
++			liuqin_audio_set_ready(false);
++		}
+ 		device_for_each_child(apr->dev, svc_path, apr_remove_device);
++		if (!strcmp(svc_path, "msm/adsp/audio_pd"))
++			liuqin_audio_suspend_devices();
+ 		break;
+ 	}
+ }
+ 
++static int apr_restart_audio_pd(void *data, u64 val)
++{
++	struct packet_router *apr = data;
++
++	if (val != 1 || !apr->audio_pd)
++		return -EINVAL;
++	return pdr_restart_pd(apr->pdr, apr->audio_pd);
++}
++DEFINE_DEBUGFS_ATTRIBUTE(apr_restart_audio_pd_fops, NULL, apr_restart_audio_pd, "%llu\n");
++
+ static int apr_probe(struct rpmsg_device *rpdev)
+ {
+ 	struct device *dev = &rpdev->dev;
+@@ -641,6 +700,11 @@ static int apr_probe(struct rpmsg_device *rpdev)
+ 		goto handle_release;
+ 
+ 	of_register_apr_devices(dev, NULL);
++	if (liuqin_board_quirks() && apr->audio_pd && apr->type == PR_TYPE_GPR) {
++		apr->debugfs = debugfs_create_dir("liuqin-gpr", NULL);
++		debugfs_create_file("restart-audio-pd", 0200, apr->debugfs, apr,
++				    &apr_restart_audio_pd_fops);
++	}
+ 
+ 	return 0;
+ 
+@@ -655,8 +719,14 @@ static void apr_remove(struct rpmsg_device *rpdev)
+ {
+ 	struct packet_router *apr = dev_get_drvdata(&rpdev->dev);
+ 
++	debugfs_remove_recursive(apr->debugfs);
++	WRITE_ONCE(apr->audio_online, false);
++	if (apr->audio_pd)
++		liuqin_audio_set_ready(false);
+ 	pdr_handle_release(apr->pdr);
+ 	device_for_each_child(&rpdev->dev, NULL, apr_remove_device);
++	if (apr->audio_pd)
++		liuqin_audio_suspend_devices();
+ 	destroy_workqueue(apr->rxwq);
+ }
+ 
+diff --git a/drivers/soundwire/master.c b/drivers/soundwire/master.c
+index 440bfc52ccba5c84f624efff7f948d2d39d0fe65..516380c175b4ff84f039104fed986e66d1e70621 100644
+--- a/drivers/soundwire/master.c
++++ b/drivers/soundwire/master.c
+@@ -4,6 +4,7 @@
+ #include <linux/device.h>
+ #include <linux/acpi.h>
+ #include <linux/pm_runtime.h>
++#include <linux/platform_data/liuqin-audio.h>
+ #include <linux/soundwire/sdw.h>
+ #include <linux/soundwire/sdw_type.h>
+ #include "bus.h"
+@@ -169,6 +170,11 @@ int sdw_master_device_add(struct sdw_bus *bus, struct device *parent,
+ 	pm_runtime_set_active(&bus->md->dev);
+ 	pm_runtime_enable(&bus->md->dev);
+ 	pm_runtime_idle(&bus->md->dev);
++	ret = devm_liuqin_audio_pm_register(&md->dev, LIUQIN_AUDIO_SWR_MASTER);
++	if (ret) {
++		pm_runtime_disable(&md->dev);
++		device_unregister(&md->dev);
++	}
+ device_register_err:
+ 	return ret;
+ }
+diff --git a/drivers/soundwire/qcom.c b/drivers/soundwire/qcom.c
+index d870ba33a65e3b125837923cf98ddf1ddecc2e63..7d1f93fe9a044d1f573b379ff0045948ea535a2a 100644
+--- a/drivers/soundwire/qcom.c
++++ b/drivers/soundwire/qcom.c
+@@ -10,7 +10,9 @@
+ #include <linux/debugfs.h>
+ #include <linux/of.h>
+ #include <linux/of_irq.h>
++#include <linux/pinctrl/consumer.h>
+ #include <linux/pm_runtime.h>
++#include <linux/platform_data/liuqin-audio.h>
+ #include <linux/regmap.h>
+ #include <linux/reset.h>
+ #include <linux/slab.h>
+@@ -228,6 +230,7 @@ struct qcom_swrm_ctrl {
+ 	u32 slave_status;
+ 	u32 wr_fifo_depth;
+ 	bool clock_stop_not_supported;
++	unsigned int audio_generation;
+ };
+ 
+ struct qcom_swrm_data {
+@@ -788,7 +791,11 @@ static irqreturn_t qcom_swrm_irq_handler(int irq, void *dev_id)
+ 	u32 i;
+ 	int devnum;
+ 	int ret = IRQ_HANDLED;
+-	clk_prepare_enable(ctrl->hclk);
++
++	if (!liuqin_audio_transport_ready())
++		return IRQ_HANDLED;
++	if (clk_prepare_enable(ctrl->hclk))
++		return IRQ_HANDLED;
+ 
+ 	ctrl->reg_read(ctrl, ctrl->reg_layout[SWRM_REG_INTERRUPT_STATUS],
+ 		       &intr_sts);
+@@ -1752,6 +1759,7 @@ static int qcom_swrm_probe(struct platform_device *pdev)
+ 	qcom_swrm_init(ctrl);
+ 	wait_for_completion_timeout(&ctrl->enumeration,
+ 				    msecs_to_jiffies(TIMEOUT_MS));
++	ctrl->audio_generation = liuqin_audio_generation();
+ 	ret = qcom_swrm_register_dais(ctrl);
+ 	if (ret)
+ 		goto err_master_add;
+@@ -1772,6 +1780,11 @@ static int qcom_swrm_probe(struct platform_device *pdev)
+ 			    &swrm_reg_fops);
+ #endif
+ 
++	ret = devm_liuqin_audio_pm_register(dev, LIUQIN_AUDIO_SWR);
++	if (ret) {
++		pm_runtime_disable(dev);
++		goto err_master_add;
++	}
+ 	return 0;
+ 
+ err_master_add:
+@@ -1794,8 +1807,14 @@ static int __maybe_unused swrm_runtime_resume(struct device *dev)
+ {
+ 	struct qcom_swrm_ctrl *ctrl = dev_get_drvdata(dev);
+ 	bool wake_irq_enabled = false;
++	bool lost_state = false;
++	unsigned int generation = 0;
++	u32 config;
+ 	int ret;
+ 
++	if (!liuqin_audio_transport_ready())
++		return -EBUSY;
++
+ 	if (ctrl->wake_irq > 0) {
+ 		if (!irqd_irq_disabled(irq_get_irq_data(ctrl->wake_irq))) {
+ 			disable_irq_nosync(ctrl->wake_irq);
+@@ -1810,24 +1829,67 @@ static int __maybe_unused swrm_runtime_resume(struct device *dev)
+ 		return ret;
+ 	}
+ 
+-	if (ctrl->clock_stop_not_supported) {
++	if (liuqin_board_quirks()) {
++		generation = liuqin_audio_generation();
++		ctrl->reg_read(ctrl, SWRM_COMP_CFG_ADDR, &config);
++		lost_state = ctrl->audio_generation != generation ||
++			!(config & SWRM_COMP_CFG_ENABLE_MSK);
++	}
++
++	if (ctrl->clock_stop_not_supported || lost_state) {
++		if (lost_state) {
++			/*
++			 * ADSP reset clears LPASS TLMM, but pinctrl still remembers
++			 * "default". Select the OEM sleep state first so default is
++			 * actually programmed again before enabling the bus.
++			 */
++			ret = pinctrl_pm_select_sleep_state(dev);
++			if (ret)
++				goto err_clk;
++			ret = pinctrl_pm_select_default_state(dev);
++			if (ret)
++				goto err_clk;
++			dev_info(dev, "reinitializing SoundWire after LPASS reset\n");
++			memset(ctrl->status, 0, sizeof(ctrl->status));
++			sdw_handle_slave_status(&ctrl->bus, ctrl->status);
++			ctrl->slave_status = 0;
++			ctrl->bus.params.curr_bank = 0;
++			ctrl->bus.params.next_bank = 1;
++		}
+ 		/* Enumeration completes from the interrupt thread. */
+-		enable_irq(ctrl->irq);
+ 		reinit_completion(&ctrl->enumeration);
++		enable_irq(ctrl->irq);
+ 		ctrl->reg_write(ctrl, SWRM_COMP_SW_RESET, 0x01);
++		if (lost_state) {
++			/* Match the OEM SSR reset, including the bus reset pulse. */
++			ctrl->reg_write(ctrl, SWRM_COMP_SW_RESET, 0x01);
++			ctrl->reg_write(ctrl, SWRM_MCP_BUS_CTRL, 0x01);
++		}
+ 		usleep_range(100, 105);
+ 
+ 		qcom_swrm_init(ctrl);
+ 
+ 		usleep_range(100, 105);
+-		if (!swrm_wait_for_frame_gen(ctrl, true))
++		if (!swrm_wait_for_frame_gen(ctrl, true)) {
+ 			dev_err(ctrl->dev, "link failed to connect\n");
++			if (lost_state) {
++				ret = -ETIMEDOUT;
++				goto err_irq;
++			}
++		}
+ 
+ 		/* wait for hw enumeration to complete */
+-		wait_for_completion_timeout(&ctrl->enumeration,
+-					    msecs_to_jiffies(TIMEOUT_MS));
++		ret = wait_for_completion_timeout(&ctrl->enumeration,
++						msecs_to_jiffies(TIMEOUT_MS));
++		if (!ret && lost_state && !list_empty(&ctrl->bus.slaves)) {
++			dev_err(dev, "slave enumeration timed out after LPASS reset\n");
++			ret = -ETIMEDOUT;
++			goto err_irq;
++		}
+ 		qcom_swrm_get_device_status(ctrl);
+ 		sdw_handle_slave_status(&ctrl->bus, ctrl->status);
++		if (lost_state)
++			ctrl->audio_generation = generation;
+ 	} else {
+ 		reset_control_reset(ctrl->audio_cgcr);
+ 
+@@ -1865,6 +1927,14 @@ static int __maybe_unused swrm_runtime_resume(struct device *dev)
+ 	}
+ 
+ 	return 0;
++
++err_irq:
++	disable_irq(ctrl->irq);
++err_clk:
++	clk_disable_unprepare(ctrl->hclk);
++	if (wake_irq_enabled)
++		enable_irq(ctrl->wake_irq);
++	return ret;
+ }
+ 
+ static int __maybe_unused swrm_runtime_suspend(struct device *dev)
+@@ -1872,6 +1942,9 @@ static int __maybe_unused swrm_runtime_suspend(struct device *dev)
+ 	struct qcom_swrm_ctrl *ctrl = dev_get_drvdata(dev);
+ 	int ret;
+ 
++	if (!liuqin_audio_transport_ready())
++		goto quiesce_irq;
++
+ 	swrm_wait_for_wr_fifo_done(ctrl);
+ 	if (!ctrl->clock_stop_not_supported) {
+ 		/* Mask bus clash interrupt */
+@@ -1897,9 +1970,10 @@ static int __maybe_unused swrm_runtime_suspend(struct device *dev)
+ 	}
+ 
+ 	/* Drain the completion IRQ before polling the stopped link. */
++quiesce_irq:
+ 	disable_irq(ctrl->irq);
+ 
+-	if (!ctrl->clock_stop_not_supported) {
++	if (liuqin_audio_transport_ready() && !ctrl->clock_stop_not_supported) {
+ 		/* Command completion precedes the last frame on the wire. */
+ 		if (!swrm_wait_for_frame_gen(ctrl, false))
+ 			dev_err(ctrl->dev, "link failed to stop\n");
+@@ -1918,6 +1992,7 @@ static int __maybe_unused swrm_runtime_suspend(struct device *dev)
+ }
+ 
+ static const struct dev_pm_ops swrm_dev_pm_ops = {
++	SYSTEM_SLEEP_PM_OPS(liuqin_audio_system_suspend, liuqin_audio_system_resume)
+ 	SET_RUNTIME_PM_OPS(swrm_runtime_suspend, swrm_runtime_resume, NULL)
+ };
+ 
+diff --git a/include/linux/platform_data/liuqin-audio.h b/include/linux/platform_data/liuqin-audio.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..4c0dc70dabee65ab659717b7f246a382964232c9
+--- /dev/null
++++ b/include/linux/platform_data/liuqin-audio.h
+@@ -0,0 +1,79 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _LINUX_PLATFORM_DATA_LIUQIN_AUDIO_H
++#define _LINUX_PLATFORM_DATA_LIUQIN_AUDIO_H
++
++#include <linux/pm_runtime.h>
++#include <linux/pm_clock.h>
++#include <linux/regmap.h>
++#include <linux/platform_data/liuqin.h>
++
++/* Supplier order: suspend consumers first, resume providers first. */
++enum liuqin_audio_pm_order {
++	LIUQIN_AUDIO_PINCTRL,
++	LIUQIN_AUDIO_VA,
++	LIUQIN_AUDIO_MACRO,
++	LIUQIN_AUDIO_SWR,
++	LIUQIN_AUDIO_SWR_MASTER,
++	LIUQIN_AUDIO_SWR_SLAVE,
++	LIUQIN_AUDIO_CODEC,
++};
++
++#if IS_REACHABLE(CONFIG_QCOM_Q6V5_PAS)
++bool liuqin_audio_transport_ready(void);
++unsigned int liuqin_audio_generation(void);
++void liuqin_audio_set_ready(bool ready);
++int devm_liuqin_audio_pm_register(struct device *dev, enum liuqin_audio_pm_order order);
++void liuqin_audio_suspend_devices(void);
++int liuqin_audio_resume_devices(void);
++#else
++static inline bool liuqin_audio_transport_ready(void) { return true; }
++static inline unsigned int liuqin_audio_generation(void) { return 0; }
++static inline void liuqin_audio_set_ready(bool ready) { }
++static inline int devm_liuqin_audio_pm_register(struct device *dev,
++					      enum liuqin_audio_pm_order order) { return 0; }
++static inline void liuqin_audio_suspend_devices(void) { }
++static inline int liuqin_audio_resume_devices(void) { return 0; }
++#endif
++
++static inline int liuqin_audio_clk_resume(struct device *dev)
++{
++	/* pm_clk_resume() itself ignores failures returned by clock prepare. */
++	return liuqin_audio_transport_ready() ? pm_clk_resume(dev) : -EBUSY;
++}
++
++static inline int liuqin_audio_swr_clock_enable(struct regmap *map, unsigned int reg,
++		unsigned int clock_mask, unsigned int reset_mask, unsigned int *generation)
++{
++	unsigned int generation_now = liuqin_audio_generation();
++	bool reset = liuqin_board_quirks() && *generation != generation_now;
++	int ret, reset_ret = 0;
++
++	/* OEM macro SSR resets the SoundWire clock domain on its first vote. */
++	if (reset) {
++		ret = regmap_update_bits(map, reg, reset_mask, reset_mask);
++		if (ret)
++			return ret;
++	}
++	ret = regmap_update_bits(map, reg, clock_mask, clock_mask);
++	if (reset)
++		reset_ret = regmap_update_bits(map, reg, reset_mask, 0);
++	if (ret || reset_ret) {
++		regmap_update_bits(map, reg, clock_mask, 0);
++		return ret ?: reset_ret;
++	}
++	*generation = generation_now;
++	return 0;
++}
++
++/* The desktop streams are stopped by the card before its suppliers suspend. */
++static inline int liuqin_audio_system_suspend(struct device *dev)
++{
++	return liuqin_board_quirks() ? pm_runtime_force_suspend(dev) : 0;
++}
++
++static inline int liuqin_audio_system_resume(struct device *dev)
++{
++	return liuqin_board_quirks() ? pm_runtime_force_resume(dev) : 0;
++}
++
++#endif
+diff --git a/include/linux/soc/qcom/apr.h b/include/linux/soc/qcom/apr.h
+index 909e84f84e0cfaa0c25f0c8f2d63a6ad843b66c7..f561e2090b3ef5dd1cd6c6837c20ded02c43b509 100644
+--- a/include/linux/soc/qcom/apr.h
++++ b/include/linux/soc/qcom/apr.h
+@@ -148,6 +148,9 @@ struct apr_device {
+ 
+ typedef struct apr_device gpr_device_t;
+ 
++int gpr_enable_callback(gpr_device_t *gdev);
++bool gpr_service_up(struct pkt_router_svc *svc);
++
+ #define to_apr_device(d) container_of(d, struct apr_device, dev)
+ #define svc_to_apr_device(d) container_of(d, struct apr_device, svc)
+ 
+diff --git a/sound/soc/codecs/lpass-rx-macro.c b/sound/soc/codecs/lpass-rx-macro.c
+index 6b8c67fdddbc1903124992b62b31bd3a577cc36f..e12126dc0bce856c57b0e97948b5bb29e412f644 100644
+--- a/sound/soc/codecs/lpass-rx-macro.c
++++ b/sound/soc/codecs/lpass-rx-macro.c
+@@ -8,6 +8,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/pm_clock.h>
+ #include <linux/pm_runtime.h>
++#include <linux/platform_data/liuqin-audio.h>
+ #include <linux/sort.h>
+ #include <linux/clk.h>
+ #include <sound/soc.h>
+@@ -638,6 +639,7 @@ enum {
+ };
+ 
+ struct rx_macro {
++	unsigned int audio_generation;
+ 	struct device *dev;
+ 	int comp_enabled[RX_MACRO_COMP_MAX];
+ 	/* Main path clock users count */
+@@ -3682,12 +3684,18 @@ static int swclk_gate_enable(struct clk_hw *hw)
+ 
+ 	ret = rx_macro_mclk_enable(rx, true);
+ 	if (ret) {
+-		clk_disable_unprepare(rx->mclk);
++		pm_runtime_put_autosuspend(rx->dev);
+ 		return ret;
+ 	}
+ 
+-	regmap_update_bits(rx->regmap, CDC_RX_CLK_RST_CTRL_SWR_CONTROL,
+-			   CDC_RX_SWR_CLK_EN_MASK, 1);
++	ret = liuqin_audio_swr_clock_enable(rx->regmap, CDC_RX_CLK_RST_CTRL_SWR_CONTROL,
++			CDC_RX_SWR_CLK_EN_MASK, CDC_RX_SWR_RESET_MASK,
++			&rx->audio_generation);
++	if (ret) {
++		rx_macro_mclk_enable(rx, false);
++		pm_runtime_put_autosuspend(rx->dev);
++		return ret;
++	}
+ 
+ 	return 0;
+ }
+@@ -3929,6 +3937,10 @@ static int rx_macro_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		goto err_rpm_put;
+ 
++	ret = devm_liuqin_audio_pm_register(dev, LIUQIN_AUDIO_MACRO);
++	if (ret)
++		goto err_rpm_put;
++
+ 	ret = pm_runtime_put_autosuspend(dev);
+ 	if (ret < 0)
+ 		dev_warn(dev, "runtime PM put failed after probe: %d\n", ret);
+@@ -3989,7 +4001,7 @@ static int rx_macro_runtime_resume(struct device *dev)
+ 	struct rx_macro *rx = dev_get_drvdata(dev);
+ 	int ret;
+ 
+-	ret = pm_clk_resume(dev);
++	ret = liuqin_audio_clk_resume(dev);
+ 	if (ret) {
+ 		regcache_cache_only(rx->regmap, true);
+ 		regcache_mark_dirty(rx->regmap);
+@@ -4009,6 +4021,7 @@ static int rx_macro_runtime_resume(struct device *dev)
+ }
+ 
+ static const struct dev_pm_ops rx_macro_pm_ops = {
++	SYSTEM_SLEEP_PM_OPS(liuqin_audio_system_suspend, liuqin_audio_system_resume)
+ 	RUNTIME_PM_OPS(rx_macro_runtime_suspend, rx_macro_runtime_resume, NULL)
+ };
+ 
+diff --git a/sound/soc/codecs/lpass-tx-macro.c b/sound/soc/codecs/lpass-tx-macro.c
+index 1caf321f5757514b6c8963a1a703b5bef4334d7f..5d99800c70906d72032d27bb69ab76fb8e2ef1c6 100644
+--- a/sound/soc/codecs/lpass-tx-macro.c
++++ b/sound/soc/codecs/lpass-tx-macro.c
+@@ -8,6 +8,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/pm_clock.h>
+ #include <linux/pm_runtime.h>
++#include <linux/platform_data/liuqin-audio.h>
+ #include <linux/regmap.h>
+ #include <sound/soc.h>
+ #include <sound/soc-dapm.h>
+@@ -265,6 +266,7 @@ struct tx_macro_data {
+ };
+ 
+ struct tx_macro {
++	unsigned int audio_generation;
+ 	struct device *dev;
+ 	const struct tx_macro_data *data;
+ 	struct snd_soc_component *component;
+@@ -2095,11 +2097,26 @@ static int tx_macro_component_extend(struct snd_soc_component *comp)
+ 	return 0;
+ }
+ 
++static void tx_macro_reset_capture_routes(struct tx_macro *tx)
++{
++	if (!liuqin_board_quirks())
++		return;
++
++	/*
++	 * APM removal destroys the card's DAPM paths, but this macro survives.
++	 * Its NOPM mixer paths start disconnected on the new card. Stale masks
++	 * would make UCM's enable writes no-ops, leaving TX_MCLK powered off.
++	 */
++	memset(tx->active_ch_mask, 0, sizeof(tx->active_ch_mask));
++	memset(tx->active_ch_cnt, 0, sizeof(tx->active_ch_cnt));
++}
++
+ static int tx_macro_component_probe(struct snd_soc_component *comp)
+ {
+ 	struct tx_macro *tx = snd_soc_component_get_drvdata(comp);
+ 	int i, ret;
+ 
++	tx_macro_reset_capture_routes(tx);
+ 	ret = tx_macro_component_extend(comp);
+ 	if (ret)
+ 		return ret;
+@@ -2148,9 +2165,14 @@ static int swclk_gate_enable(struct clk_hw *hw)
+ 		return ret;
+ 	}
+ 
+-	regmap_update_bits(regmap, CDC_TX_CLK_RST_CTRL_SWR_CONTROL,
+-			   CDC_TX_SWR_CLK_EN_MASK,
+-			   CDC_TX_SWR_CLK_ENABLE);
++	ret = liuqin_audio_swr_clock_enable(regmap, CDC_TX_CLK_RST_CTRL_SWR_CONTROL,
++			CDC_TX_SWR_CLK_EN_MASK, CDC_TX_SWR_RESET_MASK,
++			&tx->audio_generation);
++	if (ret) {
++		tx_macro_mclk_enable(tx, false);
++		pm_runtime_put_autosuspend(tx->dev);
++		return ret;
++	}
+ 
+ 	return 0;
+ }
+@@ -2352,6 +2374,10 @@ static int tx_macro_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		goto err_rpm_put;
+ 
++	ret = devm_liuqin_audio_pm_register(dev, LIUQIN_AUDIO_MACRO);
++	if (ret)
++		goto err_rpm_put;
++
+ 	ret = pm_runtime_put_autosuspend(dev);
+ 	if (ret < 0)
+ 		dev_warn(dev, "runtime PM put failed after probe: %d\n", ret);
+@@ -2397,7 +2423,7 @@ static int tx_macro_runtime_resume(struct device *dev)
+ 	struct tx_macro *tx = dev_get_drvdata(dev);
+ 	int ret;
+ 
+-	ret = pm_clk_resume(dev);
++	ret = liuqin_audio_clk_resume(dev);
+ 	if (ret) {
+ 		regcache_cache_only(tx->regmap, true);
+ 		regcache_mark_dirty(tx->regmap);
+@@ -2417,6 +2443,7 @@ static int tx_macro_runtime_resume(struct device *dev)
+ }
+ 
+ static const struct dev_pm_ops tx_macro_pm_ops = {
++	SYSTEM_SLEEP_PM_OPS(liuqin_audio_system_suspend, liuqin_audio_system_resume)
+ 	RUNTIME_PM_OPS(tx_macro_runtime_suspend, tx_macro_runtime_resume, NULL)
+ };
+ 
+diff --git a/sound/soc/codecs/lpass-va-macro.c b/sound/soc/codecs/lpass-va-macro.c
+index 025c21496dbc2ab718e41a615159f6eef507139c..f7e7897d0dc77787c480a7b3a59edd4d1b05f722 100644
+--- a/sound/soc/codecs/lpass-va-macro.c
++++ b/sound/soc/codecs/lpass-va-macro.c
+@@ -12,6 +12,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/pm_clock.h>
+ #include <linux/pm_runtime.h>
++#include <linux/platform_data/liuqin-audio.h>
+ #include <linux/regmap.h>
+ #include <linux/regulator/consumer.h>
+ #include <sound/soc.h>
+@@ -1693,6 +1694,10 @@ static int va_macro_probe(struct platform_device *pdev)
+ 		goto err_rpm_put;
+ 	}
+ 
++	ret = devm_liuqin_audio_pm_register(dev, LIUQIN_AUDIO_VA);
++	if (ret)
++		goto err_rpm_put;
++
+ 	rpm_ret = pm_runtime_put_autosuspend(dev);
+ 	if (rpm_ret < 0)
+ 		dev_warn(dev, "runtime PM put failed after probe: %d\n", rpm_ret);
+@@ -1739,7 +1744,7 @@ static int va_macro_runtime_resume(struct device *dev)
+ 	struct va_macro *va = dev_get_drvdata(dev);
+ 	int ret, sret;
+ 
+-	ret = pm_clk_resume(dev);
++	ret = liuqin_audio_clk_resume(dev);
+ 	if (ret) {
+ 		regcache_cache_only(va->regmap, true);
+ 		regcache_mark_dirty(va->regmap);
+@@ -1765,6 +1770,7 @@ static int va_macro_runtime_resume(struct device *dev)
+ 
+ 
+ static const struct dev_pm_ops va_macro_pm_ops = {
++	SYSTEM_SLEEP_PM_OPS(liuqin_audio_system_suspend, liuqin_audio_system_resume)
+ 	RUNTIME_PM_OPS(va_macro_runtime_suspend, va_macro_runtime_resume, NULL)
+ };
+ 
+diff --git a/sound/soc/codecs/lpass-wsa-macro.c b/sound/soc/codecs/lpass-wsa-macro.c
+index f7dad096bfa39700be76a9d70f75b9b9449b80da..ea813be2a2e2de1e5438886dbc1c4c6c0562c2fc 100644
+--- a/sound/soc/codecs/lpass-wsa-macro.c
++++ b/sound/soc/codecs/lpass-wsa-macro.c
+@@ -14,6 +14,7 @@
+ #include <sound/soc-dapm.h>
+ #include <linux/pm_clock.h>
+ #include <linux/pm_runtime.h>
++#include <linux/platform_data/liuqin-audio.h>
+ #include <linux/of_platform.h>
+ #include <sound/tlv.h>
+ 
+@@ -2865,7 +2866,7 @@ static int wsa_macro_runtime_resume(struct device *dev)
+ 	struct wsa_macro *wsa = dev_get_drvdata(dev);
+ 	int ret, sret;
+ 
+-	ret = pm_clk_resume(dev);
++	ret = liuqin_audio_clk_resume(dev);
+ 	if (ret) {
+ 		regcache_cache_only(wsa->regmap, true);
+ 		regcache_mark_dirty(wsa->regmap);
+@@ -2889,6 +2890,7 @@ static int wsa_macro_runtime_resume(struct device *dev)
+ }
+ 
+ static const struct dev_pm_ops wsa_macro_pm_ops = {
++	SYSTEM_SLEEP_PM_OPS(liuqin_audio_system_suspend, liuqin_audio_system_resume)
+ 	RUNTIME_PM_OPS(wsa_macro_runtime_suspend, wsa_macro_runtime_resume, NULL)
+ };
+ 
+diff --git a/sound/soc/codecs/wcd938x-sdw.c b/sound/soc/codecs/wcd938x-sdw.c
+index 802a9e3fd822d1ccbefa216adba513b6d22b74d8..540dd8be564608fba1da7cfceb592589c9250076 100644
+--- a/sound/soc/codecs/wcd938x-sdw.c
++++ b/sound/soc/codecs/wcd938x-sdw.c
+@@ -8,6 +8,7 @@
+ #include <linux/kernel.h>
+ #include <linux/component.h>
+ #include <linux/pm_runtime.h>
++#include <linux/platform_data/liuqin-audio.h>
+ #include <linux/irq.h>
+ #include <linux/irqdomain.h>
+ #include <linux/of.h>
+@@ -1147,8 +1148,19 @@ static const struct regmap_config wcd938x_regmap_config = {
+ 	.volatile_reg = wcd938x_volatile_register,
+ };
+ 
++static int wcd938x_update_status(struct sdw_slave *slave, enum sdw_slave_status status)
++{
++	struct wcd938x_sdw_priv *wcd = dev_get_drvdata(&slave->dev);
++
++	if (liuqin_board_quirks() && status == SDW_SLAVE_UNATTACHED && wcd->regmap) {
++		regcache_cache_only(wcd->regmap, true);
++		regcache_mark_dirty(wcd->regmap);
++	}
++	return wcd_update_status(slave, status);
++}
++
+ static const struct sdw_slave_ops wcd9380_slave_ops = {
+-	.update_status = wcd_update_status,
++	.update_status = wcd938x_update_status,
+ 	.interrupt_callback = wcd9380_interrupt_callback,
+ 	.bus_config = wcd_bus_config,
+ };
+@@ -1218,7 +1230,10 @@ static int wcd9380_probe(struct sdw_slave *pdev,
+ 	/* Set suspended until aggregate device is bind */
+ 	pm_runtime_set_suspended(dev);
+ 
+-	return 0;
++	ret = devm_liuqin_audio_pm_register(dev, LIUQIN_AUDIO_SWR_SLAVE);
++	if (ret)
++		component_del(dev, &wcd_sdw_component_ops);
++	return ret;
+ }
+ 
+ static void wcd9380_remove(struct sdw_slave *pdev)
+@@ -1251,6 +1266,9 @@ static int wcd938x_sdw_runtime_resume(struct device *dev)
+ 	struct wcd938x_sdw_priv *wcd = dev_get_drvdata(dev);
+ 	int ret;
+ 
++	if (!liuqin_audio_transport_ready())
++		return -EBUSY;
++
+ 	if (wcd->regmap) {
+ 		regcache_cache_only(wcd->regmap, false);
+ 		ret = regcache_sync(wcd->regmap);
+@@ -1267,6 +1285,7 @@ static int wcd938x_sdw_runtime_resume(struct device *dev)
+ }
+ 
+ static const struct dev_pm_ops wcd938x_sdw_pm_ops = {
++	SYSTEM_SLEEP_PM_OPS(liuqin_audio_system_suspend, liuqin_audio_system_resume)
+ 	RUNTIME_PM_OPS(wcd938x_sdw_runtime_suspend, wcd938x_sdw_runtime_resume, NULL)
+ };
+ 
+diff --git a/sound/soc/codecs/wcd938x.c b/sound/soc/codecs/wcd938x.c
+index 35be12cf1ed61e2e986e57137f7699d7dba0494b..8d0aaf670668ead9873b0f9fd65875dc25750c77 100644
+--- a/sound/soc/codecs/wcd938x.c
++++ b/sound/soc/codecs/wcd938x.c
+@@ -10,6 +10,7 @@
+ #include <linux/gpio/consumer.h>
+ #include <linux/kernel.h>
+ #include <linux/pm_runtime.h>
++#include <linux/platform_data/liuqin-audio.h>
+ #include <linux/component.h>
+ #include <sound/tlv.h>
+ #include <linux/of.h>
+@@ -180,8 +181,16 @@ struct wcd938x_priv {
+ 	bool comp2_enable;
+ 	bool ldoh;
+ 	bool mux_setup_done;
++	unsigned int audio_generation;
+ };
+ 
++static int wcd938x_reset(struct wcd938x_priv *wcd938x);
++
++static bool wcd938x_headphone_irqs_enabled(struct wcd938x_priv *wcd938x)
++{
++	return !liuqin_board_quirks() || !wcd938x->mbhc_disabled;
++}
++
+ static const char * const wcd938x_supplies[] = {
+ 	"vdd-rxtx", "vdd-io", "vdd-buck", "vdd-mic-bias",
+ };
+@@ -2546,6 +2555,9 @@ static int wcd938x_mbhc_init(struct snd_soc_component *component)
+ 	struct wcd938x_priv *wcd938x = snd_soc_component_get_drvdata(component);
+ 	struct wcd_mbhc_intr *intr_ids = &wcd938x->intr_ids;
+ 
++	if (!wcd938x_headphone_irqs_enabled(wcd938x))
++		return 0;
++
+ 	intr_ids->mbhc_sw_intr = regmap_irq_get_virq(wcd938x->irq_chip,
+ 						    WCD938X_IRQ_MBHC_SW_DET);
+ 	intr_ids->mbhc_btn_press_intr = regmap_irq_get_virq(wcd938x->irq_chip,
+@@ -2577,7 +2589,10 @@ static void wcd938x_mbhc_deinit(struct snd_soc_component *component)
+ {
+ 	struct wcd938x_priv *wcd938x = snd_soc_component_get_drvdata(component);
+ 
+-	wcd_mbhc_deinit(wcd938x->wcd_mbhc);
++	if (!IS_ERR_OR_NULL(wcd938x->wcd_mbhc)) {
++		wcd_mbhc_deinit(wcd938x->wcd_mbhc);
++		wcd938x->wcd_mbhc = NULL;
++	}
+ }
+ 
+ /* END MBHC */
+@@ -3010,6 +3025,19 @@ static int wcd938x_irq_init(struct wcd938x_priv *wcd, struct device *dev)
+ 					&wcd->irq_chip);
+ }
+ 
++static void wcd938x_prepare_recovery(struct wcd938x_priv *wcd938x)
++{
++	if (!liuqin_board_quirks() ||
++	    wcd938x->audio_generation == liuqin_audio_generation())
++		return;
++
++	/* OEM SSR resets the physical codec before reacquiring its bus address. */
++	regcache_cache_only(wcd938x->regmap, true);
++	regcache_mark_dirty(wcd938x->regmap);
++	wcd938x_reset(wcd938x);
++	usleep_range(10000, 11000);
++}
++
+ static int wcd938x_soc_codec_probe(struct snd_soc_component *component)
+ {
+ 	struct wcd938x_priv *wcd938x = snd_soc_component_get_drvdata(component);
+@@ -3017,6 +3045,7 @@ static int wcd938x_soc_codec_probe(struct snd_soc_component *component)
+ 	unsigned int variant;
+ 	int ret, i;
+ 
++	wcd938x_prepare_recovery(wcd938x);
+ 	ret = sdw_slave_wait_for_init(wcd938x->tx_sdw_dev, 2000);
+ 	if (ret)
+ 		return ret;
+@@ -3024,8 +3053,10 @@ static int wcd938x_soc_codec_probe(struct snd_soc_component *component)
+ 	snd_soc_component_init_regmap(component, wcd938x->regmap);
+ 
+ 	ret = pm_runtime_resume_and_get(dev);
+-	if (ret < 0)
++	if (ret < 0) {
++		dev_err(dev, "codec suppliers failed to resume: %d\n", ret);
+ 		return ret;
++	}
+ 
+ 	variant = snd_soc_component_read_field(component,
+ 					       WCD938X_DIGITAL_EFUSE_REG_0,
+@@ -3046,6 +3077,10 @@ static int wcd938x_soc_codec_probe(struct snd_soc_component *component)
+ 
+ 	pm_runtime_put(dev);
+ 
++	/* This tablet has no analog headphone/auxiliary output or jack. */
++	if (!wcd938x_headphone_irqs_enabled(wcd938x))
++		goto add_controls;
++
+ 	wcd938x->hphr_pdm_wd_int = regmap_irq_get_virq(wcd938x->irq_chip,
+ 						       WCD938X_IRQ_HPHR_PDM_WD_INT);
+ 	wcd938x->hphl_pdm_wd_int = regmap_irq_get_virq(wcd938x->irq_chip,
+@@ -3083,6 +3118,7 @@ static int wcd938x_soc_codec_probe(struct snd_soc_component *component)
+ 	disable_irq_nosync(wcd938x->hphl_pdm_wd_int);
+ 	disable_irq_nosync(wcd938x->aux_pdm_wd_int);
+ 
++add_controls:
+ 	switch (variant) {
+ 	case CHIPID_WCD9380:
+ 		ret = snd_soc_add_component_controls(component, wcd9380_snd_controls,
+@@ -3114,9 +3150,12 @@ static int wcd938x_soc_codec_probe(struct snd_soc_component *component)
+ 		goto err_free_aux_pdm_wd_int;
+ 	}
+ 
++	wcd938x->audio_generation = liuqin_audio_generation();
+ 	return 0;
+ 
+ err_free_aux_pdm_wd_int:
++	if (!wcd938x_headphone_irqs_enabled(wcd938x))
++		goto err_free_clsh_ctrl;
+ 	free_irq(wcd938x->aux_pdm_wd_int, wcd938x);
+ err_free_hphl_pdm_wd_int:
+ 	free_irq(wcd938x->hphl_pdm_wd_int, wcd938x);
+@@ -3134,9 +3173,11 @@ static void wcd938x_soc_codec_remove(struct snd_soc_component *component)
+ 
+ 	wcd938x_mbhc_deinit(component);
+ 
+-	free_irq(wcd938x->aux_pdm_wd_int, wcd938x);
+-	free_irq(wcd938x->hphl_pdm_wd_int, wcd938x);
+-	free_irq(wcd938x->hphr_pdm_wd_int, wcd938x);
++	if (wcd938x_headphone_irqs_enabled(wcd938x)) {
++		free_irq(wcd938x->aux_pdm_wd_int, wcd938x);
++		free_irq(wcd938x->hphl_pdm_wd_int, wcd938x);
++		free_irq(wcd938x->hphr_pdm_wd_int, wcd938x);
++	}
+ 
+ 	wcd_clsh_ctrl_free(wcd938x->clsh_info);
+ }
+@@ -3146,8 +3187,8 @@ static int wcd938x_codec_set_jack(struct snd_soc_component *comp,
+ {
+ 	struct wcd938x_priv *wcd = dev_get_drvdata(comp->dev);
+ 
+-	/* Keep the codec DAIs and MBHC control object, but do not start
+-	 * impedance/jack detection on boards without an analog jack.
++	/* Keep the codec DAIs without starting analog jack detection.
++	 * Liuqin also omits the unused MBHC object and headphone IRQs.
+ 	 */
+ 	if (wcd->mbhc_disabled)
+ 		return 0;
+@@ -3517,7 +3558,12 @@ static int wcd938x_probe(struct platform_device *pdev)
+ 	pm_runtime_enable(dev);
+ 	pm_runtime_idle(dev);
+ 
+-	return 0;
++	ret = devm_liuqin_audio_pm_register(dev, LIUQIN_AUDIO_CODEC);
++	if (ret) {
++		component_master_del(dev, &wcd938x_comp_ops);
++		pm_runtime_disable(dev);
++	}
++	return ret;
+ }
+ 
+ static void wcd938x_remove(struct platform_device *pdev)
+diff --git a/sound/soc/qcom/qdsp6/audioreach.c b/sound/soc/qcom/qdsp6/audioreach.c
+index d8da3d2bde6dc17bfbc08241657c4f099909a53f..34d18946e581019fa9884de186a5c563f0606131 100644
+--- a/sound/soc/qcom/qdsp6/audioreach.c
++++ b/sound/soc/qcom/qdsp6/audioreach.c
+@@ -617,6 +617,30 @@ void *audioreach_alloc_graph_pkt(struct q6apm *apm,
+ }
+ EXPORT_SYMBOL_GPL(audioreach_alloc_graph_pkt);
+ 
++static int audioreach_wait_cmd(struct pkt_router_svc *svc,
++			      struct gpr_ibasic_rsp_result_t *result,
++			      wait_queue_head_t *wait, u32 opcode, u32 rsp_opcode)
++{
++	unsigned long deadline = jiffies + 5 * HZ;
++	int ret;
++
++	if (!liuqin_board_quirks())
++		return wait_event_timeout(*wait, result->opcode == opcode ||
++				(rsp_opcode && result->opcode == rsp_opcode), 5 * HZ);
++
++	/* PD down has no DSP reply. Bound cancellation independently of RX. */
++	do {
++		if (!gpr_service_up(svc))
++			return -ENETRESET;
++		ret = wait_event_timeout(*wait, result->opcode == opcode ||
++				(rsp_opcode && result->opcode == rsp_opcode),
++				msecs_to_jiffies(100));
++		if (ret)
++			return gpr_service_up(svc) ? ret : -ENETRESET;
++	} while (time_before(jiffies, deadline));
++	return 0;
++}
++
+ int audioreach_send_cmd_sync(struct device *dev, gpr_device_t *gdev,
+ 			     struct gpr_ibasic_rsp_result_t *result, struct mutex *cmd_lock,
+ 			     gpr_port_t *port, wait_queue_head_t *cmd_wait,
+@@ -640,11 +664,10 @@ int audioreach_send_cmd_sync(struct device *dev, gpr_device_t *gdev,
+ 	if (rc < 0)
+ 		goto err;
+ 
+-	if (rsp_opcode)
+-		rc = wait_event_timeout(*cmd_wait, (result->opcode == hdr->opcode) ||
+-					(result->opcode == rsp_opcode),	5 * HZ);
+-	else
+-		rc = wait_event_timeout(*cmd_wait, (result->opcode == hdr->opcode), 5 * HZ);
++	rc = audioreach_wait_cmd(port ? port : &gdev->svc, result, cmd_wait,
++				hdr->opcode, rsp_opcode);
++	if (rc < 0)
++		goto err;
+ 
+ 	if (!rc) {
+ 		dev_err(dev, "CMD timeout for [%x] opcode\n", hdr->opcode);
+diff --git a/sound/soc/qcom/qdsp6/q6apm-dai.c b/sound/soc/qcom/qdsp6/q6apm-dai.c
+index 10229efb99a3af9f81bbf9aadc342733f2aa1ccb..cefda8cd3a6fbb579fade25dd8205c96b15f5e1a 100644
+--- a/sound/soc/qcom/qdsp6/q6apm-dai.c
++++ b/sound/soc/qcom/qdsp6/q6apm-dai.c
+@@ -146,7 +146,10 @@ static void event_handler(uint32_t opcode, uint32_t token, void *payload, void *
+ 		break;
+ 	case APM_CLIENT_EVENT_DATA_READ_DONE:
+ 		snd_pcm_period_elapsed(substream);
+-		if (prtd->state == Q6APM_STREAM_RUNNING)
++		/* ALSA also suspends prepared streams without calling trigger(). */
++		if (READ_ONCE(prtd->state) == Q6APM_STREAM_RUNNING &&
++		    (!liuqin_board_quirks() ||
++		     READ_ONCE(substream->runtime->state) != SNDRV_PCM_STATE_SUSPENDED))
+ 			q6apm_read(prtd->graph);
+ 
+ 		break;
+@@ -261,6 +264,9 @@ static int q6apm_dai_prepare(struct snd_soc_component *component,
+ 	}
+ 
+ 	prtd->last_pos_index = 0;
++	/* ALSA resets appl_ptr on prepare, including recovery from SUSPENDED. */
++	if (liuqin_board_quirks())
++		prtd->queue_ptr = 0;
+ 	prtd->pcm_count = snd_pcm_lib_period_bytes(substream);
+ 	if (q6apm_is_graph_in_push_pull_mode(prtd->graph)) {
+ 		if (prtd->pcm_size != prtd->push_pull_size) {
+@@ -376,6 +382,9 @@ static int q6apm_dai_trigger(struct snd_soc_component *component,
+ 		prtd->last_pos_index = 0;
+ 		break;
+ 	case SNDRV_PCM_TRIGGER_SUSPEND:
++		if (liuqin_board_quirks())
++			WRITE_ONCE(prtd->state, Q6APM_STREAM_STOPPED);
++		break;
+ 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
+ 		break;
+ 	default:
+@@ -423,6 +432,10 @@ static int q6apm_dai_open(struct snd_soc_component *component,
+ 	else if (substream->stream == SNDRV_PCM_STREAM_CAPTURE)
+ 		runtime->hw = q6apm_dai_hardware_capture;
+ 
++	/* Sleep stops the DSP graph; userspace must prepare a fresh ring. */
++	if (liuqin_board_quirks())
++		runtime->hw.info &= ~SNDRV_PCM_INFO_RESUME;
++
+ 	/* Ensure that buffer size is a multiple of period size */
+ 	ret = snd_pcm_hw_constraint_integer(runtime, SNDRV_PCM_HW_PARAM_PERIODS);
+ 	if (ret < 0) {
+diff --git a/sound/soc/qcom/qdsp6/q6apm.c b/sound/soc/qcom/qdsp6/q6apm.c
+index 9e000929635db99ab742969b24ecc16c56526eab..42b328c2f4badba1dadc9e19e544973e57125803 100644
+--- a/sound/soc/qcom/qdsp6/q6apm.c
++++ b/sound/soc/qcom/qdsp6/q6apm.c
+@@ -10,7 +10,7 @@
+ #include <linux/of_platform.h>
+ #include <linux/sched.h>
+ #include <linux/delay.h>
+-#include <linux/platform_data/liuqin.h>
++#include <linux/platform_data/liuqin-audio.h>
+ #include <linux/slab.h>
+ #include <linux/soc/qcom/apr.h>
+ #include <linux/wait.h>
+@@ -865,6 +865,28 @@ int q6apm_graph_stop(struct q6apm_graph *graph)
+ }
+ EXPORT_SYMBOL_GPL(q6apm_graph_stop);
+ 
++int q6apm_suspend_audio(void)
++{
++	struct audioreach_graph *graph;
++	int id, ret = 0;
++
++	/* Called after ALSA suspends the PCMs, outside their stream locks. */
++	mutex_lock(&apm_ready_lock);
++	if (g_apm) {
++		idr_for_each_entry(&g_apm->graph_idr, graph, id) {
++			if (!graph->start_count)
++				continue;
++			ret = audioreach_graph_mgmt_cmd(graph, APM_CMD_GRAPH_STOP);
++			if (ret)
++				break;
++			graph->start_count = 0;
++		}
++	}
++	mutex_unlock(&apm_ready_lock);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(q6apm_suspend_audio);
++
+ int q6apm_graph_flush(struct q6apm_graph *graph)
+ {
+ 	return audioreach_graph_mgmt_cmd(graph->ar_graph, APM_CMD_GRAPH_FLUSH);
+@@ -906,6 +928,61 @@ static const struct snd_soc_component_driver q6apm_audio_component = {
+ 	.remove_order   = SND_SOC_COMP_ORDER_LAST,
+ };
+ 
++static int q6apm_register_audio(struct q6apm *apm)
++{
++	struct device *dev = apm->dev;
++	int ret;
++
++	ret = snd_soc_register_component(dev, &q6apm_audio_component, NULL, 0);
++	if (ret)
++		return ret;
++
++	ret = of_platform_populate(dev->of_node, NULL, NULL, dev);
++	if (ret) {
++		of_platform_depopulate(dev);
++		snd_soc_unregister_component(dev);
++		return ret;
++	}
++	apm->audio_registered = true;
++	return 0;
++}
++
++static void q6apm_probe_work(struct work_struct *work)
++{
++	struct q6apm *apm = container_of(work, struct q6apm, probe_work);
++	int ret;
++
++	if (!READ_ONCE(apm->prm_ready) || apm->audio_registered)
++		return;
++
++	ret = liuqin_audio_resume_devices();
++	if (ret) {
++		dev_err(apm->dev, "audio suppliers failed to recover: %d\n", ret);
++		return;
++	}
++	ret = q6apm_register_audio(apm);
++	if (ret)
++		dev_err(apm->dev, "failed to register audio after PRM recovery: %d\n", ret);
++}
++
++void q6apm_set_prm_ready(bool ready)
++{
++	if (!liuqin_board_quirks())
++		return;
++
++	mutex_lock(&apm_ready_lock);
++	if (g_apm) {
++		liuqin_audio_set_ready(ready);
++		WRITE_ONCE(g_apm->prm_ready, ready);
++		if (ready)
++			queue_work(system_unbound_wq, &g_apm->probe_work);
++		else
++			cancel_work_sync(&g_apm->probe_work);
++	}
++	mutex_unlock(&apm_ready_lock);
++}
++EXPORT_SYMBOL_GPL(q6apm_set_prm_ready);
++
+ static int apm_probe(gpr_device_t *gdev)
+ {
+ 	struct device *dev = &gdev->dev;
+@@ -922,6 +999,7 @@ static int apm_probe(gpr_device_t *gdev)
+ 	apm->dev = dev;
+ 	apm->gdev = gdev;
+ 	init_waitqueue_head(&apm->wait);
++	INIT_WORK(&apm->probe_work, q6apm_probe_work);
+ 
+ 	INIT_LIST_HEAD(&apm->widget_list);
+ 	idr_init(&apm->graph_idr);
+@@ -931,18 +1009,15 @@ static int apm_probe(gpr_device_t *gdev)
+ 
+ 	idr_init(&apm->modules_idr);
+ 
+-	/* A synchronous query here cannot receive a GPR callback yet. */
+-
+-	ret = snd_soc_register_component(dev, &q6apm_audio_component, NULL, 0);
+-	if (ret < 0) {
+-		dev_err(dev, "failed to register q6apm: %d\n", ret);
++	ret = gpr_enable_callback(gdev);
++	if (ret)
+ 		return ret;
+-	}
+ 
+-	ret = of_platform_populate(dev->of_node, NULL, NULL, dev);
+-	if (ret) {
+-		snd_soc_unregister_component(dev);
+-		return ret;
++	/* On restart the codec components outlive the PRM clock provider. */
++	if (!liuqin_board_quirks()) {
++		ret = q6apm_register_audio(apm);
++		if (ret)
++			return ret;
+ 	}
+ 
+ 	mutex_lock(&apm_ready_lock);
+@@ -953,12 +1028,17 @@ static int apm_probe(gpr_device_t *gdev)
+ 
+ static void apm_remove(gpr_device_t *gdev)
+ {
++	struct q6apm *apm = dev_get_drvdata(&gdev->dev);
++
+ 	mutex_lock(&apm_ready_lock);
+-	if (g_apm == dev_get_drvdata(&gdev->dev))
++	if (g_apm == apm)
+ 		g_apm = NULL;
+ 	mutex_unlock(&apm_ready_lock);
+-	of_platform_depopulate(&gdev->dev);
+-	snd_soc_unregister_component(&gdev->dev);
++	cancel_work_sync(&apm->probe_work);
++	if (apm->audio_registered) {
++		of_platform_depopulate(&gdev->dev);
++		snd_soc_unregister_component(&gdev->dev);
++	}
+ }
+ 
+ struct audioreach_module *q6apm_find_module_by_mid(struct q6apm_graph *graph, uint32_t mid)
+diff --git a/sound/soc/qcom/qdsp6/q6apm.h b/sound/soc/qcom/qdsp6/q6apm.h
+index 5cb51ca491dc4fac7d910c3e26ea36d9831de1ca..42f7dd492d6fa5fb2c0226b353b75deab1930adc 100644
+--- a/sound/soc/qcom/qdsp6/q6apm.h
++++ b/sound/soc/qcom/qdsp6/q6apm.h
+@@ -68,6 +68,9 @@ struct q6apm {
+ 	struct idr sub_graphs_idr;
+ 	struct idr containers_idr;
+ 	struct idr modules_idr;
++	struct work_struct probe_work;
++	bool prm_ready;
++	bool audio_registered;
+ };
+ 
+ struct audio_buffer {
+@@ -154,6 +157,8 @@ int q6apm_send_cmd_sync(struct q6apm *apm, const struct gpr_pkt *pkt,
+ struct audioreach_module *q6apm_find_module_by_mid(struct q6apm_graph *graph,
+ 						    uint32_t mid);
+ bool q6apm_is_adsp_ready(void);
++void q6apm_set_prm_ready(bool ready);
++int q6apm_suspend_audio(void);
+ 
+ int q6apm_enable_compress_module(struct device *dev, struct q6apm_graph *graph, bool en);
+ int q6apm_remove_initial_silence(struct device *dev, struct q6apm_graph *graph, uint32_t samples);
+diff --git a/sound/soc/qcom/qdsp6/q6dsp-lpass-clocks.c b/sound/soc/qcom/qdsp6/q6dsp-lpass-clocks.c
+index b5dd30b876fd882108754b7a956013ce6a3d650d..12344118d7e4bd43dd170638f2366b7e49fef9eb 100644
+--- a/sound/soc/qcom/qdsp6/q6dsp-lpass-clocks.c
++++ b/sound/soc/qcom/qdsp6/q6dsp-lpass-clocks.c
+@@ -5,6 +5,7 @@
+ #include <linux/init.h>
+ #include <linux/clk-provider.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/device.h>
+ #include <linux/platform_device.h>
+ #include <linux/of.h>
+@@ -22,6 +23,8 @@ struct q6dsp_clk {
+ 	int attributes;
+ 	int rate;
+ 	uint32_t handle;
++	bool requested;
++	bool vote;
+ 	struct clk_hw hw;
+ };
+ 
+@@ -31,15 +34,25 @@ struct q6dsp_cc {
+ 	struct device *dev;
+ 	struct q6dsp_clk *clks[Q6DSP_MAX_CLK_ID];
+ 	const struct q6dsp_clk_desc *desc;
++	struct mutex lock;
++	bool offline;
++	bool registered;
+ };
+ 
+ static int clk_q6dsp_prepare(struct clk_hw *hw)
+ {
+ 	struct q6dsp_clk *clk = to_q6dsp_clk(hw);
+ 	struct q6dsp_cc *cc = dev_get_drvdata(clk->dev);
+-
+-	return cc->desc->lpass_set_clk(clk->dev, clk->q6dsp_clk_id, clk->attributes,
+-				     Q6DSP_LPASS_CLK_ROOT_DEFAULT, clk->rate);
++	int ret;
++
++	guard(mutex)(&cc->lock);
++	if (cc->offline)
++		return -EBUSY;
++	ret = cc->desc->lpass_set_clk(clk->dev, clk->q6dsp_clk_id, clk->attributes,
++				    Q6DSP_LPASS_CLK_ROOT_DEFAULT, clk->rate);
++	if (!ret)
++		clk->requested = true;
++	return ret;
+ }
+ 
+ static void clk_q6dsp_unprepare(struct clk_hw *hw)
+@@ -47,15 +60,20 @@ static void clk_q6dsp_unprepare(struct clk_hw *hw)
+ 	struct q6dsp_clk *clk = to_q6dsp_clk(hw);
+ 	struct q6dsp_cc *cc = dev_get_drvdata(clk->dev);
+ 
+-	cc->desc->lpass_set_clk(clk->dev, clk->q6dsp_clk_id, clk->attributes,
+-			      Q6DSP_LPASS_CLK_ROOT_DEFAULT, 0);
++	guard(mutex)(&cc->lock);
++	if (!cc->offline)
++		cc->desc->lpass_set_clk(clk->dev, clk->q6dsp_clk_id, clk->attributes,
++				      Q6DSP_LPASS_CLK_ROOT_DEFAULT, 0);
++	clk->requested = false;
+ }
+ 
+ static int clk_q6dsp_set_rate(struct clk_hw *hw, unsigned long rate,
+ 			      unsigned long parent_rate)
+ {
+ 	struct q6dsp_clk *clk = to_q6dsp_clk(hw);
++	struct q6dsp_cc *cc = dev_get_drvdata(clk->dev);
+ 
++	guard(mutex)(&cc->lock);
+ 	clk->rate = rate;
+ 
+ 	return 0;
+@@ -87,9 +105,16 @@ static int clk_vote_q6dsp_block(struct clk_hw *hw)
+ {
+ 	struct q6dsp_clk *clk = to_q6dsp_clk(hw);
+ 	struct q6dsp_cc *cc = dev_get_drvdata(clk->dev);
+-
+-	return cc->desc->lpass_vote_clk(clk->dev, clk->q6dsp_clk_id,
+-				  clk_hw_get_name(&clk->hw), &clk->handle);
++	int ret;
++
++	guard(mutex)(&cc->lock);
++	if (cc->offline)
++		return -EBUSY;
++	ret = cc->desc->lpass_vote_clk(clk->dev, clk->q6dsp_clk_id,
++				     clk_hw_get_name(&clk->hw), &clk->handle);
++	if (!ret)
++		clk->requested = true;
++	return ret;
+ }
+ 
+ static void clk_unvote_q6dsp_block(struct clk_hw *hw)
+@@ -97,7 +122,10 @@ static void clk_unvote_q6dsp_block(struct clk_hw *hw)
+ 	struct q6dsp_clk *clk = to_q6dsp_clk(hw);
+ 	struct q6dsp_cc *cc = dev_get_drvdata(clk->dev);
+ 
+-	cc->desc->lpass_unvote_clk(clk->dev, clk->q6dsp_clk_id, clk->handle);
++	guard(mutex)(&cc->lock);
++	if (!cc->offline)
++		cc->desc->lpass_unvote_clk(clk->dev, clk->q6dsp_clk_id, clk->handle);
++	clk->requested = false;
+ }
+ 
+ static const struct clk_ops clk_vote_q6dsp_ops = {
+@@ -144,6 +172,7 @@ int q6dsp_clock_dev_probe(struct platform_device *pdev)
+ 
+ 	cc->desc = desc;
+ 	cc->dev = dev;
++	mutex_init(&cc->lock);
+ 	q6dsp_clks = desc->clks;
+ 
+ 	/* Registration can prepare clocks while reparenting orphan consumers. */
+@@ -163,6 +192,7 @@ int q6dsp_clock_dev_probe(struct platform_device *pdev)
+ 		clk->dev = dev;
+ 		clk->q6dsp_clk_id = q6dsp_clks[i].q6dsp_clk_id;
+ 		clk->rate = q6dsp_clks[i].rate;
++		clk->vote = !clk->rate;
+ 		clk->hw.init = &init;
+ 
+ 		if (clk->rate)
+@@ -181,6 +211,63 @@ int q6dsp_clock_dev_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		return ret;
+ 
++	cc->registered = true;
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(q6dsp_clock_dev_probe);
++
++/* Keep consumer handles and rates while the firmware transport is replaced. */
++int q6dsp_clock_recover(struct device *dev, bool online)
++{
++	struct q6dsp_cc *cc = dev_get_drvdata(dev);
++	struct q6dsp_clk *clk;
++	bool replayed[Q6DSP_MAX_CLK_ID] = {};
++	int pass, i, ret;
++
++	if (!cc || !READ_ONCE(cc->registered))
++		return -EPROBE_DEFER;
++
++	guard(mutex)(&cc->lock);
++	cc->offline = true;
++	if (!online)
++		return 0;
++
++	/* Resource votes must precede the clocks that use those resources. */
++	for (pass = 0; pass < 2; pass++) {
++		for (i = 0; i < ARRAY_SIZE(cc->clks); i++) {
++			clk = cc->clks[i];
++			if (!clk || !clk->requested || clk->vote != (pass == 0))
++				continue;
++			if (clk->vote)
++				ret = cc->desc->lpass_vote_clk(dev, clk->q6dsp_clk_id,
++						clk_hw_get_name(&clk->hw), &clk->handle);
++			else
++				ret = cc->desc->lpass_set_clk(dev, clk->q6dsp_clk_id,
++						clk->attributes,
++						Q6DSP_LPASS_CLK_ROOT_DEFAULT, clk->rate);
++			if (ret)
++				goto rollback;
++			replayed[i] = true;
++		}
++	}
++	cc->offline = false;
++	return 0;
++
++rollback:
++	for (pass = 1; pass >= 0; pass--) {
++		for (i = ARRAY_SIZE(cc->clks) - 1; i >= 0; i--) {
++			clk = cc->clks[i];
++			if (!replayed[i] || clk->vote != (pass == 0))
++				continue;
++			if (clk->vote)
++				cc->desc->lpass_unvote_clk(dev, clk->q6dsp_clk_id,
++							 clk->handle);
++			else
++				cc->desc->lpass_set_clk(dev, clk->q6dsp_clk_id,
++						clk->attributes,
++						Q6DSP_LPASS_CLK_ROOT_DEFAULT, 0);
++		}
++	}
++	return ret;
++}
++EXPORT_SYMBOL_GPL(q6dsp_clock_recover);
+diff --git a/sound/soc/qcom/qdsp6/q6dsp-lpass-clocks.h b/sound/soc/qcom/qdsp6/q6dsp-lpass-clocks.h
+index 3770d81f2bd6458a500574338b8173b2414416f7..289007a86b2d810b01436c02b89f2aec1cfca064 100644
+--- a/sound/soc/qcom/qdsp6/q6dsp-lpass-clocks.h
++++ b/sound/soc/qcom/qdsp6/q6dsp-lpass-clocks.h
+@@ -26,5 +26,6 @@ struct q6dsp_clk_desc {
+ };
+ 
+ int q6dsp_clock_dev_probe(struct platform_device *pdev);
++int q6dsp_clock_recover(struct device *dev, bool online);
+ 
+ #endif  /* __Q6DSP_AUDIO_CLOCKS_H__ */
+diff --git a/sound/soc/qcom/qdsp6/q6prm-clocks.c b/sound/soc/qcom/qdsp6/q6prm-clocks.c
+index b4f9abbe02cb0bb1ca8d7e5de0237f8a8e8270e8..016bbb29c35f8e1f1c3932ea124b27dfc83b9d43 100644
+--- a/sound/soc/qcom/qdsp6/q6prm-clocks.c
++++ b/sound/soc/qcom/qdsp6/q6prm-clocks.c
+@@ -10,6 +10,7 @@
+ #include <linux/platform_device.h>
+ #include "q6dsp-lpass-clocks.h"
+ #include "q6prm.h"
++#include "q6apm.h"
+ 
+ #define Q6PRM_CLK(id) {					\
+ 		.clk_id	= id,				\
+@@ -116,12 +117,31 @@ static const struct of_device_id q6prm_clock_device_id[] = {
+ MODULE_DEVICE_TABLE(of, q6prm_clock_device_id);
+ #endif
+ 
++static int q6prm_clock_probe(struct platform_device *pdev)
++{
++	int ret;
++
++	if (!q6prm_transport_ready())
++		return -EPROBE_DEFER;
++	ret = q6dsp_clock_dev_probe(pdev);
++
++	if (!ret)
++		q6apm_set_prm_ready(true);
++	return ret;
++}
++
++static void q6prm_clock_remove(struct platform_device *pdev)
++{
++	q6apm_set_prm_ready(false);
++}
++
+ static struct platform_driver q6prm_clock_platform_driver = {
+ 	.driver = {
+ 		.name = "q6prm-lpass-clock",
+ 		.of_match_table = of_match_ptr(q6prm_clock_device_id),
+ 	},
+-	.probe = q6dsp_clock_dev_probe,
++	.probe = q6prm_clock_probe,
++	.remove = q6prm_clock_remove,
+ };
+ module_platform_driver(q6prm_clock_platform_driver);
+ 
+diff --git a/sound/soc/qcom/qdsp6/q6prm.c b/sound/soc/qcom/qdsp6/q6prm.c
+index 1f3ce4cc08370c8809ac7788acf3922de5135197..b03f77d9f8c2bee1fb24b3866599a2d917538f50 100644
+--- a/sound/soc/qcom/qdsp6/q6prm.c
++++ b/sound/soc/qcom/qdsp6/q6prm.c
+@@ -9,11 +9,13 @@
+ #include <linux/delay.h>
+ #include <linux/of_platform.h>
+ #include <linux/jiffies.h>
++#include <linux/platform_data/liuqin.h>
+ #include <linux/soc/qcom/apr.h>
+ #include <dt-bindings/soc/qcom,gpr.h>
+ #include <dt-bindings/sound/qcom,q6dsp-lpass-ports.h>
+ #include "q6apm.h"
+ #include "q6prm.h"
++#include "q6dsp-lpass-clocks.h"
+ #include "audioreach.h"
+ 
+ struct q6prm {
+@@ -22,8 +24,20 @@ struct q6prm {
+ 	wait_queue_head_t wait;
+ 	struct gpr_ibasic_rsp_result_t result;
+ 	struct mutex lock;
++	struct device *clock_dev;
+ };
+ 
++static DEFINE_MUTEX(liuqin_prm_lock);
++static struct q6prm *liuqin_prm;
++
++bool q6prm_transport_ready(void)
++{
++	guard(mutex)(&liuqin_prm_lock);
++	return !liuqin_board_quirks() ||
++		(liuqin_prm && gpr_service_up(&liuqin_prm->gdev->svc));
++}
++EXPORT_SYMBOL_GPL(q6prm_transport_ready);
++
+ #define PRM_CMD_REQUEST_HW_RSC		0x0100100F
+ #define PRM_CMD_RSP_REQUEST_HW_RSC	0x02001002
+ #define PRM_CMD_RELEASE_HW_RSC		0x01001010
+@@ -63,13 +77,19 @@ static int q6prm_send_cmd_sync(struct q6prm *prm, struct gpr_pkt *pkt, uint32_t
+ 
+ static int q6prm_set_hw_core_req(struct device *dev, uint32_t hw_block_id, bool enable)
+ {
+-	struct q6prm *prm = dev_get_drvdata(dev->parent);
++	struct q6prm *prm;
+ 	struct apm_module_param_data *param_data;
+ 	struct prm_cmd_request_hw_core *req;
+-	gpr_device_t *gdev = prm->gdev;
++	gpr_device_t *gdev;
+ 	uint32_t opcode, rsp_opcode;
+ 	bool lpr_req = (hw_block_id == Q6PRM_HW_LPR_VOTE);
+ 
++	guard(mutex)(&liuqin_prm_lock);
++	prm = liuqin_board_quirks() ? liuqin_prm : dev_get_drvdata(dev->parent);
++	if (!prm)
++		return enable ? -EBUSY : 0;
++	gdev = prm->gdev;
++
+ 	if (enable) {
+ 		opcode = PRM_CMD_REQUEST_HW_RSC;
+ 		rsp_opcode = PRM_CMD_RSP_REQUEST_HW_RSC;
+@@ -114,10 +134,9 @@ int q6prm_unvote_lpass_core_hw(struct device *dev, uint32_t hw_block_id, uint32_
+ }
+ EXPORT_SYMBOL_GPL(q6prm_unvote_lpass_core_hw);
+ 
+-static int q6prm_request_lpass_clock(struct device *dev, int clk_id, int clk_attr, int clk_root,
++static int q6prm_request_lpass_clock(struct q6prm *prm, int clk_id, int clk_attr, int clk_root,
+ 				     unsigned int freq)
+ {
+-	struct q6prm *prm = dev_get_drvdata(dev->parent);
+ 	struct apm_module_param_data *param_data;
+ 	struct prm_cmd_request_rsc *req;
+ 	gpr_device_t *gdev = prm->gdev;
+@@ -146,10 +165,9 @@ static int q6prm_request_lpass_clock(struct device *dev, int clk_id, int clk_att
+ 	return q6prm_send_cmd_sync(prm, pkt, PRM_CMD_RSP_REQUEST_HW_RSC);
+ }
+ 
+-static int q6prm_release_lpass_clock(struct device *dev, int clk_id, int clk_attr, int clk_root,
++static int q6prm_release_lpass_clock(struct q6prm *prm, int clk_id, int clk_attr, int clk_root,
+ 			  unsigned int freq)
+ {
+-	struct q6prm *prm = dev_get_drvdata(dev->parent);
+ 	struct apm_module_param_data *param_data;
+ 	struct prm_cmd_release_rsc *rel;
+ 	gpr_device_t *gdev = prm->gdev;
+@@ -178,10 +196,16 @@ static int q6prm_release_lpass_clock(struct device *dev, int clk_id, int clk_att
+ int q6prm_set_lpass_clock(struct device *dev, int clk_id, int clk_attr, int clk_root,
+ 			  unsigned int freq)
+ {
++	struct q6prm *prm;
++
++	guard(mutex)(&liuqin_prm_lock);
++	prm = liuqin_board_quirks() ? liuqin_prm : dev_get_drvdata(dev->parent);
++	if (!prm)
++		return freq ? -EBUSY : 0;
+ 	if (freq)
+-		return q6prm_request_lpass_clock(dev, clk_id, clk_attr, clk_root, freq);
++		return q6prm_request_lpass_clock(prm, clk_id, clk_attr, clk_root, freq);
+ 
+-	return q6prm_release_lpass_clock(dev, clk_id, clk_attr, clk_root, freq);
++	return q6prm_release_lpass_clock(prm, clk_id, clk_attr, clk_root, freq);
+ }
+ EXPORT_SYMBOL_GPL(q6prm_set_lpass_clock);
+ 
+@@ -211,6 +235,7 @@ static int prm_probe(gpr_device_t *gdev)
+ {
+ 	struct device *dev = &gdev->dev;
+ 	struct q6prm *cc;
++	int ret;
+ 
+ 	cc = devm_kzalloc(dev, sizeof(*cc), GFP_KERNEL);
+ 	if (!cc)
+@@ -225,9 +250,58 @@ static int prm_probe(gpr_device_t *gdev)
+ 	if (!q6apm_is_adsp_ready())
+ 		return -EPROBE_DEFER;
+ 
++	/* Reparenting retained consumers can request clocks during populate. */
++	ret = gpr_enable_callback(gdev);
++	if (ret)
++		return ret;
++
++	if (liuqin_board_quirks()) {
++		struct device_node *np __free(device_node) =
++			of_get_compatible_child(dev->of_node, "qcom,q6prm-lpass-clocks");
++		struct platform_device *clocks;
++
++		/* PAS owns this device, so consumers keep valid clock handles. */
++		clocks = of_find_device_by_node(np);
++		if (!clocks)
++			return -EPROBE_DEFER;
++		cc->clock_dev = &clocks->dev;
++		mutex_lock(&liuqin_prm_lock);
++		liuqin_prm = cc;
++		mutex_unlock(&liuqin_prm_lock);
++		ret = q6dsp_clock_recover(cc->clock_dev, true);
++		if (!ret) {
++			q6apm_set_prm_ready(true);
++		} else if (ret != -EPROBE_DEFER) {
++			mutex_lock(&liuqin_prm_lock);
++			liuqin_prm = NULL;
++			mutex_unlock(&liuqin_prm_lock);
++			put_device(cc->clock_dev);
++			return ret;
++		}
++		/* A first probe may still be waiting to load the clock driver. */
++		return 0;
++	}
++
+ 	return devm_of_platform_populate(dev);
+ }
+ 
++static void prm_remove(gpr_device_t *gdev)
++{
++	struct q6prm *cc = dev_get_drvdata(&gdev->dev);
++
++	q6apm_set_prm_ready(false);
++	if (liuqin_board_quirks()) {
++		q6dsp_clock_recover(cc->clock_dev, false);
++		mutex_lock(&liuqin_prm_lock);
++		if (liuqin_prm == cc)
++			liuqin_prm = NULL;
++		mutex_unlock(&liuqin_prm_lock);
++		put_device(cc->clock_dev);
++	} else {
++		devm_of_platform_depopulate(&gdev->dev);
++	}
++}
++
+ #ifdef CONFIG_OF
+ static const struct of_device_id prm_device_id[]  = {
+ 	{ .compatible = "qcom,q6prm" },
+@@ -238,10 +312,13 @@ MODULE_DEVICE_TABLE(of, prm_device_id);
+ 
+ static gpr_driver_t prm_driver = {
+ 	.probe = prm_probe,
++	.remove = prm_remove,
+ 	.gpr_callback = prm_callback,
+ 	.driver = {
+ 		.name = "qcom-prm",
+ 		.of_match_table = of_match_ptr(prm_device_id),
++		/* Do not hold the firmware's PDR acknowledgement behind clock probes. */
++		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
+ 	},
+ };
+ 
+diff --git a/sound/soc/qcom/qdsp6/q6prm.h b/sound/soc/qcom/qdsp6/q6prm.h
+index cf619ef6561a119e765d2082dd89f49ce4eb8305..4c65caad2764b59348ef580435c0a5c6e8ffef10 100644
+--- a/sound/soc/qcom/qdsp6/q6prm.h
++++ b/sound/soc/qcom/qdsp6/q6prm.h
+@@ -134,6 +134,7 @@
+ 
+ int q6prm_set_lpass_clock(struct device *dev, int clk_id, int clk_attr,
+ 			  int clk_root, unsigned int freq);
++bool q6prm_transport_ready(void);
+ int q6prm_vote_lpass_core_hw(struct device *dev, uint32_t hw_block_id,
+ 			     const char *client_name, uint32_t *client_handle);
+ int q6prm_unvote_lpass_core_hw(struct device *dev, uint32_t hw_block_id,
+diff --git a/sound/soc/qcom/sc8280xp.c b/sound/soc/qcom/sc8280xp.c
+index 172b64e97cfb738571282178a870e59b61e749bb..e7e2749fad42282612fbd680d2066f59580cf96a 100644
+--- a/sound/soc/qcom/sc8280xp.c
++++ b/sound/soc/qcom/sc8280xp.c
+@@ -4,6 +4,8 @@
+ #include <dt-bindings/sound/qcom,q6afe.h>
+ #include <linux/module.h>
+ #include <linux/platform_device.h>
++#include <linux/pinctrl/consumer.h>
++#include <linux/platform_data/liuqin-audio.h>
+ #include <linux/platform_data/liuqin.h>
+ #include <sound/soc.h>
+ #include <sound/soc-dapm.h>
+@@ -78,11 +80,13 @@ struct qcom_snd_soc_common {
+ 
+ struct sc8280xp_snd_data {
+ 	bool stream_prepared[AFE_PORT_MAX];
++	struct sdw_stream_runtime *suspended_stream[AFE_PORT_MAX];
+ 	struct snd_soc_card *card;
+ 	struct snd_soc_jack jack;
+ 	struct snd_soc_jack dp_jack[8];
+ 	const struct qcom_snd_soc_common *priv;
+ 	bool jack_setup;
++	int suspend_error;
+ };
+ 
+ static inline int sc8280xp_get_mclk_freq(struct snd_pcm_hw_params *params)
+@@ -379,10 +383,16 @@ static int sc8280xp_snd_prepare(struct snd_pcm_substream *substream)
+ 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+ 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+ 	struct sc8280xp_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
++	int ret;
+ 
+-	if (data->priv->snd_prepare) {
+-		int ret;
++	if (data->suspended_stream[cpu_dai->id]) {
++		ret = sdw_enable_stream(data->suspended_stream[cpu_dai->id]);
++		if (ret)
++			return ret;
++		data->suspended_stream[cpu_dai->id] = NULL;
++	}
+ 
++	if (data->priv->snd_prepare) {
+ 		ret = data->priv->snd_prepare(substream);
+ 		if (ret)
+ 			return ret;
+@@ -397,6 +407,7 @@ static int sc8280xp_snd_hw_free(struct snd_pcm_substream *substream)
+ 	struct sc8280xp_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
+ 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+ 
++	data->suspended_stream[cpu_dai->id] = NULL;
+ 	return qcom_snd_sdw_hw_free(substream, &data->stream_prepared[cpu_dai->id]);
+ }
+ 
+@@ -408,20 +419,152 @@ static const struct snd_soc_ops sc8280xp_be_ops = {
+ 	.prepare = sc8280xp_snd_prepare,
+ };
+ 
++static void liuqin_snd_exit(struct snd_soc_pcm_runtime *rtd)
++{
++	struct snd_soc_dai *codec_dai;
++	unsigned int id = snd_soc_rtd_to_cpu(rtd, 0)->id;
++	int i;
++
++	if (id != DISPLAY_PORT_RX_0 &&
++	    (id < DISPLAY_PORT_RX_1 || id > DISPLAY_PORT_RX_7) &&
++	    (id < TX_CODEC_DMA_TX_0 || id > TX_CODEC_DMA_TX_3))
++		return;
++
++	/* Detach callbacks before ALSA frees the old card's jack objects. */
++	for_each_rtd_codec_dais(rtd, i, codec_dai)
++		snd_soc_component_set_jack(codec_dai->component, NULL, NULL);
++}
++
++static int liuqin_snd_card_probe(struct snd_soc_card *card)
++{
++	struct sc8280xp_snd_data *data = snd_soc_card_get_drvdata(card);
++	int ret;
++
++	/* LPASS reset also loses the speaker TDM pins. */
++	if (liuqin_audio_generation()) {
++		ret = pinctrl_pm_select_sleep_state(card->dev);
++		if (ret)
++			return ret;
++		ret = pinctrl_pm_select_default_state(card->dev);
++		if (ret)
++			return ret;
++	}
++
++	/* The machine device survives APM removal, but its ALSA card does not. */
++	data->jack_setup = false;
++	memset(data->stream_prepared, 0, sizeof(data->stream_prepared));
++	memset(data->suspended_stream, 0, sizeof(data->suspended_stream));
++	return 0;
++}
++
+ static void sc8280xp_add_be_ops(struct snd_soc_card *card)
+ {
+ 	struct snd_soc_dai_link *link;
+ 	int i;
+ 
+ 	for_each_card_prelinks(card, i, link) {
++		if (liuqin_board_quirks())
++			link->ignore_suspend = 0;
+ 		if (link->no_pcm == 1) {
+ 			link->init = sc8280xp_snd_init;
++			if (liuqin_board_quirks())
++				link->exit = liuqin_snd_exit;
+ 			link->be_hw_params_fixup = sc8280xp_be_hw_params_fixup;
+ 			link->ops = &sc8280xp_be_ops;
+ 		}
+ 	}
+ }
+ 
++static int liuqin_audio_suspend_ports(struct snd_soc_card *card)
++{
++	struct sc8280xp_snd_data *data = snd_soc_card_get_drvdata(card);
++	struct snd_soc_pcm_runtime *rtd;
++	int direction, ret;
++
++	/* The OEM master refuses clock stop while any port is enabled. */
++	for_each_card_rtds(card, rtd) {
++		unsigned int id = snd_soc_rtd_to_cpu(rtd, 0)->id;
++
++		if (!rtd->dai_link->no_pcm || !data->stream_prepared[id])
++			continue;
++		for_each_pcm_streams(direction) {
++			struct snd_pcm_substream *s;
++			struct sdw_stream_runtime *stream;
++
++			s = snd_soc_dpcm_get_substream(rtd, direction);
++			if (!s || !s->runtime)
++				continue;
++			stream = qcom_snd_sdw_get_stream(s);
++			if (IS_ERR_OR_NULL(stream))
++				continue;
++			/* Remember partial failures too, so resume can roll back. */
++			data->suspended_stream[id] = stream;
++			ret = sdw_disable_stream(stream);
++			if (ret)
++				return ret;
++		}
++	}
++	return 0;
++}
++
++static int liuqin_audio_suspend_pre(struct snd_soc_card *card)
++{
++	struct sc8280xp_snd_data *data = snd_soc_card_get_drvdata(card);
++
++	data->suspend_error = q6apm_suspend_audio();
++	/* Disable data ports before DAPM powers down their clock sources. */
++	if (!data->suspend_error)
++		data->suspend_error = liuqin_audio_suspend_ports(card);
++	return data->suspend_error;
++}
++
++static int liuqin_audio_resume_pre(struct snd_soc_card *card)
++{
++	struct sc8280xp_snd_data *data = snd_soc_card_get_drvdata(card);
++	int id, ret, error = 0;
++
++	/* Enable ports before DAPM powers up and unmutes the codecs. */
++	for (id = 0; id < AFE_PORT_MAX; id++) {
++		if (!data->suspended_stream[id])
++			continue;
++		ret = sdw_enable_stream(data->suspended_stream[id]);
++		if (ret) {
++			dev_err(card->dev, "SoundWire port %d resume failed: %d\n", id, ret);
++			error = ret;
++		} else {
++			data->suspended_stream[id] = NULL;
++		}
++	}
++	return error;
++}
++
++static int sc8280xp_system_suspend(struct device *dev)
++{
++	struct snd_soc_card *card = dev_get_drvdata(dev);
++	struct sc8280xp_snd_data *data = snd_soc_card_get_drvdata(card);
++	int ret;
++
++	if (!liuqin_board_quirks())
++		return 0;
++
++	data->suspend_error = 0;
++	ret = snd_soc_suspend(dev);
++	if (!ret)
++		ret = data->suspend_error;
++	if (ret)
++		snd_soc_resume(dev);
++	return ret;
++}
++
++static int sc8280xp_system_resume(struct device *dev)
++{
++	return liuqin_board_quirks() ? snd_soc_resume(dev) : 0;
++}
++
++static const struct dev_pm_ops sc8280xp_pm_ops = {
++	SYSTEM_SLEEP_PM_OPS(sc8280xp_system_suspend, sc8280xp_system_resume)
++};
++
+ static int sc8280xp_platform_probe(struct platform_device *pdev)
+ {
+ 	struct snd_soc_card *card;
+@@ -444,6 +587,11 @@ static int sc8280xp_platform_probe(struct platform_device *pdev)
+ 
+ 	card->owner = THIS_MODULE;
+ 	card->dev = dev;
++	if (liuqin_board_quirks()) {
++		card->probe = liuqin_snd_card_probe;
++		card->suspend_pre = liuqin_audio_suspend_pre;
++		card->resume_pre = liuqin_audio_resume_pre;
++	}
+ 	dev_set_drvdata(dev, card);
+ 	snd_soc_card_set_drvdata(card, data);
+ 	card->dapm_widgets = data->priv->dapm_widgets;
+@@ -618,6 +766,7 @@ static struct platform_driver snd_sc8280xp_driver = {
+ 	.driver = {
+ 		.name = "snd-sc8280xp",
+ 		.of_match_table = snd_sc8280xp_dt_match,
++		.pm = pm_ptr(&sc8280xp_pm_ops),
+ 	},
+ };
+ module_platform_driver(snd_sc8280xp_driver);

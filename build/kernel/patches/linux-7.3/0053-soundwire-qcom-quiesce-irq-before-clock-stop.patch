@@ -1,0 +1,122 @@
+Subject: [PATCH] soundwire: qcom: finish clock transitions before dispatching IRQs
+
+ClockStopNow completion can precede the final frame and the end of its
+IRQ thread. Follow the OEM controller's stop-status polling before gating
+hclk. Drain the completion IRQ before polling and keep the normal IRQ
+disabled across the clock-off interval.
+On mode-0 resume, defer IRQ dispatch until the link has started; the
+reset/enumeration path still needs interrupts earlier. Restore a wake IRQ
+if enabling hclk fails. Keep active-bus clash and parity reporting intact.
+
+The IRQ drain is adapted from Oleg Keri's reviewed v2 upstream fix:
+https://lkml.iu.edu/2610.1/02715.html
+The stop polling and resume exclusion follow the OEM resource lock:
+https://github.com/xiaomi-sm8450-kernel/android_vendor_qcom_opensource_audio-kernel/blob/721c4fb115d50aea74a2dec9ee864bf0f12682c8/soc/swr-mstr-ctrl.c
+
+diff --git a/drivers/soundwire/qcom.c b/drivers/soundwire/qcom.c
+--- a/drivers/soundwire/qcom.c
++++ b/drivers/soundwire/qcom.c
+@@ -856,7 +856,7 @@
+ 	return ret;
+ }
+ 
+-static bool swrm_wait_for_frame_gen_enabled(struct qcom_swrm_ctrl *ctrl)
++static bool swrm_wait_for_frame_gen(struct qcom_swrm_ctrl *ctrl, bool enabled)
+ {
+ 	int retry = SWRM_LINK_STATUS_RETRY_CNT;
+ 	int comp_sts;
+@@ -864,14 +864,14 @@
+ 	do {
+ 		ctrl->reg_read(ctrl, ctrl->reg_layout[SWRM_REG_FRAME_GEN_ENABLED],
+ 			       &comp_sts);
+-		if (comp_sts & SWRM_FRM_GEN_ENABLED)
++		if (!!(comp_sts & SWRM_FRM_GEN_ENABLED) == enabled)
+ 			return true;
+ 
+ 		usleep_range(500, 510);
+ 	} while (retry--);
+ 
+ 	dev_err(ctrl->dev, "%s: link status not %s\n", __func__,
+-		comp_sts & SWRM_FRM_GEN_ENABLED ? "connected" : "disconnected");
++		enabled ? "connected" : "disconnected");
+ 
+ 	return false;
+ }
+@@ -945,7 +945,7 @@
+ 			SWRM_COMP_CFG_IRQ_LEVEL_OR_PULSE_MSK |
+ 			SWRM_COMP_CFG_ENABLE_MSK);
+ 
+-	swrm_wait_for_frame_gen_enabled(ctrl);
++	swrm_wait_for_frame_gen(ctrl, true);
+ 	ctrl->slave_status = 0;
+ 	ctrl->reg_read(ctrl, SWRM_COMP_PARAMS, &val);
+ 
+@@ -1722,16 +1722,26 @@
+ static int __maybe_unused swrm_runtime_resume(struct device *dev)
+ {
+ 	struct qcom_swrm_ctrl *ctrl = dev_get_drvdata(dev);
++	bool wake_irq_enabled = false;
+ 	int ret;
+ 
+ 	if (ctrl->wake_irq > 0) {
+-		if (!irqd_irq_disabled(irq_get_irq_data(ctrl->wake_irq)))
++		if (!irqd_irq_disabled(irq_get_irq_data(ctrl->wake_irq))) {
+ 			disable_irq_nosync(ctrl->wake_irq);
+-	}
+-
+-	clk_prepare_enable(ctrl->hclk);
++			wake_irq_enabled = true;
++		}
++	}
++
++	ret = clk_prepare_enable(ctrl->hclk);
++	if (ret) {
++		if (wake_irq_enabled)
++			enable_irq(ctrl->wake_irq);
++		return ret;
++	}
+ 
+ 	if (ctrl->clock_stop_not_supported) {
++		/* Enumeration completes from the interrupt thread. */
++		enable_irq(ctrl->irq);
+ 		reinit_completion(&ctrl->enumeration);
+ 		ctrl->reg_write(ctrl, SWRM_COMP_SW_RESET, 0x01);
+ 		usleep_range(100, 105);
+@@ -1739,7 +1749,7 @@
+ 		qcom_swrm_init(ctrl);
+ 
+ 		usleep_range(100, 105);
+-		if (!swrm_wait_for_frame_gen_enabled(ctrl))
++		if (!swrm_wait_for_frame_gen(ctrl, true))
+ 			dev_err(ctrl->dev, "link failed to connect\n");
+ 
+ 		/* wait for hw enumeration to complete */
+@@ -1773,9 +1783,11 @@
+ 				ctrl->intr_mask);
+ 
+ 		usleep_range(100, 105);
+-		if (!swrm_wait_for_frame_gen_enabled(ctrl))
++		if (!swrm_wait_for_frame_gen(ctrl, true))
+ 			dev_err(ctrl->dev, "link failed to connect\n");
+ 
++		/* Keep late stop/alert IRQs out until the link is running. */
++		enable_irq(ctrl->irq);
+ 		ret = sdw_bus_exit_clk_stop(&ctrl->bus);
+ 		if (ret < 0)
+ 			dev_err(ctrl->dev, "bus failed to exit clock stop %d\n", ret);
+@@ -1813,6 +1825,15 @@
+ 		}
+ 	}
+ 
++	/* Drain the completion IRQ before polling the stopped link. */
++	disable_irq(ctrl->irq);
++
++	if (!ctrl->clock_stop_not_supported) {
++		/* Command completion precedes the last frame on the wire. */
++		if (!swrm_wait_for_frame_gen(ctrl, false))
++			dev_err(ctrl->dev, "link failed to stop\n");
++	}
++
+ 	clk_disable_unprepare(ctrl->hclk);
+ 
+ 	usleep_range(300, 305);

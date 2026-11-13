@@ -1,0 +1,64 @@
+Subject: [PATCH] ASoC: allow FE probing for an explicitly blocked display route
+
+A disconnected DP link intentionally prunes its backend. PipeWire
+probes every PCM in the HiFi verb; rejecting this valid but temporarily
+blocked route disables the tablet speakers and microphones as well.
+Open only the FE in this case and keep the DSP backend closed until
+link restoration. Missing routes and connection errors still fail.
+
+diff --git a/sound/soc/soc-pcm.c b/sound/soc/soc-pcm.c
+--- a/sound/soc/soc-pcm.c
++++ b/sound/soc/soc-pcm.c
+@@ -1670,6 +1670,28 @@
+ 	return true;
+ }
+ 
++/* A disconnected display still has a valid route and probeable FE PCM. */
++static bool dpcm_has_blocked_playback_path(struct snd_soc_pcm_runtime *fe,
++					 int stream,
++					 struct snd_soc_dapm_widget_list *list)
++{
++	struct snd_soc_dapm_widget *widget;
++	struct snd_soc_pcm_runtime *be;
++	int i;
++
++	if (stream != SNDRV_PCM_STREAM_PLAYBACK)
++		return false;
++
++	for_each_dapm_widgets(list, i, widget) {
++		if (widget->id != snd_soc_dapm_dai_in)
++			continue;
++		be = dpcm_get_be(fe->card, widget, stream);
++		if (be && !dpcm_be_link_available(be))
++			return true;
++	}
++	return false;
++}
++
+ static int dpcm_prune_paths(struct snd_soc_pcm_runtime *fe, int stream,
+ 			    struct snd_soc_dapm_widget_list **list_)
+ {
+@@ -2951,10 +2973,19 @@
+ 		goto open_end;
+ 
+ 	/* calculate valid and active FE <-> BE dpcms */
+-	dpcm_add_paths(fe, stream, &list);
+-
+-	/* There is no point starting up this FE if there are no BEs. */
+-	if (list_empty(&fe->dpcm[stream].be_clients)) {
++	ret = dpcm_add_paths(fe, stream, &list);
++	if (ret < 0) {
++		dpcm_fe_dai_cleanup(fe_substream);
++		goto put_path;
++	}
++
++	/*
++	 * Let userspace probe a routed FE while its display link is down.
++	 * Only the FE starts; the blocked BE must stay closed until the link
++	 * notification reconnects it. A genuinely missing route still fails.
++	 */
++	if (list_empty(&fe->dpcm[stream].be_clients) &&
++	    !dpcm_has_blocked_playback_path(fe, stream, list)) {
+ 		/* dev_err_once() for visibility, dev_dbg() for debugging UCM profiles. */
+ 		dev_err_once(fe->dev, "ASoC: no backend DAIs enabled for %s, possibly missing ALSA mixer-based routing or UCM profile\n",
+ 			     fe->dai_link->name);
