@@ -1,0 +1,97 @@
+From 2c5ca550820741ed58e982e51e6deab17459c03f Mon Sep 17 00:00:00 2001
+From: Liuqin Linux Kit <liuqin@localhost>
+Date: Sat, 14 Nov 2026 16:17:07 +0800
+Subject: [PATCH] avcodec/v4l2: read visible capture rectangle without
+ requiring S_SELECTION
+
+Stateful Iris decoders reject S_SELECTION but provide G_SELECTION. Query COMPOSE (falling back to CROP), validate it against the storage dimensions, and export AVFrame crop fields without changing UV memory offsets. Refresh the rectangle whenever capture is restarted.
+---
+ libavcodec/v4l2_buffers.c | 12 ++++++++++++
+ libavcodec/v4l2_context.h |  2 ++
+ libavcodec/v4l2_m2m_dec.c | 33 +++++++++++++++++++++++----------
+ 3 files changed, 37 insertions(+), 10 deletions(-)
+
+diff --git a/libavcodec/v4l2_buffers.c b/libavcodec/v4l2_buffers.c
+index 2a35da1..9a0d22d 100644
+--- a/libavcodec/v4l2_buffers.c
++++ b/libavcodec/v4l2_buffers.c
+@@ -516,6 +516,18 @@ int ff_v4l2_buffer_buf_to_avframe(AVFrame *frame, V4L2Buffer *avbuf)
+     /* these values are updated also during re-init in v4l2_process_driver_event */
+     frame->height = avbuf->context->height;
+     frame->width = avbuf->context->width;
++    if (avbuf->context->selection.width) {
++        const struct v4l2_rect *r = &avbuf->context->selection;
++        const struct v4l2_format *fmt = &avbuf->context->format;
++        frame->width = V4L2_TYPE_IS_MULTIPLANAR(fmt->type) ?
++                       fmt->fmt.pix_mp.width : fmt->fmt.pix.width;
++        frame->height = V4L2_TYPE_IS_MULTIPLANAR(fmt->type) ?
++                        fmt->fmt.pix_mp.height : fmt->fmt.pix.height;
++        frame->crop_left   = r->left;
++        frame->crop_top    = r->top;
++        frame->crop_right  = frame->width - r->left - r->width;
++        frame->crop_bottom = frame->height - r->top - r->height;
++    }
+     frame->sample_aspect_ratio = avbuf->context->sample_aspect_ratio;
+ 
+     /* 3. report errors upstream */
+diff --git a/libavcodec/v4l2_context.h b/libavcodec/v4l2_context.h
+index fdd5cf5..3b6f1df 100644
+--- a/libavcodec/v4l2_context.h
++++ b/libavcodec/v4l2_context.h
+@@ -71,6 +71,8 @@ typedef struct V4L2Context {
+      */
+     int width, height;
+     AVRational sample_aspect_ratio;
++    /* Visible rectangle within the negotiated capture buffer, if available. */
++    struct v4l2_rect selection;
+ 
+     /**
+      * Indexed array of V4L2Buffers
+diff --git a/libavcodec/v4l2_m2m_dec.c b/libavcodec/v4l2_m2m_dec.c
+index ba1fe76..75027b8 100644
+--- a/libavcodec/v4l2_m2m_dec.c
++++ b/libavcodec/v4l2_m2m_dec.c
+@@ -70,17 +70,30 @@ static int v4l2_try_start(AVCodecContext *avctx)
+     selection.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+     selection.r.height = avctx->coded_height;
+     selection.r.width = avctx->coded_width;
+-    ret = ioctl(s->fd, VIDIOC_S_SELECTION, &selection);
+-    if (!ret) {
++    ioctl(s->fd, VIDIOC_S_SELECTION, &selection);
++
++    /* Stateful decoders may expose a read-only visible rectangle. Query it
++     * even when S_SELECTION fails, and preserve the padded memory layout. */
++    memset(&capture->selection, 0, sizeof(capture->selection));
++    selection.target = V4L2_SEL_TGT_COMPOSE;
++    ret = ioctl(s->fd, VIDIOC_G_SELECTION, &selection);
++    if (ret) {
++        selection.target = V4L2_SEL_TGT_CROP;
+         ret = ioctl(s->fd, VIDIOC_G_SELECTION, &selection);
+-        if (ret) {
+-            av_log(avctx, AV_LOG_WARNING, "VIDIOC_G_SELECTION ioctl\n");
+-        } else {
+-            av_log(avctx, AV_LOG_DEBUG, "crop output %dx%d\n", selection.r.width, selection.r.height);
+-            /* update the size of the resulting frame */
+-            capture->height = selection.r.height;
+-            capture->width  = selection.r.width;
+-        }
++    }
++    if (!ret) {
++        unsigned int width = V4L2_TYPE_IS_MULTIPLANAR(capture->type) ?
++                             capture->format.fmt.pix_mp.width : capture->format.fmt.pix.width;
++        unsigned int height = V4L2_TYPE_IS_MULTIPLANAR(capture->type) ?
++                              capture->format.fmt.pix_mp.height : capture->format.fmt.pix.height;
++        if (selection.r.left < 0 || selection.r.top < 0 ||
++            !selection.r.width || !selection.r.height ||
++            (uint64_t)selection.r.left + selection.r.width > width ||
++            (uint64_t)selection.r.top + selection.r.height > height)
++            return AVERROR(EINVAL);
++        capture->selection = selection.r;
++        av_log(avctx, AV_LOG_DEBUG, "visible output %dx%d at %d,%d\n",
++               selection.r.width, selection.r.height, selection.r.left, selection.r.top);
+     }
+ 
+     /* 4. init the capture context now that we have the capture format */
+-- 
+2.56.0
+

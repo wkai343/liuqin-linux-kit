@@ -73,6 +73,7 @@ devbox run outputs
 | `devbox run build -- --target modules` | 构建同版内核模块 |
 | `devbox run build -- --target boot` | 构建引导镜像，不装配桌面 |
 | `devbox run build -- --target packages` | 构建配套 RPM/DEB 内核升级包 |
+| `devbox run build -- --target obs-v4l2` | 单独构建 OBS V4L2 插件 RPM，自动补齐 FFmpeg，无需内核或原厂 ROM |
 | `devbox run build -- --target kernel --configure-only` | 生成最终 `.config`，不编译 |
 | `devbox run build -- --refresh` | 重新装配系统软件阶段，保留旧缓存 |
 | `devbox run help` / `devbox run test` | 查看入口说明 / 运行离线检查 |
@@ -172,6 +173,24 @@ Btrfs 使用单设备、元数据 DUP、Zstd 三级压缩和 `native-root` 子�
 `clinfo`。选用 `mesa-libOpenCL` 时，构建会校验固定的 Mesa libclc 发布文件并打包
 兼容的 SPIR-V RPM，不重新编译 Mesa 或 libclc。该包的路径与依赖限定于锁定的 Fedora
 LLVM/libclc 基线，升级基线时需重新核对。
+
+默认配方还包含 `ffmpeg-free`，会在独立 Fedora ARM64 构建根中重建固定的官方 SRPM，
+应用 Iris 的输入对齐、解码裁剪及编码缓冲区修复。镜像只安装八个运行库包与 DNF5
+版本锁工具，并保留对应的修订版源码包；不会带入 FFmpeg 编译依赖。
+首次构建会增加编译耗时，后续复用独立缓存；修改来源、补丁或脚本会使缓存失效。
+整组运行库默认锁定，升级需审查新版、验证后更新锁；这也会暂缓该组安全更新。
+构建、解锁与恢复官方包的步骤见 [Fedora FFmpeg 配方](../build/ffmpeg/README.md)，
+硬件验证见 [视频接口](VIDEO.md)。
+
+默认配方也安装官方 `obs-studio`，自动构建并安装独立的 H.264/H.265 V4L2 编码器
+RPM。插件使用同次 FFmpeg 构建的开发包，在独立 ARM64 根中编译、运行包适配测试，
+并检查真实共享库/API；开发包不进入桌面镜像。它不覆盖或锁定官方 OBS。
+单独构建、安装与缓存规则见 [OBS 插件](../build/obs-v4l2/README.md)。
+
+同时提供 [Firefox 系统 FFmpeg 启动适配](../build/firefox/README.md)：默认配方安装
+Bubblewrap，选用修复 FFmpeg 时添加 `/usr/local` 下的独立入口与兼容名单。
+不重建或锁定 Firefox，不改写官方 RPM 文件；未知版本自动回到原版媒体库，
+VP9 会暂时使用软件解码。已有 overlay 的本地启动器保留，维护兼容名单后重新装配。
 
 板级 overlay 为用户会话和登录 shell 设置 `IR3_SHADER_DEBUG=noearlypreamble` 及独立
 缓存目录，规避 A730 的跨步复制错误。此设置也影响继承环境的 IR3 图形应用；已有系统

@@ -73,10 +73,25 @@ class SourceTests(unittest.TestCase):
         pipeline.images.assert_not_called()
         pipeline.runtime.assert_not_called()
 
+    def test_obs_only_build_skips_device_and_kernel_inputs(self):
+        from unittest.mock import Mock
+        data=builder.config(PROJECT/'build/devbox/build.example.json')
+        data['rootfs_config']=str(PROJECT/'build/rootfs/fedora-plasma.json')
+        pipeline=Mock(data=data)
+        pipeline.obs_v4l2_rpm.return_value=self.root/'plugin'
+        with patch.object(flow,'PROJECT',self.project), \
+             patch.object(fedora_flow,'FedoraFlow',return_value=pipeline), \
+             contextlib.redirect_stdout(io.StringIO()):
+            flow.execute(data,'obs-v4l2',lambda *_a,**_k:self.fail('unexpected command'))
+        pipeline.obs_v4l2_rpm.assert_called_once_with(force=True)
+        for name in ('board','fingerprint_image','fingerprint_rpm','tools','kernel_source','kernel','rootfs'):
+            getattr(pipeline,name).assert_not_called()
+
     def test_prepare_downloads_only_target_materials(self):
         data=builder.config(PROJECT/'build/devbox/build.example.json')
         pipeline=fedora_flow.FedoraFlow(data,lambda *_a,**_k:self.fail('unexpected command'))
         stats=json.loads((PROJECT/'build/rootfs/fedora-stats-source.json').read_text())
+        ffmpeg=json.loads((PROJECT/'build/ffmpeg/source.json').read_text())
         with patch.object(flow,'PROJECT',self.project), \
              patch.object(fedora_flow,'FedoraFlow',return_value=pipeline), \
              patch.object(pipeline,'fingerprint_image'),patch.object(pipeline,'board'), \
@@ -84,7 +99,7 @@ class SourceTests(unittest.TestCase):
              patch.object(fedora_flow,'download',return_value=self.root/'download') as download:
             flow.execute(data,'prepare',lambda *_a,**_k:self.fail('unexpected command'))
         self.assertEqual([call.args[0] for call in download.call_args_list],
-                         [pipeline.source['url'],stats['url']])
+                         [pipeline.source['url'],stats['url'],ffmpeg['url']])
 
     def test_image_export_uses_results_from_this_flow_and_skips_failed_builds(self):
         from unittest.mock import Mock

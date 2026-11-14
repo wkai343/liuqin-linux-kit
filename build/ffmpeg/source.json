@@ -1,0 +1,22 @@
+{
+  "url": "https://dl.fedoraproject.org/pub/fedora/linux/updates/45/Everything/source/tree/Packages/f/ffmpeg-9.0.2-3.fc45.src.rpm",
+  "srpm": "ffmpeg-9.0.2-3.fc45.src.rpm",
+  "sha256": "2c4fb4143e733b53a1423dde0c055a9b001eba47a7c1fcc8bd5f01f372fe4f5f",
+  "spec_sha256": "ad2066c09c916e2942182770bdeb2c4f9dd7a235969ab827c10b45499691f687",
+  "version": "9.0.2",
+  "dist": "fc45",
+  "release": "3.liuqin3",
+  "decoders": [
+    "h264_v4l2m2m",
+    "hevc_v4l2m2m"
+  ],
+  "patches": [
+    "0001-v4l2-nv12-padded-input.patch",
+    "0002-v4l2-read-visible-rectangle.patch",
+    "0003-v4l2-recycle-encoded-capture.patch",
+    "0004-v4l2-refresh-crop-on-source-change.patch",
+    "0005-v4l2-export-drm-prime.patch",
+    "0006-v4l2-preserve-decoder-timestamps.patch",
+    "0007-v4l2-reopen-decoder-on-flush.patch"
+  ]
+}

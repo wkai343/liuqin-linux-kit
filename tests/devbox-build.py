@@ -193,7 +193,7 @@ class BuildTests(unittest.TestCase):
                 if root.is_symlink(): root.unlink()
 
     def test_legacy_configs_cannot_enter_any_build_target(self):
-        for target in ('system','kernel','modules','boot','packages'):
+        for target in ('system','kernel','modules','boot','packages','obs-v4l2'):
             with self.subTest(target=target), \
                  patch.object(sys,'argv',['build.py','build','--target',target,'--config',str(self.root/'legacy.json')]), \
                  patch('source_flow.execute') as execute,self.assertRaisesRegex(ValueError,'不支持的构建配置项'):
@@ -217,7 +217,7 @@ class BuildTests(unittest.TestCase):
         config = self.root/'official.json'
         config.write_text(json.dumps({'rootfs_config':'build/rootfs/fedora-plasma.json'}))
         for target, expected in (('system','rootfs'),('kernel','kernel'),('modules','modules'),
-                                 ('boot','boot'),('packages','kernel-debs')):
+                                 ('boot','boot'),('packages','kernel-debs'),('obs-v4l2','obs-v4l2')):
             with self.subTest(target=target), \
                  patch.object(sys,'argv',['build.py','build','--target',target,'--config',str(config)]), \
                  patch('source_flow.execute') as execute,patch.object(builder,'run') as run:
@@ -233,7 +233,9 @@ class BuildTests(unittest.TestCase):
     def test_invalid_build_target_options_stop_before_reading_config(self):
         for options in (['outputs','--target','kernel'],['build','--target','unknown'],
                         ['build','--target','boot','--configure-only'],
-                        ['build','--target','packages','--export-dir','export']):
+                        ['build','--target','packages','--export-dir','export'],
+                        ['build','--target','obs-v4l2','--configure-only'],
+                        ['build','--target','obs-v4l2','--export-dir','export']):
             with self.subTest(options=options),patch.object(sys,'argv',['build.py',*options]), \
                  patch.object(builder,'config') as config,contextlib.redirect_stderr(io.StringIO()), \
                  self.assertRaises(SystemExit):

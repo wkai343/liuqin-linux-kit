@@ -26,8 +26,8 @@
     "fcitx5", "fcitx5-chinese-addons", "fcitx5-configtool", "fcitx5-gtk", "fcitx5-qt",
     "xdg-user-dirs", "kde-connect",
 
-    "firefox", "firefox-langpacks",
-    "elisa-player", "haruna", "mpv"
+    "firefox", "firefox-langpacks", "bubblewrap",
+    "elisa-player", "haruna", "mpv", "ffmpeg-free", "obs-studio"
   ],
   "remove": ["ibus", "ibus-libpinyin", "maliit-keyboard"],
   "overlay": "build/rootfs/plasma-overlay",

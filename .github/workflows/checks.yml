@@ -96,6 +96,9 @@ jobs:
           python3 tests/device-overlays.py
           python3 tests/stock-rom.py
           python3 tests/fedora-build.py
+          python3 tests/fedora-ffmpeg.py
+          python3 tests/fedora-obs.py
+          python3 tests/firefox-media.py
           python3 tests/fedora-stats.py
           python3 tests/mesa-libclc.py
           python3 tests/fedora-startup.py

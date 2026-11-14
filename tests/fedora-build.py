@@ -326,6 +326,12 @@ class FedoraTests(unittest.TestCase):
         stats=self.work/'liuqin-ksystemstats-gpu.rpm';stats.write_bytes(b'stats')
         fingerprint=self.work/'liuqin-fingerprint.rpm';fingerprint.write_bytes(b'fingerprint')
         libclc=self.work/'libclc22-spirv.rpm';libclc.write_bytes(b'libclc')
+        ffmpeg=self.work/'ffmpeg';(ffmpeg/'rpms').mkdir(parents=True)
+        (ffmpeg/'manifest.json').write_text('{}')
+        (ffmpeg/root_builder.fedora_ffmpeg.source_filename(root_builder.fedora_ffmpeg.record())).touch()
+        obs=self.work/'obs';obs.mkdir()
+        (obs/'manifest.json').write_text('{}')
+        (obs/root_builder.fedora_obs.filename()).write_bytes(b'obs plugin')
         def stage(_name,_inputs,build,_artifacts):
             output=self.work/'stage';output.mkdir();build(output);return output
         with patch.object(flow,'target_runtime_root',return_value=archive), \
@@ -333,9 +339,13 @@ class FedoraTests(unittest.TestCase):
              patch.object(flow,'stats_rpm',return_value=stats), \
              patch.object(flow,'fingerprint_rpm',return_value=fingerprint), \
              patch.object(flow,'libclc_rpm',return_value=libclc), \
+             patch.object(flow,'ffmpeg_rpms',return_value=ffmpeg), \
+             patch.object(flow,'obs_v4l2_rpm',return_value=obs), \
              patch.object(flow,'stage',side_effect=stage),patch.object(flow,'target_action') as action:
             flow.apps()
         self.assertEqual(action.call_args.args[0],'apps')
+        self.assertEqual(action.call_args.kwargs['ffmpeg_bundle'],ffmpeg)
+        self.assertEqual(action.call_args.kwargs['obs_bundle'],obs)
         rpms=action.call_args.kwargs['rpms']
         self.assertEqual(sorted(p.name for p in rpms.iterdir()),['libclc22-spirv.rpm','liuqin-device.rpm','liuqin-fingerprint.rpm','liuqin-ksystemstats-gpu.rpm'])
         self.assertIn('Fedora 官方 plasma-setup 软件包',flow.plan()['steps'])
@@ -349,6 +359,18 @@ class FedoraTests(unittest.TestCase):
                 self.assertIn('plasma-keyboard',requested)
                 self.assertIn('ksystemstats',requested)
                 self.assertIn('kate',requested)
+
+    def test_ffmpeg_obs_plugin_and_desktop_share_one_dependency_transaction(self):
+        packages=['/tmp/liuqin-packages/ffmpeg-free-local.rpm','/tmp/liuqin-packages/libavcodec-free-local.rpm',
+                  '/tmp/liuqin-packages/obs-studio-plugin-liuqin-v4l2-local.rpm']
+        with patch.object(root_builder,'dnf') as dnf:
+            root_builder.install_desktop_packages(self.work,
+                dict(first_boot_setup=True,packages=['ffmpeg-free','mpv','obs-studio']),packages)
+        requested=dnf.call_args_list[0].args
+        self.assertIn('dnf5-plugins',requested)
+        self.assertIn('mpv',requested)
+        self.assertIn('obs-studio',requested)
+        self.assertTrue(set(packages).issubset(requested))
 
     def test_kernel_install_with_satisfied_dependencies_stays_offline(self):
         packages=['/tmp/liuqin-packages/liuqin-boot-tools.rpm']
@@ -442,7 +464,9 @@ class FedoraTests(unittest.TestCase):
         consumer=rpm(payload,'liuqin-consumer','1.0',self.work/'consumer',
                      requires=['liuqin-provider(aarch-64) >= 1.0'])
         db=self.work/'rpmdb';db.mkdir()
-        command=['rpm','--dbpath',str(db),'--test','--ignorearch','-U',str(consumer)]
+        # Locally generated fixtures are unsigned; verify dependency resolution
+        # even on RPM versions which require package signatures by default.
+        command=['rpm','--dbpath',str(db),'--test','--nosignature','--ignorearch','-U',str(consumer)]
         accepted=subprocess.run([*command,str(native)],text=True,capture_output=True)
         self.assertEqual(accepted.returncode,0,accepted.stdout+accepted.stderr)
         rejected=subprocess.run([*command,str(noarch)],text=True,capture_output=True)

@@ -121,3 +121,19 @@ ownership, the existing MCU connector reports and explicit HID input releases.
 Original file-level authorship, SPDX identifiers and kernel licensing remain
 applicable. This source adaptation does not redistribute device firmware or
 private calibration data.
+
+Video application integration
+-----------------------------
+
+The Fedora FFmpeg source package and local V4L2 patches are pinned in
+build/ffmpeg/source.json. The patches retain the licenses and authorship of
+the upstream files they modify. The image retains the revised SRPM, recipe,
+build script and source record under /usr/share/licenses/liuqin-ffmpeg/;
+these materials and the Fedora package licenses are not replaced by MIT.
+
+The independent OBS encoder in build/obs-v4l2/ and its C packet regression
+use GPL-2.0-or-later; see build/obs-v4l2/COPYING and file-level identifiers.
+The plugin RPM includes corresponding source and build provenance. Official
+OBS Studio, Firefox and their libraries retain their own licenses and files.
+The separate Firefox launcher and Python build/test helpers use their stated
+file-level licenses; the launcher does not redistribute Mozilla binaries.

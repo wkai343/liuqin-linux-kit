@@ -81,6 +81,14 @@ Rusticl 的 SPIR-V 内建函数使用 Karol Herbst 维护的
 等文件级许可。Khronos [OpenCL-CTS](https://github.com/KhronosGroup/OpenCL-CTS) 用于设备兼容性验证；
 测试源码和日志保存在忽略的 `out/` 目录，不作为项目自有实现或认证声明。
 
+视频用户态基于 Fedora 打包的 FFmpeg 与上游 V4L2 实现，固定 SRPM、补丁和来源见
+`build/ffmpeg/README.md`。保留 Fedora 的拆包与编解码器配置以及上游
+文件的作者和许可；镜像携带修订版 SRPM、配方与构建记录。
+`build/obs-v4l2/` 插件使用 OBS Project 的模块、编码器和标准封装接口，
+插件及 C 包适配测试按 GPL-2.0-or-later 分发，并随 RPM 保留对应源码。
+官方 OBS 与 Firefox 包不被替换；`build/firefox/` 启动适配使用
+Bubblewrap 私有挂载视图，兼容判断参考 Mozilla 的媒体模块接口。各组件继续遵守自身许可。
+
 NanoSic 键盘连接状态适配保留主线驱动作者与 GPL 声明；协议参考 Xiaomi 开源内核
 `pipa-t-oss` 的 `drivers/input/keyboard/nanosic_driver_v2/nano_i2c.c`，
 提交 `77dc8e2290f3f5f15861821564f68d30ea193449`，原作者 Nanosic Inc. / Bin.yuan，GPL-2.0。

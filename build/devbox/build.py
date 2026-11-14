@@ -29,7 +29,7 @@ DEFAULTS = {
 }
 CONFIG_KEYS = set(DEFAULTS) | {'rootfs_config', 'kernel_source_lock', 'kernel_config', 'rom_images'}
 BUILD_TARGETS = {'system': 'rootfs', 'kernel': 'kernel', 'modules': 'modules',
-                 'boot': 'boot', 'packages': 'kernel-debs'}
+                 'boot': 'boot', 'packages': 'kernel-debs', 'obs-v4l2': 'obs-v4l2'}
 
 
 def command_help():
@@ -43,7 +43,7 @@ def command_help():
   devbox run test               运行离线回归
   devbox run help               查看本说明
 
-单独构建：devbox run build -- --target kernel（也可选 modules、boot、packages）
+单独构建：devbox run build -- --target kernel（也可选 modules、boot、packages、obs-v4l2）
 配置预览：devbox run build -- --target kernel --configure-only
 镜像导出：devbox run build -- --export-dir /path/to/new-output
 其他参数：--config build.custom.json；--refresh 重新装配系统软件。
@@ -202,7 +202,7 @@ def doctor():
 
 
 def test():
-    for name in ('project-identity.py', 'project-structure.py', 'devbox-build.py', 'source-build.py', 'device-overlays.py', 'stock-rom.py', 'fedora-build.py', 'fedora-stats.py', 'mesa-libclc.py', 'fedora-startup.py', 'nanosic-folio.py', 'selinux-packaging.py', 'backlight-default.py', 'boot-splash.py', 'splash-handoff.py', 'splash-logo.py', 'splash-orientation.py', 'plymouth-guard.py', 'display-clock.py', 'display-brightness-minimum.py', 'display-refresh-rates.py', 'display-live-refresh.py', 'display-policy.py', 'display-recovery.py', 'resume-display.py', 'wlan-mac.py', 'rtc.py', 'login-ready.py', 'mipps-startup.py', 'charge-status.py', 'mipps-events.py', 'storage-scope.py', 'storage-seal.py', 'storage-ready.py', 'storage-paths.py', 'mkbootimg-fetch.py', 'initramfs-inputs.py', 'sensor-build-environment.py', 'gui-artifacts.py', 'filesystems.py', 'windows-installer.py', 'usb-installer-network.py', 'custom-kernel.py', 'kernel-common-fixes.py', 'ucsi-source-pdos.py', 'ucsi-power-supply.py', 'ucsi-lifecycle.py', 'battmgr-recovery.py', 'rootless-build.py', 'kernel-updates.py', 'boot-update-store.py', 'gui-engine.py', 'gui-worker.py', 'install-root-single.py', 'multiboot.py', 'multiboot-device.py', 'multiboot-store.py', 'android-installer.py', 'android-device.py', 'android-direct.py', 'android-rom.py', 'android-runtime.py', 'staged-install.py', 'managed-linux-device.py', 'partition-discovery.py', 'partition-device.py', 'partition-editor-device.py', 'workflow.py', 'recovery-installer.py', 'recovery-source.py'):
+    for name in ('project-identity.py', 'project-structure.py', 'devbox-build.py', 'source-build.py', 'device-overlays.py', 'stock-rom.py', 'fedora-build.py', 'fedora-ffmpeg.py', 'fedora-obs.py', 'firefox-media.py', 'fedora-stats.py', 'mesa-libclc.py', 'fedora-startup.py', 'nanosic-folio.py', 'selinux-packaging.py', 'backlight-default.py', 'boot-splash.py', 'splash-handoff.py', 'splash-logo.py', 'splash-orientation.py', 'plymouth-guard.py', 'display-clock.py', 'display-brightness-minimum.py', 'display-refresh-rates.py', 'display-live-refresh.py', 'display-policy.py', 'display-recovery.py', 'resume-display.py', 'wlan-mac.py', 'rtc.py', 'login-ready.py', 'mipps-startup.py', 'charge-status.py', 'mipps-events.py', 'storage-scope.py', 'storage-seal.py', 'storage-ready.py', 'storage-paths.py', 'mkbootimg-fetch.py', 'initramfs-inputs.py', 'sensor-build-environment.py', 'gui-artifacts.py', 'filesystems.py', 'windows-installer.py', 'usb-installer-network.py', 'custom-kernel.py', 'kernel-common-fixes.py', 'ucsi-source-pdos.py', 'ucsi-power-supply.py', 'ucsi-lifecycle.py', 'battmgr-recovery.py', 'rootless-build.py', 'kernel-updates.py', 'boot-update-store.py', 'gui-engine.py', 'gui-worker.py', 'install-root-single.py', 'multiboot.py', 'multiboot-device.py', 'multiboot-store.py', 'android-installer.py', 'android-device.py', 'android-direct.py', 'android-rom.py', 'android-runtime.py', 'staged-install.py', 'managed-linux-device.py', 'partition-discovery.py', 'partition-device.py', 'partition-editor-device.py', 'workflow.py', 'recovery-installer.py', 'recovery-source.py'):
         run([shutil.which('python3'), 'tests/' + name])
     run([shutil.which('python3'), 'tests/fingerprint-gallery-client.py'])
     # The provider's private-file checks run as namespace root using fake TAs.

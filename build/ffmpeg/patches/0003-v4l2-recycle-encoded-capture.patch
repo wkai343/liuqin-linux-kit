@@ -1,0 +1,62 @@
+From 0ccd88b29cc30573123a50f5ddd63497c80424f0 Mon Sep 17 00:00:00 2001
+From: Liuqin Linux Kit <liuqin@localhost>
+Date: Sat, 14 Nov 2026 16:25:19 +0800
+Subject: [PATCH] avcodec/v4l2: detach encoded packets before returning capture
+ buffers
+
+Packet references held by an asynchronous muxer can retain every capture buffer. During drain the existing dequeue path treats that state as EOF, before the final input frame has been encoded. Copy the compressed payload into a padded AVPacket and immediately requeue the hardware buffer. Validate bytesused and data_offset; keep decoded-frame references unchanged.
+---
+ libavcodec/v4l2_buffers.c | 25 +++++++++++++++++++++----
+ 1 file changed, 21 insertions(+), 4 deletions(-)
+
+diff --git a/libavcodec/v4l2_buffers.c b/libavcodec/v4l2_buffers.c
+index 9a0d22d..fd356fe 100644
+--- a/libavcodec/v4l2_buffers.c
++++ b/libavcodec/v4l2_buffers.c
+@@ -541,15 +541,24 @@ int ff_v4l2_buffer_buf_to_avframe(AVFrame *frame, V4L2Buffer *avbuf)
+ 
+ int ff_v4l2_buffer_buf_to_avpkt(AVPacket *pkt, V4L2Buffer *avbuf)
+ {
++    unsigned int used, offset;
+     int ret;
+ 
+     av_packet_unref(pkt);
+-    ret = v4l2_buf_to_bufref(avbuf, 0, &pkt->buf);
++    used = V4L2_TYPE_IS_MULTIPLANAR(avbuf->buf.type) ?
++           avbuf->buf.m.planes[0].bytesused : avbuf->buf.bytesused;
++    offset = V4L2_TYPE_IS_MULTIPLANAR(avbuf->buf.type) ?
++             avbuf->buf.m.planes[0].data_offset : 0;
++    if (offset > used || used > avbuf->plane_info[0].length || used - offset > INT_MAX)
++        return AVERROR_INVALIDDATA;
++
++    /* Muxers may retain several packets. Do not let those references exhaust
++     * the small hardware capture queue, especially while draining the last
++     * input frame. Encoded packets are small compared with raw video frames. */
++    ret = av_new_packet(pkt, used - offset);
+     if (ret)
+         return ret;
+-
+-    pkt->size = V4L2_TYPE_IS_MULTIPLANAR(avbuf->buf.type) ? avbuf->buf.m.planes[0].bytesused : avbuf->buf.bytesused;
+-    pkt->data = pkt->buf->data;
++    memcpy(pkt->data, (uint8_t *)avbuf->plane_info[0].mm_addr + offset, pkt->size);
+ 
+     if (avbuf->buf.flags & V4L2_BUF_FLAG_KEYFRAME)
+         pkt->flags |= AV_PKT_FLAG_KEY;
+@@ -561,6 +570,14 @@ int ff_v4l2_buffer_buf_to_avpkt(AVPacket *pkt, V4L2Buffer *avbuf)
+ 
+     pkt->dts = pkt->pts = v4l2_get_pts(avbuf);
+ 
++    if (avbuf->context->streamon) {
++        ret = ff_v4l2_buffer_enqueue(avbuf);
++        if (ret) {
++            av_packet_unref(pkt);
++            return ret;
++        }
++    }
++
+     return 0;
+ }
+ 
+-- 
+2.56.0
+

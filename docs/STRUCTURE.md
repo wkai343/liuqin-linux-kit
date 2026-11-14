@@ -11,6 +11,9 @@ build/
   devbox/           主机环境、构建编排与配置示例
   kernel/           内核来源、配置与补丁
   rootfs/           Fedora 基础系统来源、软件配方与 overlay
+  ffmpeg/           固定 Fedora SRPM、Iris V4L2 补丁和播放器默认设置
+  firefox/          系统 FFmpeg 启动适配与已验证兼容名单
+  obs-v4l2/         独立 OBS 硬件编码器、CMake 构建与本地化资源
   runtime/          Rec Buildroot/musl 来源、配置与说明
   recovery/         原生 Rec、ADB/LVGL、固定封装与离线启动链验证
   data/             工具与 ROM 版本数据

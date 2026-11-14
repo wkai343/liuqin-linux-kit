@@ -1,0 +1,89 @@
+From: Liuqin Linux Kit <liuqin@localhost>
+Date: Sat, 14 Nov 2026 18:21:43 +0800
+Subject: [PATCH] avcodec/v4l2: carry decoder PTS through positive timestamp cookies
+
+V4L2 timeval-to-nanoseconds conversion treats tv_usec as unsigned. Negative
+fractional PTS can therefore wrap to about 4294 seconds and stall presentation.
+Pass an opaque positive cookie to the driver and restore the exact packet PTS,
+including negative, reordered and unknown timestamps. Reject stale history
+entries instead of returning the PTS of an unrelated packet.
+
+diff --git a/libavcodec/v4l2_buffers.c b/libavcodec/v4l2_buffers.c
+--- a/libavcodec/v4l2_buffers.c
++++ b/libavcodec/v4l2_buffers.c
+@@ -71,24 +71,38 @@
+ 
+ static inline void v4l2_set_pts(V4L2Buffer *out, int64_t pts)
+ {
++    V4L2m2mContext *s = buf_to_m2mctx(out);
+     int64_t v4l2_pts;
+ 
+-    if (pts == AV_NOPTS_VALUE)
+-        pts = 0;
+-
+-    /* convert pts to v4l2 timebase */
+-    v4l2_pts = av_rescale_q(pts, v4l2_get_timebase(out), v4l2_timebase);
++    if (s->decode) {
++        const uint64_t cookie = ++s->pts_sequence;
++        s->pts_history[cookie % FF_ARRAY_ELEMS(s->pts_history)].cookie = cookie;
++        s->pts_history[cookie % FF_ARRAY_ELEMS(s->pts_history)].pts = pts;
++        v4l2_pts = cookie;
++    } else {
++        if (pts == AV_NOPTS_VALUE)
++            pts = 0;
++        v4l2_pts = av_rescale_q(pts, v4l2_get_timebase(out), v4l2_timebase);
++    }
+     out->buf.timestamp.tv_usec = v4l2_pts % USEC_PER_SEC;
+     out->buf.timestamp.tv_sec = v4l2_pts / USEC_PER_SEC;
+ }
+ 
+ static inline int64_t v4l2_get_pts(V4L2Buffer *avbuf)
+ {
++    const V4L2m2mContext *s = buf_to_m2mctx(avbuf);
+     int64_t v4l2_pts;
+ 
+     /* convert pts back to encoder timebase */
+     v4l2_pts = (int64_t)avbuf->buf.timestamp.tv_sec * USEC_PER_SEC +
+                         avbuf->buf.timestamp.tv_usec;
++
++    if (s->decode) {
++        const unsigned index = (uint64_t)v4l2_pts % FF_ARRAY_ELEMS(s->pts_history);
++        if (v4l2_pts > 0 && s->pts_history[index].cookie == v4l2_pts)
++            return s->pts_history[index].pts;
++        return AV_NOPTS_VALUE;
++    }
+ 
+     return av_rescale_q(v4l2_pts, v4l2_timebase, v4l2_get_timebase(avbuf));
+ }
+diff --git a/libavcodec/v4l2_m2m_dec.c b/libavcodec/v4l2_m2m_dec.c
+--- a/libavcodec/v4l2_m2m_dec.c
++++ b/libavcodec/v4l2_m2m_dec.c
+@@ -249,6 +249,7 @@
+ 
+     capture = &s->capture;
+     output = &s->output;
++    s->decode = 1;
+ 
+     /* if these dimensions are invalid (ie, 0 or too small) an event will be raised
+      * by the v4l2 driver; this event will trigger a full pipeline reconfig and
+diff --git a/libavcodec/v4l2_m2m.h b/libavcodec/v4l2_m2m.h
+--- a/libavcodec/v4l2_m2m.h
++++ b/libavcodec/v4l2_m2m.h
+@@ -43,6 +43,17 @@
+ typedef struct V4L2m2mContext {
+     char devname[PATH_MAX];
+     int fd;
++
++    /* V4L2 timestamps are unsigned. Carry a positive sequence cookie through
++     * the driver and recover the exact packet PTS, including negative values.
++     * The bounded history exceeds the input/output queues and decoder reorder
++     * depth. Check the cookie before reuse; never return another packet's PTS. */
++    int decode;
++    uint64_t pts_sequence;
++    struct {
++        uint64_t cookie;
++        int64_t pts;
++    } pts_history[256];
+ 
+     /* the codec context queues */
+     V4L2Context capture;

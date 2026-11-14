@@ -228,7 +228,7 @@ def execute(data,action,run,*,refresh=False,configure_only=False,export_dir=None
         if not export_dir.is_absolute():export_dir=PROJECT/export_dir
         if export_dir.exists() or export_dir.is_symlink():
             raise ValueError('导出目录已存在，未覆盖：'+str(export_dir))
-    if action not in ('plan','prepare','check-inputs','kernel','modules','boot','kernel-debs','rootfs'):
+    if action not in ('plan','prepare','check-inputs','kernel','modules','boot','kernel-debs','rootfs','obs-v4l2'):
         raise ValueError('该构建阶段已退役；使用 devbox run build -- --target 选择目标，原生 Rec 独立构建。')
     distribution=json.loads(recipe_path.read_text()).get('distribution')
     if distribution!='fedora':raise ValueError('目标系统只支持 Fedora + Plasma。')
@@ -250,7 +250,7 @@ def execute(data,action,run,*,refresh=False,configure_only=False,export_dir=None
             flow.board()
         if action=='prepare':
             flow.tools();flow.kernel_source()
-            flow.target_base();flow.stats_archive()
+            flow.target_base();flow.stats_archive();flow.ffmpeg_archive()
             return
         if action=='kernel' and configure_only:
             source,commit=flow.kernel_source()
@@ -268,7 +268,8 @@ def execute(data,action,run,*,refresh=False,configure_only=False,export_dir=None
             run(argv,env={'NIX_HARDENING_ENABLE_aarch64_unknown_linux_musl':''})
             print('内核配置预览：'+str(out/'.config'));return
         methods={'kernel':flow.kernel,'modules':flow.modules,'boot':flow.boot,
-                 'kernel-debs':flow.kernel_debs,'rootfs':flow.rootfs}
+                 'kernel-debs':flow.kernel_debs,'rootfs':flow.rootfs,
+                 'obs-v4l2':lambda:flow.obs_v4l2_rpm(force=True)}
         if action not in methods:raise ValueError('官方系统工作流不支持此阶段：'+action)
         result=methods[action]()
         if result is not None:print('阶段产物：'+str(result),flush=True)

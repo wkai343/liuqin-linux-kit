@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "ffmpeg_release": "9.0.2-3.liuqin3.fc45",
+  "firefox": [
+    {
+      "package": "firefox-159.0.1-1.fc45.aarch64",
+      "identity": {
+        "elf": {
+          "firefox": "0f7ca977387a5bf9e44c38145d9d7bca15969836",
+          "libxul.so": "f7077622be1f75a73c391208bd2135bb32b6e711",
+          "libmozavcodec.so": "9efe2a24cfa3e009f0df077f6776f906b3814094",
+          "libmozavutil.so": "c22a3f959ae68f9ec84d06c4c65794e021bed68d"
+        },
+        "launcher_sha256": "12e361bb42c030a9ffa940c641ff3ddf53ea097d40a7b2ea4903cd2c954dcc2e"
+      }
+    },
+    {
+      "package": "firefox-160.0-1.fc45.aarch64",
+      "identity": {
+        "elf": {
+          "firefox": "7f1a64546786c5b4855065fe0248ce928bb8709a",
+          "libxul.so": "f3f53a73a44748c7e92a880ad4558993b427bfce",
+          "libmozavcodec.so": "6ce05a080e5415407694f9923a55ddddb7e87d8f",
+          "libmozavutil.so": "20107a3661d65583733e5f408ee1e2065765e687"
+        },
+        "launcher_sha256": "12e361bb42c030a9ffa940c641ff3ddf53ea097d40a7b2ea4903cd2c954dcc2e"
+      }
+    }
+  ]
+}

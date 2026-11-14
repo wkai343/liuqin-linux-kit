@@ -9,6 +9,8 @@ from source_flow import Flow, load_module
 from source_build import PROJECT, download, sha, tree_identity
 from storage_scope import inputs as storage_scope_inputs
 import mesa_libclc
+import fedora_ffmpeg
+import fedora_obs
 
 
 class FedoraFlow(Flow):
@@ -33,7 +35,11 @@ class FedoraFlow(Flow):
     def target_action(self,action,archive,out,**values):
         argv=[sys.executable,str(PROJECT/'build/scripts/build-fedora-root.py'),action,
               '--archive',str(archive),'--archive-sha256',sha(archive),'--out',str(out)]
-        for name,value in values.items():argv+=['--'+name.replace('_','-'),str(value)]
+        for name,value in values.items():
+            flag='--'+name.replace('_','-')
+            if isinstance(value,bool):
+                if value:argv.append(flag)
+            else:argv+=[flag,str(value)]
         self.run(argv,root=True)
 
     def target_runtime_root(self):
@@ -130,18 +136,59 @@ class FedoraFlow(Flow):
             builder=sha(PROJECT/'build/lib/mesa_libclc.py'),
             packager=sha(PROJECT/'build/lib/rpm_package.py')),build,['rpms/'+name])/'rpms'/name
 
+    def ffmpeg_archive(self, *, force=False):
+        if not force and not fedora_ffmpeg.selected(self.recipe):return None
+        record=fedora_ffmpeg.record()
+        return download(record['url'],PROJECT/'inputs/ffmpeg'/record['srpm'],record['sha256'])
+
+    def ffmpeg_rpms(self, *, force=False):
+        if not force and not fedora_ffmpeg.selected(self.recipe):return None
+        archive=self.target_runtime_root();source=self.ffmpeg_archive(force=force)
+        def build(out):
+            self.target_action('ffmpeg',archive,out/'assembled',
+                ffmpeg_source=source,jobs=self.data.get('jobs',12))
+        return self.stage('fedora-ffmpeg',dict(base=sha(archive),source=sha(source),
+            recipe=fedora_ffmpeg.inputs(),builder=sha(PROJECT/'build/lib/fedora_ffmpeg.py'),
+            root_builder=sha(PROJECT/'build/scripts/build-fedora-root.py'),refresh=self.refresh),
+            build,['assembled/rpms','assembled/devel-rpms','assembled/manifest.json','assembled/build-packages.tsv',
+                   'assembled/'+fedora_ffmpeg.source_filename(fedora_ffmpeg.record())])/'assembled'
+
+    def obs_v4l2_rpm(self, *, force=False):
+        if not force and not fedora_obs.selected(self.recipe):return None
+        archive=self.target_runtime_root();ffmpeg=self.ffmpeg_rpms(force=force)
+        def build(out):
+            self.target_action('obs-v4l2',archive,out/'assembled',
+                ffmpeg_bundle=ffmpeg,jobs=self.data.get('jobs',12))
+        return self.stage('fedora-obs-v4l2',dict(base=sha(archive),
+            source=fedora_obs.inputs(),ffmpeg_manifest=sha(ffmpeg/'manifest.json'),
+            ffmpeg_builder=sha(PROJECT/'build/lib/fedora_ffmpeg.py'),
+            root_builder=sha(PROJECT/'build/scripts/build-fedora-root.py'),refresh=self.refresh),
+            build,['assembled/'+fedora_obs.filename(),'assembled/manifest.json',
+                   'assembled/build-packages.tsv'])/'assembled'
+
     def apps(self):
         archive=self.target_runtime_root();devices=self.device_debs();stats=self.stats_rpm();fingerprint=self.fingerprint_rpm()
-        libclc=self.libclc_rpm()
+        libclc=self.libclc_rpm();ffmpeg=self.ffmpeg_rpms();obs=self.obs_v4l2_rpm()
         inputs=dict(base=sha(archive),rpms=tree_identity(devices),recipe=self.recipe,
             builder=sha(PROJECT/'build/scripts/build-fedora-root.py'),
             input_env=sha(PROJECT/'build/rootfs/fedora-input-env.sh'),
             shell_defaults=sha(PROJECT/'build/lib/shell_defaults.py'),
+            firefox_media=tree_identity(PROJECT/'build/firefox'),
+            firefox_media_installer=sha(PROJECT/'build/lib/firefox_media.py'),
             splash_assets=sha(PROJECT/'build/lib/splash_assets.py'),
             theme=tree_identity(PROJECT/'device/boot/splash'),refresh=self.refresh)
         inputs['stats_rpm']=sha(stats)
         inputs['fingerprint_rpm']=sha(fingerprint)
         if libclc:inputs['libclc_rpm']=sha(libclc)
+        if ffmpeg:
+            inputs['ffmpeg_bundle']=tree_identity(ffmpeg/'rpms')
+            inputs['ffmpeg_manifest']=sha(ffmpeg/'manifest.json')
+            inputs['ffmpeg_source']=sha(ffmpeg/fedora_ffmpeg.source_filename(fedora_ffmpeg.record()))
+            inputs['ffmpeg_installer']=sha(PROJECT/'build/lib/fedora_ffmpeg.py')
+        if obs:
+            inputs['obs_manifest']=sha(obs/'manifest.json')
+            inputs['obs_rpm']=sha(obs/fedora_obs.filename())
+            inputs['obs_installer']=sha(PROJECT/'build/lib/fedora_obs.py')
         if self.recipe.get('overlay'):inputs['overlay']=tree_identity(self.recipe['overlay'])
         if self.recipe.get('password_file'):inputs['password_sha256']=sha(self.recipe['password_file'])
         def build(out):
@@ -161,7 +208,9 @@ class FedoraFlow(Flow):
                 if sha(target)!=inputs['password_sha256']:raise ValueError('密码文件在暂存期间变化。')
                 snapshot['password_file']=str(target)
             recipe=out/'recipe.json';recipe.write_text(json.dumps(snapshot)+'\n')
-            self.target_action('apps',archive,out/'assembled',recipe=recipe,rpms=rpms)
+            options=dict(ffmpeg_bundle=ffmpeg) if ffmpeg else {}
+            if obs:options['obs_bundle']=obs
+            self.target_action('apps',archive,out/'assembled',recipe=recipe,rpms=rpms,**options)
         artifacts=['assembled/root.tar.gz','assembled/packages.tsv']
         if not self.recipe['first_boot_setup']:artifacts.append('assembled/login.txt')
         return self.stage('fedora-apps',inputs,build,artifacts)/'assembled'
@@ -182,7 +231,8 @@ class FedoraFlow(Flow):
         firmware=self.fingerprint_image()
         apps=self.apps();rpms=self.kernel_debs();source,kernel=self.kernel();modules=self.modules()
         def build(out):
-            self.target_action('kernel-files',apps/'root.tar.gz',out/'assembled',rpms=rpms)
+            self.target_action('kernel-files',apps/'root.tar.gz',out/'assembled',rpms=rpms,
+                require_ffmpeg=fedora_ffmpeg.selected(self.recipe),require_obs=fedora_obs.selected(self.recipe))
             self.run([sys.executable,'build/scripts/extract-liuqin-fingerprint-firmware.py',
                 '--image',str(firmware),'--root',str(out/'assembled/rootfs')],root=True)
             self.run([sys.executable,'build/scripts/build-liuqin-custom-root.py','--root',str(out/'assembled/rootfs'),
@@ -201,4 +251,8 @@ class FedoraFlow(Flow):
         result['kernel_configuration']='额外启用 Fedora SELinux 片段；图形启动包含固件帧缓冲配置'
         result['package_format']='rpm'
         result['first_boot_setup_source']='Fedora official RPM'
+        if fedora_ffmpeg.selected(self.recipe):
+            result['ffmpeg']='Fedora SRPM + Iris 接口补丁；隔离编译、运行库整组版本锁及对应源码包'
+        if fedora_obs.selected(self.recipe):
+            result['obs']='Fedora 官方 OBS + 独立 V4L2 编码器 RPM；隔离编译，保留源码，不锁定 OBS'
         return result

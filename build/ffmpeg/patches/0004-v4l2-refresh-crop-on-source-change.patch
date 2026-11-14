@@ -1,0 +1,138 @@
+From 525702cc1a91aaae1fb7812cdf9f7a877d0b047a Mon Sep 17 00:00:00 2001
+From: Liuqin Linux Kit <liuqin@localhost>
+Date: Sat, 14 Nov 2026 16:34:50 +0800
+Subject: [PATCH] avcodec/v4l2: refresh visible crop on every source-change
+ event
+
+The initial capture setup can run before the device has parsed headers. Read the authoritative visible rectangle on SOURCE_CHANGE even if storage dimensions are unchanged. Preserve it across capture S_FMT/restart: Iris resets selection to the padded format on S_FMT. Do not rewrite the optional decoder crop on startup.
+---
+ libavcodec/v4l2_context.c | 37 +++++++++++++++++++++++++++++++++++++
+ libavcodec/v4l2_context.h |  3 +++
+ libavcodec/v4l2_m2m_dec.c | 35 ++++++-----------------------------
+ 3 files changed, 46 insertions(+), 29 deletions(-)
+
+diff --git a/libavcodec/v4l2_context.c b/libavcodec/v4l2_context.c
+index be1df37..e7b7ef8 100644
+--- a/libavcodec/v4l2_context.c
++++ b/libavcodec/v4l2_context.c
+@@ -64,6 +64,37 @@ static inline unsigned int v4l2_get_height(struct v4l2_format *fmt)
+     return V4L2_TYPE_IS_MULTIPLANAR(fmt->type) ? fmt->fmt.pix_mp.height : fmt->fmt.pix.height;
+ }
+ 
++int ff_v4l2_context_get_selection(V4L2Context *ctx, const struct v4l2_format *fmt)
++{
++    struct v4l2_selection selection = {
++        .type = V4L2_BUF_TYPE_VIDEO_CAPTURE,
++        .target = V4L2_SEL_TGT_COMPOSE,
++    };
++    unsigned int width = V4L2_TYPE_IS_MULTIPLANAR(fmt->type) ?
++                         fmt->fmt.pix_mp.width : fmt->fmt.pix.width;
++    unsigned int height = V4L2_TYPE_IS_MULTIPLANAR(fmt->type) ?
++                          fmt->fmt.pix_mp.height : fmt->fmt.pix.height;
++    int ret;
++
++    memset(&ctx->selection, 0, sizeof(ctx->selection));
++    ret = ioctl(ctx_to_m2mctx(ctx)->fd, VIDIOC_G_SELECTION, &selection);
++    if (ret) {
++        selection.target = V4L2_SEL_TGT_CROP;
++        ret = ioctl(ctx_to_m2mctx(ctx)->fd, VIDIOC_G_SELECTION, &selection);
++    }
++    if (ret)
++        return 0; /* Selection is optional on older drivers. */
++    if (selection.r.left < 0 || selection.r.top < 0 ||
++        !selection.r.width || !selection.r.height ||
++        (uint64_t)selection.r.left + selection.r.width > width ||
++        (uint64_t)selection.r.top + selection.r.height > height)
++        return AVERROR(EINVAL);
++    ctx->selection = selection.r;
++    av_log(logger(ctx), AV_LOG_DEBUG, "visible output %dx%d at %d,%d\n",
++           selection.r.width, selection.r.height, selection.r.left, selection.r.top);
++    return 0;
++}
++
+ static AVRational v4l2_get_sar(V4L2Context *ctx)
+ {
+     struct AVRational sar = { 0, 1 };
+@@ -201,6 +232,12 @@ static int v4l2_handle_event(V4L2Context *ctx)
+         return 0;
+     }
+ 
++    /* A SOURCE_CHANGE can change only the visible crop, with identical buffer
++     * dimensions. Read it now: a later S_FMT may reset the driver's rectangle. */
++    ret = ff_v4l2_context_get_selection(&s->capture, &cap_fmt);
++    if (ret < 0)
++        return ret;
++
+     if (v4l2_resolution_changed(&s->capture, &cap_fmt)) {
+         s->capture.height = v4l2_get_height(&cap_fmt);
+         s->capture.width = v4l2_get_width(&cap_fmt);
+diff --git a/libavcodec/v4l2_context.h b/libavcodec/v4l2_context.h
+index 3b6f1df..35dd757 100644
+--- a/libavcodec/v4l2_context.h
++++ b/libavcodec/v4l2_context.h
+@@ -97,6 +97,9 @@ typedef struct V4L2Context {
+ 
+ } V4L2Context;
+ 
++/* Cache the visible rectangle before S_FMT can reset the driver's selection. */
++int ff_v4l2_context_get_selection(V4L2Context *ctx, const struct v4l2_format *fmt);
++
+ /**
+  * Initializes a V4L2Context.
+  *
+diff --git a/libavcodec/v4l2_m2m_dec.c b/libavcodec/v4l2_m2m_dec.c
+index 75027b8..181d4e3 100644
+--- a/libavcodec/v4l2_m2m_dec.c
++++ b/libavcodec/v4l2_m2m_dec.c
+@@ -39,7 +39,6 @@ static int v4l2_try_start(AVCodecContext *avctx)
+     V4L2m2mContext *s = ((V4L2m2mPriv*)avctx->priv_data)->context;
+     V4L2Context *const capture = &s->capture;
+     V4L2Context *const output = &s->output;
+-    struct v4l2_selection selection = { 0 };
+     int ret;
+ 
+     /* 1. start the output process */
+@@ -66,34 +65,12 @@ static int v4l2_try_start(AVCodecContext *avctx)
+     avctx->pix_fmt = ff_v4l2_format_v4l2_to_avfmt(capture->format.fmt.pix_mp.pixelformat, AV_CODEC_ID_RAWVIDEO);
+     capture->av_pix_fmt = avctx->pix_fmt;
+ 
+-    /* 3. set the crop parameters */
+-    selection.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+-    selection.r.height = avctx->coded_height;
+-    selection.r.width = avctx->coded_width;
+-    ioctl(s->fd, VIDIOC_S_SELECTION, &selection);
+-
+-    /* Stateful decoders may expose a read-only visible rectangle. Query it
+-     * even when S_SELECTION fails, and preserve the padded memory layout. */
+-    memset(&capture->selection, 0, sizeof(capture->selection));
+-    selection.target = V4L2_SEL_TGT_COMPOSE;
+-    ret = ioctl(s->fd, VIDIOC_G_SELECTION, &selection);
+-    if (ret) {
+-        selection.target = V4L2_SEL_TGT_CROP;
+-        ret = ioctl(s->fd, VIDIOC_G_SELECTION, &selection);
+-    }
+-    if (!ret) {
+-        unsigned int width = V4L2_TYPE_IS_MULTIPLANAR(capture->type) ?
+-                             capture->format.fmt.pix_mp.width : capture->format.fmt.pix.width;
+-        unsigned int height = V4L2_TYPE_IS_MULTIPLANAR(capture->type) ?
+-                              capture->format.fmt.pix_mp.height : capture->format.fmt.pix.height;
+-        if (selection.r.left < 0 || selection.r.top < 0 ||
+-            !selection.r.width || !selection.r.height ||
+-            (uint64_t)selection.r.left + selection.r.width > width ||
+-            (uint64_t)selection.r.top + selection.r.height > height)
+-            return AVERROR(EINVAL);
+-        capture->selection = selection.r;
+-        av_log(avctx, AV_LOG_DEBUG, "visible output %dx%d at %d,%d\n",
+-               selection.r.width, selection.r.height, selection.r.left, selection.r.top);
++    /* 3. Read the initial visible area unless SOURCE_CHANGE already supplied
++     * it. Keep that authoritative rectangle across capture reconfiguration. */
++    if (!capture->selection.width) {
++        ret = ff_v4l2_context_get_selection(capture, &capture->format);
++        if (ret < 0)
++            return ret;
+     }
+ 
+     /* 4. init the capture context now that we have the capture format */
+-- 
+2.56.0
+

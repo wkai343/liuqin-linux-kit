@@ -19,6 +19,9 @@ from source_build import mounted_root, sha, arm64_execution
 from fedora_oci import extract as extract_oci
 from shell_defaults import check_skeleton, ensure as ensure_shell_defaults
 from splash_assets import install_themes
+import fedora_ffmpeg
+import fedora_obs
+import firefox_media
 spec=importlib.util.spec_from_file_location('rootfs_common',PROJECT/'build/scripts/build-official-root.py')
 common=importlib.util.module_from_spec(spec);spec.loader.exec_module(common)
 
@@ -259,9 +262,10 @@ def install_kernel_packages(root, packages):
         chroot(root,['rpm','-Uvh','--replacepkgs',*packages])
 
 
-def install_desktop_packages(root, data):
+def install_desktop_packages(root, data, local_packages=()):
     desktop_dnf(root,data,'install',*DEVICE_PACKAGES,*PLASMA_PACKAGES,*data.get('packages',[]),
-        *(FIRST_BOOT_PACKAGES if data['first_boot_setup'] else []))
+        *(FIRST_BOOT_PACKAGES if data['first_boot_setup'] else []),
+        *(['dnf5-plugins'] if fedora_ffmpeg.selected(data) else []),*local_packages)
     desktop_dnf(root,data,'install','--allowerasing','fedora-release-kde','fedora-release-identity-kde')
 
 
@@ -342,6 +346,7 @@ def configure(root, data, output):
     configure_input(root)
     configure_login_output(root)
     configure_firefox_languages(root)
+    if fedora_ffmpeg.selected(data):firefox_media.install(root)
     configure_qrca_camera(root)
     legacy_panel=root/'etc/xdg/autostart/liuqin-plasma-panel-defaults.desktop'
     if not legacy_panel.is_symlink() and legacy_panel.is_file() and 'TryExec=/usr/libexec/liuqin-plasma-panel-defaults' in legacy_panel.read_text():
@@ -414,12 +419,17 @@ def configure(root, data, output):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=('runtime','apps','extract','sensors','kernel-files','stats','fingerprint','splash'))
+    parser.add_argument('action',choices=('runtime','apps','extract','sensors','kernel-files','stats','fingerprint','splash','ffmpeg','obs-v4l2'))
     parser.add_argument('--archive',type=Path,required=True);parser.add_argument('--archive-sha256',required=True)
     parser.add_argument('--out',type=Path,required=True);parser.add_argument('--recipe',type=Path)
     parser.add_argument('--rpms',type=Path);parser.add_argument('--rom-sensors',type=Path)
     parser.add_argument('--jobs',type=int,default=12)
     parser.add_argument('--stats-source',type=Path)
+    parser.add_argument('--ffmpeg-source',type=Path)
+    parser.add_argument('--ffmpeg-bundle',type=Path)
+    parser.add_argument('--require-ffmpeg',action='store_true')
+    parser.add_argument('--obs-bundle',type=Path)
+    parser.add_argument('--require-obs',action='store_true')
     parser.add_argument('--fingerprint-libfprint-source',type=Path)
     parser.add_argument('--fingerprint-fprintd-source',type=Path)
     args=parser.parse_args()
@@ -462,6 +472,12 @@ def main():
             if not args.stats_source:parser.error('需要 KSystemStats 源码。')
             from fedora_stats import build
             build(root,args.stats_source,output,args.jobs,chroot,dnf);return
+        elif args.action=='ffmpeg':
+            if not args.ffmpeg_source:parser.error('需要固定的 Fedora FFmpeg 源码包。')
+            fedora_ffmpeg.build(root,args.ffmpeg_source,output,args.jobs,chroot,dnf);return
+        elif args.action=='obs-v4l2':
+            if not args.ffmpeg_bundle:parser.error('OBS 插件构建需要匹配的 FFmpeg 运行库和开发包。')
+            fedora_obs.build(root,args.ffmpeg_bundle,output,args.jobs,chroot,dnf);return
         elif args.action=='fingerprint':
             if not args.fingerprint_libfprint_source or not args.fingerprint_fprintd_source:
                 parser.error('需要固定的 libfprint/TOD 与 fprintd 源码。')
@@ -476,21 +492,35 @@ def main():
             if not args.rpms or not args.rpms.is_dir():parser.error('需要已构建的 RPM 目录。')
             if args.action=='apps':
                 data=common.recipe(args.recipe,'fedora')
-                install_desktop_packages(root,data)
+                if fedora_ffmpeg.selected(data) and not args.ffmpeg_bundle:
+                    parser.error('含 ffmpeg-free 的配方需要修订版 FFmpeg 构建包。')
+                if fedora_obs.selected(data) and not args.obs_bundle:
+                    parser.error('含 obs-studio 的配方需要独立 V4L2 插件构建包。')
             staging=root/'tmp/liuqin-packages';staging.mkdir()
             for file in sorted(args.rpms.glob('*.rpm')):shutil.copyfile(file,staging/file.name)
+            if args.action=='apps' and fedora_ffmpeg.selected(data):
+                fedora_ffmpeg.stage(args.ffmpeg_bundle,staging)
+            if args.action=='apps' and fedora_obs.selected(data):
+                fedora_obs.stage(args.obs_bundle,staging)
             packages=['/tmp/liuqin-packages/'+p.name for p in sorted(staging.glob('*.rpm'))]
             if args.action=='kernel-files':
                 install_kernel_packages(root,packages)
             else:
-                desktop_dnf(root,data,'install',*packages)
+                # Resolve the desktop and its exact local libraries together.
+                install_desktop_packages(root,data,packages)
             shutil.rmtree(staging)
             if args.action=='apps':
                 if data.get('remove'):desktop_dnf(root,data,'remove',*data['remove'])
                 restore_core_manpages(root)
                 if data.get('overlay'):common.overlay(data['overlay'],root)
                 configure(root,data,output)
+                if fedora_ffmpeg.selected(data):fedora_ffmpeg.configure(root,args.ffmpeg_bundle,chroot)
+                if fedora_obs.selected(data):fedora_obs.check_image(root,chroot)
                 check_desktop_runtime(root,first_boot_setup=data['first_boot_setup'])
+            elif args.require_ffmpeg or (root/fedora_ffmpeg.LICENSE_DIR).exists():
+                fedora_ffmpeg.check_image(root,chroot)
+            if args.action=='kernel-files' and (args.require_obs or (root/fedora_obs.LICENSE).exists()):
+                fedora_obs.check_image(root,chroot)
         inventory=chroot(root,['rpm','-qa','--qf','%{NAME}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n'],capture_output=True).stdout
         (output/'packages.tsv').write_bytes(inventory)
         dnf(root,'clean','all')

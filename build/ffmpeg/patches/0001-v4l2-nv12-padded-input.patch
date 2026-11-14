@@ -1,0 +1,101 @@
+From f6ff60f74fb5c8408ee0e69bb041f603544069ab Mon Sep 17 00:00:00 2001
+From: Liuqin Linux Kit <liuqin@localhost>
+Date: Sat, 14 Nov 2026 16:04:56 +0800
+Subject: [PATCH] avcodec/v4l2: copy linear NV12 with visible rows and
+ negotiated stride
+
+Iris can negotiate a padded 736-line buffer for a 720-line frame. Copy only the visible input pixels, but place UV after the padded luma plane. Respect independent input strides, including negative strides, and validate the destination before writing. Clear padding on reused buffers.
+
+Also guard the shared byte-copy helper against a negative size or an offset beyond the mapped buffer.
+---
+ libavcodec/v4l2_buffers.c | 57 +++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 55 insertions(+), 2 deletions(-)
+
+diff --git a/libavcodec/v4l2_buffers.c b/libavcodec/v4l2_buffers.c
+index f96c267..2a35da1 100644
+--- a/libavcodec/v4l2_buffers.c
++++ b/libavcodec/v4l2_buffers.c
+@@ -300,11 +300,14 @@ static int v4l2_bufref_to_buf(V4L2Buffer *out, int plane, const uint8_t* data, i
+ {
+     unsigned int bytesused, length;
+ 
+-    if (plane >= out->num_planes)
++    if (plane < 0 || plane >= out->num_planes || size < 0 || offset < 0 ||
++        out->plane_info[plane].length > UINT_MAX)
+         return AVERROR(EINVAL);
+ 
+     length = out->plane_info[plane].length;
+-    bytesused = FFMIN(size+offset, length);
++    if (offset > length)
++        return AVERROR(EINVAL);
++    bytesused = offset + FFMIN(size, length - offset);
+ 
+     memcpy((uint8_t*)out->plane_info[plane].mm_addr+offset, data, FFMIN(size, length-offset));
+ 
+@@ -360,6 +363,52 @@ static int v4l2_buffer_buf_to_swframe(AVFrame *frame, V4L2Buffer *avbuf)
+     return 0;
+ }
+ 
++/* Linear NV12/NV21 has two image planes in one V4L2 memory plane. The
++ * negotiated height includes padding, and locates UV; it is not the number
++ * of rows available in the input AVFrame. Its strides can differ as well. */
++static int v4l2_buffer_nv12_to_buf(const AVFrame *frame, V4L2Buffer *out, int height)
++{
++    int stride = out->plane_info[0].bytesperline;
++    int uv_width, uv_height, i, y;
++    size_t uv_offset, size;
++    uint8_t *dst = out->plane_info[0].mm_addr;
++
++    if (out->num_planes != 1 || frame->width <= 0 || frame->height <= 0 ||
++        height < frame->height || stride <= 0 || frame->width > stride ||
++        frame->width == INT_MAX || height == INT_MAX)
++        return AVERROR(EINVAL);
++
++    uv_width  = 2 * ((frame->width + 1) / 2);
++    uv_height = (frame->height + 1) / 2;
++    if (uv_width > stride || !frame->data[0] || !frame->data[1] ||
++        FFABS((int64_t)frame->linesize[0]) < frame->width ||
++        FFABS((int64_t)frame->linesize[1]) < uv_width ||
++        (uint64_t)stride * ((uint64_t)height + (height + 1) / 2) > UINT_MAX)
++        return AVERROR(EINVAL);
++
++    uv_offset = (size_t)stride * height;
++    size = uv_offset + (size_t)stride * ((height + 1) / 2);
++    if (size > out->plane_info[0].length || !dst)
++        return AVERROR(EINVAL);
++
++    /* Clear row and bottom padding so reused buffers do not retain pixels. */
++    memset(dst, 0, size);
++    for (i = 0; i < 2; i++) {
++        int rows = i ? uv_height : frame->height;
++        int width = i ? uv_width : frame->width;
++        uint8_t *plane = dst + (i ? uv_offset : 0);
++        for (y = 0; y < rows; y++)
++            memcpy(plane + (size_t)y * stride,
++                   frame->data[i] + (ptrdiff_t)y * frame->linesize[i], width);
++    }
++
++    if (V4L2_TYPE_IS_MULTIPLANAR(out->buf.type))
++        out->planes[0].bytesused = size;
++    else
++        out->buf.bytesused = size;
++    return 0;
++}
++
+ static int v4l2_buffer_swframe_to_buf(const AVFrame *frame, V4L2Buffer *out)
+ {
+     int i, ret;
+@@ -370,6 +419,10 @@ static int v4l2_buffer_swframe_to_buf(const AVFrame *frame, V4L2Buffer *out)
+                        fmt.fmt.pix_mp.height : fmt.fmt.pix.height;
+     int is_planar_format = 0;
+ 
++    if ((pixel_format == V4L2_PIX_FMT_NV12 && frame->format == AV_PIX_FMT_NV12) ||
++        (pixel_format == V4L2_PIX_FMT_NV21 && frame->format == AV_PIX_FMT_NV21))
++        return v4l2_buffer_nv12_to_buf(frame, out, height);
++
+     switch (pixel_format) {
+     case V4L2_PIX_FMT_YUV420M:
+     case V4L2_PIX_FMT_YVU420M:
+-- 
+2.56.0
+

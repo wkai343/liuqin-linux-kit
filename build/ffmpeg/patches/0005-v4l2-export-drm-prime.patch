@@ -1,0 +1,317 @@
+From: Liuqin Linux Kit <liuqin@localhost>
+Date: Sat, 14 Nov 2026 18:21:43 +0800
+Subject: [PATCH] avcodec/v4l2: export linear NV12/NV21 decoder frames as DRM PRIME
+
+Negotiate DRM PRIME through get_format and advertise the internal hardware
+configuration to consumers. Export capture DMA-BUFs with checked plane layout;
+keep each capture buffer and the decoder alive until the last frame reference
+is released. Retain ordinary mapped-frame output for other consumers.
+
+diff --git a/libavcodec/v4l2_buffers.c b/libavcodec/v4l2_buffers.c
+--- a/libavcodec/v4l2_buffers.c
++++ b/libavcodec/v4l2_buffers.c
+@@ -21,6 +21,7 @@
+  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+  */
+ 
++#define _GNU_SOURCE
+ #include <linux/videodev2.h>
+ #include <sys/ioctl.h>
+ #include <sys/mman.h>
+@@ -28,7 +29,13 @@
+ #include <fcntl.h>
+ #include <poll.h>
+ #include "libavcodec/avcodec.h"
++#include "config.h"
++#if CONFIG_LIBDRM
++#include <drm_fourcc.h>
++#include "libavutil/hwcontext_drm.h"
++#endif
+ #include "libavutil/attributes.h"
++#include "libavutil/mem.h"
+ #include "libavutil/pixdesc.h"
+ #include "libavutil/refstruct.h"
+ #include "v4l2_context.h"
+@@ -362,6 +369,106 @@
+ 
+     return 0;
+ }
++
++#if CONFIG_LIBDRM
++static void v4l2_drm_descriptor_free(AVDRMFrameDescriptor *desc)
++{
++    int i;
++    for (i = 0; i < desc->nb_objects; i++)
++        if (desc->objects[i].fd >= 0)
++            close(desc->objects[i].fd);
++    av_free(desc);
++}
++
++static void v4l2_drm_frame_free(void *opaque, uint8_t *data)
++{
++    v4l2_drm_descriptor_free((AVDRMFrameDescriptor *)data);
++    v4l2_free_buffer(opaque, NULL);
++}
++
++/* NV12/NV21 image planes can share one V4L2 memory plane, or occupy two.
++ * Use the negotiated storage height for UV and validate before exporting FDs.
++ * Each frame owns its exported FD references and one capture-buffer reference;
++ * retained frames therefore keep the decoder and its buffers alive on close. */
++static int v4l2_drm_descriptor(V4L2Buffer *buf, AVDRMFrameDescriptor *desc)
++{
++    const V4L2Context *ctx = buf->context;
++    const int multi = V4L2_TYPE_IS_MULTIPLANAR(ctx->type);
++    const unsigned width = multi ? ctx->format.fmt.pix_mp.width : ctx->format.fmt.pix.width;
++    const unsigned height = multi ? ctx->format.fmt.pix_mp.height : ctx->format.fmt.pix.height;
++    AVDRMLayerDescriptor *layer = &desc->layers[0];
++    int i;
++
++    if ((ctx->av_pix_fmt != AV_PIX_FMT_NV12 && ctx->av_pix_fmt != AV_PIX_FMT_NV21) ||
++        (buf->num_planes != 1 && buf->num_planes != 2) || !width || !height)
++        return AVERROR(EINVAL);
++    desc->nb_objects = buf->num_planes;
++    for (i = 0; i < desc->nb_objects; i++) {
++        desc->objects[i].fd = -1;
++        desc->objects[i].size = buf->plane_info[i].length;
++        desc->objects[i].format_modifier = DRM_FORMAT_MOD_LINEAR;
++    }
++    desc->nb_layers = 1;
++    layer->format = ctx->av_pix_fmt == AV_PIX_FMT_NV12 ? DRM_FORMAT_NV12 : DRM_FORMAT_NV21;
++    layer->nb_planes = 2;
++    for (i = 0; i < 2; i++) {
++        const int obj = buf->num_planes == 1 ? 0 : i;
++        const uint64_t pitch = buf->plane_info[obj].bytesperline;
++        const uint64_t rows = i ? ((uint64_t)height + 1) / 2 : height;
++        const uint64_t rowbytes = i ? ((uint64_t)width + 1) / 2 * 2 : width;
++        uint64_t offset = multi ? buf->planes[obj].data_offset : 0;
++        if (i && buf->num_planes == 1)
++            offset += pitch * height;
++        if (pitch < rowbytes || pitch > INT_MAX || offset > PTRDIFF_MAX ||
++            offset > desc->objects[obj].size ||
++            (rows - 1) * pitch + rowbytes > desc->objects[obj].size - offset)
++            return AVERROR(EINVAL);
++        layer->planes[i].object_index = obj;
++        layer->planes[i].offset = offset;
++        layer->planes[i].pitch = pitch;
++    }
++    for (i = 0; i < desc->nb_objects; i++) {
++        struct v4l2_exportbuffer exp = {
++            .type = ctx->type, .index = buf->buf.index, .plane = i,
++            .flags = O_CLOEXEC | O_RDWR,
++        };
++        if (ioctl(buf_to_m2mctx(buf)->fd, VIDIOC_EXPBUF, &exp) < 0)
++            return AVERROR(errno);
++        desc->objects[i].fd = exp.fd;
++    }
++    return 0;
++}
++
++static int v4l2_buffer_buf_to_drmframe(AVFrame *frame, V4L2Buffer *buf)
++{
++    AVDRMFrameDescriptor *desc = av_mallocz(sizeof(*desc));
++    int ret;
++    if (!desc)
++        return AVERROR(ENOMEM);
++    ret = v4l2_drm_descriptor(buf, desc);
++    if (ret < 0)
++        goto fail;
++    frame->hw_frames_ctx = av_buffer_ref(buf->context->hw_frames_ref);
++    if (!frame->hw_frames_ctx) {
++        ret = AVERROR(ENOMEM);
++        goto fail;
++    }
++    frame->buf[0] = av_buffer_create((uint8_t *)desc, sizeof(*desc),
++                                    v4l2_drm_frame_free, buf, AV_BUFFER_FLAG_READONLY);
++    if (!frame->buf[0]) {
++        av_buffer_unref(&frame->hw_frames_ctx);
++        ret = AVERROR(ENOMEM);
++        goto fail;
++    }
++    v4l2_buf_increase_ref(buf);
++    frame->data[0] = frame->buf[0]->data;
++    frame->format = AV_PIX_FMT_DRM_PRIME;
++    return 0;
++fail:
++    v4l2_drm_descriptor_free(desc);
++    return ret;
++}
++#endif
+ 
+ /* Linear NV12/NV21 has two image planes in one V4L2 memory plane. The
+  * negotiated height includes padding, and locates UV; it is not the number
+@@ -498,7 +605,12 @@
+     av_frame_unref(frame);
+ 
+     /* 1. get references to the actual data */
+-    ret = v4l2_buffer_buf_to_swframe(frame, avbuf);
++#if CONFIG_LIBDRM
++    if (avbuf->context->drm_prime)
++        ret = v4l2_buffer_buf_to_drmframe(frame, avbuf);
++    else
++#endif
++        ret = v4l2_buffer_buf_to_swframe(frame, avbuf);
+     if (ret)
+         return ret;
+ 
+diff --git a/libavcodec/v4l2_context.h b/libavcodec/v4l2_context.h
+--- a/libavcodec/v4l2_context.h
++++ b/libavcodec/v4l2_context.h
+@@ -52,6 +52,10 @@
+      * AV_PIX_FMT_NONE means this is an encoded stream.
+      */
+     enum AVPixelFormat av_pix_fmt;
++
++    /* Decoder output negotiated with get_format(), independent of V4L2 layout. */
++    int drm_prime;
++    AVBufferRef *hw_frames_ref;
+ 
+     /**
+      * AVCodecID corresponding to this buffer context.
+diff --git a/libavcodec/v4l2_m2m.c b/libavcodec/v4l2_m2m.c
+--- a/libavcodec/v4l2_m2m.c
++++ b/libavcodec/v4l2_m2m.c
+@@ -254,6 +254,7 @@
+ 
+     ff_v4l2_context_release(&s->capture);
+     sem_destroy(&s->refsync);
++    av_buffer_unref(&s->capture.hw_frames_ref);
+ 
+     if (s->fd >= 0)
+         close(s->fd);
+diff --git a/libavcodec/v4l2_m2m_dec.c b/libavcodec/v4l2_m2m_dec.c
+--- a/libavcodec/v4l2_m2m_dec.c
++++ b/libavcodec/v4l2_m2m_dec.c
+@@ -23,16 +23,81 @@
+ 
+ #include <linux/videodev2.h>
+ #include <sys/ioctl.h>
++#include "config.h"
++#include "libavutil/hwcontext.h"
++#include "libavutil/hwcontext_drm.h"
+ #include "libavutil/pixfmt.h"
+ #include "libavutil/pixdesc.h"
+ #include "libavutil/opt.h"
+ #include "libavcodec/avcodec.h"
+ #include "codec_internal.h"
++#include "hwconfig.h"
+ #include "libavcodec/decode.h"
+ 
+ #include "v4l2_context.h"
+ #include "v4l2_m2m.h"
+ #include "v4l2_fmt.h"
++
++static int v4l2_select_output(AVCodecContext *avctx, V4L2Context *capture)
++{
++    enum AVPixelFormat formats[3] = { capture->av_pix_fmt, AV_PIX_FMT_NONE, AV_PIX_FMT_NONE };
++    int ret;
++
++#if CONFIG_LIBDRM
++    if (capture->av_pix_fmt == AV_PIX_FMT_NV12 || capture->av_pix_fmt == AV_PIX_FMT_NV21) {
++        formats[0] = AV_PIX_FMT_DRM_PRIME;
++        formats[1] = capture->av_pix_fmt;
++    }
++#endif
++    avctx->sw_pix_fmt = capture->av_pix_fmt;
++    ret = ff_get_format(avctx, formats);
++    if (ret < 0)
++        return ret;
++    avctx->pix_fmt = ret;
++    capture->drm_prime = ret == AV_PIX_FMT_DRM_PRIME;
++    av_buffer_unref(&capture->hw_frames_ref);
++
++#if CONFIG_LIBDRM
++    if (capture->drm_prime) {
++        AVBufferRef *device;
++        AVHWFramesContext *frames;
++        if (avctx->hw_device_ctx) {
++            if (((AVHWDeviceContext *)avctx->hw_device_ctx->data)->type != AV_HWDEVICE_TYPE_DRM)
++                return AVERROR(EINVAL);
++            device = av_buffer_ref(avctx->hw_device_ctx);
++        } else {
++            device = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_DRM);
++        }
++        if (!device)
++            return AVERROR(ENOMEM);
++        ret = 0;
++        if (!avctx->hw_device_ctx) {
++            ((AVDRMDeviceContext *)((AVHWDeviceContext *)device->data)->hwctx)->fd = -1;
++            ret = av_hwdevice_ctx_init(device);
++        }
++        if (ret >= 0)
++            capture->hw_frames_ref = av_hwframe_ctx_alloc(device);
++        av_buffer_unref(&device);
++        if (ret < 0)
++            return ret;
++        if (!capture->hw_frames_ref)
++            return AVERROR(ENOMEM);
++        frames = (AVHWFramesContext *)capture->hw_frames_ref->data;
++        frames->format = AV_PIX_FMT_DRM_PRIME;
++        frames->sw_format = capture->av_pix_fmt;
++        frames->width = V4L2_TYPE_IS_MULTIPLANAR(capture->type) ?
++                        capture->format.fmt.pix_mp.width : capture->format.fmt.pix.width;
++        frames->height = V4L2_TYPE_IS_MULTIPLANAR(capture->type) ?
++                         capture->format.fmt.pix_mp.height : capture->format.fmt.pix.height;
++        ret = av_hwframe_ctx_init(capture->hw_frames_ref);
++        if (ret < 0) {
++            av_buffer_unref(&capture->hw_frames_ref);
++            return ret;
++        }
++    }
++#endif
++    return 0;
++}
+ 
+ static int v4l2_try_start(AVCodecContext *avctx)
+ {
+@@ -62,8 +127,8 @@
+     }
+ 
+     /* 2.1 update the AVCodecContext */
+-    avctx->pix_fmt = ff_v4l2_format_v4l2_to_avfmt(capture->format.fmt.pix_mp.pixelformat, AV_CODEC_ID_RAWVIDEO);
+-    capture->av_pix_fmt = avctx->pix_fmt;
++    capture->av_pix_fmt = ff_v4l2_format_v4l2_to_avfmt(V4L2_TYPE_IS_MULTIPLANAR(capture->type) ?
++        capture->format.fmt.pix_mp.pixelformat : capture->format.fmt.pix.pixelformat, AV_CODEC_ID_RAWVIDEO);
+ 
+     /* 3. Read the initial visible area unless SOURCE_CHANGE already supplied
+      * it. Keep that authoritative rectangle across capture reconfiguration. */
+@@ -75,6 +140,9 @@
+ 
+     /* 4. init the capture context now that we have the capture format */
+     if (!capture->buffers) {
++        ret = v4l2_select_output(avctx, capture);
++        if (ret < 0)
++            return ret;
+         ret = ff_v4l2_context_init(capture);
+         if (ret) {
+             av_log(avctx, AV_LOG_ERROR, "can't request capture buffers\n");
+@@ -227,6 +295,22 @@
+         .option     = options, \
+         .version    = LIBAVUTIL_VERSION_INT, \
+     };
++
++static const AVCodecHWConfigInternal *const v4l2_m2m_hw_configs[] = {
++#if CONFIG_LIBDRM
++    HW_CONFIG_INTERNAL(DRM_PRIME),
++    /* Also accept an application-supplied DRM device. The FFmpeg CLI only
++     * negotiates formats with HW_DEVICE_CTX when using -hwaccel drm. */
++    &(const AVCodecHWConfigInternal) {
++        .public = {
++            .pix_fmt = AV_PIX_FMT_DRM_PRIME,
++            .methods = AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX,
++            .device_type = AV_HWDEVICE_TYPE_DRM,
++        },
++    },
++#endif
++    NULL
++};
+ 
+ #define M2MDEC(NAME, LONGNAME, CODEC, bsf_name) \
+     M2MDEC_CLASS(NAME) \
+@@ -245,6 +329,7 @@
+         .caps_internal  = FF_CODEC_CAP_NOT_INIT_THREADSAFE | \
+                           FF_CODEC_CAP_INIT_CLEANUP, \
+         .p.wrapper_name = "v4l2m2m", \
++        .hw_configs     = v4l2_m2m_hw_configs, \
+     }
+ 
+ M2MDEC(h264,  "H.264", AV_CODEC_ID_H264,       "h264_mp4toannexb");

@@ -35,6 +35,47 @@ A730 的 SP/TPL1 恢复项、其他 GPU 的既有布局、固件计数字段及�
 发布文件字节保留，以及实际 RPM 的路径、版本和 Fedora 精确依赖兼容能力；已接入
 Devbox 与 CI。
 
+`fedora-ffmpeg.py` 使用真实的合成 ARM64 RPM/SRPM 检查默认构建路由、运行库整组校验、
+补丁变化导致缓存失效、缺失/篡改/错误架构拒绝，以及镜像版本锁和对应源码保留。
+此测试不访问网络或视频设备，已纳入 Devbox 和 CI 的离线入口。
+
+`fedora-obs.py` 用真实 ARM64 ELF/RPM 检查 OBS 插件的独立安装布局、共享库依赖、
+源码保留、镜像校验、缓存失效和默认/单独构建路由；同时检查 FFmpeg 开发包只进入
+构建根。已纳入 Devbox 和 CI，不启动 OBS 或访问视频设备。
+
+`firefox-media.py` 检查 Firefox/FFmpeg 兼容组合、异常清单和命名空间不可用时的回退、
+启动参数保留、嵌套启动时恢复原版库，以及安装时保留 RPM 文件和用户入口。
+已纳入 Devbox 与 CI；实际播放、音频、沙箱及版本维护流程见
+[Firefox 启动适配](../build/firefox/README.md)。
+
+`ffmpeg-v4l2.py --source /path/to/configured-ffmpeg` 直接编译 FFmpeg 的 V4L2 缓冲区函数，
+用 ASan/UBSan 检查 NV12/NV21 的可见高度、存储高度、UV 偏移、独立及负行间距和容量边界。
+还检查解码可见区域及保留编码 packet 时的硬件缓冲区归还。
+DRM 回归检查导出 FD、帧引用生命周期、平面布局和重排/负值 PTS。
+需要配置好的主机 FFmpeg 源码、静态 libavutil、`libavcodec/packet.o` 和 libdrm 开发头文件，
+独立于默认离线入口；头文件可通过 `--drm-include` 指定。
+配方和运行要求见 [Fedora FFmpeg](../build/ffmpeg/README.md)；实机帧数和画质另行检查。
+
+`ffmpeg-v4l2-playback.py` 是需要真机、mpv 和已解锁桌面的短测，不加入离线 CI。
+它禁止软件回退，检查真实 DRM PRIME 显示以及播完后连续两次跳回开头；保存日志、
+截图和播放位置到新建的输出目录。使用 PTS/DTS 正确的约两秒素材，在桌面终端运行：
+
+```sh
+python3 tests/ffmpeg-v4l2-playback.py --output out/video-playback \
+  --sample h264=/path/to/h264.mp4 --sample hevc=/path/to/hevc.mp4 \
+  --sample vp9=/path/to/vp9.webm
+```
+
+可用 `--library-path` 指定候选 FFmpeg 运行库目录；不传时检查系统安装版本。
+截图会主动回读图像，只作画面核对，不用于零拷贝性能测量。
+
+`obs-v4l2-packets.c` 通过插件的 CMake `BUILD_TESTING` 选项构建，检查真实包适配代码的
+独立/合并参数集、重复头信息、首帧时间戳和短缓冲区；可启用 ASan/UBSan。
+`obs-v4l2-record.py` 需要 ARM64 真机 Wayland 会话和插件，用合成图片与静音轨执行
+约两秒的标准 OBS 录像，检查停止时间之前的连续视频包和重新录像。
+MKV/MP4/TS 文件的实际帧数和尺寸还须在另一台机器上独立软件解码验证。
+两者独立于默认离线 CI，构建、依赖与命令见 [OBS V4L2 插件](../build/obs-v4l2/README.md)。
+
 OpenCL CTS 须在平板执行，不加入无 GPU 的离线入口。按问题选择
 [图像和复制定向回归](../docs/GPU.md#图像和复制定向回归)或
 [长计算与故障恢复](../docs/GPU.md#长计算与故障恢复)；单个用例保持原始规模。

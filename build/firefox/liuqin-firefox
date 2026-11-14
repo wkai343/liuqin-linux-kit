@@ -1,0 +1,132 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: MIT
+"""Run tested Fedora Firefox builds with the matched system FFmpeg libraries."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import struct
+import subprocess
+import sys
+
+LIB = Path('/usr/lib64/firefox')
+BIN = Path('/usr/bin')
+DATA = Path('/usr/local/share/liuqin-firefox')
+HELPER = Path('/usr/local/libexec/liuqin-firefox')
+HOST = Path('/usr/local/libexec/liuqin-firefox-host')
+MARKER = 'LIUQIN_FIREFOX_MEDIA_NAMESPACE'
+
+
+def build_id(path):
+    """Read GNU build ID from an AArch64 ELF's bounded PT_NOTE segments."""
+    with path.open('rb') as stream:
+        header = stream.read(64)
+        if (len(header) != 64 or header[:6] != b'\x7fELF\x02\x01' or
+                struct.unpack_from('<H', header, 18)[0] != 183):
+            raise ValueError('not an AArch64 ELF: '+str(path))
+        offset = struct.unpack_from('<Q', header, 32)[0]
+        size, count = struct.unpack_from('<HH', header, 54)
+        if size != 56 or count > 128:
+            raise ValueError('unexpected ELF program headers')
+        for index in range(count):
+            stream.seek(offset + index * size)
+            entry = stream.read(size)
+            if len(entry) != size:
+                raise ValueError('truncated ELF program header')
+            if struct.unpack_from('<I', entry)[0] != 4:
+                continue
+            start, length = struct.unpack_from('<Q', entry, 8)[0], struct.unpack_from('<Q', entry, 32)[0]
+            if length > 65536:
+                raise ValueError('oversized ELF note')
+            stream.seek(start)
+            notes = stream.read(length)
+            position = 0
+            while position + 12 <= len(notes):
+                namesize, descsize, kind = struct.unpack_from('<III', notes, position)
+                position += 12
+                desc = position + (namesize + 3) // 4 * 4
+                end = desc + descsize
+                if end > len(notes):
+                    raise ValueError('truncated ELF note')
+                if kind == 3 and notes[position:position+namesize] == b'GNU\0':
+                    return notes[desc:end].hex()
+                position = desc + (descsize + 3) // 4 * 4
+    raise ValueError('missing GNU build ID: '+str(path))
+
+
+def identity(library, launcher):
+    return dict(elf={name: build_id(library/name) for name in
+                    ('firefox', 'libxul.so', 'libmozavcodec.so', 'libmozavutil.so')},
+                launcher_sha256=hashlib.sha256(launcher.read_bytes()).hexdigest())
+
+
+def compatible(library, launcher, manifest, packages):
+    if not isinstance(manifest, dict) or manifest.get('schema') != 1:
+        raise ValueError('unsupported compatibility manifest')
+    if (not isinstance(manifest.get('ffmpeg_release'), str) or
+            not isinstance(manifest.get('firefox'), list) or
+            any(not isinstance(item, dict) for item in manifest['firefox'])):
+        raise ValueError('invalid compatibility manifest')
+    if packages != [manifest['ffmpeg_release']] * 2:
+        return False, 'untested FFmpeg packages'
+    current = identity(library, launcher)
+    if not any(item.get('identity') == current for item in manifest['firefox']):
+        return False, 'untested Firefox build'
+    return True, 'tested Firefox and FFmpeg pair'
+
+
+def namespace_prefix():
+    # A normal user namespace; Firefox's own seccomp/LSM sandboxes stay enabled.
+    return ['/usr/bin/bwrap', '--bind', '/', '/', '--dev-bind', '/dev', '/dev']
+
+
+def command(active, library, binary, arguments):
+    if not active and library == LIB:
+        return [str(BIN/'firefox'), *arguments]
+    prefix = namespace_prefix()
+    # Keep an unmodified directory view for internal restarts and package
+    # updates. Binding the original directory hides any old per-file overlays.
+    prefix += ['--ro-bind', str(binary), str(HOST/'bin'),
+               '--ro-bind', str(library), str(HOST/'firefox'),
+               '--ro-bind', str(library), str(LIB)]
+    if active:
+        prefix += ['--ro-bind', str(HELPER), str(BIN/'firefox'),
+                   '--ro-bind', '/usr/lib64/libavcodec.so.63', str(LIB/'libmozavcodec.so'),
+                   '--ro-bind', '/usr/lib64/libavutil.so.61', str(LIB/'libmozavutil.so'),
+                   '--setenv', MARKER, '1']
+    else:
+        prefix += ['--ro-bind', str(binary/'firefox'), str(BIN/'firefox'),
+                   '--unsetenv', MARKER]
+    return [*prefix, '--', str(HOST/'bin/firefox'), *arguments]
+
+
+def main():
+    nested = (os.environ.get(MARKER) == '1' and
+              (HOST/'bin/firefox').is_file() and (HOST/'firefox/libxul.so').is_file())
+    library, binary = (HOST/'firefox', HOST/'bin') if nested else (LIB, BIN)
+    active = False
+    reason = 'disabled by LIUQIN_FIREFOX_SYSTEM_FFMPEG=0'
+    try:
+        if os.environ.get('LIUQIN_FIREFOX_SYSTEM_FFMPEG') != '0':
+            manifest = json.loads((DATA/'compatibility.json').read_text())
+            packages = subprocess.check_output(
+                ['/usr/bin/rpm', '-q', '--qf', '%{VERSION}-%{RELEASE}\n',
+                 'libavcodec-free', 'libavutil-free'], text=True, timeout=5).splitlines()
+            active, reason = compatible(library, binary/'firefox', manifest, packages)
+        if active:
+            # Check mount/user-namespace permissions before replacing this
+            # process. A denied namespace must not prevent ordinary browsing.
+            probe = command(True, library, binary, [])
+            subprocess.run([*probe[:probe.index('--')+1], '/usr/bin/true'],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=5)
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        active, reason = False, str(error)
+    if os.environ.get('LIUQIN_FIREFOX_MEDIA_DEBUG') == '1':
+        print('liuqin-firefox: '+('system FFmpeg' if active else 'original media libraries')+
+              '; '+reason, file=sys.stderr, flush=True)
+    argv = command(active, library, binary, sys.argv[1:])
+    os.execv(argv[0], argv)
+
+
+if __name__ == '__main__':
+    main()
