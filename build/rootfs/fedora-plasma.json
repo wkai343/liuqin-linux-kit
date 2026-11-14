@@ -4,6 +4,7 @@
   "packages": [
     "google-noto-sans-cjk-fonts", "qt6-qttranslations",
     "plasma-welcome", "plasma-milou", "plasma-systemsettings", "kinfocenter", "accountsservice",
+    "pam-kwallet",
     "bash-color-prompt", "bash-completion",
 
     "procps-ng", "psmisc", "util-linux", "ncurses", "hostname", "iputils", "bind-utils",
