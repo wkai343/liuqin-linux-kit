@@ -5,7 +5,7 @@
   "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
   "tag": "v7.3.4",
   "commit": "7595a62d45ee1a2297eafa5f2ef5d0a45142d84d",
-  "expected_source_tree": "a7f9085206c19dd2928d09985e997bbfd5a1ff2a",
+  "expected_source_tree": "e2949b9db2182407b7885e02de44f1fb94918af2",
   "config": {
     "path": "build/recovery/kernel/7.3.4.config",
     "sha256": "84e4eeb8b0004d8f73c7cb956efe53e13bf9a6d580918a1214892bda95469f39"
@@ -216,6 +216,30 @@
       "sha256": "fa0bdfb622952ee0e221bd294a2db428e7d41f0548b8eb3c0b7be5534908fbc2"
     },
     {
+      "path": "build/kernel/patches/linux-7.3/0065-media-iris-drain-irq-before-power-off.patch",
+      "sha256": "3a214bce6e8febf0be60e7787a9eaeedd02222f41e2f05bca30b4a8169ab77f2"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0066-media-iris-recycle-empty-capture-buffers.patch",
+      "sha256": "3eda967c7d48afd04493f0e6986e7a916a895b7d81ec647d1952c6d95e5cbd4c"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0067-media-iris-sm8450-limits-and-decoder-only.patch",
+      "sha256": "981f4a9c1a83b9bf86aa4b6e83111914f8351124f37f9a8dfa1ae3de565380a8"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0068-iommu-qcom-iris-secure-page-tables.patch",
+      "sha256": "71dcc960d691eb7a4397a7979715ccaa98e2e413f3828abd7c9206429c788f67"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0069-arm64-dts-sm8450-iris-secure-context.patch",
+      "sha256": "7d9426aa01163e0a2b1273998b08c137d5bbf4ee9c12408dfa3b5cfcbfe45d42"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0070-media-iris-sm8450-secure-encoder.patch",
+      "sha256": "634e53e4e128394972dbcad99015a0f6db22cdba9f37978c6b723303afb6e266"
+    },
+    {
       "path": "build/recovery/kernel/patches/linux-7.3/0001-recovery-peripheral-handoff.patch",
       "sha256": "ccb0f030fb1bed451301961d3d9c67d1b45060f67beb936a9aaf32a9db998f62"
     }
@@ -243,7 +267,7 @@
   "build_timestamp": "2026-11-11T00:00:00+00:00",
   "shared_kernel": {
     "path": "build/kernel/source.json",
-    "sha256": "cabc3e74a24107ccd9253a0ab4e5de8b491662b82718b64dfa725f5a6c99f6e4"
+    "sha256": "72d4a2e02d7a4a0f4992b39f14634b3ea6a331f900b9e38fca7705a1c7daa26c"
   },
   "touch_patches": [
     {

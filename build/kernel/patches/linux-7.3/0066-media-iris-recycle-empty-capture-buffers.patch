@@ -1,0 +1,156 @@
+From c6d742da1f977cfedc4b7e714efaec83e93e8e21 Mon Sep 17 00:00:00 2001
+From: wk <58632380+wkai343@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 03:56:12 +0800
+Subject: [PATCH] media: iris: recycle empty decoder capture buffers without
+ dropping frames
+
+Iris2 firmware returns empty buffers for VP9 hidden frames, including buffers without the NOSHOW picture flag and an initial timestamp-zero return. Passing these to userspace as corrupt frames drops pending visible frames with the same timestamp. Requeue clean non-LAST empty/NOSHOW buffers inside the driver; preserve timestamps for actual errors.
+
+Do not requeue while capture STOP is waiting for its response or after capture stops. Leave such buffers deferred for cleanup or the next stream-on. Preserve the driver LAST flag synthesized for source changes.
+
+Based on Xilin Wu's pending iris VA fixes, extended for unflagged empty Iris2 buffers and capture STOP ordering.
+
+Link: https://lore.landau.one/lkml/20261029-iris-va-fixes-v1-0-44a2783f782b@radxa.com/T/
+---
+ .../media/platform/qcom/iris/iris_buffer.c    |  3 +-
+ .../media/platform/qcom/iris/iris_hfi_gen2.h  |  2 +
+ .../qcom/iris/iris_hfi_gen2_command.c         | 11 ++++-
+ .../qcom/iris/iris_hfi_gen2_response.c        | 48 +++++++++++++++++--
+ 4 files changed, 58 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_buffer.c b/drivers/media/platform/qcom/iris/iris_buffer.c
+index eb8de60c1..c376c6a97 100644
+--- a/drivers/media/platform/qcom/iris/iris_buffer.c
++++ b/drivers/media/platform/qcom/iris/iris_buffer.c
+@@ -899,7 +899,8 @@ int iris_vb2_buffer_done(struct iris_inst *inst, struct iris_buffer *buf)
+ 	if (buf->flags & V4L2_BUF_FLAG_ERROR) {
+ 		state = VB2_BUF_STATE_ERROR;
+ 		vb2_set_plane_payload(vb2, 0, 0);
+-		vb2->timestamp = 0;
++		/* Preserve the identity of the discarded frame for userspace. */
++		vb2->timestamp = buf->timestamp;
+ 		v4l2_m2m_buf_done(vbuf, state);
+ 		return 0;
+ 	}
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen2.h b/drivers/media/platform/qcom/iris/iris_hfi_gen2.h
+index 21ab58e0a..914479918 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2.h
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2.h
+@@ -20,6 +20,7 @@ struct iris_core;
+  * @packet: HFI packet
+  * @ipsc_properties_set: boolean to set ipsc properties to fw
+  * @opsc_properties_set: boolean to set opsc properties to fw
++ * @output_stopping: capture streamoff is waiting for the firmware response
+  * @hfi_frame_info: structure of frame info
+  * @src_subcr_params: subscription params to fw on input port
+  * @dst_subcr_params: subscription params to fw on output port
+@@ -29,6 +30,7 @@ struct iris_inst_hfi_gen2 {
+ 	struct iris_hfi_header		*packet;
+ 	bool				ipsc_properties_set;
+ 	bool				opsc_properties_set;
++	bool				output_stopping;
+ 	struct iris_hfi_frame_info	hfi_frame_info;
+ 	struct hfi_subscription_params	src_subcr_params;
+ 	struct hfi_subscription_params	dst_subcr_params;
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen2_command.c b/drivers/media/platform/qcom/iris/iris_hfi_gen2_command.c
+index 567f7d369..4acbcec7e 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2_command.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2_command.c
+@@ -1154,7 +1154,16 @@ static int iris_hfi_gen2_session_stop(struct iris_inst *inst, u32 plane)
+ 	if (ret)
+ 		return ret;
+ 
+-	return iris_wait_for_session_response(inst, false);
++	/* The response wait drops inst->lock, allowing buffers to be returned. */
++	if (plane == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
++		inst_hfi_gen2->output_stopping = true;
++
++	ret = iris_wait_for_session_response(inst, false);
++
++	if (plane == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
++		inst_hfi_gen2->output_stopping = false;
++
++	return ret;
+ }
+ 
+ static int iris_hfi_gen2_session_pause(struct iris_inst *inst, u32 plane)
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c b/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c
+index 8c2644c7f..e19e5d3af 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c
+@@ -101,9 +101,7 @@ static int iris_hfi_gen2_get_driver_buffer_flags(struct iris_inst *inst, u32 hfi
+ 		HFI_GEN2_PICTURE_CRA | HFI_GEN2_PICTURE_BLA;
+ 	u32 driver_flags = 0;
+ 
+-	if (inst_hfi_gen2->hfi_frame_info.picture_type & HFI_GEN2_PICTURE_NOSHOW)
+-		driver_flags |= V4L2_BUF_FLAG_ERROR;
+-	else if (inst_hfi_gen2->hfi_frame_info.picture_type & keyframe)
++	if (inst_hfi_gen2->hfi_frame_info.picture_type & keyframe)
+ 		driver_flags |= V4L2_BUF_FLAG_KEYFRAME;
+ 	else if (inst_hfi_gen2->hfi_frame_info.picture_type & HFI_GEN2_PICTURE_P)
+ 		driver_flags |= V4L2_BUF_FLAG_PFRAME;
+@@ -345,9 +343,40 @@ static int iris_hfi_gen2_handle_input_buffer(struct iris_inst *inst,
+ 	return 0;
+ }
+ 
++static int iris_hfi_gen2_requeue_output_buffer(struct iris_inst *inst,
++					      struct iris_buffer *buf)
++{
++	struct iris_inst_hfi_gen2 *inst_hfi_gen2 = to_iris_inst_hfi_gen2(inst);
++	u64 timestamp = buf->timestamp;
++	int ret;
++
++	buf->data_size = 0;
++	buf->timestamp = 0;
++	buf->flags = 0;
++	buf->attr &= ~BUF_ATTR_DEQUEUED;
++	buf->attr |= BUF_ATTR_DEFERRED;
++
++	/* Leave stopped buffers for streamoff cleanup or the next streamon. */
++	if (inst_hfi_gen2->output_stopping ||
++	    (inst->state != IRIS_INST_STREAMING &&
++	     inst->state != IRIS_INST_OUTPUT_STREAMING))
++		return 0;
++
++	ret = iris_queue_buffer(inst, buf);
++	if (ret) {
++		buf->attr &= ~BUF_ATTR_DEFERRED;
++		buf->attr |= BUF_ATTR_DEQUEUED;
++		buf->flags = V4L2_BUF_FLAG_ERROR;
++		buf->timestamp = timestamp;
++	}
++
++	return ret;
++}
++
+ static int iris_hfi_gen2_handle_output_buffer(struct iris_inst *inst,
+ 					      struct iris_hfi_buffer *hfi_buffer)
+ {
++	struct iris_inst_hfi_gen2 *inst_hfi_gen2 = to_iris_inst_hfi_gen2(inst);
+ 	struct v4l2_m2m_ctx *m2m_ctx = inst->m2m_ctx;
+ 	struct v4l2_m2m_buffer *m2m_buffer, *n;
+ 	struct iris_buffer *buf;
+@@ -390,8 +419,19 @@ static int iris_hfi_gen2_handle_output_buffer(struct iris_inst *inst,
+ 
+ 	buf->flags = iris_hfi_gen2_get_driver_buffer_flags(inst, hfi_buffer->flags);
+ 
++	if (inst->domain == DECODER &&
++	    (!buf->data_size ||
++	     inst_hfi_gen2->hfi_frame_info.picture_type & HFI_GEN2_PICTURE_NOSHOW)) {
++		/* Iris2 also returns empty buffers without a NOSHOW picture flag. */
++		buf->data_size = 0;
++		if (inst->state == IRIS_INST_ERROR)
++			buf->flags |= V4L2_BUF_FLAG_ERROR;
++		if (!(buf->flags & (V4L2_BUF_FLAG_ERROR | V4L2_BUF_FLAG_LAST)))
++			return iris_hfi_gen2_requeue_output_buffer(inst, buf);
++	}
++
+ 	if (!buf->data_size && inst->state == IRIS_INST_STREAMING &&
+-	    !(hfi_buffer->flags & HFI_BUF_FW_FLAG_LAST)) {
++	    !(buf->flags & V4L2_BUF_FLAG_LAST)) {
+ 		buf->flags |= V4L2_BUF_FLAG_ERROR;
+ 	}
+ 
+-- 
+2.56.0
+

@@ -1,0 +1,153 @@
+From 9311135ab5d2d5d9de03ac3e70adf93778d25964 Mon Sep 17 00:00:00 2001
+From: wk <58632380+wkai343@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 15:11:01 +0800
+Subject: [PATCH] iommu: arm-smmu-qcom: share Iris2 CP_NON_PIXEL page tables
+
+Iris2 encoder ARP transactions use VMID 11. Give that VMID read access
+to translation tables while retaining HLOS read/write access. Limit the
+allocator to the dedicated Iris2 context. Reject atomic table growth,
+and defer reclaim to a device-managed workqueue. Never recycle pages
+whose ownership cannot be reclaimed.
+
+Signed-off-by: wk <58632380+wkai343@users.noreply.github.com>
+---
+ drivers/iommu/arm/arm-smmu/arm-smmu-qcom.c | 89 ++++++++++++++++++++++
+ drivers/iommu/arm/arm-smmu/arm-smmu-qcom.h |  1 +
+ 2 files changed, 90 insertions(+)
+
+diff --git a/drivers/iommu/arm/arm-smmu/arm-smmu-qcom.c b/drivers/iommu/arm/arm-smmu/arm-smmu-qcom.c
+index 795e8ec7e..f065b2fa8 100644
+--- a/drivers/iommu/arm/arm-smmu/arm-smmu-qcom.c
++++ b/drivers/iommu/arm/arm-smmu/arm-smmu-qcom.c
+@@ -10,6 +10,7 @@
+ #include <linux/firmware/qcom/qcom_scm.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_runtime.h>
++#include <linux/workqueue.h>
+ 
+ #include "arm-smmu.h"
+ #include "arm-smmu-qcom.h"
+@@ -430,6 +431,85 @@ static const struct of_device_id qcom_smmu_client_of_match[] __maybe_unused = {
+ 	{ }
+ };
+ 
++/* Iris2 CP_NON_PIXEL transactions require shared translation tables too. */
++struct qcom_smmu_secure_free {
++	struct work_struct work;
++	struct device *dev;
++	void *pages;
++	size_t size;
++};
++
++static void *qcom_smmu_secure_alloc(void *cookie, size_t size, gfp_t gfp)
++{
++	const struct qcom_scm_vmperm perms[] = {
++		{ QCOM_SCM_VMID_HLOS, QCOM_SCM_PERM_RW },
++		{ QCOM_SCM_VMID_CP_NON_PIXEL, QCOM_SCM_PERM_READ },
++	};
++	u64 owner = BIT_ULL(QCOM_SCM_VMID_HLOS);
++	void *pages;
++	int ret;
++
++	/* This context is used only by sleepable dma_alloc_noncontiguous(). */
++	if (!gfpflags_allow_blocking(gfp))
++		return NULL;
++
++	size = PAGE_SIZE << get_order(size);
++	pages = (void *)__get_free_pages(gfp | __GFP_ZERO, get_order(size));
++	if (!pages)
++		return NULL;
++
++	ret = qcom_scm_assign_mem(virt_to_phys(pages), size, &owner,
++				  perms, ARRAY_SIZE(perms));
++	if (ret) {
++		free_pages((unsigned long)pages, get_order(size));
++		return NULL;
++	}
++
++	return pages;
++}
++
++static void qcom_smmu_secure_free_work(struct work_struct *work)
++{
++	struct qcom_smmu_secure_free *entry =
++		container_of(work, struct qcom_smmu_secure_free, work);
++	const struct qcom_scm_vmperm perm = {
++		QCOM_SCM_VMID_HLOS, QCOM_SCM_PERM_RW | QCOM_SCM_PERM_EXEC,
++	};
++	u64 owner = BIT_ULL(QCOM_SCM_VMID_HLOS) | BIT_ULL(QCOM_SCM_VMID_CP_NON_PIXEL);
++	int ret;
++
++	ret = qcom_scm_assign_mem(virt_to_phys(entry->pages), entry->size,
++				  &owner, &perm, 1);
++	if (ret)
++		dev_err(entry->dev, "secure page table reclaim failed: %d; retaining pages\n",
++			ret);
++	else
++		free_pages((unsigned long)entry->pages, get_order(entry->size));
++
++	put_device(entry->dev);
++	kfree(entry);
++}
++
++static void qcom_smmu_secure_free(void *cookie, void *pages, size_t size)
++{
++	struct arm_smmu_domain *domain = cookie;
++	struct qcom_smmu *qsmmu = to_qcom_smmu(domain->smmu);
++	struct qcom_smmu_secure_free *entry;
++
++	/* Unmap may run in atomic context; SCM ownership changes may sleep. */
++	entry = kmalloc_obj(*entry, GFP_ATOMIC);
++	if (!entry) {
++		dev_err_ratelimited(domain->smmu->dev,
++				    "cannot reclaim secure page table; retaining pages\n");
++		return;
++	}
++	entry->dev = get_device(domain->smmu->dev);
++	entry->pages = pages;
++	entry->size = PAGE_SIZE << get_order(size);
++	INIT_WORK(&entry->work, qcom_smmu_secure_free_work);
++	queue_work(qsmmu->secure_wq, &entry->work);
++}
++
+ static int qcom_smmu_init_context(struct arm_smmu_domain *smmu_domain,
+ 		struct io_pgtable_cfg *pgtbl_cfg, struct device *dev)
+ {
+@@ -438,6 +518,11 @@ static int qcom_smmu_init_context(struct arm_smmu_domain *smmu_domain,
+ 	const struct of_device_id *client_match;
+ 	int cbndx = smmu_domain->cfg.cbndx;
+ 
++	if (of_device_is_compatible(dev->of_node, "qcom,sm8450-iris-cp-nonpixel")) {
++		pgtbl_cfg->alloc = qcom_smmu_secure_alloc;
++		pgtbl_cfg->free = qcom_smmu_secure_free;
++	}
++
+ 	smmu_domain->cfg.flush_walk_prefer_tlbiasid = true;
+ 
+ 	client_match = qsmmu->data->client_match;
+@@ -691,6 +776,10 @@ static struct arm_smmu_device *qcom_smmu_create(struct arm_smmu_device *smmu,
+ 
+ 	qsmmu->smmu.impl = impl;
+ 	qsmmu->data = data;
++	qsmmu->secure_wq = devm_alloc_workqueue(qsmmu->smmu.dev, "qcom-smmu-secure",
++						WQ_UNBOUND | WQ_MEM_RECLAIM, 1);
++	if (!qsmmu->secure_wq)
++		return ERR_PTR(-ENOMEM);
+ 
+ 	return &qsmmu->smmu;
+ }
+diff --git a/drivers/iommu/arm/arm-smmu/arm-smmu-qcom.h b/drivers/iommu/arm/arm-smmu/arm-smmu-qcom.h
+index 8addd453f..90d582b00 100644
+--- a/drivers/iommu/arm/arm-smmu/arm-smmu-qcom.h
++++ b/drivers/iommu/arm/arm-smmu/arm-smmu-qcom.h
+@@ -9,6 +9,7 @@
+ struct qcom_smmu {
+ 	struct arm_smmu_device smmu;
+ 	const struct qcom_smmu_match_data *data;
++	struct workqueue_struct *secure_wq;
+ 	bool bypass_quirk;
+ 	u8 bypass_cbndx;
+ 	u32 stall_enabled;
+-- 
+2.56.0
+

@@ -1,0 +1,602 @@
+From de704779fbab023703769514b04ad0826c016d54 Mon Sep 17 00:00:00 2001
+From: wk <58632380+wkai343@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 15:11:02 +0800
+Subject: [PATCH] media: iris: enable Iris2 encoding with secure ARP
+ allocations
+
+Allocate per-session ARP memory in the CP_NON_PIXEL DMA context and
+assign it to VMID 11 before queuing. Keep protected allocations out of
+the page allocator if reclaim fails. Preserve decoder-only operation
+with older device trees.
+
+Match OEM reconstruction buffer layout, count and 128-byte stride
+alignment, supply four-pipe capability and limit COMV/crop properties to
+the ports accepted by Iris2 firmware. Explicitly select non-secure
+sessions while keeping ARP secure.
+
+Accept the zero-flag encoder DRAIN acknowledgement used by Iris2,
+matching the OEM response handler. Otherwise CAPTURE QBUF enters the
+error path and can terminate userspace before the last encoded frame.
+Keep decoder, newer-platform and explicit firmware-error handling
+strict.
+
+Signed-off-by: wk <58632380+wkai343@users.noreply.github.com>
+---
+ drivers/media/platform/qcom/iris/Makefile     |   1 +
+ .../media/platform/qcom/iris/iris_buffer.c    |  28 ++-
+ .../media/platform/qcom/iris/iris_buffer.h    |   2 +
+ drivers/media/platform/qcom/iris/iris_core.h  |   2 +
+ drivers/media/platform/qcom/iris/iris_ctrls.c |   4 +
+ .../qcom/iris/iris_hfi_gen2_command.c         |  19 +-
+ .../qcom/iris/iris_hfi_gen2_defines.h         |   1 +
+ .../qcom/iris/iris_hfi_gen2_response.c        |   6 +-
+ .../platform/qcom/iris/iris_platform_common.h |   7 +-
+ .../platform/qcom/iris/iris_platform_vpu3x.c  |   4 +-
+ drivers/media/platform/qcom/iris/iris_probe.c |  30 ++-
+ .../platform/qcom/iris/iris_secure_memory.c   | 193 ++++++++++++++++++
+ .../platform/qcom/iris/iris_secure_memory.h   |  16 ++
+ .../platform/qcom/iris/iris_vpu_buffer.c      |   9 +-
+ 14 files changed, 306 insertions(+), 16 deletions(-)
+ create mode 100644 drivers/media/platform/qcom/iris/iris_secure_memory.c
+ create mode 100644 drivers/media/platform/qcom/iris/iris_secure_memory.h
+
+diff --git a/drivers/media/platform/qcom/iris/Makefile b/drivers/media/platform/qcom/iris/Makefile
+index 48e415cbc..072a4b401 100644
+--- a/drivers/media/platform/qcom/iris/Makefile
++++ b/drivers/media/platform/qcom/iris/Makefile
+@@ -17,6 +17,7 @@ qcom-iris-objs += iris_buffer.o \
+              iris_power.o \
+              iris_probe.o \
+              iris_resources.o \
++             iris_secure_memory.o \
+              iris_state.o \
+              iris_utils.o \
+              iris_vidc.o \
+diff --git a/drivers/media/platform/qcom/iris/iris_buffer.c b/drivers/media/platform/qcom/iris/iris_buffer.c
+index c376c6a97..0bc09388d 100644
+--- a/drivers/media/platform/qcom/iris/iris_buffer.c
++++ b/drivers/media/platform/qcom/iris/iris_buffer.c
+@@ -7,6 +7,7 @@
+ #include <media/v4l2-mem2mem.h>
+ 
+ #include "iris_buffer.h"
++#include "iris_secure_memory.h"
+ #include "iris_instance.h"
+ #include "iris_power.h"
+ #include "iris_vpu_buffer.h"
+@@ -533,6 +534,7 @@ static int iris_create_internal_buffer(struct iris_inst *inst,
+ 	struct iris_buffers *buffers = &inst->buffers[buffer_type];
+ 	struct iris_core *core = inst->core;
+ 	struct iris_buffer *buffer;
++	int ret;
+ 
+ 	if (!buffers->size)
+ 		return 0;
+@@ -547,11 +549,20 @@ static int iris_create_internal_buffer(struct iris_inst *inst,
+ 	buffer->buffer_size = buffers->size;
+ 	buffer->dma_attrs = DMA_ATTR_WRITE_COMBINE | DMA_ATTR_NO_KERNEL_MAPPING;
+ 
+-	buffer->kvaddr = dma_alloc_attrs(core->dev, buffer->buffer_size,
+-					 &buffer->device_addr, GFP_KERNEL, buffer->dma_attrs);
+-	if (!buffer->kvaddr) {
+-		kfree(buffer);
+-		return -ENOMEM;
++	if (buffer_type == BUF_ARP && core->iris_platform_data->requires_secure_arp) {
++		ret = iris_secure_buffer_alloc(core, buffer);
++		if (ret) {
++			kfree(buffer);
++			return ret;
++		}
++	} else {
++		buffer->kvaddr = dma_alloc_attrs(core->dev, buffer->buffer_size,
++						 &buffer->device_addr, GFP_KERNEL,
++						 buffer->dma_attrs);
++		if (!buffer->kvaddr) {
++			kfree(buffer);
++			return -ENOMEM;
++		}
+ 	}
+ 
+ 	list_add_tail(&buffer->list, &buffers->list);
+@@ -653,8 +664,11 @@ void iris_destroy_internal_buffer(struct iris_inst *inst, struct iris_buffer *bu
+ 	struct iris_core *core = inst->core;
+ 
+ 	list_del(&buffer->list);
+-	dma_free_attrs(core->dev, buffer->buffer_size, buffer->kvaddr,
+-		       buffer->device_addr, buffer->dma_attrs);
++	if (buffer->secure)
++		iris_secure_buffer_free(buffer->secure);
++	else
++		dma_free_attrs(core->dev, buffer->buffer_size, buffer->kvaddr,
++			       buffer->device_addr, buffer->dma_attrs);
+ 	kfree(buffer);
+ }
+ 
+diff --git a/drivers/media/platform/qcom/iris/iris_buffer.h b/drivers/media/platform/qcom/iris/iris_buffer.h
+index ab8e5d953..1450e5817 100644
+--- a/drivers/media/platform/qcom/iris/iris_buffer.h
++++ b/drivers/media/platform/qcom/iris/iris_buffer.h
+@@ -77,6 +77,7 @@ enum iris_buffer_attributes {
+  * @data_offset: accessible buffer offset from base address
+  * @data_size: data size in bytes
+  * @device_addr: device address of the buffer
++ * @secure: secure non-pixel allocation, if required by this buffer
+  * @kvaddr: kernel virtual address of the buffer
+  * @dma_attrs: dma attributes
+  * @flags: buffer flags. It is represented as bit masks.
+@@ -95,6 +96,7 @@ struct iris_buffer {
+ 	size_t				data_size;
+ 	dma_addr_t			device_addr;
+ 	void				*kvaddr;
++	struct iris_secure_buffer	*secure;
+ 	unsigned long			dma_attrs;
+ 	u32				flags; /* V4L2_BUF_FLAG_* */
+ 	u64				timestamp;
+diff --git a/drivers/media/platform/qcom/iris/iris_core.h b/drivers/media/platform/qcom/iris/iris_core.h
+index c8c72ddf2..a1640562b 100644
+--- a/drivers/media/platform/qcom/iris/iris_core.h
++++ b/drivers/media/platform/qcom/iris/iris_core.h
+@@ -85,11 +85,13 @@ struct qcom_ubwc_cfg_data;
+  * @instances: a list_head of all instances
+  * @inst_fw_caps_dec: an array of supported instance capabilities by decoder
+  * @inst_fw_caps_enc: an array of supported instance capabilities by encoder
++ * @secure_pdev: secure non-pixel DMA context for encoder ARP buffers
+  * @iova_state: a pointer to an array of dma_iova_state entries reserved for restricted IOVA region
+  */
+ 
+ struct iris_core {
+ 	struct device				*dev;
++	struct platform_device			*secure_pdev;
+ 	void __iomem				*reg_base;
+ 	int					irq;
+ 	struct v4l2_device			v4l2_dev;
+diff --git a/drivers/media/platform/qcom/iris/iris_ctrls.c b/drivers/media/platform/qcom/iris/iris_ctrls.c
+index bf17d310e..0a071d288 100644
+--- a/drivers/media/platform/qcom/iris/iris_ctrls.c
++++ b/drivers/media/platform/qcom/iris/iris_ctrls.c
+@@ -465,6 +465,10 @@ void iris_session_init_caps(struct iris_core *core)
+ 		core->inst_fw_caps_enc[cap_id].hfi_id = caps[i].hfi_id;
+ 		core->inst_fw_caps_enc[cap_id].set = caps[i].set;
+ 	}
++
++	/* Iris2 shares the decoder's fixed four-pipe topology. */
++	if (core->iris_platform_data == &sm8450_data)
++		core->inst_fw_caps_enc[PIPE] = core->inst_fw_caps_dec[PIPE];
+ }
+ 
+ static u32 iris_get_port_info(struct iris_inst *inst,
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen2_command.c b/drivers/media/platform/qcom/iris/iris_hfi_gen2_command.c
+index 4acbcec7e..1bba61e5c 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2_command.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2_command.c
+@@ -232,6 +232,11 @@ static int iris_hfi_gen2_set_crop_offsets(struct iris_inst *inst, u32 plane)
+ 	u32 left_offset, top_offset;
+ 	u32 payload[2], codec_align;
+ 
++	/* Iris2 accepts encoder crop offsets only on the bitstream port. */
++	if (inst->domain == ENCODER && V4L2_TYPE_IS_OUTPUT(plane) &&
++	    inst->core->iris_platform_data == &sm8450_data)
++		return 0;
++
+ 	if (inst->domain == DECODER) {
+ 		if (V4L2_TYPE_IS_OUTPUT(plane)) {
+ 			bottom_offset = (inst->fmt_src->fmt.pix_mp.height - inst->crop.height);
+@@ -799,6 +804,7 @@ static int iris_hfi_gen2_session_set_default_header(struct iris_inst *inst)
+ static int iris_hfi_gen2_session_open(struct iris_inst *inst)
+ {
+ 	struct iris_inst_hfi_gen2 *inst_hfi_gen2 = to_iris_inst_hfi_gen2(inst);
++	u32 secure = 0;
+ 	int ret;
+ 
+ 	if (inst->state != IRIS_INST_DEINIT)
+@@ -830,6 +836,14 @@ static int iris_hfi_gen2_session_open(struct iris_inst *inst)
+ 	if (ret)
+ 		goto fail_free_packet;
+ 
++	if (inst->domain == ENCODER && inst->core->iris_platform_data->requires_secure_arp) {
++		ret = iris_hfi_gen2_session_set_property(inst, HFI_PROP_SECURE,
++							 HFI_HOST_FLAGS_NONE, HFI_PORT_NONE,
++							 HFI_PAYLOAD_U32, &secure, sizeof(secure));
++		if (ret)
++			goto fail_free_packet;
++	}
++
+ 	if (inst->domain == DECODER) {
+ 		ret = iris_hfi_gen2_session_set_default_header(inst);
+ 		if (ret)
+@@ -1303,7 +1317,8 @@ static void iris_hfi_gen2_get_buffer(u32 domain, struct iris_buffer *buffer,
+ 	buf->data_size = buffer->data_size;
+ 	if (buffer->attr & BUF_ATTR_PENDING_RELEASE)
+ 		buf->flags |= HFI_BUF_HOST_FLAG_RELEASE;
+-	buf->flags |= HFI_BUF_HOST_FLAGS_CB_NON_SECURE;
++	if (!buffer->secure)
++		buf->flags |= HFI_BUF_HOST_FLAGS_CB_NON_SECURE;
+ 	buf->timestamp = buffer->timestamp;
+ }
+ 
+@@ -1315,7 +1330,7 @@ static int iris_hfi_gen2_session_queue_buffer(struct iris_inst *inst, struct iri
+ 	int ret;
+ 
+ 	iris_hfi_gen2_get_buffer(inst->domain, buffer, &hfi_buffer);
+-	if (buffer->type == BUF_COMV) {
++	if (inst->domain == DECODER && buffer->type == BUF_COMV) {
+ 		ret = iris_hfi_gen2_set_num_comv(inst);
+ 		if (ret)
+ 			return ret;
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen2_defines.h b/drivers/media/platform/qcom/iris/iris_hfi_gen2_defines.h
+index f43aea100..2eda150d1 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2_defines.h
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2_defines.h
+@@ -39,6 +39,7 @@
+ #define HFI_PROP_UBWC_BANK_SWZL_LEVEL2		0x03000007
+ #define HFI_PROP_UBWC_BANK_SWZL_LEVEL3		0x03000008
+ #define HFI_PROP_UBWC_BANK_SPREADING		0x03000009
++#define HFI_PROP_SECURE					0x03000102
+ #define HFI_PROP_CODEC				0x03000100
+ #define HFI_PROP_COLOR_FORMAT			0x03000101
+ #define HFI_PROP_BITSTREAM_RESOLUTION		0x03000103
+diff --git a/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c b/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c
+index e19e5d3af..71e3b4937 100644
+--- a/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c
++++ b/drivers/media/platform/qcom/iris/iris_hfi_gen2_response.c
+@@ -548,9 +548,13 @@ static int iris_hfi_gen2_handle_session_buffer(struct iris_inst *inst,
+ static int iris_hfi_gen2_handle_session_drain(struct iris_inst *inst,
+ 					      struct iris_hfi_packet *pkt)
+ {
++	bool legacy_ack = inst->domain == ENCODER &&
++		inst->core->iris_platform_data->enc_drain_no_success && !pkt->flags;
+ 	int ret = 0;
+ 
+-	if (!(pkt->flags & HFI_FW_FLAGS_SUCCESS)) {
++	/* Iris2 acknowledges encoder drain with zero flags, as in the OEM driver. */
++	if (pkt->flags & (HFI_FW_FLAGS_SESSION_ERROR | HFI_FW_FLAGS_SYSTEM_ERROR) ||
++	    (!(pkt->flags & HFI_FW_FLAGS_SUCCESS) && !legacy_ack)) {
+ 		iris_inst_change_state(inst, IRIS_INST_ERROR);
+ 		return 0;
+ 	}
+diff --git a/drivers/media/platform/qcom/iris/iris_platform_common.h b/drivers/media/platform/qcom/iris/iris_platform_common.h
+index d111085ee..1126b011f 100644
+--- a/drivers/media/platform/qcom/iris/iris_platform_common.h
++++ b/drivers/media/platform/qcom/iris/iris_platform_common.h
+@@ -321,8 +321,11 @@ struct iris_platform_data {
+ 	bool no_aon;
+ 	/* Iris2 (SM8450) firmware predates the RESUME reason payload. */
+ 	bool resume_without_payload;
+-	/* Do not expose an encoder until its platform path is functional. */
+-	bool decoder_only;
++	/* Iris2 needs individual reconstruction buffers and secure ARP memory. */
++	bool enc_dpb_per_buffer;
++	bool requires_secure_arp;
++	/* Iris2 encoder DRAIN replies may omit HFI_FW_FLAGS_SUCCESS. */
++	bool enc_drain_no_success;
+ 	u32 max_session_count;
+ 	/* max number of macroblocks per frame supported */
+ 	u32 max_core_mbpf;
+diff --git a/drivers/media/platform/qcom/iris/iris_platform_vpu3x.c b/drivers/media/platform/qcom/iris/iris_platform_vpu3x.c
+index 3cc62f8c2..045d93ce0 100644
+--- a/drivers/media/platform/qcom/iris/iris_platform_vpu3x.c
++++ b/drivers/media/platform/qcom/iris/iris_platform_vpu3x.c
+@@ -166,7 +166,9 @@ const struct iris_platform_data sm8450_data = {
+ 	.tz_cp_config_data_size = ARRAY_SIZE(tz_cp_config_vpu3),
+ 	/* Iris2 firmware predates the RESUME reason payload. */
+ 	.resume_without_payload = true,
+-	.decoder_only = true,
++	.enc_dpb_per_buffer = true,
++	.requires_secure_arp = true,
++	.enc_drain_no_success = true,
+ 	.num_vpp_pipe = 4,
+ 	.max_session_count = 16,
+ 	.max_core_mbpf = ((8192 * 4320) / 256) * 2,
+diff --git a/drivers/media/platform/qcom/iris/iris_probe.c b/drivers/media/platform/qcom/iris/iris_probe.c
+index 69dde27e8..f4753afdc 100644
+--- a/drivers/media/platform/qcom/iris/iris_probe.c
++++ b/drivers/media/platform/qcom/iris/iris_probe.c
+@@ -14,6 +14,7 @@
+ 
+ #include "iris_core.h"
+ #include "iris_ctrls.h"
++#include "iris_secure_memory.h"
+ #include "iris_vidc.h"
+ 
+ static int iris_init_icc(struct iris_core *core)
+@@ -323,6 +324,10 @@ static int iris_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		return ret;
+ 
++	ret = iris_secure_memory_init(core);
++	if (ret)
++		return ret;
++
+ 	ret = iris_reserve_iova_region(dev, &core->iova_state, IRIS_NP_RESERVE_IOVA_START,
+ 				       IRIS_NP_RESERVE_IOVA_SIZE);
+ 	if (ret)
+@@ -336,7 +341,7 @@ static int iris_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		goto err_v4l2_unreg;
+ 
+-	if (!core->iris_platform_data->decoder_only) {
++	if (!core->iris_platform_data->requires_secure_arp || core->secure_pdev) {
+ 		ret = iris_register_video_device(core, ENCODER);
+ 		if (ret)
+ 			goto err_vdev_unreg_dec;
+@@ -469,6 +474,27 @@ static struct platform_driver qcom_iris_driver = {
+ 	},
+ };
+ 
+-module_platform_driver(qcom_iris_driver);
++static int __init iris_module_init(void)
++{
++	int ret;
++
++	ret = platform_driver_register(&iris_secure_memory_driver);
++	if (ret)
++		return ret;
++
++	ret = platform_driver_register(&qcom_iris_driver);
++	if (ret)
++		platform_driver_unregister(&iris_secure_memory_driver);
++
++	return ret;
++}
++module_init(iris_module_init);
++
++static void __exit iris_module_exit(void)
++{
++	platform_driver_unregister(&qcom_iris_driver);
++	platform_driver_unregister(&iris_secure_memory_driver);
++}
++module_exit(iris_module_exit);
+ MODULE_DESCRIPTION("Qualcomm iris video driver");
+ MODULE_LICENSE("GPL");
+diff --git a/drivers/media/platform/qcom/iris/iris_secure_memory.c b/drivers/media/platform/qcom/iris/iris_secure_memory.c
+new file mode 100644
+index 000000000..42f54eb70
+--- /dev/null
++++ b/drivers/media/platform/qcom/iris/iris_secure_memory.c
+@@ -0,0 +1,193 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* Iris2 encoder ARP uses CP_NON_PIXEL memory even for non-secure sessions. */
++#include <linux/dma-mapping.h>
++#include <linux/firmware/qcom/qcom_scm.h>
++#include <linux/iommu.h>
++#include <linux/of_platform.h>
++#include <linux/slab.h>
++
++#include "iris_buffer.h"
++#include "iris_core.h"
++#include "iris_secure_memory.h"
++
++#define IRIS_SECURE_IOVA_START	0x01000000ULL
++#define IRIS_SECURE_IOVA_END	0x25800000ULL
++
++struct iris_secure_buffer {
++	struct device *dev;
++	struct sg_table *sgt;
++	size_t size;
++	u64 owners[];
++};
++
++static int iris_secure_buffer_reclaim(struct iris_secure_buffer *secure)
++{
++	const struct qcom_scm_vmperm perm = {
++		QCOM_SCM_VMID_HLOS, QCOM_SCM_PERM_RW | QCOM_SCM_PERM_EXEC,
++	};
++	struct scatterlist *sg;
++	int i, ret, error = 0;
++
++	for_each_sg(secure->sgt->sgl, sg, secure->sgt->orig_nents, i) {
++		if (secure->owners[i] == BIT_ULL(QCOM_SCM_VMID_HLOS))
++			continue;
++		ret = qcom_scm_assign_mem(sg_phys(sg), sg->length,
++					  &secure->owners[i], &perm, 1);
++		if (ret)
++			error = ret;
++	}
++
++	return error;
++}
++
++void iris_secure_buffer_free(struct iris_secure_buffer *secure)
++{
++	int ret;
++
++	ret = iris_secure_buffer_reclaim(secure);
++	if (ret) {
++		/* Never return protected pages to the allocator after a failed reclaim. */
++		dev_err(secure->dev, "ARP reclaim failed: %d; retaining allocation until reboot\n",
++			ret);
++		return;
++	}
++
++	dma_free_noncontiguous(secure->dev, secure->size, secure->sgt, DMA_BIDIRECTIONAL);
++	put_device(secure->dev);
++	kfree(secure);
++}
++
++int iris_secure_buffer_alloc(struct iris_core *core, struct iris_buffer *buffer)
++{
++	const struct qcom_scm_vmperm perm = {
++		QCOM_SCM_VMID_CP_NON_PIXEL, QCOM_SCM_PERM_RW,
++	};
++	struct iris_secure_buffer *secure;
++	struct scatterlist *sg;
++	struct sg_table *sgt;
++	struct device *dev;
++	dma_addr_t address;
++	size_t size = PAGE_ALIGN(buffer->buffer_size);
++	int i, ret;
++
++	if (!core->secure_pdev)
++		return -ENODEV;
++	dev = &core->secure_pdev->dev;
++
++	/*
++	 * Unlike dma_map_page(), this API passes GFP_KERNEL to the IOMMU.
++	 * The dedicated context must share new page tables via sleepable SCM.
++	 * Each session gets its own DMA-contiguous, CPU-unmapped allocation.
++	 */
++	sgt = dma_alloc_noncontiguous(dev, size, DMA_BIDIRECTIONAL, GFP_KERNEL | __GFP_ZERO, 0);
++	if (!sgt)
++		return -ENOMEM;
++
++	address = sg_dma_address(sgt->sgl);
++	if (address < IRIS_SECURE_IOVA_START ||
++	    size > IRIS_SECURE_IOVA_END || address > IRIS_SECURE_IOVA_END - size) {
++		ret = -ERANGE;
++		goto free_dma;
++	}
++
++	secure = kzalloc(struct_size(secure, owners, sgt->orig_nents), GFP_KERNEL);
++	if (!secure) {
++		ret = -ENOMEM;
++		goto free_dma;
++	}
++	secure->dev = get_device(dev);
++	secure->sgt = sgt;
++	secure->size = size;
++	for (i = 0; i < sgt->orig_nents; i++)
++		secure->owners[i] = BIT_ULL(QCOM_SCM_VMID_HLOS);
++
++	for_each_sg(sgt->sgl, sg, sgt->orig_nents, i) {
++		ret = qcom_scm_assign_mem(sg_phys(sg), sg->length,
++					  &secure->owners[i], &perm, 1);
++		if (ret) {
++			iris_secure_buffer_free(secure);
++			return ret;
++		}
++	}
++
++	buffer->secure = secure;
++	buffer->device_addr = address;
++	return 0;
++
++free_dma:
++	dma_free_noncontiguous(dev, size, sgt, DMA_BIDIRECTIONAL);
++	return ret;
++}
++
++static int iris_secure_memory_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct iommu_domain *domain = iommu_get_domain_for_dev(dev);
++	int ret;
++
++	if (!qcom_scm_is_available())
++		return -EPROBE_DEFER;
++	/* Never share the non-secure video device's IOVA domain. */
++	if (!domain || (domain->type != IOMMU_DOMAIN_DMA &&
++			domain->type != IOMMU_DOMAIN_DMA_FQ) ||
++	    domain == iommu_get_domain_for_dev(dev->parent))
++		return -EINVAL;
++
++	ret = dma_set_mask_and_coherent(dev, IRIS_SECURE_IOVA_END - 1);
++	if (ret)
++		return ret;
++	dma_set_max_seg_size(dev, DMA_BIT_MASK(32));
++	dma_set_seg_boundary(dev, DMA_BIT_MASK(32));
++	platform_set_drvdata(pdev, dev);
++
++	return 0;
++}
++
++static const struct of_device_id iris_secure_memory_match[] = {
++	{ .compatible = "qcom,sm8450-iris-cp-nonpixel" },
++	{ }
++};
++
++struct platform_driver iris_secure_memory_driver = {
++	.probe = iris_secure_memory_probe,
++	.driver = {
++		.name = "iris-cp-nonpixel",
++		.of_match_table = iris_secure_memory_match,
++		.suppress_bind_attrs = true,
++	},
++};
++
++static void iris_secure_memory_remove(void *data)
++{
++	of_platform_device_destroy(&((struct platform_device *)data)->dev, NULL);
++}
++
++int iris_secure_memory_init(struct iris_core *core)
++{
++	struct device_node *np;
++	struct platform_device *pdev;
++	int ret;
++
++	if (!core->iris_platform_data->requires_secure_arp)
++		return 0;
++
++	np = of_get_child_by_name(core->dev->of_node, "secure-nonpixel");
++	if (!np || !of_device_is_available(np)) {
++		of_node_put(np);
++		dev_warn(core->dev, "no secure non-pixel context; encoder disabled\n");
++		return 0;
++	}
++	pdev = of_platform_device_create(np, NULL, core->dev);
++	of_node_put(np);
++	if (!pdev)
++		return -ENODEV;
++
++	ret = devm_add_action_or_reset(core->dev, iris_secure_memory_remove, pdev);
++	if (ret)
++		return ret;
++	if (!platform_get_drvdata(pdev))
++		return -EPROBE_DEFER;
++
++	core->secure_pdev = pdev;
++	return 0;
++}
+diff --git a/drivers/media/platform/qcom/iris/iris_secure_memory.h b/drivers/media/platform/qcom/iris/iris_secure_memory.h
+new file mode 100644
+index 000000000..57b0f5bc2
+--- /dev/null
++++ b/drivers/media/platform/qcom/iris/iris_secure_memory.h
+@@ -0,0 +1,16 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef _IRIS_SECURE_MEMORY_H_
++#define _IRIS_SECURE_MEMORY_H_
++
++struct iris_buffer;
++struct iris_core;
++struct iris_secure_buffer;
++struct platform_driver;
++
++extern struct platform_driver iris_secure_memory_driver;
++
++int iris_secure_memory_init(struct iris_core *core);
++int iris_secure_buffer_alloc(struct iris_core *core, struct iris_buffer *buffer);
++void iris_secure_buffer_free(struct iris_secure_buffer *secure);
++
++#endif
+diff --git a/drivers/media/platform/qcom/iris/iris_vpu_buffer.c b/drivers/media/platform/qcom/iris/iris_vpu_buffer.c
+index faebb5472..17c6ca64a 100644
+--- a/drivers/media/platform/qcom/iris/iris_vpu_buffer.c
++++ b/drivers/media/platform/qcom/iris/iris_vpu_buffer.c
+@@ -1739,6 +1739,9 @@ static u32 iris_vpu_enc_scratch2_size(struct iris_inst *inst)
+ 	u32 frame_width = iris_vpu_enc_get_bitstream_width(inst);
+ 	u32 num_ref = hfi_buffer_get_recon_count(inst);
+ 
++	if (inst->core->iris_platform_data->enc_dpb_per_buffer)
++		return hfi_buffer_dpb_enc(ALIGN(frame_width, 128), frame_height, false);
++
+ 	return hfi_buffer_scratch2_enc(frame_width, frame_height, num_ref, false);
+ }
+ 
+@@ -2243,8 +2246,12 @@ int iris_vpu_buf_count(struct iris_inst *inst, enum iris_buffer_type buffer_type
+ 	case BUF_LINE:
+ 	case BUF_PERSIST:
+ 		return internal_buffer_count(inst, buffer_type);
+-	case BUF_SCRATCH_1:
+ 	case BUF_SCRATCH_2:
++		if (inst->domain == ENCODER &&
++		    inst->core->iris_platform_data->enc_dpb_per_buffer)
++			return hfi_buffer_get_recon_count(inst) + 1;
++		fallthrough;
++	case BUF_SCRATCH_1:
+ 	case BUF_VPSS:
+ 	case BUF_ARP:
+ 	case BUF_PARTIAL:
+-- 
+2.56.0
+

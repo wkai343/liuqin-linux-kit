@@ -1,0 +1,83 @@
+From 83d7606cac549e1bdbc5003d0b4f648d0de533bf Mon Sep 17 00:00:00 2001
+From: wk <58632380+wkai343@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 03:56:12 +0800
+Subject: [PATCH] media: iris: set SM8450 rate limits and keep its encoder
+ disabled
+
+Use the downstream waipio rate bounds instead of zero-initialized frame and operating rates. These are capability bounds, not a throughput guarantee.
+
+The current Iris2 HFI Gen2 adaptation decodes successfully, but submitting the first H.264 raw input can hang and reset SM8475. Do not register the unimplemented encoder path. Keep decoding available and leave other platform registrations unchanged. video_unregister_device accepts NULL on the common cleanup paths.
+
+Link: https://github.com/LineageOS/android_kernel_qcom_sm8450-modules/blob/lineage-20/qcom/opensource/video-driver/driver/platform/waipio/src/msm_vidc_waipio.c
+Link: https://github.com/royka1/diting-ubuntu/blob/main/ubuntu-diting/docs/KNOWN_ISSUES.md#video-encoder-resets-the-phone-sm8475-iris-r35
+---
+ drivers/media/platform/qcom/iris/iris_platform_common.h | 2 ++
+ drivers/media/platform/qcom/iris/iris_platform_sm8450.h | 2 ++
+ drivers/media/platform/qcom/iris/iris_platform_vpu3x.c  | 2 ++
+ drivers/media/platform/qcom/iris/iris_probe.c           | 8 +++++---
+ 4 files changed, 11 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_platform_common.h b/drivers/media/platform/qcom/iris/iris_platform_common.h
+index 26afe221d..d111085ee 100644
+--- a/drivers/media/platform/qcom/iris/iris_platform_common.h
++++ b/drivers/media/platform/qcom/iris/iris_platform_common.h
+@@ -321,6 +321,8 @@ struct iris_platform_data {
+ 	bool no_aon;
+ 	/* Iris2 (SM8450) firmware predates the RESUME reason payload. */
+ 	bool resume_without_payload;
++	/* Do not expose an encoder until its platform path is functional. */
++	bool decoder_only;
+ 	u32 max_session_count;
+ 	/* max number of macroblocks per frame supported */
+ 	u32 max_core_mbpf;
+diff --git a/drivers/media/platform/qcom/iris/iris_platform_sm8450.h b/drivers/media/platform/qcom/iris/iris_platform_sm8450.h
+index 8519d9dd8..b82e0c655 100644
+--- a/drivers/media/platform/qcom/iris/iris_platform_sm8450.h
++++ b/drivers/media/platform/qcom/iris/iris_platform_sm8450.h
+@@ -18,6 +18,8 @@ static struct platform_inst_caps platform_inst_cap_sm8450 = {
+ 	.mb_cycles_vpp = 200,
+ 	.mb_cycles_fw = 326389,
+ 	.mb_cycles_fw_vpp = 44156,
++	.max_frame_rate = MAXIMUM_FPS,
++	.max_operating_rate = MAXIMUM_FPS,
+ };
+ 
+ #endif
+diff --git a/drivers/media/platform/qcom/iris/iris_platform_vpu3x.c b/drivers/media/platform/qcom/iris/iris_platform_vpu3x.c
+index 373f3b30b..3cc62f8c2 100644
+--- a/drivers/media/platform/qcom/iris/iris_platform_vpu3x.c
++++ b/drivers/media/platform/qcom/iris/iris_platform_vpu3x.c
+@@ -166,9 +166,11 @@ const struct iris_platform_data sm8450_data = {
+ 	.tz_cp_config_data_size = ARRAY_SIZE(tz_cp_config_vpu3),
+ 	/* Iris2 firmware predates the RESUME reason payload. */
+ 	.resume_without_payload = true,
++	.decoder_only = true,
+ 	.num_vpp_pipe = 4,
+ 	.max_session_count = 16,
+ 	.max_core_mbpf = ((8192 * 4320) / 256) * 2,
++	.max_core_mbps = ((3840 * 2176) / 256) * 240,
+ };
+ 
+ const struct iris_platform_data sm8550_data = {
+diff --git a/drivers/media/platform/qcom/iris/iris_probe.c b/drivers/media/platform/qcom/iris/iris_probe.c
+index 2f8a3f9ae..69dde27e8 100644
+--- a/drivers/media/platform/qcom/iris/iris_probe.c
++++ b/drivers/media/platform/qcom/iris/iris_probe.c
+@@ -336,9 +336,11 @@ static int iris_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		goto err_v4l2_unreg;
+ 
+-	ret = iris_register_video_device(core, ENCODER);
+-	if (ret)
+-		goto err_vdev_unreg_dec;
++	if (!core->iris_platform_data->decoder_only) {
++		ret = iris_register_video_device(core, ENCODER);
++		if (ret)
++			goto err_vdev_unreg_dec;
++	}
+ 
+ 	platform_set_drvdata(pdev, core);
+ 
+-- 
+2.56.0
+

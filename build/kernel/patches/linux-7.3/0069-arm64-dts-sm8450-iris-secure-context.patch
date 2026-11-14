@@ -1,0 +1,80 @@
+From 61171ba9e82707f2d345047ae99cd0ccb96b5d1e Mon Sep 17 00:00:00 2001
+From: wk <58632380+wkai343@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 15:11:02 +0800
+Subject: [PATCH] arm64: dts: qcom: sm8450: describe Iris secure non-pixel
+ context
+
+The OEM Waipio context uses SID 0x2184 with mask 0x400 for secure non-
+pixel video traffic. Describe it separately from ordinary pixel and non-
+pixel DMA, including its binding.
+
+Signed-off-by: wk <58632380+wkai343@users.noreply.github.com>
+---
+ .../bindings/media/qcom,sm8550-iris.yaml      | 26 +++++++++++++++++++
+ arch/arm64/boot/dts/qcom/sm8450.dtsi          |  6 +++++
+ 2 files changed, 32 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/media/qcom,sm8550-iris.yaml b/Documentation/devicetree/bindings/media/qcom,sm8550-iris.yaml
+index ecc0be63f..a379106d9 100644
+--- a/Documentation/devicetree/bindings/media/qcom,sm8550-iris.yaml
++++ b/Documentation/devicetree/bindings/media/qcom,sm8550-iris.yaml
+@@ -89,6 +89,23 @@ properties:
+   opp-table:
+     type: object
+ 
++  secure-nonpixel:
++    type: object
++    description:
++      Iris2 secure non-pixel DMA context, used by encoder ARP scratch buffers
++      even when encoding non-secure video.
++    additionalProperties: false
++    properties:
++      compatible:
++        const: qcom,sm8450-iris-cp-nonpixel
++      iommus:
++        maxItems: 1
++      dma-coherent: true
++    required:
++      - compatible
++      - iommus
++      - dma-coherent
++
+ required:
+   - compatible
+   - power-domain-names
+@@ -100,6 +117,15 @@ required:
+   - dma-coherent
+ 
+ allOf:
++  - if:
++      properties:
++        compatible:
++          not:
++            contains:
++              const: qcom,sm8450-iris
++    then:
++      properties:
++        secure-nonpixel: false
+   - if:
+       properties:
+         compatible:
+diff --git a/arch/arm64/boot/dts/qcom/sm8450.dtsi b/arch/arm64/boot/dts/qcom/sm8450.dtsi
+index d902cb253..261a01fba 100644
+--- a/arch/arm64/boot/dts/qcom/sm8450.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8450.dtsi
+@@ -3238,6 +3238,12 @@ &config_noc SLAVE_VENUS_CFG QCOM_ICC_TAG_ACTIVE_ONLY>,
+ 			dma-coherent;
+ 			status = "disabled";
+ 
++			secure-nonpixel {
++				compatible = "qcom,sm8450-iris-cp-nonpixel";
++				iommus = <&apps_smmu 0x2184 0x400>;
++				dma-coherent;
++			};
++
+ 			iris_opp_table: opp-table {
+ 				compatible = "operating-points-v2";
+ 
+-- 
+2.56.0
+

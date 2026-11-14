@@ -210,6 +210,18 @@ Type-C 申请与生效状态、接收端通道数限制，以及分配变化后�
 检查 GPIO46 常开状态中断的接管与失败清理、唤醒开关、睡眠边界上的双中断、
 总线休眠时不访问 I2C、恢复后的待处理帧，以及反复睡眠的唤醒引用配对。
 可用 `--source /path/to/assembled-kernel-source` 指定已装配源码；实际唤醒仍需硬件验证。
+
+`devbox run -- python3 tests/iris-video.py --source /path/to/assembled-kernel-source`
+编译执行 Iris 的实际 CAPTURE 响应函数，覆盖未标记空帧、隐藏帧、随后同时间戳的可见帧、
+停止期间返回、EOS、分辨率变化、真实错误、重新排队失败和无效缓冲区。
+实机帧内容、固件行为和卸载生命周期仍按[视频短测](../docs/VIDEO.md#可复现短测)单独验证。
+
+`devbox run -- python3 tests/iris-encoder.py --source /path/to/assembled-kernel-source`
+执行 Iris 安全 ARP 分配和 SMMU 页表管理的实际 C 函数，覆盖多会话隔离、物理段部分授权失败、
+权限回收失败时保留内存、IOVA 边界、页表授权范围及原子上下文的延迟释放。
+还执行编码排空回复函数，验证 Iris2 零标志确认、其他平台/解码的严格检查及真实错误处理。
+主机测试不能代替实机编码、码流解码和画质比较。
+
 `tests/display-panel-margins.py --source /path/to/candidate --baseline-source /path/to/before`
 执行面板 prepare 与复位函数，覆盖三个等待开关、机型与身份限制及失败清理；
 同时检查原厂命令表和其他面板代码未变；默认引导通过三个独立参数省去额外等待。
