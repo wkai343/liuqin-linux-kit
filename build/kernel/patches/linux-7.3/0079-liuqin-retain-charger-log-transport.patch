@@ -1,0 +1,297 @@
+From: Liuqin Linux contributors
+Subject: [PATCH] rpmsg: glink: retain Liuqin charger diagnostic transport
+
+M81 closes the main charging channel after a local log-channel CLOSE.
+Follow the OEM client/transport lifetime separation on this board and ADSP
+edge: release local callbacks at unbind, retain the existing ID references,
+and reuse the open channel and intents at rebind. Reject ctrl-created
+aliases of this device. Preserve remote-close and whole-edge cleanup.
+
+diff --git a/drivers/rpmsg/qcom_glink_native.c b/drivers/rpmsg/qcom_glink_native.c
+--- a/drivers/rpmsg/qcom_glink_native.c
++++ b/drivers/rpmsg/qcom_glink_native.c
+@@ -12,6 +12,7 @@
+ #include <linux/of.h>
+ #include <linux/of_address.h>
+ #include <linux/platform_device.h>
++#include <linux/platform_data/liuqin.h>
+ #include <linux/regmap.h>
+ #include <linux/rpmsg.h>
+ #include <linux/sizes.h>
+@@ -159,6 +160,11 @@
+  * @intent_req_result: Result of intent request
+  * @intent_received: flag indicating that an intent has been received
+  * @intent_req_wq: wait queue for intent_req signalling
++ * @keepalive: retain Liuqin's diagnostic transport across local driver unbind
++ * @ept_attached: local endpoint is owned or being attached (under recv_lock)
++ * @close_sent: local close has started (under recv_lock)
++ * @remote_close: remote close has started (under recv_lock)
++ * @intents_announced: base intents already belong to the retained transport
+  */
+ struct glink_channel {
+ 	struct rpmsg_endpoint ept;
+@@ -191,6 +197,11 @@
+ 	int intent_req_result;
+ 	bool intent_received;
+ 	wait_queue_head_t intent_req_wq;
++	bool keepalive;
++	bool ept_attached;
++	bool close_sent;
++	bool remote_close;
++	bool intents_announced;
+ };
+ 
+ #define to_glink_channel(_ept) container_of(_ept, struct glink_channel, ept)
+@@ -222,6 +233,12 @@
+ 
+ static void qcom_glink_rx_done_work(struct work_struct *work);
+ 
++static bool qcom_glink_keepalive(struct qcom_glink *glink, const char *name)
++{
++	return liuqin_board_quirks() && !strcmp(glink->label, "lpass") &&
++		!strcmp(name, "PMIC_LOGS_ADSP_APPS");
++}
++
+ static struct glink_channel *qcom_glink_alloc_channel(struct qcom_glink *glink,
+ 						      const char *name)
+ {
+@@ -237,6 +254,7 @@
+ 	mutex_init(&channel->intent_req_lock);
+ 
+ 	channel->glink = glink;
++	channel->keepalive = qcom_glink_keepalive(glink, name);
+ 	channel->name = kstrdup(name, GFP_KERNEL);
+ 	if (!channel->name) {
+ 		kfree(channel);
+@@ -525,6 +543,17 @@
+ 				      struct glink_channel *channel)
+ {
+ 	struct glink_msg req;
++	unsigned long flags;
++
++	if (channel->keepalive) {
++		spin_lock_irqsave(&channel->recv_lock, flags);
++		if (channel->close_sent || !channel->lcid) {
++			spin_unlock_irqrestore(&channel->recv_lock, flags);
++			return;
++		}
++		channel->close_sent = true;
++		spin_unlock_irqrestore(&channel->recv_lock, flags);
++	}
+ 
+ 	req.cmd = cpu_to_le16(GLINK_CMD_CLOSE);
+ 	req.param1 = cpu_to_le16(channel->lcid);
+@@ -1165,8 +1194,11 @@
+ 
+ 	enable = sigs & NATIVE_DSR_SIG || sigs & NATIVE_CTS_SIG;
+ 
+-	if (channel->ept.flow_cb)
++	spin_lock_irqsave(&channel->recv_lock, flags);
++	if (channel->ept.flow_cb &&
++	    (!channel->keepalive || channel->ept_attached))
+ 		channel->ept.flow_cb(channel->ept.rpdev, channel->ept.priv, enable);
++	spin_unlock_irqrestore(&channel->recv_lock, flags);
+ }
+ 
+ void qcom_glink_native_rx(struct qcom_glink *glink)
+@@ -1293,8 +1325,14 @@
+ 	qcom_glink_send_open_ack(glink, channel);
+ 
+ 	ret = qcom_glink_send_open_req(glink, channel);
+-	if (ret)
++	if (ret) {
++		/* A failed allocation/transmit left no local ID for CLOSE_ACK. */
++		if (channel->keepalive && !channel->lcid) {
++			kref_put(&channel->refcount, qcom_glink_channel_release);
++			return ret;
++		}
+ 		goto close_link;
++	}
+ 
+ 	ret = wait_for_completion_timeout(&channel->open_ack, 5 * HZ);
+ 	if (!ret) {
+@@ -1327,34 +1365,76 @@
+ 	struct qcom_glink *glink = parent->glink;
+ 	struct rpmsg_endpoint *ept;
+ 	const char *name = chinfo.name;
++	bool keepalive = qcom_glink_keepalive(glink, name);
++	bool reuse = false;
+ 	int cid;
+ 	int ret;
+ 	unsigned long flags;
+ 
++	/* This firmware channel must be owned by its real RPMsg device. */
++	if (keepalive && strcmp(rpdev->id.name, name))
++		return NULL;
++
+ 	spin_lock_irqsave(&glink->idr_lock, flags);
+ 	idr_for_each_entry(&glink->rcids, channel, cid) {
+ 		if (!strcmp(channel->name, name))
+ 			break;
+ 	}
++	if (channel && keepalive)
++		kref_get(&channel->refcount);
+ 	spin_unlock_irqrestore(&glink->idr_lock, flags);
++
++	if (keepalive) {
++		/* Never resurrect a device whose remote channel has gone away. */
++		if (!channel)
++			return NULL;
++		spin_lock_irqsave(&channel->recv_lock, flags);
++		if (channel->ept_attached || channel->remote_close ||
++		    channel->close_sent || READ_ONCE(glink->abort_tx)) {
++			spin_unlock_irqrestore(&channel->recv_lock, flags);
++			goto put_channel;
++		}
++		channel->ept_attached = true;
++		reuse = channel->lcid && completion_done(&channel->open_ack);
++		spin_unlock_irqrestore(&channel->recv_lock, flags);
++	}
+ 
+ 	if (!channel) {
+ 		channel = qcom_glink_create_local(glink, name);
+ 		if (IS_ERR(channel))
+ 			return NULL;
+-	} else {
++	} else if (!reuse) {
+ 		ret = qcom_glink_create_remote(glink, channel);
+ 		if (ret)
+-			return NULL;
+-	}
+-
++			goto detach_channel;
++	}
++
++	spin_lock_irqsave(&channel->recv_lock, flags);
++	if (keepalive && (channel->remote_close || channel->close_sent ||
++			  READ_ONCE(glink->abort_tx))) {
++		spin_unlock_irqrestore(&channel->recv_lock, flags);
++		goto detach_channel;
++	}
+ 	ept = &channel->ept;
+ 	ept->rpdev = rpdev;
+ 	ept->cb = cb;
+ 	ept->priv = priv;
+ 	ept->ops = &glink_endpoint_ops;
++	spin_unlock_irqrestore(&channel->recv_lock, flags);
++	if (keepalive)
++		kref_put(&channel->refcount, qcom_glink_channel_release);
+ 
+ 	return ept;
++
++detach_channel:
++	if (!keepalive)
++		return NULL;
++	spin_lock_irqsave(&channel->recv_lock, flags);
++	channel->ept_attached = false;
++	spin_unlock_irqrestore(&channel->recv_lock, flags);
++put_channel:
++	kref_put(&channel->refcount, qcom_glink_channel_release);
++	return NULL;
+ }
+ 
+ static int qcom_glink_announce_create(struct rpmsg_device *rpdev)
+@@ -1372,6 +1452,8 @@
+ 
+ 	if (glink->intentless || !completion_done(&channel->open_ack))
+ 		return 0;
++	if (channel->keepalive && channel->intents_announced)
++		return 0;
+ 
+ 	prop = of_find_property(np, "qcom,intents", NULL);
+ 	if (prop) {
+@@ -1392,6 +1474,25 @@
+ 			qcom_glink_advertise_intent(glink, channel, intent);
+ 		}
+ 	}
++	channel->intents_announced = true;
++	return 0;
++}
++
++static int qcom_glink_announce_destroy(struct rpmsg_device *rpdev)
++{
++	struct glink_channel *channel = to_glink_channel(rpdev->ept);
++	unsigned long flags;
++
++	if (!channel->keepalive)
++		return 0;
++
++	/* Drain both callback paths before the client frees its private state. */
++	spin_lock_irqsave(&channel->recv_lock, flags);
++	channel->ept_attached = false;
++	channel->ept.cb = NULL;
++	channel->ept.flow_cb = NULL;
++	channel->ept.priv = NULL;
++	spin_unlock_irqrestore(&channel->recv_lock, flags);
+ 	return 0;
+ }
+ 
+@@ -1413,10 +1514,30 @@
+ 	struct glink_channel *channel = to_glink_channel(ept);
+ 	struct qcom_glink *glink = channel->glink;
+ 	unsigned long flags;
++	bool retain;
+ 
+ 	spin_lock_irqsave(&channel->recv_lock, flags);
+ 	channel->ept.cb = NULL;
++	if (channel->keepalive) {
++		channel->ept.flow_cb = NULL;
++		channel->ept.priv = NULL;
++		channel->ept.rpdev = NULL;
++		channel->ept_attached = false;
++	}
++	retain = channel->keepalive && !channel->remote_close &&
++		 !channel->close_sent && !READ_ONCE(glink->abort_tx) &&
++		 channel->lcid && channel->rcid &&
++		 completion_done(&channel->open_ack);
+ 	spin_unlock_irqrestore(&channel->recv_lock, flags);
++
++	/*
++	 * OEM log disable detaches the client, not the firmware transport.
++	 * Sending CLOSE here makes M81 also close PMIC_RTR_ADSP_APPS.
++	 * The existing local/remote ID references retain the channel; remote
++	 * CLOSE and edge removal still release both references normally.
++	 */
++	if (retain)
++		return;
+ 
+ 	qcom_glink_send_close_req(glink, channel);
+ }
+@@ -1608,6 +1729,7 @@
+ static const struct rpmsg_device_ops glink_device_ops = {
+ 	.create_ept = qcom_glink_create_ept,
+ 	.announce_create = qcom_glink_announce_create,
++	.announce_destroy = qcom_glink_announce_destroy,
+ };
+ 
+ static const struct rpmsg_endpoint_ops glink_endpoint_ops = {
+@@ -1720,11 +1842,18 @@
+ 				      channel ? channel->lcid : 0, rcid);
+ 	if (WARN(!channel, "close request on unknown channel\n"))
+ 		return;
++	spin_lock_irqsave(&channel->recv_lock, flags);
++	channel->remote_close = true;
++	spin_unlock_irqrestore(&channel->recv_lock, flags);
+ 
+ 	/* cancel pending rx_done work */
+ 	cancel_work_sync(&channel->intent_work);
+ 
+ 	qcom_glink_remove_rpmsg_device(glink, channel);
++
++	/* An unbound retained channel has no client remove callback to close it. */
++	if (channel->keepalive)
++		qcom_glink_send_close_req(glink, channel);
+ 
+ 	qcom_glink_send_close_ack(glink, channel);
+ 
+@@ -1757,6 +1886,10 @@
+ 	idr_remove(&glink->lcids, channel->lcid);
+ 	channel->lcid = 0;
+ 	spin_unlock_irqrestore(&glink->idr_lock, flags);
++
++	spin_lock_irqsave(&channel->recv_lock, flags);
++	channel->remote_close = true;
++	spin_unlock_irqrestore(&channel->recv_lock, flags);
+ 
+ 	/* Decouple the potential rpdev from the channel */
+ 	qcom_glink_remove_rpmsg_device(glink, channel);

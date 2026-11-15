@@ -27,6 +27,57 @@ ROM 为 `OS2.0.6.0.VMYCNXM`，镜像身份固定在
 公开 UCSI 未提供当前主线的 PD 能力设备注册路径；能力目录替换仍需引用 Linux 的相应实现。
 这些主线 API 依据与 [NOTICE](../NOTICE) 中的代码来源、作者署名不能改称原厂实现。
 
+## 日志通道生命周期
+
+公开原厂 [`charger-ulog-glink.c` 的 `ulog_en_set()`](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/soc/qcom/charger-ulog-glink.c#L282)
+在 `enable=0` 时只执行 `cancel_delayed_work_sync()`，保留 `chg_ulog` 客户端及
+`PMIC_LOGS_ADSP_APPS` 通道。原厂
+[`pmic_glink_unregister_client()`](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/soc/qcom/pmic_glink.c#L352)
+也只撤销客户端路由，不关闭其父设备的 RPMsg 通道；日志和主充电分别匹配两个
+具名 RPMsg 设备。因此停止日志轮询不需要发送 GLINK `CLOSE`，也不需要取消
+充电属性投票、发送额外日志控制命令或重启 ADSP。
+
+锁定 ROM 的 `charger-ulog-glink.ko` SHA-256 为
+`162dc041e4f30171027a0194c946a7a01c982a1959b30b772ef694441d5e4ded`。
+其 `.text` 中 `ulog_en_set` 位于 `0xc10`，关闭分支 `0xc60` 的重定位目标为
+`cancel_delayed_work_sync`；该路径不调用客户端注销或通道关闭。模块符号可能附带
+编译器哈希后缀，地址只适用于此哈希的 ELF，可用 ARM64 `objdump -dr` 复核。
+
+当前 Linux 的 `drivers/rpmsg/rpmsg_char.c` 区分两种所有权：通过 `rpmsg_ctrl`
+创建的端点由打开的文件持有，释放文件或 `RPMSG_DESTROY_EPT_IOCTL` 会调用
+`rpmsg_destroy_ept()`；绑定 `rpmsg_chrdev` 的默认端点由驱动持有，关闭文件仅
+释放文件状态和接收队列，默认端点不接受销毁 ioctl。`liuqin-charge-logs` 使用后者，
+使采集进程退出保持原厂关闭轮询的语义。该工具本身不解绑驱动。
+
+锁定固件的 GLINK 行为是：主机向日志通道发送 `CLOSE`，远端回复该通道的
+`CLOSE_ACK`，随后远端主动向主充电通道发送 `CLOSE`，Linux 才进入主通道清理
+与对向关闭。两个通道的 ID 不同，ADSP remoteproc 仍为 `running`；此时电源属性
+请求不可用，Type-C 伙伴消失。这个顺序将触发点定位到诊断传输关闭后的固件行为，
+不能解释成 Linux 在最初的请求中误用了主通道 ID。主机修复遵循原厂持有方式，
+不依靠忽略远端关闭事件、伪造成功应答或自动重启 ADSP。
+
+### 驱动解绑适配
+
+原厂 GLINK 的端点销毁同样发送 `CLOSE`，未发现可以单独关闭日志传输又保留主充电
+的额外主机握手。原厂充电日志客户端与 RPMsg 传输是分层持有的；当前主机适配
+[`0079-liuqin-retain-charger-log-transport.patch`](../build/kernel/patches/linux-7.3/0079-liuqin-retain-charger-log-transport.patch)
+将这种生命周期分离用于驱动解绑，范围由 `liuqin_board_quirks()`、`lpass` 边和
+精确的 `PMIC_LOGS_ADSP_APPS` 名称共同限定。
+
+解绑前撤销并排空数据及流控回调，释放客户端状态；已经完成握手的传输继续由原有
+本地／远端 ID 引用持有。重绑复用通道，不重新分配 ID 或重复公告基础 intents。
+打开失败、重复占用及 `rpmsg_ctrl` 同名别名不能接管活跃端点。收到远端关闭时，
+包括客户端已经解绑的情况，仍完成双方关闭与引用释放；整个 GLINK 边移除也照常
+清理保留的通道。保留传输不意味着缓存充电成功状态或忽略固件服务掉线。
+
+`tests/charge-logs-kernel.py --source <完整适配源码>` 编译执行上述真实函数，
+覆盖重复解绑、回调生命周期、握手失败、远端关闭、传输移除和其他通道行为。
+
+可复现检查包括：正常退出、SIGTERM、SIGKILL 后重新打开日志文件，并确认主充电
+属性、温控状态和 Type-C 伙伴持续有效。需要调查底层关闭行为时，应使用临时跟踪
+内核记录 `qcom_glink_cmd_open/open_ack/close/close_ack` 的方向、通道名和 ID，
+区分主机主动关闭、远端关闭和通道重新公告；测试产物保存在忽略的 `out/` 中。
+
 ## 认证程序
 
 `/vendor/etc/init/hw/init.batterysecret.rc` 在开机完成及关机充电模式下启动
@@ -181,6 +232,11 @@ cat /sys/class/power_supply/qcom-battmgr-usb/input_current_limit
 返回码一定是 `0x204`。使用现有 `pmic_glink_trace` 可记录线上 24 字节应答，完成后恢复
 原跟踪开关。`tests/charge-thermal-kernel.py` 覆盖完整 `0x204` 应答的错误传播与失败不覆盖
 成功缓存，实机记录保存在 `out/`。SDP 限流及能力位为 1 的 PD 电源仍需分别实测。
+
+需要补充固件执行路径时使用 `liuqin-charge-logs`，按[原厂生命周期](#日志通道生命周期)
+停止轮询并保留端点。新内核的驱动解绑行为见[驱动解绑适配](#驱动解绑适配)。
+旧内核或直接发送底层关闭命令仍会触发锁定固件关闭主充电通道；若已发生，正常重启
+后核对电量通信、Type-C 和温控服务恢复。
 
 ## 固件服务恢复
 

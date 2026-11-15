@@ -5,7 +5,7 @@
   "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
   "tag": "v7.3.4",
   "commit": "7595a62d45ee1a2297eafa5f2ef5d0a45142d84d",
-  "expected_source_tree": "ee543900338369d2446080570cc487f4dbdc0505",
+  "expected_source_tree": "cbe28f5d3c34ab9ea55d96c780e624e19660c4dc",
   "config": {
     "path": "build/recovery/kernel/7.3.4.config",
     "sha256": "84e4eeb8b0004d8f73c7cb956efe53e13bf9a6d580918a1214892bda95469f39"
@@ -272,6 +272,10 @@
       "sha256": "60cf03eabf4f3ac0e31ff20d39ca983b191652bcd66d8a49c87a6473357c6025"
     },
     {
+      "path": "build/kernel/patches/linux-7.3/0079-liuqin-retain-charger-log-transport.patch",
+      "sha256": "8e0309f2eb505339405d7053b765a572d61a6a66effd7cf5afadeb2e8bd82a28"
+    },
+    {
       "path": "build/recovery/kernel/patches/linux-7.3/0001-recovery-peripheral-handoff.patch",
       "sha256": "ccb0f030fb1bed451301961d3d9c67d1b45060f67beb936a9aaf32a9db998f62"
     },
@@ -311,7 +315,7 @@
   "build_timestamp": "2026-11-11T00:00:00+00:00",
   "shared_kernel": {
     "path": "build/kernel/source.json",
-    "sha256": "36c3d8b6d6c61045f82fdaffd9db4d8e1bcf859e213fb6669737f15cdd89a8b2"
+    "sha256": "ce38fec51c2bd5901d4fc2404cc00a05253831ecb9fced43bf0d0c07f9db2e04"
   },
   "touch_patches": [
     {

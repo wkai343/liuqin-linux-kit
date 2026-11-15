@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+"""Read charger firmware logs while retaining the diagnostic transport."""
+import argparse
+import fcntl
+import math
+import os
+from pathlib import Path
+import select
+import signal
+import stat
+import struct
+import subprocess
+import sys
+import time
+
+CHANNEL = 'PMIC_LOGS_ADSP_APPS'
+DRIVER = 'rpmsg_chrdev'
+HEADER = (32778, 1, 0x18)
+LOG_SIZE = 8192
+
+
+def endpoint(sysfs=Path('/sys')):
+    """Bind only the ADSP log device; retain its driver-owned default endpoint."""
+    devices = list((sysfs / 'bus/rpmsg/devices').glob(
+        '3000000.remoteproc:glink-edge.' + CHANNEL + '.*'))
+    if len(devices) != 1 or (devices[0] / 'name').read_text().strip() != CHANNEL:
+        raise RuntimeError('ADSP charger log channel is unavailable or ambiguous')
+    device = devices[0]
+    endpoints = list((sysfs / 'class/rpmsg').glob('rpmsg[0-9]*'))
+    # A ctrl-created endpoint has a different parent and owns channel teardown.
+    for entry in endpoints:
+        if ((entry / 'name').read_text().strip() == CHANNEL and
+                entry.resolve().parent.parent != device.resolve()):
+            raise RuntimeError('a separately created charger log endpoint is already present')
+    driver = device / 'driver'
+    if driver.exists() and driver.resolve().name != DRIVER:
+        raise RuntimeError('charger log channel is owned by another driver')
+    if not driver.exists():
+        override = (device / 'driver_override').read_text().strip()
+        if override not in ('', '(null)', DRIVER):
+            raise RuntimeError('charger log channel has another driver override')
+        subprocess.run(['modprobe', 'rpmsg_char'], check=True)
+        # Reloading the module can bind an existing driver_override itself.
+        if not driver.exists():
+            (device / 'driver_override').write_text(DRIVER + '\n')
+            (sysfs / 'bus/rpmsg/drivers' / DRIVER / 'bind').write_text(device.name + '\n')
+    if not driver.exists() or driver.resolve().name != DRIVER:
+        raise RuntimeError('charger log driver did not bind')
+    matches = [p for p in (sysfs / 'class/rpmsg').glob('rpmsg[0-9]*')
+               if p.resolve().parent.parent == device.resolve() and
+               (p / 'name').read_text().strip() == CHANNEL]
+    if len(matches) != 1:
+        raise RuntimeError('driver-owned charger log endpoint is unavailable or ambiguous')
+    return matches[0]
+
+
+def decode(data):
+    if len(data) != LOG_SIZE + 12 or struct.unpack('<3I', data[:12]) != HEADER:
+        raise RuntimeError('invalid charger log response header or length')
+    return data[12:].split(b'\0', 1)[0]
+
+
+def request(fd, timeout):
+    payload = struct.pack('<4I', *HEADER, LOG_SIZE)
+    if os.write(fd, payload) != len(payload):
+        raise RuntimeError('short charger log request')
+    poller = select.poll()
+    poller.register(fd, select.POLLIN)
+    events = poller.poll(math.ceil(timeout * 1000))
+    if not events:
+        raise TimeoutError('charger log response timed out')
+    if events[0][1] & (select.POLLERR | select.POLLHUP | select.POLLNVAL):
+        raise RuntimeError('charger log transport disconnected')
+    return decode(os.read(fd, LOG_SIZE + 13))
+
+
+def collect(entry, count, interval, timeout, output):
+    major, minor = map(int, (entry / 'dev').read_text().strip().split(':'))
+    fd = os.open('/dev/' + entry.name, os.O_RDWR | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISCHR(info.st_mode) or info.st_rdev != os.makedev(major, minor):
+            raise RuntimeError('charger log device identity changed')
+        # A late reply from an interrupted collector can remain in the queue.
+        # Discard already queued replies before sending a new request.
+        for _ in range(16):
+            try:
+                data = os.read(fd, LOG_SIZE + 13)
+            except BlockingIOError:
+                break
+            if not data:
+                raise RuntimeError('charger log transport disconnected')
+            decode(data)
+        else:
+            raise RuntimeError('charger log receive queue did not drain')
+        for index in range(count):
+            output.write(request(fd, timeout))
+            output.flush()
+            if index + 1 < count:
+                time.sleep(interval)
+    finally:
+        # Closing a default-endpoint file purges its queue but leaves the rpmsg
+        # driver and GLINK channel alive, as OEM ulog enable=0 does.
+        os.close(fd)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--count', type=int, default=1, help='number of log requests (default: 1)')
+    parser.add_argument('--interval', type=float, default=1, help='seconds between requests (minimum: 0.5)')
+    parser.add_argument('--timeout', type=float, default=3, help='response timeout in seconds (default: 3)')
+    args = parser.parse_args()
+    if (args.count < 1 or not math.isfinite(args.interval) or args.interval < 0.5 or
+            not math.isfinite(args.timeout) or not 0 < args.timeout <= 30):
+        parser.error('count must be positive, interval >= 0.5, and 0 < timeout <= 30')
+    if os.geteuid() != 0:
+        parser.error('run on the tablet with sudo')
+
+    def interrupted(signum, frame):
+        raise InterruptedError(f'signal {signum}')
+
+    signal.signal(signal.SIGTERM, interrupted)
+    with open('/run/liuqin-charge-logs.lock', 'a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        collect(endpoint(), args.count, args.interval, args.timeout, sys.stdout.buffer)
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except (KeyboardInterrupt, InterruptedError):
+        sys.exit(130)
+    except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
+        print(f'Charger logs unavailable: {error}', file=sys.stderr)
+        sys.exit(1)
