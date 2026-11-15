@@ -34,6 +34,8 @@ def board_overlay(root, busybox, storage_helper):
     battery.symlink_to('../liuqin-mipps-battery-auth.service')
     auth_events=root/'etc/systemd/system/multi-user.target.wants/liuqin-mipps-auth.path'
     auth_events.symlink_to('../liuqin-mipps-auth.path')
+    thermal=root/'etc/systemd/system/multi-user.target.wants/liuqin-charge-thermal.service'
+    thermal.symlink_to('../liuqin-charge-thermal.service')
     old='marker=${LIUQIN_GNOME_GUARD_TEST_MARKER:-/etc/liuqin-native-root}'
     if text.count(old)!=1:raise ValueError('存储保护脚本标记不符。')
     text=text.replace(old,'marker=/etc/liuqin-native-root')

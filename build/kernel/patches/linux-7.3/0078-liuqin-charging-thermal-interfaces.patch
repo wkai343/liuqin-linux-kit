@@ -1,0 +1,522 @@
+From: Liuqin Linux contributors
+Subject: [PATCH] power: supply: expose M81 thermal levels and board thermistors
+
+Use the shipping M81 level protocol and strict property acknowledgments.
+Restore acknowledged votes across service generations and expose the OEM
+ADC7 board channels to host thermal policy.
+
+diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -24,6 +24,7 @@
+ #include <linux/spinlock.h>
+ #include <linux/math.h>
+ #include <linux/units.h>
++#include <linux/thermal.h>
+ 
+ #define BATTMGR_CHEMISTRY_LEN	4
+ #define BATTMGR_STRING_LEN	128
+@@ -462,6 +463,18 @@
+ 	/* verify_slave_flag: selects the slave fuel gauge for verify_digest. */
+ 	bool xm_slave_fg;
+ 
++	/* M81 host thermal votes: level indices, never microamps. @lock owns these. */
++	struct {
++		bool active;
++		u32 opcode, property, value;
++	} control;
++	u32 thermal_level, thermal_generation;
++	bool thermal_valid;
++	u32 icl_ua, icl_generation;
++	bool icl_requested, icl_valid;
++	u32 replay_generation;
++	unsigned int replay_attempts;
++
+ 	struct delayed_work enable_work;
+ 	struct work_struct xm_notify_work;
+ 	struct delayed_work refresh_work;
+@@ -717,6 +730,147 @@
+ 	return ret;
+ }
+ 
++
++/* Caller holds @lock. The protocol has no transaction ID; never accept another
++ * property's reply, a notification, or a reply from an old service lifetime.
++ */
++static int qcom_battmgr_control_locked(struct qcom_battmgr *battmgr,
++				     u32 opcode, u32 property, u32 value,
++				     u32 *reply, u32 *generation)
++{
++	unsigned long flags;
++	u32 service;
++	int ret;
++
++	spin_lock_irqsave(&battmgr->state_lock, flags);
++	service = battmgr->service_generation;
++	ret = battmgr->service_up && !battmgr->stopping ? 0 : -EAGAIN;
++	spin_unlock_irqrestore(&battmgr->state_lock, flags);
++	if (ret)
++		return ret;
++
++	battmgr->control.opcode = opcode;
++	battmgr->control.property = property;
++	smp_store_release(&battmgr->control.active, true);
++	ret = qcom_battmgr_request_property(battmgr, opcode, property, value);
++	WRITE_ONCE(battmgr->control.active, false);
++	spin_lock_irqsave(&battmgr->state_lock, flags);
++	if (!battmgr->service_up || battmgr->stopping ||
++	    service != battmgr->service_generation)
++		ret = -ENOTCONN;
++	spin_unlock_irqrestore(&battmgr->state_lock, flags);
++	if (!ret) {
++		if (reply)
++			*reply = battmgr->control.value;
++		if (generation)
++			*generation = service;
++	}
++	return ret;
++}
++
++static int qcom_battmgr_thermal_set_locked(struct qcom_battmgr *battmgr,
++					 unsigned long level)
++{
++	u32 generation;
++	int ret;
++
++	if (level > 15)
++		return -EINVAL;
++	ret = qcom_battmgr_control_locked(battmgr, BATTMGR_BAT_PROPERTY_SET,
++					 BATT_CHG_CTRL_LIM, level, NULL, &generation);
++	battmgr->thermal_valid = !ret;
++	if (!ret) {
++		battmgr->thermal_level = level;
++		battmgr->thermal_generation = generation;
++	}
++	return ret;
++}
++
++static int qcom_battmgr_thermal_get(struct qcom_battmgr *battmgr,
++				  unsigned long *level)
++{
++	int ret = 0;
++
++	mutex_lock(&battmgr->lock);
++	if (!READ_ONCE(battmgr->service_up) || !battmgr->thermal_valid ||
++	    battmgr->thermal_generation != READ_ONCE(battmgr->service_generation))
++		ret = -EAGAIN;
++	else
++		*level = battmgr->thermal_level;
++	mutex_unlock(&battmgr->lock);
++	return ret;
++}
++
++static int qcom_battmgr_cooling_max(struct thermal_cooling_device *cdev,
++				  unsigned long *state)
++{
++	*state = 15; /* OEM num_thermal_levels = 16; valid values are 0..15. */
++	return 0;
++}
++
++static int qcom_battmgr_cooling_get(struct thermal_cooling_device *cdev,
++				  unsigned long *state)
++{
++	return qcom_battmgr_thermal_get(cdev->devdata, state);
++}
++
++static int qcom_battmgr_cooling_set(struct thermal_cooling_device *cdev,
++				  unsigned long state)
++{
++	struct qcom_battmgr *battmgr = cdev->devdata;
++	int ret;
++
++	mutex_lock(&battmgr->lock);
++	ret = qcom_battmgr_thermal_set_locked(battmgr, state);
++	mutex_unlock(&battmgr->lock);
++	if (!ret)
++		power_supply_changed(battmgr->bat_psy);
++	return ret;
++}
++
++static const struct thermal_cooling_device_ops qcom_battmgr_cooling_ops = {
++	.get_max_state = qcom_battmgr_cooling_max,
++	.get_cur_state = qcom_battmgr_cooling_get,
++	.set_cur_state = qcom_battmgr_cooling_set,
++};
++
++/* Restore only successfully acknowledged host votes after service recovery.
++ * A failed write invalidates readback; it must never look like applied policy.
++ */
++static void qcom_battmgr_controls_restore(struct qcom_battmgr *battmgr)
++{
++	u32 generation;
++	int ret;
++
++	mutex_lock(&battmgr->lock);
++	generation = READ_ONCE(battmgr->service_generation);
++	if (generation != battmgr->replay_generation) {
++		battmgr->replay_generation = generation;
++		battmgr->replay_attempts = 0;
++	}
++	if (!READ_ONCE(battmgr->service_up) || battmgr->replay_attempts >= 10)
++		goto out;
++	if (battmgr->thermal_valid && battmgr->thermal_generation == generation &&
++	    (!battmgr->icl_requested ||
++	     (battmgr->icl_valid && battmgr->icl_generation == generation)))
++		goto out;
++	battmgr->replay_attempts++;
++	if (!battmgr->thermal_valid || battmgr->thermal_generation != generation) {
++		ret = qcom_battmgr_thermal_set_locked(battmgr, battmgr->thermal_level);
++		if (ret)
++			goto out;
++	}
++	if (battmgr->icl_requested &&
++	    (!battmgr->icl_valid || battmgr->icl_generation != generation)) {
++		ret = qcom_battmgr_control_locked(battmgr, BATTMGR_USB_PROPERTY_SET,
++						 USB_INPUT_CURR_LIMIT, battmgr->icl_ua,
++						 NULL, &battmgr->icl_generation);
++		battmgr->icl_valid = !ret;
++	}
++out:
++	mutex_unlock(&battmgr->lock);
++}
++
+ static int qcom_battmgr_raw_property(struct qcom_battmgr *battmgr,
+ 				     unsigned int opcode,
+ 				     unsigned int property,
+@@ -731,7 +885,12 @@
+ 	battmgr->raw_valid = false;
+ 	if (opcode == BATTMGR_XM_PROPERTY_GET)
+ 		ret = qcom_battmgr_xm_get_value_locked(battmgr, property, value);
+-	else
++	else if (opcode == BATTMGR_BAT_PROPERTY_GET) {
++		ret = qcom_battmgr_control_locked(battmgr, opcode, property, 0,
++						value, NULL);
++		mutex_unlock(&battmgr->lock);
++		return ret;
++	} else
+ 		ret = qcom_battmgr_request_property(battmgr, opcode, property, 0);
+ 	if (!ret && opcode != BATTMGR_XM_PROPERTY_GET &&
+ 	    (!battmgr->raw_valid || battmgr->raw_opcode != opcode ||
+@@ -773,7 +932,14 @@
+ QCOM_BATTMGR_RAW_ATTR(raw_xm_apdo_max, BATTMGR_XM_PROPERTY_GET, XM_APDO_MAX);
+ QCOM_BATTMGR_RAW_ATTR(raw_xm_power_max, BATTMGR_XM_PROPERTY_GET, XM_POWER_MAX);
+ 
++QCOM_BATTMGR_RAW_ATTR(raw_xm_thermal_temp, BATTMGR_XM_PROPERTY_GET, XM_THERMAL_TEMP);
++QCOM_BATTMGR_RAW_ATTR(raw_bat_charge_limit, BATTMGR_BAT_PROPERTY_GET, BATT_CHG_CTRL_LIM);
++QCOM_BATTMGR_RAW_ATTR(raw_bat_charge_limit_max, BATTMGR_BAT_PROPERTY_GET, BATT_CHG_CTRL_LIM_MAX);
++
+ static struct attribute *qcom_battmgr_raw_attrs[] = {
++	&dev_attr_raw_xm_thermal_temp.attr,
++	&dev_attr_raw_bat_charge_limit.attr,
++	&dev_attr_raw_bat_charge_limit_max.attr,
+ 	&dev_attr_raw_xm_cc_orientation.attr,
+ 	&dev_attr_raw_usb_real_type.attr,
+ 	&dev_attr_raw_xm_authentic.attr,
+@@ -1744,6 +1910,84 @@
+ 	.get_property = qcom_battmgr_bat_get_property,
+ };
+ 
++static int qcom_battmgr_sm8475_bat_get(struct power_supply *psy,
++				     enum power_supply_property psp,
++				     union power_supply_propval *val)
++{
++	unsigned long level;
++	int ret;
++
++	if (psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT_MAX) {
++		val->intval = 15;
++		return 0;
++	}
++	if (psp != POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT)
++		return qcom_battmgr_bat_get_property(psy, psp, val);
++	ret = qcom_battmgr_thermal_get(power_supply_get_drvdata(psy), &level);
++	if (!ret)
++		val->intval = level;
++	return ret;
++}
++
++static int qcom_battmgr_sm8475_bat_set(struct power_supply *psy,
++				     enum power_supply_property psp,
++				     const union power_supply_propval *val)
++{
++	struct qcom_battmgr *battmgr = power_supply_get_drvdata(psy);
++	int ret;
++
++	if (psp != POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT || val->intval < 0)
++		return -EINVAL;
++	mutex_lock(&battmgr->lock);
++	ret = qcom_battmgr_thermal_set_locked(battmgr, val->intval);
++	mutex_unlock(&battmgr->lock);
++	if (!ret)
++		power_supply_changed(psy);
++	return ret;
++}
++
++static int qcom_battmgr_sm8475_bat_writeable(struct power_supply *psy,
++					   enum power_supply_property psp)
++{
++	return psp == POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT;
++}
++
++static const enum power_supply_property sm8475_bat_props[] = {
++	POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT,
++	POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT_MAX,
++	POWER_SUPPLY_PROP_STATUS,
++	POWER_SUPPLY_PROP_HEALTH,
++	POWER_SUPPLY_PROP_PRESENT,
++	POWER_SUPPLY_PROP_CHARGE_TYPE,
++	POWER_SUPPLY_PROP_CAPACITY,
++	POWER_SUPPLY_PROP_VOLTAGE_OCV,
++	POWER_SUPPLY_PROP_VOLTAGE_NOW,
++	POWER_SUPPLY_PROP_VOLTAGE_MAX,
++	POWER_SUPPLY_PROP_CURRENT_NOW,
++	POWER_SUPPLY_PROP_TEMP,
++	POWER_SUPPLY_PROP_TECHNOLOGY,
++	POWER_SUPPLY_PROP_CHARGE_COUNTER,
++	POWER_SUPPLY_PROP_CYCLE_COUNT,
++	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
++	POWER_SUPPLY_PROP_CHARGE_FULL,
++	POWER_SUPPLY_PROP_MODEL_NAME,
++	POWER_SUPPLY_PROP_TIME_TO_FULL_AVG,
++	POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG,
++	POWER_SUPPLY_PROP_INTERNAL_RESISTANCE,
++	POWER_SUPPLY_PROP_STATE_OF_HEALTH,
++	POWER_SUPPLY_PROP_POWER_NOW,
++};
++
++static const struct power_supply_desc sm8475_bat_psy_desc = {
++	.name = "qcom-battmgr-bat",
++	.type = POWER_SUPPLY_TYPE_BATTERY,
++	.properties = sm8475_bat_props,
++	.num_properties = ARRAY_SIZE(sm8475_bat_props),
++	.get_property = qcom_battmgr_sm8475_bat_get,
++	.set_property = qcom_battmgr_sm8475_bat_set,
++	.property_is_writeable = qcom_battmgr_sm8475_bat_writeable,
++};
++
+ static const enum power_supply_property sm8550_bat_props[] = {
+ 	POWER_SUPPLY_PROP_STATUS,
+ 	POWER_SUPPLY_PROP_HEALTH,
+@@ -1926,12 +2170,60 @@
+ 	POWER_SUPPLY_PROP_USB_TYPE,
+ };
+ 
++static int qcom_battmgr_usb_set_property(struct power_supply *psy,
++				       enum power_supply_property psp,
++				       const union power_supply_propval *val)
++{
++	struct qcom_battmgr *battmgr = power_supply_get_drvdata(psy);
++	u32 type, generation, value;
++	int ret;
++
++	if (battmgr->variant != QCOM_BATTMGR_SM8475 ||
++	    psp != POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT || val->intval < -1)
++		return -EINVAL;
++	value = val->intval == -1 ? U32_MAX : val->intval;
++	mutex_lock(&battmgr->lock);
++	ret = qcom_battmgr_control_locked(battmgr, BATTMGR_USB_PROPERTY_GET,
++					 USB_ADAP_TYPE, 0, &type, NULL);
++	if (ret)
++		goto out;
++	/* Preserve the OEM SDP/PD restriction; -1 withdraws this host vote. */
++	if (type != POWER_SUPPLY_USB_TYPE_SDP && type != POWER_SUPPLY_USB_TYPE_PD) {
++		ret = -EINVAL;
++		goto out;
++	}
++	ret = qcom_battmgr_control_locked(battmgr, BATTMGR_USB_PROPERTY_SET,
++					 USB_INPUT_CURR_LIMIT, value, NULL, &generation);
++	battmgr->icl_valid = !ret;
++	if (!ret) {
++		battmgr->icl_ua = value;
++		battmgr->icl_requested = true;
++		battmgr->icl_generation = generation;
++	}
++out:
++	mutex_unlock(&battmgr->lock);
++	if (!ret)
++		power_supply_changed(psy);
++	return ret;
++}
++
++static int qcom_battmgr_usb_is_writeable(struct power_supply *psy,
++				       enum power_supply_property psp)
++{
++	struct qcom_battmgr *battmgr = power_supply_get_drvdata(psy);
++
++	return battmgr->variant == QCOM_BATTMGR_SM8475 &&
++		psp == POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT;
++}
++
+ static const struct power_supply_desc sm8350_usb_psy_desc = {
+ 	.name = "qcom-battmgr-usb",
+ 	.type = POWER_SUPPLY_TYPE_USB,
+ 	.properties = sm8350_usb_props,
+ 	.num_properties = ARRAY_SIZE(sm8350_usb_props),
+ 	.get_property = qcom_battmgr_usb_get_property,
++	.set_property = qcom_battmgr_usb_set_property,
++	.property_is_writeable = qcom_battmgr_usb_is_writeable,
+ 	.usb_types = BIT(POWER_SUPPLY_USB_TYPE_UNKNOWN) |
+ 		     BIT(POWER_SUPPLY_USB_TYPE_SDP)     |
+ 		     BIT(POWER_SUPPLY_USB_TYPE_DCP)     |
+@@ -2541,6 +2833,23 @@
+ 	return true;
+ }
+ 
++static void qcom_battmgr_control_response(struct qcom_battmgr *battmgr,
++					  const void *data, size_t len)
++{
++	const struct qcom_battmgr_message *resp = data;
++
++	if (len != sizeof(resp->hdr) + sizeof(resp->intval) ||
++	    le32_to_cpu(resp->hdr.owner) != PMIC_GLINK_OWNER_BATTMGR ||
++	    le32_to_cpu(resp->hdr.type) != PMIC_GLINK_REQ_RESP ||
++	    le32_to_cpu(resp->hdr.opcode) != battmgr->control.opcode ||
++	    le32_to_cpu(resp->intval.property) != battmgr->control.property)
++		return;
++	battmgr->error = le32_to_cpu(resp->intval.result) ? -EREMOTEIO : 0;
++	if (!battmgr->error)
++		battmgr->control.value = le32_to_cpu(resp->intval.value);
++	complete(&battmgr->ack);
++}
++
+ static void qcom_battmgr_callback(const void *data, size_t len, void *priv)
+ {
+ 	const struct pmic_glink_hdr *hdr = data;
+@@ -2554,6 +2863,16 @@
+ 	}
+ 
+ 	opcode = le32_to_cpu(hdr->opcode);
++	if (smp_load_acquire(&battmgr->control.active)) {
++		if (opcode == BATTMGR_NOTIFICATION)
++			qcom_battmgr_notification(battmgr, data, len);
++		else
++			qcom_battmgr_control_response(battmgr, data, len);
++		return;
++	}
++	/* A late standard SET reply cannot complete a subsequent GET/XM. */
++	if (opcode == BATTMGR_BAT_PROPERTY_SET || opcode == BATTMGR_USB_PROPERTY_SET)
++		return;
+ 	xm_active = smp_load_acquire(&battmgr->xm.active); /* pairs with request publish */
+ 
+ 	/* Do this before the generic callback, whose old completion is broad. */
+@@ -2595,6 +2914,7 @@
+ 	int ret;
+ 
+ 	if (READ_ONCE(battmgr->service_up)) {
++		qcom_battmgr_controls_restore(battmgr);
+ 		ret = qcom_battmgr_xm_get(battmgr, XM_THERMAL_TEMP, &temperature);
+ 		if (ret)
+ 			dev_dbg(battmgr->dev, "fuel-gauge refresh failed: %d\n", ret);
+@@ -2823,6 +3143,8 @@
+ 	} else {
+ 		if (battmgr->variant == QCOM_BATTMGR_SM8550)
+ 			psy_desc = &sm8550_bat_psy_desc;
++		else if (battmgr->variant == QCOM_BATTMGR_SM8475)
++			psy_desc = &sm8475_bat_psy_desc;
+ 		else
+ 			psy_desc = &sm8350_bat_psy_desc;
+ 
+@@ -2877,6 +3199,7 @@
+ 	pmic_glink_client_register(battmgr->client);
+ 
+ 	if (battmgr->variant == QCOM_BATTMGR_SM8475) {
++		struct thermal_cooling_device *cdev;
+ 		int ret;
+ 
+ 		ret = devm_device_add_group(dev, &qcom_battmgr_raw_group);
+@@ -2886,6 +3209,10 @@
+ 		if (ret)
+ 			return ret;
+ 
++		cdev = devm_thermal_cooling_device_register(dev, "qcom-battmgr-charge",
++							battmgr, &qcom_battmgr_cooling_ops);
++		if (IS_ERR(cdev))
++			return dev_err_probe(dev, PTR_ERR(cdev), "charging cooling device\n");
+ 		queue_delayed_work(system_freezable_wq, &battmgr->refresh_work, 0);
+ 	}
+ 
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+@@ -3,6 +3,9 @@
+ 
+ #include <dt-bindings/input/input.h>
+ #include <dt-bindings/iio/qcom,spmi-adc7-pmk8350.h>
++#include <dt-bindings/iio/qcom,spmi-adc7-pm8350.h>
++#include <dt-bindings/iio/qcom,spmi-adc7-pm8350b.h>
++#include <dt-bindings/iio/qcom,spmi-adc7-pmr735a.h>
+ #include <dt-bindings/interrupt-controller/irq.h>
+ #include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
+ #include <dt-bindings/regulator/qcom,rpmh-regulator.h>
+@@ -1380,6 +1383,71 @@
+ 		label = "pmk8350_die_temp";
+ 		qcom,pre-scaling = <1 1>;
+ 	};
++	/* Liuqin OEM thermistor wiring, 100 kohm pull-ups and 200 us settling. */
++	channel@144 {
++		reg = <PM8350_ADC7_AMUX_THM1_100K_PU(1)>;
++		label = "cpu_therm";
++		qcom,ratiometric;
++		qcom,hw-settle-time = <200>;
++		qcom,pre-scaling = <1 1>;
++	};
++
++	channel@145 {
++		reg = <PM8350_ADC7_AMUX_THM2_100K_PU(1)>;
++		label = "flash_therm";
++		qcom,ratiometric;
++		qcom,hw-settle-time = <200>;
++		qcom,pre-scaling = <1 1>;
++	};
++
++	channel@146 {
++		reg = <PM8350_ADC7_AMUX_THM3_100K_PU(1)>;
++		label = "quiet_therm";
++		qcom,ratiometric;
++		qcom,hw-settle-time = <200>;
++		qcom,pre-scaling = <1 1>;
++	};
++
++	channel@147 {
++		reg = <PM8350_ADC7_AMUX_THM4_100K_PU(1)>;
++		label = "backlight_therm";
++		qcom,ratiometric;
++		qcom,hw-settle-time = <200>;
++		qcom,pre-scaling = <1 1>;
++	};
++
++	channel@347 {
++		reg = <PM8350B_ADC7_AMUX_THM4_100K_PU>;
++		label = "conn_therm";
++		qcom,ratiometric;
++		qcom,hw-settle-time = <200>;
++		qcom,pre-scaling = <1 1>;
++	};
++
++	channel@34d {
++		reg = <PM8350B_ADC7_GPIO4_100K_PU>;
++		label = "charger_therm0";
++		qcom,ratiometric;
++		qcom,hw-settle-time = <200>;
++		qcom,pre-scaling = <1 1>;
++	};
++
++	channel@44c {
++		reg = <PMR735A_ADC7_GPIO3_100K_PU>;
++		label = "wifi_therm";
++		qcom,ratiometric;
++		qcom,hw-settle-time = <200>;
++		qcom,pre-scaling = <1 1>;
++	};
++
++	channel@44 {
++		reg = <PMK8350_ADC7_AMUX_THM1_100K_PU>;
++		label = "xo_therm";
++		qcom,ratiometric;
++		qcom,hw-settle-time = <200>;
++		qcom,pre-scaling = <1 1>;
++	};
++
+ };
+ 
+ &pmk8350_rtc {

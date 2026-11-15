@@ -1,0 +1,10 @@
+{
+  "poll_seconds": 2,
+  "weights": {"battery": 800, "quiet_therm": -74, "charger_therm0": 131, "wifi_therm": -46, "cpu_therm": 184},
+  "weight_sum": 1000,
+  "compensation_mc": -389,
+  "trigger_mc": [37000, 39000, 41000, 42000, 43000, 45000],
+  "clear_mc": [35000, 37000, 40000, 41000, 42000, 44000],
+  "screen_on_levels": [2, 3, 7, 9, 12, 15],
+  "screen_off_levels": [0, 1, 3, 4, 5, 15]
+}

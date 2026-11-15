@@ -103,6 +103,85 @@ ROM 为 `OS2.0.6.0.VMYCNXM`，镜像身份固定在
 它不改变 USB 原始电流语义，不把 PPS 请求电流或最大功率能力作为采样值，
 也不根据快充模式标志推测电荷泵电流。分次读取不是硬件原子快照。
 
+## 充电温控接口与 normal 策略
+
+同一 M81 模块的 `battery_psy_set_prop()`（`0x3630`–`0x36c0`）验证输入在
+`0 <= level < num_thermal_levels`，以 battery SET `0x31`、属性 10 发送档位。
+probe 的 `0xd98`–`0xda0` 将档位数量设为 16。公开源码对应
+`battery_psy_set_charge_current()`；旧的微安辅助函数不能用于解释这个量产路径。
+独立 USB 输入电流入口的协议和 PD 能力限制见下节；它与热档位使用不同属性，
+不能把 USB 输入投票被拒绝推导为热档位失效。
+
+`mi_thermald` 和其 normal 配置同样来自锁定 ROM 的 `vendor_a`：
+
+| 文件 | SHA-256 |
+| --- | --- |
+| `/vendor/bin/mi_thermald` | `4b7043146a5ecb7afb1dc7ee855450fed4da1e65dfa329fee060a77907310c4b` |
+| `/vendor/etc/thermal-normal.conf` | `30b448aa005664047f60eef507d743932dac7652ee8b6748505535896be4fe1b` |
+| normal 配置解码后的文本 | `ae62ce8b2264ee9907d11c0d6a3e83cfa93ef80aeadb4ba15c7a93b084e55276` |
+
+按本页的只读提取步骤获取文件。`mi_thermald` 的 `.gnu_debugdata` 使用 XZ 压缩，
+解压后的 ELF 符号表标识 `en_de_crypt()` 为 `0x1273c`、`virtual_read_temp()` 为
+`0xbf1c`、`generic_set_level()` 为 `0xe584`、`screen_monitor()` 为 `0xe778`。
+解码使用 AES-128-CBC；`0x848c` 调用点通过相对重定位 `0x17278` / `0x17280`
+引用 key / IV。它们的虚拟地址为 `0x189ec` / `0x189fd`，对应文件偏移各减 `0x1000`，
+分别取 16 字节。将解码结果校验到上表摘要后再分析配置，不把未知版本按固定偏移处理。
+
+normal 的 `VIRTUAL-SENSOR` 给出五路传感器、权重、分母和补偿值；`MONITOR-BAT`
+给出六组触发／解除阈值和编码目标。`generic_set_level()` 的 `0xe630`–`0xe660`
+将 battery 的编码目标除以 100，屏幕状态非零取商，零取余数；原始编码不进入固件。
+`virtual_read_temp()` 在 `0xc03c`–`0xc048` 对加权和作有符号整数除法后加入补偿。
+Linux 采用这个 normal 充电表，未宣称复制游戏、相机等全部场景策略。
+
+传感器接线同时核对公开 `liuqin-sm8475.dtsi` 和锁定 ROM 的 DTBO：
+ADC7 通道 `0x144/145/146/147/347/34d/44c/44`、100 kΩ 上拉、比例校准、
+预缩放 `1 1`、稳定时间 200 µs。标准 battery `TEMP` 与用于热策略的
+`XM_THERMAL_TEMP` 是不同属性；后者的原厂 `power_supply_read_temp()` 以原值乘 100
+转换为毫摄氏度。主机接口、Linux 生命周期规则及复现检查见[温控](THERMAL.md#充电温控)。
+
+## USB 独立输入电流接口与 0x204
+
+公开 [`usb_psy_set_icl()`](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/power/supply/qti_battery_charger.c#L1385)
+先读 `USB_ADAP_TYPE=7`，仅接受 SDP（1）或固定 PD（6），再以 USB SET `0x33`、
+属性 5 发送微安值，负数编码为 `UINT_MAX`。量产 M81 模块的
+`usb_psy_set_prop()`（`0x2f4c`，主要路径 `0x2fe0`–`0x306c`）同样发送 24 字节，
+包含 owner=32778、type=1、opcode=0x33、battery_id=0、property=5 和 value。
+这条路径没有额外认证或使能写入；服务恢复时通知订阅和 200 ms 等待属于初始化流程，
+不是每次 SET 的解锁序列。Linux 保留该协议，但仅接受 `-1` 作为撤销值。
+
+锁定 ROM 的 `adsp.b14`（SHA-256
+`a708e6266aecf1f44fa5434635411f4e81d4ab3107e89d5751b3523aa66f2973`）
+给出了拒绝条件。下表是 Hexagon 虚拟地址，分段基址为 `0x60000000`；
+须先校验文件摘要，不能将这些偏移用于其他固件。
+
+| 位置 | 行为 |
+| --- | --- |
+| `0x600ccf30`，`battmngr_plat_scpqchg_exfg_r1_set_usb_icl` | SDP 直接进入电流投票；PD 类型 6／7／8 进入额外能力检查，其他类型返回 `0x204`。主机仍保留原厂较窄的 1／6 类型范围 |
+| `0x600cd0a4`–`0x600cd0d0` | 从输入信息读取 `bPDSuspendSupported`；为零时立即返回 `0x204`，未执行电流投票 |
+| `0x60032740` → `0x60181ec0` | 查询端口 PD 状态；已有所选 PDO 时，从首个 source PDO 提取 bit 28，作为上述能力标志 |
+| `0x6002bf44`–`0x6002bf70` | 同一个标志被送入 `charger detection` 的 `bPDSuspendSupported` 日志字段，格式位于 `0x602653fd` |
+| `0x600cd0d4`–`0x600cd0e8` | 能力检查通过后，普通电流值仍被改成 `UINT_MAX`；PD 入口不提供任意电流上限保证 |
+
+bit 28 的含义与原厂 [`PDO_FIXED_SUSPEND`](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/include/linux/usb/pd.h)
+一致。它由供电端声明，不能通过修改主机缓存或设置适配器认证位补齐。
+该结论限定于此固件、此属性和上述分支，不把所有属性中的 `0x204` 一律解释成 PD 能力错误。
+当前驱动保留 `EREMOTEIO`，不吞掉失败，也不将失败请求保存为已成功的控制值。
+
+复查时从当前连接的 partner 查找能力目录，避免固定 `pdN` 编号：
+
+```sh
+cat /sys/class/typec/port0/power_role
+cat /sys/class/typec/port0-partner/usb_power_delivery/source-capabilities/1:fixed_supply/usb_suspend_supported
+cat /sys/class/power_supply/qcom-battmgr-usb/usb_type
+cat /sys/class/power_supply/qcom-battmgr-usb/input_current_limit
+```
+
+在供电在线、sink 角色、固定 PD 且上述能力为 0 时，对 500000、750000 和 `-1`
+的独立请求应分别核对实际固件应答与未变的 GET 限额；不能用 `EREMOTEIO` 单独证明
+返回码一定是 `0x204`。使用现有 `pmic_glink_trace` 可记录线上 24 字节应答，完成后恢复
+原跟踪开关。`tests/charge-thermal-kernel.py` 覆盖完整 `0x204` 应答的错误传播与失败不覆盖
+成功缓存，实机记录保存在 `out/`。SDP 限流及能力位为 1 的 PD 电源仍需分别实测。
+
 ## 固件服务恢复
 
 公开原厂 [`battery_chg_state_cb()` / `battery_chg_subsys_up_work()`](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/power/supply/qti_battery_charger.c#L1934)

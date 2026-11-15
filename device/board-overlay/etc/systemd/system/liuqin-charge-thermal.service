@@ -1,0 +1,17 @@
+[Unit]
+Description=Liuqin charging thermal policy
+After=systemd-udev-trigger.service
+
+[Service]
+ExecStart=/usr/local/libexec/liuqin-charge-thermal
+Restart=on-failure
+RestartSec=3
+RuntimeDirectory=liuqin-charge-thermal
+RuntimeDirectoryPreserve=restart
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

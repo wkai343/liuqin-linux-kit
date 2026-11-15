@@ -121,6 +121,11 @@ class FedoraTests(unittest.TestCase):
         observer=root/'usr/local/bin/liuqin-charge-status'
         self.assertTrue(observer.stat().st_mode & 0o111)
         self.assertEqual(observer.read_bytes(),(PROJECT/'device/board-overlay/usr/local/bin/liuqin-charge-status').read_bytes())
+        thermal=root/'etc/systemd/system/multi-user.target.wants/liuqin-charge-thermal.service'
+        self.assertTrue(thermal.is_symlink())
+        self.assertEqual(thermal.resolve(),root/'etc/systemd/system/liuqin-charge-thermal.service')
+        self.assertTrue((root/'usr/local/libexec/liuqin-charge-thermal').stat().st_mode & 0o111)
+        self.assertTrue((root/'usr/share/liuqin/charge-thermal.json').is_file())
         for name in ('usr/local/sbin/liuqin-gnome-usb-rescue','usr/local/sbin/liuqin-rescue',
                      'usr/local/bin/liuqin-shell','etc/systemd/system/liuqin-gnome-usb-rescue.service'):
             self.assertFalse((root/name).exists(),name)

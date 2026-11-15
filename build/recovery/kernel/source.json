@@ -5,7 +5,7 @@
   "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
   "tag": "v7.3.4",
   "commit": "7595a62d45ee1a2297eafa5f2ef5d0a45142d84d",
-  "expected_source_tree": "bbbd0fa5ff050376c18c8fb856d8fc42c46316a0",
+  "expected_source_tree": "ee543900338369d2446080570cc487f4dbdc0505",
   "config": {
     "path": "build/recovery/kernel/7.3.4.config",
     "sha256": "84e4eeb8b0004d8f73c7cb956efe53e13bf9a6d580918a1214892bda95469f39"
@@ -268,6 +268,10 @@
       "sha256": "cdd05340d30dde84453f60b5f4f9c1050b05c645f10134875eb45d6db4607188"
     },
     {
+      "path": "build/kernel/patches/linux-7.3/0078-liuqin-charging-thermal-interfaces.patch",
+      "sha256": "60cf03eabf4f3ac0e31ff20d39ca983b191652bcd66d8a49c87a6473357c6025"
+    },
+    {
       "path": "build/recovery/kernel/patches/linux-7.3/0001-recovery-peripheral-handoff.patch",
       "sha256": "ccb0f030fb1bed451301961d3d9c67d1b45060f67beb936a9aaf32a9db998f62"
     },
@@ -307,7 +311,7 @@
   "build_timestamp": "2026-11-11T00:00:00+00:00",
   "shared_kernel": {
     "path": "build/kernel/source.json",
-    "sha256": "6caa3fbb882f4b0c4214bc390294420a3ba8314dae64bf62b2ef106b26340a78"
+    "sha256": "36c3d8b6d6c61045f82fdaffd9db4d8e1bcf859e213fb6669737f15cdd89a8b2"
   },
   "touch_patches": [
     {

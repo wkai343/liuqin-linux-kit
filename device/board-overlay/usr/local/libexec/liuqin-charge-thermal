@@ -1,0 +1,179 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: MIT
+"""Apply Liuqin's OEM normal charging policy through acknowledged M81 levels."""
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import signal
+import time
+
+
+class Policy:
+    def __init__(self, config):
+        self.config = config
+        self.triggers = config['trigger_mc']
+        self.clears = config['clear_mc']
+        self.levels_on = config['screen_on_levels']
+        self.levels_off = config['screen_off_levels']
+        arrays = (self.triggers, self.clears, self.levels_on, self.levels_off)
+        if not self.triggers or any(len(a) != len(self.triggers) for a in arrays):
+            raise ValueError('thermal table lengths differ')
+        if any(a != sorted(a) for a in arrays):
+            raise ValueError('thermal tables must be ascending')
+        if any(c >= t for c, t in zip(self.clears, self.triggers)):
+            raise ValueError('clear temperature must be below trigger')
+        if any(not 0 <= x <= 15 for a in (self.levels_on, self.levels_off) for x in a):
+            raise ValueError('M81 levels must be within 0..15')
+        if config['weight_sum'] <= 0 or not 0.5 <= config['poll_seconds'] <= 10:
+            raise ValueError('invalid sampling parameters')
+        self.band = None
+
+    def update(self, temperatures, screen_on):
+        if set(temperatures) != set(self.config['weights']):
+            raise ValueError('incomplete temperature sample')
+        if any(not -20000 <= t <= 100000 for t in temperatures.values()):
+            raise ValueError('temperature outside sensor range')
+        weighted = sum(temperatures[k] * w for k, w in self.config['weights'].items())
+        # C signed division truncates toward zero, including subzero readings.
+        temp = (abs(weighted) // self.config['weight_sum']) * (1 if weighted >= 0 else -1)
+        temp += self.config['compensation_mc']
+        if self.band is None:
+            # A daemon restart must not release a band while inside its hysteresis.
+            self.band = sum(temp >= clear for clear in self.clears)
+        while self.band < len(self.triggers) and temp >= self.triggers[self.band]:
+            self.band += 1
+        while self.band and temp < self.clears[self.band - 1]:
+            self.band -= 1
+        levels = self.levels_on if screen_on else self.levels_off
+        return temp, (levels[self.band - 1] if self.band else 0)
+
+
+class Device:
+    def __init__(self, sysfs):
+        self.root = Path(sysfs)
+
+    def cooling(self):
+        matches = [p for p in (self.root / 'class/thermal').glob('cooling_device*')
+                   if (p / 'type').read_text().strip() == 'qcom-battmgr-charge']
+        if len(matches) != 1:
+            raise OSError('M81 charging cooling device unavailable')
+        return matches[0] / 'cur_state'
+
+    def sample(self, names):
+        values = {}
+        for name in names:
+            if name == 'battery':
+                paths = list((self.root / 'bus/auxiliary/devices').glob(
+                    'pmic_glink.power-supply.*/sm8475_raw/raw_xm_thermal_temp'))
+                scale = 100  # OEM XM_THERMAL_TEMP: tenths of a degree Celsius.
+            else:
+                paths = list((self.root / 'bus/iio/devices').glob(
+                    f'iio:device*/in_temp_{name}_input'))
+                scale = 1  # ADC7 processed thermistors: millidegrees Celsius.
+            if len(paths) != 1:
+                raise OSError(f'unique {name} temperature unavailable')
+            value = int(paths[0].read_text())
+            if name == 'battery' and value >= 2 ** 31:
+                value -= 2 ** 32  # Signed firmware temperature on the raw u32 wire.
+            values[name] = value * scale
+        return values
+
+    def screen_on(self):
+        paths = list((self.root / 'class/backlight').glob('ktz8866*/bl_power'))
+        try:
+            return len(paths) != 1 or int(paths[0].read_text()) == 0
+        except (OSError, ValueError):
+            return True  # Unknown display state uses the more restrictive table.
+
+
+class Controller:
+    def __init__(self, policy, device):
+        self.policy, self.device = policy, device
+        self.failures = 0
+
+    def tick(self):
+        result = {'time': time.time(), 'applied_level': None}
+        state = self.device.cooling()
+        try:
+            temperatures = self.device.sample(self.policy.config['weights'])
+            screen_on = self.device.screen_on()
+            temp, level = self.policy.update(temperatures, screen_on)
+            self.failures = 0
+            result.update(temperatures_mc=temperatures, virtual_mc=temp,
+                          band=self.policy.band, screen_on=screen_on)
+        except (OSError, ValueError) as error:
+            self.failures += 1
+            result.update(error=str(error), sensor_failures=self.failures)
+            # Hold on a transient failure. Repeated loss requests maximum cooling;
+            # fresh complete samples are required before any subsequent relaxation.
+            if self.failures < 3:
+                return result
+            level = 15
+        result['requested_level'] = level
+        try:
+            applied = int(state.read_text())
+        except OSError:
+            applied = None  # Driver rejects stale acknowledgements after GLINK loss.
+        if applied != level:
+            write_sysfs(state, level)
+        applied = int(state.read_text())
+        if applied != level:
+            raise OSError(f'charging level acknowledgement differs: {applied} != {level}')
+        result['applied_level'] = applied
+        return result
+
+
+def write_sysfs(path, value):
+    # Buffered close can retry a failed flush. A control write must issue one
+    # transaction, including when firmware explicitly rejects the command.
+    data = (str(value) + '\n').encode('ascii')
+    with path.open('wb', buffering=0) as stream:
+        if stream.write(data) != len(data):
+            raise OSError('short sysfs control write')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--config', default='/usr/share/liuqin/charge-thermal.json')
+    parser.add_argument('--sysfs', default='/sys')
+    parser.add_argument('--status-file', default='/run/liuqin-charge-thermal/status.json')
+    parser.add_argument('--once', action='store_true')
+    args = parser.parse_args()
+    status = Path(args.status_file)
+    status.parent.mkdir(parents=True, exist_ok=True)
+    lock = (status.parent / 'controller.lock').open('w')
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    policy = Policy(json.loads(Path(args.config).read_text()))
+    controller = Controller(policy, Device(args.sysfs))
+    running = True
+
+    def stop(signum, frame):
+        nonlocal running
+        running = False
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    previous = None
+    while running:
+        try:
+            result = controller.tick()
+        except (OSError, ValueError) as error:
+            result = {'time': time.time(), 'error': str(error), 'applied_level': None}
+        temporary = status.with_suffix('.tmp')
+        temporary.write_text(json.dumps(result, sort_keys=True) + '\n')
+        os.replace(temporary, status)
+        summary = (result.get('applied_level'), result.get('error'))
+        if summary != previous:
+            print(json.dumps(result, sort_keys=True), flush=True)
+            previous = summary
+        if args.once:
+            return 1 if result.get('error') else 0
+        time.sleep(policy.config['poll_seconds'])
+    # Keep the last restriction across service restarts; do not release while hot.
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
