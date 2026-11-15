@@ -2,8 +2,8 @@
 /*
  * Classify one fresh PMIC KEY_POWER press/release sequence for charger mode.
  *
- * Exit 0: ordinary press, request normal boot.
- * Exit 10: medium press, request bootloader.
+ * Exit 0: short press, request the charging screen.
+ * Exit 10: long press, request normal boot.
  * Exit 2: bounded wait elapsed or a press was outside both windows.
  */
 #define _GNU_SOURCE
@@ -26,10 +26,10 @@
 #define BITS_PER_LONG (sizeof(unsigned long) * 8U)
 #define NBITS(x) (((x) + BITS_PER_LONG - 1U) / BITS_PER_LONG)
 #define ARM_AFTER_MS 3000
-#define NORMAL_MIN_MS 50
-#define NORMAL_MAX_MS 1999
-#define BOOTLOADER_MIN_MS 2000
-#define BOOTLOADER_MAX_MS 7000
+#define SCREEN_MIN_MS 50
+#define SCREEN_MAX_MS 1999
+#define BOOT_MIN_MS 2000
+#define BOOT_MAX_MS 7000
 
 static int64_t monotonic_ms(void)
 {
@@ -116,13 +116,13 @@ static int classify_event(bool *armed, bool *pressed, int64_t *pressed_at,
 	}
 	held = now - *pressed_at;
 	*pressed = false;
-	if (held >= NORMAL_MIN_MS && held <= NORMAL_MAX_MS) {
-		fprintf(stderr, "liuqin-charger-power-key: normal %lldms\n",
+	if (held >= SCREEN_MIN_MS && held <= SCREEN_MAX_MS) {
+		fprintf(stderr, "liuqin-charger-power-key: screen %lldms\n",
 			(long long)held);
 		return 0;
 	}
-	if (held >= BOOTLOADER_MIN_MS && held <= BOOTLOADER_MAX_MS) {
-		fprintf(stderr, "liuqin-charger-power-key: bootloader %lldms\n",
+	if (held >= BOOT_MIN_MS && held <= BOOT_MAX_MS) {
+		fprintf(stderr, "liuqin-charger-power-key: normal %lldms\n",
 			(long long)held);
 		return 10;
 	}
@@ -151,10 +151,14 @@ static int run_test_script(const char *path, int64_t arm_after, int64_t timeout)
 		struct input_event event = { 0 };
 		int rc;
 
-		if (offset < last_offset || offset > timeout ||
+		if (offset < last_offset ||
 		    (strcmp(action, "press") && strcmp(action, "release"))) {
 			fclose(stream);
 			return 64;
+		}
+		if (offset >= timeout && (!pressed || started + offset - pressed_at > BOOT_MAX_MS + 1000)) {
+			fclose(stream);
+			return 2;
 		}
 		last_offset = offset;
 		event.type = EV_KEY;
@@ -240,7 +244,8 @@ int main(int argc, char **argv)
 
 		if (now < 0)
 			return 1;
-		if (now - started >= timeout)
+		/* Finish an in-flight press across the polling-window boundary. */
+		if (now - started >= timeout && (!pressed || now - pressed_at > BOOT_MAX_MS + 1000))
 			return 2;
 		if (!test_event && count == 0)
 			count = add_real_events(fds, count);

@@ -1,0 +1,24 @@
+From: Liuqin Linux Kit maintainers
+Subject: [PATCH] Keep Recovery ADSP independent of disabled audio PRM clocks
+
+Recovery disables the GPR audio subtree while retaining ADSP for PMIC
+battery and charging communication. The desktop's PRM clock child cannot
+be instantiated from that disabled subtree; treating this as ENOMEM
+prevents the entire ADSP from probing. Skip only this audio setup in the
+explicit Recovery profile, preserving the shared board identity helper
+and the normal desktop clock lifecycle.
+
+diff --git a/drivers/remoteproc/qcom_q6v5_pas.c b/drivers/remoteproc/qcom_q6v5_pas.c
+--- a/drivers/remoteproc/qcom_q6v5_pas.c
++++ b/drivers/remoteproc/qcom_q6v5_pas.c
+@@ -982,6 +982,10 @@ static int liuqin_create_prm_clocks(struct qcom_pas *pas)
+ 	if (!liuqin_board_quirks() || !pas->info_name || strcmp(pas->info_name, "adsp"))
+ 		return 0;
+ 
++	/* Recovery retains ADSP charging services, but disables GPR audio. */
++	if (of_property_read_bool(of_root, "liuqin,recovery"))
++		return 0;
++
+ 	edge = of_get_child_by_name(pas->dev->of_node, "glink-edge");
+ 	gpr = of_get_compatible_child(edge, "qcom,gpr");
+ 	prm = of_get_compatible_child(gpr, "qcom,q6prm");

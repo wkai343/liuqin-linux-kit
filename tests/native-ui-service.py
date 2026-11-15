@@ -52,6 +52,48 @@ class ServiceTests(unittest.TestCase):
         self.runner.assert_called_once_with(['/bin/busybox','dmesg'],capture_output=True,timeout=8,check=True)
         self.assertEqual((self.root/'sys/class/block/sda/ro').read_text(),'1')
 
+    def test_partial_enumeration_and_stale_proof_do_not_admit_maintenance(self):
+        marker=self.root/'etc/liuqin-native-recovery.json'
+        value=json.loads(marker.read_text());value['recovery_fast_start_version']=1;marker.write_text(json.dumps(value))
+        proof=self.root/'run/liuqin-native-startup'
+        boot=(self.root/'proc/sys/kernel/random/boot_id').read_text()
+        for body in ('','ready\nold-boot\n','failed\n'+boot+'\n','ready\n'+boot+'\nextra\n'):
+            proof.write_text(body)
+            self.assertFalse(self.ops.summary()['sealed'])
+            for op in ({'op':'partitions'},{'op':'brightness','percent':30},{'op':'prepare_exit','action':'system'}):
+                with self.subTest(body=body,op=op),self.assertRaises(RuntimeError):self.ops.dispatch(op)
+        proof.write_text('ready\n'+boot+'\n')
+        self.assertTrue(self.ops.summary()['sealed'])
+        self.assertEqual(len(self.ops.dispatch({'op':'partitions'})['partitions']),1)
+
+    def test_periodic_status_does_not_wait_for_capacity(self):
+        original=service.status.read
+        def read(path,*args):
+            if Path(path).name=='capacity':raise AssertionError('capacity read on UI RPC')
+            return original(path,*args)
+        battery=self.root/'sys/class/power_supply/battery'
+        battery.mkdir(parents=True);(battery/'capacity').write_text('85')
+        (battery/'type').write_text('Battery')
+        with patch.object(service.status,'read',side_effect=read):
+            self.assertEqual(self.ops.dispatch({'op':'status'})['battery'],'unavailable')
+
+    def test_early_display_verifies_ram_profile_and_its_payload_without_storage_admission(self):
+        marker=self.root/'etc/liuqin-native-recovery.json'
+        value=json.loads(marker.read_text())
+        value.update(recovery_fast_start_version=1,ui_version=1,display_profile='bootloader-simplefb',
+                     kernel_release='test-native',payload_sha256={})
+        for name in ('usr/bin/liuqin-recovery-ui','usr/lib/liuqin/native-ui-service.py'):
+            path=self.root/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b'fixture')
+            value['payload_sha256'][name]=hashlib.sha256(path.read_bytes()).hexdigest()
+        marker.write_text(json.dumps(value));(self.root/'etc/liuqin-storage-mode').write_text('readonly\n')
+        with patch.object(service.os,'geteuid',return_value=0),patch.object(service.os,'uname',return_value=SimpleNamespace(machine='aarch64')):
+            self.assertFalse(service.prepare_ui(self.root)['sealed'])
+            (self.root/'usr/bin/liuqin-recovery-ui').write_bytes(b'tampered')
+            with self.assertRaisesRegex(RuntimeError,'checksum'):service.prepare_ui(self.root)
+            (self.root/'usr/bin/liuqin-recovery-ui').write_bytes(b'fixture')
+            (self.root/'etc/liuqin-storage-mode').write_text('persistent\n')
+            with self.assertRaisesRegex(RuntimeError,'readonly RAM'):service.prepare_ui(self.root)
+
     def test_usb_status_uses_live_controller_state_and_never_assumes_adb_authorization(self):
         self.assertEqual(self.ops.summary()['usb_state'],'starting')
         gadget=self.root/'sys/kernel/config/usb_gadget/liuqin-adb'

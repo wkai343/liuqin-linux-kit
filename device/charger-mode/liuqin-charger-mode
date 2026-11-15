@@ -1,13 +1,8 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT
 #
-# Stage-1 charger-mode state machine.  This file is intentionally not copied
-# by the current initramfs builder: it is the reviewed input for a later,
-# separately identified M2 boot-image change.
-#
-# It has no mount, root-selection, slot, desktop, or shutdown operation.  Its
-# only terminal actions are the two explicit reboot requests made by the
-# separately pinned exit helper.
+# Stage-1 charging UI and low-power hold. All persistent storage stays read-only.
+# Power monitoring is independent of display setup and power-key waits.
 
 set -u
 
@@ -20,6 +15,11 @@ usb=${LIUQIN_CHARGER_USB_ROOT:-/sys/class/power_supply/qcom-battmgr-usb}
 blockdev=${LIUQIN_CHARGER_BLOCKDEV:-"/bin/busybox blockdev"}
 key_tool=${LIUQIN_CHARGER_KEY_TOOL:-/bin/liuqin-charger-mode-power-key}
 exit_tool=${LIUQIN_CHARGER_EXIT_TOOL:-/bin/liuqin-charger-mode-exit}
+ui_tool=${LIUQIN_CHARGER_UI_TOOL:-/bin/liuqin-charger-mode-ui}
+display_prepare=${LIUQIN_CHARGER_DISPLAY_PREPARE:-/usr/libexec/liuqin-boot-splash}
+uptime_file=${LIUQIN_CHARGER_UPTIME_FILE:-/proc/uptime}
+run_dir=${LIUQIN_CHARGER_RUN_DIR:-/run/liuqin-charger-mode}
+timeout_cmd=${LIUQIN_CHARGER_TIMEOUT_CMD:-timeout}
 log_file=${LIUQIN_CHARGER_LOG_FILE:-/dev/kmsg}
 pmsg_file=${LIUQIN_CHARGER_PMSG_FILE:-/dev/pmsg0}
 sleep_cmd=${LIUQIN_CHARGER_SLEEP_CMD:-sleep}
@@ -125,26 +125,11 @@ charger_panel_off() {
 
 # This is the early-boot subset of liuqin-lowpower-apply.sh.  No service is
 # stopped here because the integration point is before a persistent root or a
-# desktop can start.  Refuse to call the policy complete if no cpufreq policy
-# can be proved capped at its advertised minimum.
+# desktop can start. Offline the other cores before capping CPU0's policy.
+# Inactive policy4/policy7 attributes remain present but return EBUSY, so they
+# must not be read on subsequent checks or screen wakes.
 charger_apply_lowpower() {
-	charger_policy_seen=false
 	charger_policy_ok=true
-	for charger_policy in "$cpu_root"/cpufreq/policy*; do
-		[ -r "$charger_policy/cpuinfo_min_freq" ] || continue
-		charger_policy_seen=true
-		charger_min=$(charger_value "$charger_policy/cpuinfo_min_freq")
-		case $charger_min in *[!0-9]*|'') charger_policy_ok=false; continue ;; esac
-		[ -w "$charger_policy/scaling_max_freq" ] || {
-			charger_policy_ok=false
-			continue
-		}
-		printf '%s\n' "$charger_min" >"$charger_policy/scaling_max_freq" ||
-			charger_policy_ok=false
-		[ "$(charger_value "$charger_policy/scaling_max_freq")" = "$charger_min" ] ||
-			charger_policy_ok=false
-	done
-	[ "$charger_policy_seen" = true ] || return 1
 	for charger_cpu in 7 6 5 4 3 2 1; do
 		charger_online=$cpu_root/cpu$charger_cpu/online
 		[ -e "$charger_online" ] || continue
@@ -155,7 +140,23 @@ charger_apply_lowpower() {
 		printf '%s\n' 0 >"$charger_online" || charger_policy_ok=false
 		[ "$(charger_value "$charger_online")" = 0 ] || charger_policy_ok=false
 	done
-	[ "$charger_policy_ok" = true ]
+	[ "$charger_policy_ok" = true ] || return 1
+	if [ -e "$cpu_root/cpu0/online" ]; then
+		[ "$(charger_value "$cpu_root/cpu0/online")" = 1 ] || return 1
+	fi
+	charger_policy=$cpu_root/cpufreq/policy0
+	charger_min=$(charger_value "$charger_policy/cpuinfo_min_freq")
+	case $charger_min in *[!0-9]*|'') return 1 ;; esac
+	[ -w "$charger_policy/scaling_max_freq" ] || return 1
+	printf '%s\n' "$charger_min" >"$charger_policy/scaling_max_freq" || return 1
+	# cpufreq applies freq_qos requests from an asynchronous work item. An
+	# immediate read can still return the old limit even after a successful
+	# write. Allow at most 200 ms for readback before failing the proof.
+	for charger_policy_wait in 1 2 3 4 5 6 7 8 9 10; do
+		[ "$(charger_value "$charger_policy/scaling_max_freq")" = "$charger_min" ] && return 0
+		"$sleep_cmd" 0.02 || return 1
+	done
+	[ "$(charger_value "$charger_policy/scaling_max_freq")" = "$charger_min" ]
 }
 
 charger_status() {
@@ -168,17 +169,24 @@ charger_status() {
 }
 
 charger_wait_key() {
-	if [ ! -x "$key_tool" ]; then
-		"$sleep_cmd" "$interval" 2>/dev/null || :
-		return 2
-	fi
+	charger_key_wait=$interval
+	# Initial readiness can change just after a failed check. Do not make the
+	# first automatic screen wait for the normal 30-second key window; a key
+	# must not be necessary to trigger another readiness check.
+	[ "$charger_display_started" = true ] || charger_key_wait=1
 	charger_arm_after=0
 	if [ "$charger_first_key_window" = true ]; then
 		charger_arm_after=3000
 		charger_first_key_window=false
+		# Preserve the complete initial held-key guard before using short waits.
+		[ "$charger_key_wait" -ge 3 ] || charger_key_wait=3
+	fi
+	if [ ! -x "$key_tool" ]; then
+		"$sleep_cmd" "$charger_key_wait" 2>/dev/null || :
+		return 2
 	fi
 	"$key_tool" --arm-after-ms "$charger_arm_after" \
-		--timeout-ms "$((interval * 1000))"
+		--timeout-ms "$((charger_key_wait * 1000))"
 	return $?
 }
 
@@ -188,28 +196,142 @@ charger_request_exit() {
 		charger_log "state=hold exit=$charger_exit refused=no-exit-helper"
 		return 1
 	}
+	# The power monitor and key handler must never issue conflicting exits.
+	mkdir "$run_dir/exit-lock" 2>/dev/null || return 1
+	if [ "$charger_exit" = poweroff ] && [ "$(charger_value "$usb/online")" != 0 ]; then
+		rmdir "$run_dir/exit-lock"
+		return 1
+	fi
 	charger_log "state=hold exit=$charger_exit requested"
+	charger_panel_off || :
 	"$exit_tool" "$charger_exit"
 	charger_exit_rc=$?
 	charger_log "state=hold exit=$charger_exit returned=$charger_exit_rc"
+	rmdir "$run_dir/exit-lock"
 	return "$charger_exit_rc"
 }
 
+charger_seconds() {
+	IFS=' ' read -r charger_uptime charger_unused <"$uptime_file" || return 1
+	charger_uptime=${charger_uptime%%.*}
+	case $charger_uptime in ''|*[!0-9]*) return 1 ;; esac
+	printf '%s\n' "$charger_uptime"
+}
+
+charger_monitor_power() {
+	charger_started=
+	charger_offline_since=
+	charger_online_seen=false
+	while :; do
+		charger_now=$(charger_seconds) || charger_now=
+		charger_online=$(charger_value "$usb/online")
+		if [ -z "$charger_now" ]; then
+			charger_offline_since=
+		else
+			[ -n "$charger_started" ] || charger_started=$charger_now
+			case $charger_online in
+			1) charger_online_seen=true; charger_offline_since= ;;
+			0)
+				# A cold ADSP can initially report zero before USB is ready.
+				# Still handle a cable removed before the first valid sample.
+				if [ "$charger_online_seen" = true ] || [ "$((charger_now - charger_started))" -ge 10 ]; then
+					[ -n "$charger_offline_since" ] || charger_offline_since=$charger_now
+					if [ "$((charger_now - charger_offline_since))" -ge 3 ]; then
+						charger_log 'external power absent for 3s; requesting poweroff'
+						charger_request_exit poweroff || :
+						# Failed shutdowns are retried, never converted to a boot.
+						charger_offline_since=
+					fi
+				fi
+				;;
+			*) charger_offline_since= ;;
+			esac
+		fi
+		"$sleep_cmd" 1 || :
+	done
+}
+
+charger_show_display() {
+	# The supervisor continues monitoring power during module/DRM setup.
+	if [ -x "$display_prepare" ]; then
+		"$timeout_cmd" -k 1 20 "$display_prepare" charger-prepare || {
+			charger_log 'display preparation failed; keeping power monitor active'
+			return 1
+		}
+	fi
+	# An initial zero can be ADSP startup, so let the debounced monitor decide
+	# about shutdown instead of permanently skipping the screen on one sample.
+	[ ! -d "$run_dir/exit-lock" ] || return 1
+	"$timeout_cmd" -k 1 25 "$ui_tool" "$bat" "$backlight" >"$run_dir/display.log" 2>&1
+	charger_ui_rc=$?
+	charger_panel_off || :
+	while IFS= read -r charger_ui_line; do
+		charger_log "display: $charger_ui_line"
+	done <"$run_dir/display.log"
+	charger_log "display finished=$charger_ui_rc"
+	return "$charger_ui_rc"
+}
+
+charger_cleanup() {
+	[ -z "$charger_monitor_pid" ] || kill "$charger_monitor_pid" 2>/dev/null || :
+	[ -z "$charger_display_pid" ] || wait "$charger_display_pid" 2>/dev/null || :
+	[ -z "$charger_monitor_pid" ] || wait "$charger_monitor_pid" 2>/dev/null || :
+}
+
+charger_wake_display() {
+	if [ -n "$charger_display_pid" ] && [ -e "$run_dir/display-finished" ]; then
+		wait "$charger_display_pid" 2>/dev/null || :
+		charger_display_pid=
+	fi
+	# A short press while already displaying keeps the current display window.
+	[ -z "$charger_display_pid" ] || return 0
+	[ -x "$ui_tool" ] || return 1
+	charger_lock_ufs && charger_apply_lowpower && charger_panel_off || return 1
+	rm -f "$run_dir/display-finished"
+	(charger_show_display; : >"$run_dir/display-finished") &
+	charger_display_pid=$!
+	charger_display_started=true
+	charger_log 'display requested by power key'
+}
+
+# Entry point (functions above are also exercised by the host fault harness).
 charger_cmdline_is_charger || exit 64
+mkdir -p "$run_dir" || exit 1
+chmod 0700 "$run_dir" || exit 1
+charger_monitor_pid=
+charger_display_pid=
+charger_display_started=false
+rm -f "$run_dir/display-finished"
+trap charger_cleanup EXIT
+charger_monitor_power &
+charger_monitor_pid=$!
 
 charger_ticks=0
 charger_first_key_window=true
 while :; do
+	if [ -n "$charger_display_pid" ] && [ -e "$run_dir/display-finished" ]; then
+		wait "$charger_display_pid" 2>/dev/null || :
+		charger_display_pid=
+	fi
 	charger_ufs=failed
 	charger_panel=failed
 	charger_lowpower=failed
 	charger_lock_ufs && charger_ufs=ro
 	if [ "$charger_ufs" = ro ]; then
-		charger_panel_off && charger_panel=off
+		if [ -z "$charger_display_pid" ]; then
+			charger_panel_off && charger_panel=off
+		else
+			charger_panel=managed
+		fi
 		charger_apply_lowpower && charger_lowpower=applied
 	fi
-	if [ "$charger_ufs:$charger_panel:$charger_lowpower" = ro:off:applied ]; then
+	if [ "$charger_ufs:$charger_lowpower" = ro:applied ] && [ "$charger_panel" != failed ]; then
 		charger_state=hold
+		if [ "$charger_display_started" = false ] && [ -x "$ui_tool" ]; then
+			(charger_show_display; : >"$run_dir/display-finished") &
+			charger_display_pid=$!
+			charger_display_started=true
+		fi
 	else
 		charger_state=retry
 	fi
@@ -218,8 +340,8 @@ while :; do
 	charger_wait_key
 	charger_key_rc=$?
 	case $charger_key_rc in
-		0) charger_request_exit normal || : ;;
-		10) charger_request_exit bootloader || : ;;
+		0) charger_wake_display || charger_log 'display wake unavailable; keeping charger mode' ;;
+		10) charger_request_exit normal || : ;;
 		2) : ;;
 		*) charger_log "state=$charger_state key-helper=$charger_key_rc" ;;
 	esac

@@ -183,6 +183,7 @@ class Flow:
                         filesystem_interface=sha(PROJECT/'shared/liuqin_filesystems.py'),
                         bootargs=sha(PROJECT/'device/native-bootargs.txt'),
                         init=tree_identity(PROJECT/'device/boot'),
+                        charger=tree_identity(PROJECT/'device/charger-mode'),
                         dtb_tools=sha(PROJECT/'build/lib/build-bootimg.sh'),
                         abl_symbols=sha(PROJECT/'build/lib/abl-symbols.py'))
         env=dict(inputs,**usb_environment(self.usb),KERNEL_SOURCE=str(source),KERNEL_OUT=str(kernel))

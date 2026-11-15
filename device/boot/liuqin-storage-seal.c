@@ -224,7 +224,8 @@ int main(int argc, char **argv)
 
     if (argc == 2 && strcmp(argv[1], "--ready") == 0)
         return liuqin_storage_ready(0);
-    if (argc == 2 && strcmp(argv[1], "--ready-recovery") == 0)
+    if (argc == 2 && (strcmp(argv[1], "--ready-recovery") == 0 ||
+                      strcmp(argv[1], "--ready-charger") == 0))
         return liuqin_storage_ready(1);
     if (argc == 2 && strcmp(argv[1], "--ready-ufs") == 0)
         return liuqin_storage_ready(2);
@@ -238,7 +239,7 @@ int main(int argc, char **argv)
     list = argc >= 2 && strcmp(argv[1], "--list-ufs") == 0;
     if (!((argc == 2 && (!strcmp(argv[1], "--seal") || !strcmp(argv[1], "--seal-ufs") ||
                         !strcmp(argv[1], "--check") || list)) || (argc == 4 && list))) {
-        fprintf(stderr, "usage: liuqin-storage-seal --seal|--seal-ufs|--check|--list-ufs [devroot sysroot]|--ready|--ready-ufs|--ready-recovery|--version\n"
+        fprintf(stderr, "usage: liuqin-storage-seal --seal|--seal-ufs|--check|--list-ufs [devroot sysroot]|--ready|--ready-ufs|--ready-recovery|--ready-charger|--version\n"
                         "       liuqin-storage-seal --verify-flags devroot sysroot ufs|scsi writable-partition|- snapshot-name...\n");
         return 2;
     }

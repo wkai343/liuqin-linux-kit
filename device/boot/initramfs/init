@@ -580,7 +580,18 @@ storage_wait_for_ufs() {
 		storage_wait_fast=true
 		storage_wait_probe=--ready-recovery
 	fi
-	case " $1 " in *' androidboot.mode=charger '*) storage_wait_fast=false ;; esac
+	case " $1 " in
+	*' androidboot.mode=charger '*)
+		# Charger mode seals the entire SCSI namespace. Use the full-LUN/GPT
+		# proof, including the validated factory backup-header convention,
+		# rather than the desktop's internal-UFS-only enumeration.
+		if [ "$storage_mode" = persistent ] && [ "$storage_profile" = native-updatable ]; then
+			storage_wait_probe=--ready-charger
+		else
+			storage_wait_fast=false
+		fi
+		;;
+	esac
 	if [ "$storage_wait_fast" = true ]; then
 		if storage_clock_read; then
 			storage_wait_deadline=$((storage_wait_now + 1000))
@@ -933,6 +944,8 @@ mdev -s
 
 # A separately packaged, graphics-only runtime may render while the existing
 # storage guard works. It cannot admit a root or alter its protection checks.
+# Charger boots only prepare blanked display drivers here; their first frame
+# still waits for the final storage proof and the low-power charger gate.
 storage_splash_pid=
 if [ "$storage_mode" = persistent ] && [ "$storage_profile" = native-updatable ] &&
    [ -x "$storage_splash_helper" ]; then
@@ -948,6 +961,21 @@ if [ -f /etc/liuqin-native-recovery.json ] && [ -f /etc/liuqin-native-adb ] &&
    [ "$storage_mode" = readonly ] && [ -x "$storage_seal_helper" ] &&
    IFS= read -r storage_native_adb </etc/liuqin-native-adb && [ "$storage_native_adb" = 1 ]; then
 	storage_wait_mode=recovery
+fi
+recovery_touch_pid=
+recovery_ui_pid=
+if [ "$storage_wait_mode" = recovery ]; then
+	# These workers only prepare RAM-backed display/input hardware. The UI
+	# has no maintenance socket until the independent final storage proof.
+	if [ -f /usr/lib/liuqin/native-touch.py ]; then
+		/usr/bin/python3 -I -B /usr/lib/liuqin/native-touch.py --prepare >/run/liuqin-native-touch.log 2>&1 &
+		recovery_touch_pid=$!
+	fi
+	if [ -x /usr/bin/liuqin-recovery-ui ] && [ -f /usr/lib/liuqin/native-ui-service.py ]; then
+		/usr/bin/python3 -I -B /usr/lib/liuqin/native-ui-service.py prepare >/run/liuqin-native-ui.log 2>&1 &
+		recovery_ui_pid=$!
+	fi
+	log 'native Recovery display and touch preparation started alongside storage checks'
 fi
 log "waiting for SCSI/UFS block devices and marking them read-only"
 storage_wait_for_ufs "$("$BB" cat /proc/cmdline 2>/dev/null)" "$storage_wait_mode"
@@ -991,14 +1019,30 @@ fi
 # The native Recovery console runs entirely in RAM. A console failure must
 # never relax the storage guard or start an installed operating system.
 if [ -f /etc/liuqin-native-recovery.json ] && [ -f /usr/lib/liuqin/native-status.py ]; then
-    if [ -f /usr/lib/liuqin/native-touch.py ]; then
+    if [ -n "$recovery_touch_pid" ]; then
+        if wait "$recovery_touch_pid"; then
+            log 'native Recovery touch ready'
+        else
+            log 'native touch unavailable; physical keys and computer control remain available'
+        fi
+    elif [ -f /usr/lib/liuqin/native-touch.py ]; then
         if /usr/bin/python3 -I -B /usr/lib/liuqin/native-touch.py >/run/liuqin-native-touch.log 2>&1; then
             [ "$storage_wait_mode" != recovery ] || log 'native Recovery touch ready'
         else
             log "native touch unavailable; physical keys and computer control remain available"
         fi
     fi
-    if [ -x /usr/bin/liuqin-recovery-ui ] && [ -f /usr/lib/liuqin/native-ui-service.py ]; then
+    if [ "$storage_wait_mode" = recovery ]; then
+        # /run is a fresh tmpfs for this boot. Publish atomically only after
+        # the final RO proof and touch completion, never after a mere scan.
+        recovery_result=failed
+        [ "$ufs_safe" != true ] || recovery_result=ready
+        { printf '%s\n' "$recovery_result"; cat /proc/sys/kernel/random/boot_id; } >/run/liuqin-native-startup.tmp
+        mv /run/liuqin-native-startup.tmp /run/liuqin-native-startup
+    fi
+    if [ -n "$recovery_ui_pid" ] && kill -0 "$recovery_ui_pid" 2>/dev/null; then
+        : # The prepared UI will join the maintenance service after admission.
+    elif [ -x /usr/bin/liuqin-recovery-ui ] && [ -f /usr/lib/liuqin/native-ui-service.py ]; then
         (/usr/bin/python3 -I -B /usr/lib/liuqin/native-ui-service.py supervise ||
             /usr/bin/python3 -I -B /usr/lib/liuqin/native-status.py serve) >/run/liuqin-native-ui.log 2>&1 &
     else
@@ -1010,9 +1054,9 @@ fi
 # discharged tablet.  A normal desktop boot in that state consumes more than
 # an SDP input can supply and creates a boot/drain/reboot loop.  Product GNOME
 # images therefore divert here, before USB gadget setup, any read-write mount,
-# slot metadata update, or stage-2/systemd handoff.  The charger process keeps
-# retrying the read-only/low-power proof and never turns a failed proof into a
-# normal boot.
+# slot metadata update, or stage-2/systemd handoff. The charger process shows
+# a bounded charging screen and independently powers off after confirmed
+# cable removal. Failed storage/display/power reads never start the desktop.
 charger_boot=false
 case " $(cat /proc/cmdline 2>/dev/null) " in
 *' androidboot.mode=charger '*) charger_boot=true ;;
@@ -1023,10 +1067,11 @@ if [ "$storage_profile" = native-updatable ] && [ "$charger_boot" = true ]; then
 	charger_marker_hash=$(sha256sum "$charger_marker" 2>/dev/null | cut -d' ' -f1)
 	if [ -f "$charger_marker" ] && [ ! -L "$charger_marker" ] &&
 		[ "$(stat -c '%a %u %g %s' "$charger_marker" 2>/dev/null || true)" = "644 0 0 8" ] &&
-		[ "$charger_marker_hash" = 837fa926ba93f4a56e06d7e511f782465cebb250f67d74faee1d16bfc80aede1 ] &&
+		[ "$charger_marker_hash" = 955fa9c6c96d9db41c3c7da0bc0111e5426e93f868e5c959123a185ca5ce0e30 ] &&
 		[ -x /bin/liuqin-charger-mode ] &&
 		[ -x /bin/liuqin-charger-mode-power-key ] &&
-		[ -x /bin/liuqin-charger-mode-exit ]; then
+		[ -x /bin/liuqin-charger-mode-exit ] &&
+		[ -x /bin/liuqin-charger-mode-ui ]; then
 		charger_marker_ok=true
 	fi
 	if [ "$charger_marker_ok" = true ]; then

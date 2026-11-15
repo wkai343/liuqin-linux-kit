@@ -2,13 +2,21 @@
 
 Rec 独立使用 kernel.org 源码和本仓库补丁，不再获取原作者的内核仓库，也不需要从旧 Recovery 镜像提取内核、配置或 DTB。桌面内核配方仍在 `build/kernel/source.json`。
 
-默认配方为 [source.json](source.json)，版本为 **7.3.4**，与 Fedora 使用同一 kernel.org 提交和 `build/kernel/source.json` 中的 51 个公共补丁文件。独立的 [7.3.4.config](7.3.4.config) 从原 Rec 配置迁移；Rec 不使用桌面配置或启动参数。公共源码中的音频恢复改动不代表 Rec 开启了音频，也不替代当前源码配方的 Rec 实机验证。
+默认配方为 [source.json](source.json)，版本为 **7.3.4**，与 Fedora 使用同一 kernel.org 提交和 `build/kernel/source.json` 中的公共补丁。独立的 [7.3.4.config](7.3.4.config) 从原 Rec 配置迁移；Rec 不使用桌面配置或启动参数。公共源码中的音频恢复改动不代表 Rec 开启了音频，也不替代当前源码配方的 Rec 实机验证。
 
 CPU 功耗系数与两级 BWMON 共享桌面的设备树配置；Rec 将 `CONFIG_QCOM_ICC_BWMON` 内置，
 不依赖未打包的带宽监测模块。新增配置在 Rec 侧仅完成源码、配置和 DTB 离线校验；
 Fedora 的实机结果不代表新的 Rec 镜像已通过验收，详见[设备树对照](../../../docs/DEVICE-TREE.md)。
 
 Rec 专用差异集中在 `patches/linux-7.3/`：内核补丁隔离 ABL 占位节点的供应依赖、固定 USB peripheral，并保留 PMIC 电池/充电服务；外部模块补丁仅应用到触控接管模块的构建副本，通知新版 NVT 驱动已有画面就绪。
+
+Rec 标记还会跳过桌面 ADSP 的音频 PRM 时钟子设备创建。Rec 已禁用 GPR 音频子树，
+不能因无法创建其时钟设备而使整个 ADSP 探测失败；电池和充电服务仍依赖 ADSP。
+板级识别继续使用 `liuqin_board_quirks()`，桌面音频的时钟初始化路径保持原有行为。
+
+Rec 专用触控补丁在天马屏 NVT 固件加载后、输入开放前检查看门狗状态，持续异常时
+最多重载一次固件；不重新注册输入设备、不执行工程复位或面板复位。该机制用于
+有限恢复，不能替代首次固件启动异常的根因分析，详见[触控准备流程](../../../docs/NATIVE-RECOVERY.md)。
 
 维护环境继续使用启动器保留的 simplefb 画面、手指触控、ADB 和只读存储封存。DTB 禁用完整 DRM/GPU 接管、音频与笔输入，保留显示时钟/电源依赖和 ADSP 电池通信。触控服务在发布衔接面板之前设置 `nt36523_ts.liuqin_tddi_recovery=0`，沿用 Rec 的 ReK 就绪判断；simplefb 没有桌面 A3 校准恢复所需的面板回调。初始画面就绪检查和禁止工程复位仍保留。共享显示补丁不表示 Rec 启用了桌面的刷新率切换。
 
@@ -69,6 +77,7 @@ devbox run -- python3 build/recovery/build-native-installer.py \
 
 ```sh
 devbox run -- python3 tests/recovery-source.py
+devbox run -- python3 tests/recovery-startup.py
 LIUQIN_RECOVERY_COMPONENTS=out/build/rec-kernel/components \
   devbox run -- python3 tests/recovery-source.py
 ```

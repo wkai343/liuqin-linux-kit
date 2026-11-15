@@ -11,6 +11,22 @@ int main(void){
         lv_font_glyph_dsc_t glyph;
         CHECK(lv_font_get_glyph_dsc(&ui_font_20,&glyph,usb_glyphs[i],0)&&!glyph.is_placeholder);
     }
+    /* Early frames must not expose maintenance controls. */
+    demo_battery="unavailable";render_startup();
+    CHECK(lv_group_get_obj_count(focus)==0);
+    CHECK(!strcmp(lv_label_get_text(battery_label),"电量 --"));
+    lv_timer_t *battery_timer=lv_timer_create(refresh_battery,200,NULL);
+    demo_battery="0%";refresh_battery(battery_timer);
+    CHECK(!strcmp(lv_label_get_text(battery_label),"电量 0%"));
+    lv_timer_delete(battery_timer);
+    { const uint32_t glyphs[]={0x4f5c,0x50a8,0x51c6,0x5728,0x5883,0x5907,0x590d,0x5b58,0x5f00,0x6062,0x62a4,0x64cd,0x653e,0x672a,0x67e5,0x68c0,0x6b63,0x73af,0x7ef4,0x8fc7,0x901a};
+      for(unsigned i=0;i<sizeof(glyphs)/sizeof(glyphs[0]);i++){lv_font_glyph_dsc_t glyph;
+        if(!lv_font_get_glyph_dsc(&ui_font_20,&glyph,glyphs[i],0)||glyph.is_placeholder){fprintf(stderr,"Missing startup glyph: U+%04x in ui_font_20\n",glyphs[i]);return 1;}
+      } }
+    { const uint32_t glyphs[]={0x51c6,0x5728,0x5883,0x5907,0x590d,0x6062,0x6b63,0x73af};
+      for(unsigned i=0;i<sizeof(glyphs)/sizeof(glyphs[0]);i++){lv_font_glyph_dsc_t glyph;
+        if(!lv_font_get_glyph_dsc(&ui_font_34,&glyph,glyphs[i],0)||glyph.is_placeholder){fprintf(stderr,"Missing startup glyph: U+%04x in ui_font_34\n",glyphs[i]);return 1;}
+      } }
     demo_battery = "unavailable";
     render_page(HOME);
     CHECK(!strcmp(lv_label_get_text(battery_label), "电量 --"));

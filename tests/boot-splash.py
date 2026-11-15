@@ -358,10 +358,14 @@ class OwnershipOrderTests(unittest.TestCase):
         self.box=self.root/'busybox'
         self.box.write_text(r"""#!/bin/sh
 case $1 in
- timeout) shift; shift; exec "$@" ;;
+ timeout)
+  printf 'timeout:%s\n' "$2" >>"$EVENTS"; shift
+  [ -z "${REAL_TIMEOUT:-}" ] || exec "$REAL_TIMEOUT" timeout "$@"
+  shift; exec "$@" ;;
  insmod)
   name=${2##*/}; name=${name%.ko}
   printf 'insmod:%s\n' "$name" >>"$EVENTS"
+  [ "${DELAY_MODULE:-}" != "$name" ] || exec sleep 5
   [ "${FAIL_MODULE:-}" != "$name" ] || exit 1
   if [ "$name" = ktz8866 ]; then
    mkdir -p "$LIGHT"
@@ -370,12 +374,16 @@ case $1 in
    printf 'liuqin-oem\n' >"$LIGHT/brightness_curve"
   fi
   if [ "$name" = dispcc_sm8450 ]; then
+   if [ "${WAIT_STORAGE:-0}" = 1 ]; then
+    timeout 3 sh -c 'while [ ! -e "$STORAGE_STARTED" ]; do sleep 0.01; done' || exit 97
+   fi
    [ "$(cat "$LIGHT/bl_power")" = 4 ] || exit 99
    grep -q '^log:backlight blanked before display clock takeover$' "$EVENTS" || exit 98
    printf 'connected\n' >"$PANEL/status"
    printf '1800x2880\n' >"$PANEL/modes"
   fi
   mkdir -p "$SYSMODULES/$name"
+  [ "$name" != dispcc_sm8450 ] || echo display-prepared >>"$EVENTS"
   exit 0 ;;
  *) exec "$@" ;;
 esac
@@ -411,6 +419,7 @@ esac
         source=source.replace('log() { echo "liuqin-splash: $*" >/dev/kmsg 2>/dev/null || :; }',
                               'log() { printf "log:%s\\n" "$*" >>"$EVENTS"; }')
         self.script=self.root/'splash.sh';self.script.write_text(source)
+        self.script.chmod(0o755)
         self.env=dict(os.environ,EVENTS=str(self.events),LIGHT=str(self.backlight),PANEL=str(self.panel),SYSMODULES=str(self.sysmodules))
 
     def tearDown(self):self.temp.cleanup()
@@ -427,10 +436,87 @@ esac
         positions=[events.index(x) for x in required]
         self.assertEqual(positions,sorted(positions));self.assertTrue((self.state/'ready').exists())
 
-    def test_charging_blanks_without_loading_graphics(self):
+    def test_charging_prepares_blanked_drivers_without_starting_a_renderer(self):
         self.cmdline.write_text('rhgb androidboot.mode=charger\n');events=self.start()
         self.assertIn('insmod:ktz8866',events);self.assertEqual((self.backlight/'bl_power').read_text().strip(),'4')
-        self.assertFalse(any('dispcc_sm8450' in x or x.startswith('plymouth') for x in events))
+        self.assertLess(events.index('log:backlight blanked before display clock takeover'),events.index('insmod:dispcc_sm8450'))
+        self.assertEqual(events.count('timeout:1'),3)  # backlight scale plus two early modules
+        self.assertFalse(any(x.startswith(('plymouth','udev')) for x in events))
+        self.assertFalse((self.state/'ready').exists())
+
+    def test_charger_driver_preparation_runs_alongside_storage_and_is_joined(self):
+        self.cmdline.write_text('androidboot.mode=charger\n')
+        source=(PROJECT/'device/boot/initramfs/init').read_text()
+        start=source.index('storage_splash_pid=\n');end=source.index('\nufs_safe=false\n',start)
+        section=source[start:end].replace('/proc/cmdline',str(self.cmdline))
+        section=section.replace('/etc/liuqin-native-',str(self.root/'absent-native-'))
+        wrapper=self.root/'parallel-init.sh'
+        wrapper.write_text('''#!/bin/sh
+log() { echo "log:$*" >>"$EVENTS"; }
+storage_wait_for_ufs() {
+ echo storage-start >>"$EVENTS"
+ : >"$STORAGE_STARTED"
+ while [ ! -d "$SYSMODULES/dispcc_sm8450" ]; do sleep 0.01; done
+ echo storage-complete >>"$EVENTS"
+}
+''' + section + '\necho joined >>"$EVENTS"\n')
+        result=subprocess.run(['sh',str(wrapper)],env=dict(self.env,WAIT_STORAGE='1',
+            STORAGE_STARTED=str(self.root/'storage-started'),BB=str(self.box),
+            storage_mode='persistent',storage_profile='native-updatable',storage_splash_helper=str(self.script)),
+            capture_output=True,text=True,timeout=8)
+        self.assertEqual(result.returncode,0,result.stderr)
+        events=self.events.read_text().splitlines()
+        self.assertLess(events.index('storage-start'),events.index('display-prepared'))
+        self.assertLess(events.index('display-prepared'),events.index('joined'))
+        self.assertLess(events.index('storage-complete'),events.index('joined'))
+        self.assertFalse(any(x.startswith(('plymouth','udev')) for x in events))
+
+    def test_failed_early_charger_module_can_retry_in_charger_mode(self):
+        self.cmdline.write_text('androidboot.mode=charger\n')
+        self.env['FAIL_MODULE']='dispcc_sm8450';events=self.start()
+        self.assertIn('log:early charger display preparation incomplete; retrying in charger mode',events)
+        self.env.pop('FAIL_MODULE')
+        result=subprocess.run(['sh',str(self.script),'charger-prepare'],env=self.env,
+                              capture_output=True,text=True,timeout=8)
+        self.assertEqual(result.returncode,0,result.stderr)
+        events=self.events.read_text().splitlines()
+        self.assertEqual(events.count('insmod:fsa4480'),1)
+        self.assertEqual(events.count('insmod:dispcc_sm8450'),2)
+        self.assertIn('timeout:10',events)
+        self.assertFalse(any(x.startswith(('plymouth','udev')) for x in events))
+
+    @unittest.skipUnless(shutil.which('busybox'), 'BusyBox timeout required')
+    def test_slow_early_charger_module_is_bounded_and_retryable(self):
+        self.cmdline.write_text('androidboot.mode=charger\n')
+        self.env.update(REAL_TIMEOUT=shutil.which('busybox'),DELAY_MODULE='dispcc_sm8450')
+        events=self.start()
+        self.assertIn('log:early charger display preparation incomplete; retrying in charger mode',events)
+        self.assertFalse((self.sysmodules/'dispcc_sm8450').exists())
+        self.env.pop('DELAY_MODULE')
+        result=subprocess.run(['sh',str(self.script),'charger-prepare'],env=self.env,
+                              capture_output=True,text=True,timeout=8)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertTrue((self.sysmodules/'dispcc_sm8450').exists())
+
+    def test_charger_preparation_loads_verified_display_without_plymouth(self):
+        self.cmdline.write_text('rhgb androidboot.mode=charger\n');self.start()
+        result=subprocess.run(['sh',str(self.script),'charger-prepare'],env=self.env,
+                              capture_output=True,text=True,timeout=8)
+        self.assertEqual(result.returncode,0,result.stderr)
+        events=self.events.read_text().splitlines()
+        self.assertIn('insmod:dispcc_sm8450',events)
+        self.assertFalse(any(x.startswith(('plymouth','udev')) for x in events))
+        self.assertEqual((self.backlight/'brightness').read_text().strip(),'0')
+
+    def test_charger_preparation_refuses_wrong_mode_and_bad_modules(self):
+        result=subprocess.run(['sh',str(self.script),'charger-prepare'],env=self.env,capture_output=True)
+        self.assertNotEqual(result.returncode,0)
+        self.cmdline.write_text('androidboot.mode=charger\n')
+        (self.modules/'dispcc_sm8450.ko').write_bytes(b'corrupt')
+        self.start()
+        result=subprocess.run(['sh',str(self.script),'charger-prepare'],env=self.env,capture_output=True,timeout=8)
+        self.assertNotEqual(result.returncode,0)
+        self.assertNotIn('insmod:dispcc_sm8450',self.events.read_text().splitlines())
 
     def test_animation_optout_keeps_the_backlight_phase(self):
         self.cmdline.write_text('rhgb plymouth.enable=0\n');events=self.start()
@@ -460,16 +546,17 @@ esac
         self.assertLess(events.index('log:backlight blanked before display clock takeover'),events.index('insmod:dispcc_sm8450'))
         self.assertTrue((self.state/'ready').exists())
 
-    def test_modular_native_backlight_requires_the_early_runtime_at_build_time(self):
+    def test_modular_native_display_requires_the_early_runtime_at_build_time(self):
         source=(PROJECT/'build/lib/build-initramfs.sh').read_text()
-        start=source.index('if [ "$root_profile" = native-updatable ] &&\n   grep -qx \'CONFIG_BACKLIGHT_KTZ8866=m\'')
+        start=source.index('if [ "$root_profile" = native-updatable ] &&\n   grep -Eqx')
         guard=source[start:source.index('\nfi',start)+3]
         config=self.root/'kernel.config';script=self.root/'guard.sh';script.write_text(guard+'\n')
         for profile,choice,runtime,success in [('native-updatable','m','',False),('native-updatable','m','runtime',True),('native-updatable','y','',True),('installer','m','',True)]:
             with self.subTest(profile=profile,choice=choice,runtime=runtime):
-                config.write_text('CONFIG_BACKLIGHT_KTZ8866='+choice+'\n')
-                result=subprocess.run(['sh',str(script)],env=dict(self.env,root_profile=profile,KERNEL_CONFIG=str(config),BOOT_SPLASH_RUNTIME=runtime),capture_output=True)
-                self.assertEqual(result.returncode==0,success)
+                for symbol in ('BACKLIGHT_KTZ8866','SM_DISPCC_8450'):
+                    config.write_text('CONFIG_'+symbol+'='+choice+'\n')
+                    result=subprocess.run(['sh',str(script)],env=dict(self.env,root_profile=profile,KERNEL_CONFIG=str(config),BOOT_SPLASH_RUNTIME=runtime),capture_output=True)
+                    self.assertEqual(result.returncode==0,success)
 
 
 if __name__=='__main__':unittest.main()

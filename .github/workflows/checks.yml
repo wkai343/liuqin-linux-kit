@@ -30,7 +30,7 @@ jobs:
       - name: 构建与安装器离线检查
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y python3-pyelftools python3-lz4 python3-unicorn gdisk busybox-static device-tree-compiler rpm rsync pigz acl libcap2-bin btrfs-progs f2fs-tools gcc-aarch64-linux-gnu libglib2.0-bin nodejs
+          sudo apt-get install --no-install-recommends -y python3-pyelftools python3-lz4 python3-unicorn gdisk busybox-static device-tree-compiler rpm rsync pigz acl libcap2-bin btrfs-progs f2fs-tools gcc-aarch64-linux-gnu libglib2.0-bin libdrm-dev nodejs
           python3 tests/installer.py
           python3 tests/storage-layouts.py
           python3 tests/multiboot.py
@@ -73,6 +73,8 @@ jobs:
           python3 tests/native-ui-service.py
           python3 tests/native-bcb.py
           python3 tests/native-touch-service.py
+          python3 tests/recovery-startup.py
+          python3 tests/recovery-touch-startup.py
           python3 tests/recovery-kernel-components.py
           python3 tests/recovery-source.py
           python3 tests/kernel-common-fixes.py
@@ -117,6 +119,7 @@ jobs:
           python3 tests/display-refresh-rates.py
           python3 tests/display-live-refresh.py
           python3 tests/backlight-default.py
+          python3 tests/charger-mode.py
           python3 tests/boot-splash.py
           python3 tests/splash-handoff.py
           python3 tests/splash-logo.py

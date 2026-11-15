@@ -1,0 +1,177 @@
+From: Liuqin Linux contributors
+Subject: [PATCH] input: nt36523: qualify Recovery firmware before input admission
+
+Keep the input device and retained scanout intact. Observe firmware for a
+clean second before enabling IRQs, and retry only a confirmed startup
+watchdog once via the existing no-engineering-reset download path. Preserve
+watchdog observations separately from IRQ counters. This is bounded fault
+recovery, not evidence of the underlying firmware failure being fixed.
+
+diff --git a/drivers/input/touchscreen/nt36523/nt36xxx.c b/drivers/input/touchscreen/nt36523/nt36xxx.c
+--- a/drivers/input/touchscreen/nt36523/nt36xxx.c
++++ b/drivers/input/touchscreen/nt36523/nt36xxx.c
+@@ -1408,7 +1408,8 @@
+ 	u8 fw_info[39] = { 0 };
+ 	u8 cached_cascade, wdt_pattern;
+ 	u64 wdt_frames, wdt_events;
+-	u32 wdt_streak;
++	u32 wdt_streak, rec_fw_retries, rec_wdt_polls;
++	bool rec_health_checked;
+ 	ssize_t count;
+ 	int host_ret, handshake_ret, reset_ret, fw_ret, restore_ret;
+ 	int i;
+@@ -1439,6 +1440,9 @@
+ 	wdt_events = ts_core->wdt_events;
+ 	wdt_streak = ts_core->wdt_streak;
+ 	wdt_pattern = ts_core->wdt_pattern;
++	rec_health_checked = ts_core->rec_health_checked;
++	rec_fw_retries = ts_core->rec_fw_retries;
++	rec_wdt_polls = ts_core->rec_wdt_polls;
+ 	mutex_unlock(&ts_core->lock);
+ 
+ 	count = sysfs_emit(buf,
+@@ -1461,6 +1465,9 @@
+ 			       " wdt_frames=%llu wdt_events=%llu wdt_streak=%u wdt_pattern=%02x",
+ 			       wdt_frames, wdt_events, wdt_streak, wdt_pattern);
+ 	count += sysfs_emit_at(buf, count,
++			       " rec_health_checked=%u rec_fw_retries=%u rec_wdt_polls=%u",
++			       rec_health_checked, rec_fw_retries, rec_wdt_polls);
++	count += sysfs_emit_at(buf, count,
+ 			       " pen_pos=%llu pen_none=%llu pen_id=%llu pen_other=%llu"
+ 			       " pen_reported=%llu pen_spi_errors=%llu"
+ 			       " pen_enable_attempts=%llu pen_enable_failures=%llu pen_enable_err=%d\n",
+@@ -2309,10 +2316,15 @@
+ 	NVT_LOG("TDDI failed init quiesced: ret=%d\n", ret);
+ }
+ 
++#include "nt36xxx_rec.h"
++
+ static int32_t nvt_ts_resume(struct device *dev)
+ {
+ 	bool hold_wake = READ_ONCE(ts->dev_pm_suspend);
+ 	bool tddi_recovery = nvt_tddi_recovery_enabled(ts);
++	bool rec_health = liuqin_board_quirks() &&
++		of_property_read_bool(of_root, "liuqin,recovery") &&
++		nvt_tddi_panel_supported(ts) && !ts->db_wakeup;
+ 	bool firmware_started = false;
+ 	bool retry_pen = false;
+ 	int ret;
+@@ -2354,6 +2366,7 @@
+ 			goto resume_fail;
+ 	}
+ 	ts->wdt_streak = 0;
++	ts->rec_health_checked = false;
+ 	ts->resume_count++;
+ 	NVT_LOG("follower resume #%u start\n", ts->resume_count);
+ 	ts->ic_state = NVT_IC_RESUME_IN;
+@@ -2391,6 +2404,15 @@
+ 		goto resume_fail;
+ 	}
+ 
++	/* Verify retained-scanout firmware before admitting input. Recovery
++	 * cannot use the desktop panel reset/calibration recovery callbacks.
++	 */
++	if (rec_health) {
++		ret = nvt_rec_startup_health(ts);
++		if (ret)
++			goto resume_fail;
++	}
++
+ 	/* A pen mailbox error does not invalidate a ready touch controller. */
+ 	if (ts->pen_support)
+ 		retry_pen = nvt_try_enable_pen(ts) < 0;
+@@ -2433,7 +2455,7 @@
+ 	return 0;
+ 
+ resume_fail:
+-	if (tddi_recovery && firmware_started)
++	if ((tddi_recovery || rec_health) && firmware_started)
+ 		nvt_quiesce_failed_tddi(ts);
+ 	nvt_set_touch_awake_state(ts, false);
+ 	ts->ic_state = NVT_IC_SUSPEND_OUT;
+diff --git a/drivers/input/touchscreen/nt36523/nt36xxx.h b/drivers/input/touchscreen/nt36523/nt36xxx.h
+--- a/drivers/input/touchscreen/nt36523/nt36xxx.h
++++ b/drivers/input/touchscreen/nt36523/nt36xxx.h
+@@ -207,6 +207,8 @@
+ 	u64 wdt_frames, wdt_events;
+ 	u32 wdt_streak;
+ 	u8 wdt_pattern;
++	bool rec_health_checked;
++	u32 rec_fw_retries, rec_wdt_polls;
+ 	bool point_data_attr_created;
+ 	bool touch_state_attr_created;
+ 	uint8_t cascade;
+diff --git a/drivers/input/touchscreen/nt36523/nt36xxx_rec.h b/drivers/input/touchscreen/nt36523/nt36xxx_rec.h
+new file mode 100644
+--- /dev/null
++++ b/drivers/input/touchscreen/nt36523/nt36xxx_rec.h
+@@ -0,0 +1,69 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Recovery retains scanout: never reset the shared display/touch hardware. */
++#ifndef _NT36XXX_REC_H
++#define _NT36XXX_REC_H
++
++/* Called with the SPI mutex held and IRQ/ESD work disabled. These are
++ * observations, not IRQ frames: repeated reads may see one latched report.
++ */
++static int nvt_rec_check_firmware(struct nvt_ts_data *data)
++{
++	u8 packet[POINT_DATA_LEN + 1];
++	unsigned int poll, i, streak = 0, clean = 0;
++	bool watchdog;
++	int ret;
++
++	for (poll = 0; poll < 150; poll++) {
++		if (!nvt_panel_is_on(data))
++			return -EHOSTDOWN;
++		ret = nvt_read_event_bytes(data, 0, packet, sizeof(packet));
++		if (ret)
++			return ret;
++		watchdog = true;
++		for (i = 1; i < 7; i++) {
++			if (packet[i] != 0xfd && packet[i] != 0xfe) {
++				watchdog = false;
++				break;
++			}
++		}
++		if (watchdog) {
++			data->rec_wdt_polls++;
++			clean = 0;
++			if (++streak == 11)
++				return -EUCLEAN;
++		} else {
++			streak = 0;
++			if (++clean == 101)
++				return 0;
++		}
++		usleep_range(10000, 11000);
++	}
++	return -EUCLEAN;
++}
++
++static int nvt_rec_startup_health(struct nvt_ts_data *data)
++{
++	int ret;
++
++	data->rec_health_checked = false;
++	ret = nvt_rec_check_firmware(data);
++	if (ret == -EUCLEAN) {
++		NVT_LOG("Rec startup watchdog: retry firmware once without input replacement\n");
++		nvt_quiesce_failed_tddi(data);
++		msleep(50);
++		if (!nvt_panel_is_on(data))
++			return -EHOSTDOWN;
++		data->rec_fw_retries++;
++		ret = nvt_update_firmware_no_eng_reset(data->fw_name);
++		if (!ret)
++			ret = nvt_check_fw_reset_state(RESET_STATE_REK);
++		if (!ret)
++			ret = nvt_rec_check_firmware(data);
++	}
++	if (!ret)
++		data->rec_health_checked = true;
++	NVT_LOG("Rec startup health: ret=%d retries=%u watchdog_polls=%u\n",
++		ret, data->rec_fw_retries, data->rec_wdt_polls);
++	return ret;
++}
++#endif

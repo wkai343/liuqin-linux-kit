@@ -47,10 +47,27 @@ load_modules() {
             case "$module" in ktz8866|regmap_i2c) ;; *) log 'invalid backlight dependency'; return 1 ;; esac
         fi
         [ ! -e "$module_sysfs/$module" ] || continue
-        "$BB" timeout 10 "$BB" insmod "$module_dir/$module.ko" >>"$state/modules.log" 2>&1 || {
+        "$BB" timeout "${3:-10}" "$BB" insmod "$module_dir/$module.ko" >>"$state/modules.log" 2>&1 || {
             log "could not load $module"; return 1;
         }
     done <"$1"
+}
+
+charger_prepare() {
+    # No Plymouth, udev daemon or persistent root is needed by the charging UI.
+    case " $(cat /proc/cmdline 2>/dev/null) " in
+        *' androidboot.mode=charger '*) ;;
+        *) return 1 ;;
+    esac
+    [ "$(cat /etc/liuqin-storage-mode 2>/dev/null)" = persistent ] || return 1
+    mkdir -p "$state"
+    backlight=/sys/class/backlight/ktz8866-backlight
+    wait_writable "$backlight/bl_power" && wait_backlight_scale "$backlight" || return 1
+    echo 4 >"$backlight/bl_power" || return 1
+    echo 0 >"$backlight/brightness" || return 1
+    log 'backlight blanked before display clock takeover'
+    (cd / && "$BB" sha256sum -c /etc/liuqin-splash-modules.sha256) >>"$state/modules.log" 2>&1 || return 1
+    load_modules /etc/liuqin-splash-modules.order display "${1:-10}"
 }
 
 start() {
@@ -62,7 +79,8 @@ start() {
     fi
     # A modular backlight takes ownership here instead of during kernel init.
     # This phase also runs for charging and animation opt-out, keeping their
-    # original blanking behavior without loading display clocks or Plymouth.
+    # early blanking behavior. Charger mode prepares drivers in this worker
+    # alongside storage enumeration, but leaves modesetting to the guarded UI.
     if [ -s /etc/liuqin-splash-backlight-modules.order ]; then
         mkdir -p "$state"
         (cd / && "$BB" sha256sum -c /etc/liuqin-splash-backlight-modules.sha256) >"$state/modules.log" 2>&1 || {
@@ -71,10 +89,16 @@ start() {
         log 'starting backlight ownership before display clocks'
         load_modules /etc/liuqin-splash-backlight-modules.order backlight || return 0
     fi
-    # Charging, RAM installation and an explicit opt-out keep their own paths.
+    # /init starts this worker alongside storage enumeration and joins it
+    # before the independent final read-only proof. Keep the early module
+    # attempts short; charger-prepare can retry later while power is monitored.
     args=" $(cat /proc/cmdline 2>/dev/null) "
     case "$args" in
-        *' androidboot.mode=charger '*|*' plymouth.enable=0 '*|*' rd.plymouth=0 '*) return 0 ;;
+        *' androidboot.mode=charger '*)
+            log 'preparing charger display alongside storage enumeration'
+            charger_prepare 1 || log 'early charger display preparation incomplete; retrying in charger mode'
+            return 0 ;;
+        *' plymouth.enable=0 '*|*' rd.plymouth=0 '*) return 0 ;;
     esac
     case "$args" in *' rhgb '*|*' splash '*) ;; *) return 0 ;; esac
     [ -x /usr/bin/plymouthd ] && [ -f /etc/liuqin-splash-modules.sha256 ] || return 0
@@ -141,6 +165,7 @@ handoff() {
 
 case ${1:-} in
     start) start ;;
+    charger-prepare) charger_prepare; exit $? ;;
     stop-udev) stop_udev ;;
     handoff) [ $# = 2 ] && handoff "$2" ;;
 esac

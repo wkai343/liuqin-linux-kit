@@ -5,7 +5,7 @@
   "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
   "tag": "v7.3.4",
   "commit": "7595a62d45ee1a2297eafa5f2ef5d0a45142d84d",
-  "expected_source_tree": "e2949b9db2182407b7885e02de44f1fb94918af2",
+  "expected_source_tree": "faff3a5fb2b50f138ee432f71022d1afd9da7642",
   "config": {
     "path": "build/recovery/kernel/7.3.4.config",
     "sha256": "84e4eeb8b0004d8f73c7cb956efe53e13bf9a6d580918a1214892bda95469f39"
@@ -242,6 +242,14 @@
     {
       "path": "build/recovery/kernel/patches/linux-7.3/0001-recovery-peripheral-handoff.patch",
       "sha256": "ccb0f030fb1bed451301961d3d9c67d1b45060f67beb936a9aaf32a9db998f62"
+    },
+    {
+      "path": "build/recovery/kernel/patches/linux-7.3/0003-recovery-skip-audio-prm-clocks.patch",
+      "sha256": "d70fe813bfc5d2ad6b5f4237a15d51de94e3984e49d78bd117ccca83c0726e8a"
+    },
+    {
+      "path": "build/recovery/kernel/patches/linux-7.3/0004-recovery-touch-startup-health.patch",
+      "sha256": "96c7f13f4baca1554d0d3882ab0cfe04b3bbb113650ec42eaf2d0a2656637a5b"
     }
   ],
   "dtb": "qcom/sm8475-xiaomi-liuqin.dtb",

@@ -86,6 +86,12 @@ class SealTests(unittest.TestCase):
         self.assertIn('requires the BusyBox PID 1 RAM environment', result.stderr)
         self.assertEqual(self.run_mock('normal', '--setrw').returncode, 2)
 
+    def test_charger_readiness_uses_full_namespace_factory_gpt_validation(self):
+        result = self.run_mock('normal', '--ready-charger')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('READY 1\n', result.stderr)
+        self.assertNotIn('SET ', result.stderr)
+
 
 class ScanTests(unittest.TestCase):
     def setUp(self):
@@ -223,6 +229,25 @@ printf 'result=%s,%s\\n' "$found_block" "$storage_wait_complete"
         self.assertEqual(calls.count('bb sleep 1\n'),1)
         self.assertGreaterEqual(elapsed,100);self.assertLess(elapsed,200)
 
+    def test_charger_exits_only_after_two_full_namespace_proofs(self):
+        out,calls,elapsed=self.run_wait(cmdline='androidboot.mode=charger',
+                                       READY_COMMAND='--ready-charger')
+        self.assertIn('result=true,true',out)
+        self.assertEqual(calls.splitlines().count('ready'),2)
+        self.assertEqual(calls.count('bb sleep 1\n'),1)
+        self.assertGreaterEqual(elapsed,100);self.assertLess(elapsed,200)
+
+    def test_charger_incomplete_or_unsealed_namespace_keeps_waiting(self):
+        for settings in [{'READY_AFTER':999},{'EMPTY_PROOF':1},{'HANG':1},
+                         {'NODES':'false'},{'SEAL_FAIL':1}]:
+            with self.subTest(settings=settings):
+                self.clock.write_text('0\n');self.calls.unlink(missing_ok=True)
+                (self.root/'count').unlink(missing_ok=True)
+                out,_,elapsed=self.run_wait(cmdline='androidboot.mode=charger',
+                                           READY_COMMAND='--ready-charger',**settings)
+                self.assertIn(',false',out)
+                self.assertGreaterEqual(elapsed,1000);self.assertLessEqual(elapsed,1010)
+
     def test_delayed_readiness_is_retried_then_finishes(self):
         out,calls,elapsed=self.run_wait(READY_AFTER=3)
         self.assertIn('result=true,true',out);self.assertEqual(calls.splitlines().count('ready'),4)
@@ -257,10 +282,11 @@ printf 'result=%s,%s\\n' "$found_block" "$storage_wait_complete"
                 self.assertIn(',false',out);self.assertNotIn('ready\n',calls)
                 self.assertGreaterEqual(elapsed,1000)
 
-    def test_installer_charger_and_failed_clock_keep_ten_legacy_rounds(self):
+    def test_installer_non_native_charger_and_failed_clock_keep_ten_legacy_rounds(self):
         for settings in [{'mode':'readonly','profile':'installer'},
                          {'mode':'readonly','wait_mode':'recovery','cmdline':'androidboot.mode=charger'},
-                         {'cmdline':'androidboot.mode=charger rhgb'},{'CLOCK_FAIL':1}]:
+                         {'profile':'other','cmdline':'androidboot.mode=charger rhgb'},
+                         {'CLOCK_FAIL':1}]:
             with self.subTest(settings=settings):
                 self.clock.write_text('0\n');self.calls.unlink(missing_ok=True)
                 out,calls,elapsed=self.run_wait(**settings)

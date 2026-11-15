@@ -19,11 +19,16 @@ FILES=(MODULE,'usr/lib/liuqin/native-touch.py',
  'lib/firmware/novatek/liuqin/novatek_nt36532_m81_fw_tm.bin')
 
 
-def preflight(root=Path('/')):
+def preflight(root=Path('/'), prepare=False):
     m=json.loads((root/'etc/liuqin-native-recovery.json').read_text())
-    v=status.collect(root)
+    v=status.collect(root,include_battery=not prepare)
     from liuqin_native_install import capable
-    if (m.get('touch_version')!=1 or not v['sealed'] or v['device']!='liuqin' or
+    if prepare and (m.get('recovery_fast_start_version') != 1 or
+                    status.read(root/'etc/liuqin-storage-mode') != 'readonly'):
+        raise RuntimeError('early touch requires the readonly native Recovery startup')
+    if prepare and status.startup_result(root) != 'pending':
+        raise RuntimeError('touch preparation cannot replace inputs after startup admission')
+    if (m.get('touch_version')!=1 or (not prepare and not v['sealed']) or v['device']!='liuqin' or
         v['slot']!='a' or not v['unlocked'] or v['kernel']!=m['kernel_release'] or
         m.get('display_profile')!='bootloader-simplefb' or (m.get('inspection_only') is not True and not capable(m))):
         raise RuntimeError('not a verified read-only liuqin simplefb Recovery')
@@ -42,8 +47,30 @@ def preflight(root=Path('/')):
     return devices[0],v
 
 
-def start(root=Path('/'),runner=subprocess.run):
-    device,v=preflight(root)
+def observe(device, deadline):
+    """A successful firmware read can precede the first FD/FE watchdog frame."""
+    since=None;watchdog=False
+    while time.monotonic()<deadline:
+        try:
+            state=(device/'touch_state').read_text()
+            fields=dict(x.split('=',1) for x in state.split() if '=' in x)
+            valid=(fields.get('eng_reset_count')=='0' and fields.get('reset_ret')=='0' and
+                   fields.get('fw_ret')=='0' and fields.get('restore_ret')=='0' and
+                   0xa1<=int(fields.get('reset','00')[:2],16)<=0xaf)
+            counters=[int(fields[name]) for name in ('wdt_frames','wdt_events','wdt_streak')]
+            if valid and all(n>=0 for n in counters):
+                if since is None:since=time.monotonic()
+                watchdog=watchdog or any(counters)
+                if time.monotonic()-since>=1.0:return state.strip(),watchdog
+            else:since=None
+        except (OSError,ValueError,KeyError):since=None
+        time.sleep(.1)
+    raise RuntimeError('touch controller did not reach an observable no-reset firmware state')
+
+
+def start(root=Path('/'),runner=subprocess.run,prepare=False):
+    # Preparing the RAM-backed panel/touch hardware grants no storage access.
+    device,v=preflight(root,prepare)
     # The retained bootloader panel has no DRM reset/recovery callbacks.
     # Preserve the Rec ReK gate; the desktop A3 calibration/recovery path
     # belongs to the real panel driver. Set this before publishing the shim,
@@ -56,23 +83,18 @@ def start(root=Path('/'),runner=subprocess.run):
     if not (device/'driver').exists():
         (root/'sys/bus/spi/drivers_probe').write_text(device.name)
     deadline=time.monotonic()+10
-    while time.monotonic()<deadline:
-        try:
-            state=(device/'touch_state').read_text()
-            fields=dict(x.split('=',1) for x in state.split() if '=' in x)
-            if (fields.get('eng_reset_count')=='0' and fields.get('reset_ret')=='0' and
-                fields.get('fw_ret')=='0' and fields.get('restore_ret')=='0' and
-                int(fields.get('reset','00')[:2],16)>=0xa1):
-                return dict(status='ready',boot_id=v['boot_id'],device=device.name,touch_state=state.strip())
-        except (OSError,ValueError):pass
-        time.sleep(.1)
-    raise RuntimeError('touch controller did not become ready without engineering reset')
+    state,watchdog=observe(device,deadline)
+    # Startup recovery belongs to the driver, before it enables IRQs. Never
+    # replace input devices from userspace, including during preparation.
+    if watchdog:raise RuntimeError('touch firmware watchdog persists; touch is unavailable')
+    return dict(status='ready',boot_id=v['boot_id'],device=device.name,touch_state=state,
+                health_observation_seconds=1.0,monotonic=time.monotonic())
 
 
 if __name__=='__main__':
-    if len(sys.argv)!=1 or os.geteuid()!=0 or os.uname().machine!='aarch64':raise SystemExit('native ARM64 Recovery only')
+    if sys.argv[1:] not in ([],['--prepare']) or os.geteuid()!=0 or os.uname().machine!='aarch64':raise SystemExit('native ARM64 Recovery only')
     try:
-        result=start();code=0
+        result=start(prepare=sys.argv[1:]==['--prepare']);code=0
     except Exception as error:
         result=dict(status='unavailable',error=str(error));code=1
     Path('/run/liuqin-native-touch.json').write_text(json.dumps(result)+'\n')

@@ -13,6 +13,7 @@ from liuqin_board_identity import identify
 MARKER='etc/liuqin-native-recovery.json'
 STATE='run/liuqin-native-recovery-state.json'
 PHASES={
+    'starting':'Preparing Recovery',
     'ready':'Waiting for the computer installer',
     'connected':'Computer connected - checking identity',
     'reading':'Reading partitions (no disk writes)',
@@ -28,7 +29,16 @@ def read(path,default=''):
     except (OSError,UnicodeError):return default
 
 
-def collect(root=Path('/')):
+def startup_result(root=Path('/')):
+    """Accept only PID 1's atomic, current-boot storage admission result."""
+    value=read(root/'run/liuqin-native-startup').splitlines()
+    boot=read(root/'proc/sys/kernel/random/boot_id')
+    if boot and len(value)==2 and value[1]==boot and value[0] in ('ready','failed'):
+        return value[0]
+    return 'pending'
+
+
+def collect(root=Path('/'),include_battery=True):
     manifest=json.loads((root/MARKER).read_text())
     identity=identify(root)
     words=read(root/'proc/cmdline').split()
@@ -50,7 +60,7 @@ def collect(root=Path('/')):
     phase=state.get('phase','ready')
     if phase not in PHASES:phase='error'
     battery='unavailable'
-    for p in (root/'sys/class/power_supply').glob('*'):
+    for p in (root/'sys/class/power_supply').glob('*') if include_battery else ():
         capacity=read(p/'capacity')
         if read(p/'type')=='Battery' and capacity.isdigit() and 0<=int(capacity)<=100:
             battery=capacity+'%';break
@@ -63,13 +73,15 @@ def collect(root=Path('/')):
         if (w.get('boot_id')==read(root/'proc/sys/kernel/random/boot_id') and w.get('build_id')==manifest['build_id'] and w.get('serial')==serial and
             type(w.get('anti_version')) is int and 0<=w['anti_version']<10**8):witness['anti_version']=w['anti_version']
     except (OSError,ValueError):pass
+    admitted=manifest.get('recovery_fast_start_version')!=1 or startup_result(root)=='ready'
+    if not admitted:phase='error' if startup_result(root)=='failed' else 'starting'
     return dict(interface='liuqin-native-recovery-v1',build_id=manifest['build_id'],
         device=identity['device'],board_identity=identity,
         serial=serial,slot=unique('androidboot.slot_suffix=').removeprefix('_'),
         unlocked=unique('androidboot.verifiedbootstate=')=='orange' and unique('androidboot.flash.locked=') in ('','0'),
         boot_id=read(root/'proc/sys/kernel/random/boot_id'),kernel=read(root/'proc/sys/kernel/osrelease'),
         inspection_only=not installing,installer_version=1 if installing else 0,fixed_installer_version=manifest.get('fixed_installer_version',0),fixed_recovery_restore_version=manifest.get('fixed_recovery_restore_version',0),generic_ota_version=manifest.get('generic_ota_version',0),usb_transport=manifest.get('usb_transport','unknown'),phase=phase,battery=battery,blocks=blocks,**witness,
-        sealed=bool(blocks) and all(b['readonly'] for b in blocks) and not mounted)
+        sealed=admitted and bool(blocks) and all(b['readonly'] for b in blocks) and not mounted)
 
 
 def render(value):

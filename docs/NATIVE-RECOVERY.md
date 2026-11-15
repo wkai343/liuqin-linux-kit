@@ -27,6 +27,26 @@ uv run --project installer installer/install-gui.py \
 
 显示使用 Bootloader simplefb 和保留的时钟，触屏通过专用面板状态衔接加载 RAM 固件。USB 使用 [ADB](NATIVE-RECOVERY-INSTALLER.md#adb-连接与传输)，不创建 USB 网卡；USB 已连接不代表已建立 ADB 会话。桌面 Fedora 使用自己的 DRM、音频与 OTG 配置。
 
+ADB Rec 的准备画面和触控初始化与 UFS 枚举、只读检查并行。准备阶段只使用 RAM 中
+已经核验的程序和触控固件，不开放维护套接字。PID 1 完成最终存储只读校验、等待触控
+准备结束后，发布绑定当前启动 ID 的结果，再开放维护界面及 ADB；触控失败可使用按键
+和电脑控制，存储校验失败则保持维护入口关闭。界面在切入维护页时才枚举输入设备，
+避免遗漏并行初始化中稍晚出现的触控节点。
+
+天马屏的 Rec 触控驱动在固件下载后、开放中断前，要求连续约 1 秒没有 FD/FE 看门狗
+数据；每次检查最多轮询 150 次，轮询间隔为 10～11 毫秒，另需 SPI 传输和调度时间。
+持续异常只允许在本次初始化中重载一次固件，沿用无
+工程复位的路径，保留屏幕和输入设备；SPI 错误、面板关闭或重试失败均停止初始化。
+这是有次数上限的故障恢复，不代表首次固件异常的根因已经消除。板级判断使用
+`liuqin_board_quirks()` 和 Rec 标记，桌面面板的恢复流程不变。
+`touch_state` 中的 `rec_health_checked`、`rec_fw_retries` 和 `rec_wdt_polls` 分别记录
+检查通过、固件重试及异常轮询次数；轮询次数不等同于中断帧数。用户态随后再观察
+1 秒的实际中断运行状态，失败则报告触控不可用，不解绑或重新绑定驱动。
+
+图形界面的电量由独立线程读取，未知时每 200 毫秒重试，有效后每 2 秒刷新，0% 也是
+有效读数。读取不会阻塞界面，也不触发高频分区扫描。它仍需等待 ADSP 的 PMIC 通信
+服务就绪；界面先显示未知电量，不能把首次读取失败当作电池耗尽。
+
 启动后封存块设备。电脑确认计划绑定 boot ID、构建、分区、备份、材料摘要与当前引导，只开放必要目标，结束后恢复只读并回读核验。
 
 运行镜像的能力清单决定是否提供分区编辑、Android ROM、多个 Linux rootfs、引导切换、固定 Rec 保护、BCB 清理及引导存储管理。更新 GUI 不会升级正在运行的 Rec。
@@ -41,7 +61,7 @@ uv run --project installer installer/install-gui.py \
 
 ## 构建与交付
 
-默认 Rec 内核使用 kernel.org 的 **7.3.4**，复用 Fedora 的 47 个公共补丁，另加 Rec 专用补丁和独立配置，保留 simplefb、手指触控、固定 USB peripheral、ADB 与存储封存路径。不获取原作者内核仓库，也不依赖旧 Rec 基础镜像。源码锁、从零构建及排查方法见[Rec 内核构建](../build/recovery/kernel/README.md)。
+默认 Rec 内核使用 kernel.org 的 **7.3.4**，复用 Fedora 来源锁中的公共补丁，另加 Rec 专用补丁和独立配置，保留 simplefb、手指触控、固定 USB peripheral、ADB 与存储封存路径。不获取原作者内核仓库，也不依赖旧 Rec 基础镜像。源码锁、从零构建及排查方法见[Rec 内核构建](../build/recovery/kernel/README.md)。
 
 Rec 工具集采用 [Buildroot + musl](../build/runtime/README.md)，包含静态 BusyBox、Python、GNU tar 和 GPT/ext4/Btrfs/F2FS 工具；不需要 Ubuntu Base 或 APT。内核、LVGL 和 adbd 仍分别构建。
 

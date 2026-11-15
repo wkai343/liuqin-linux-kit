@@ -90,6 +90,7 @@ slot_success_gcc=$(command -v "${SLOT_SUCCESS_GCC:-aarch64-linux-gnu-gcc}" || tr
 charger_mode_source="$project_root/device/charger-mode/liuqin-charger-mode"
 charger_key_source="$project_root/device/charger-mode/liuqin-charger-mode-power-key.c"
 charger_exit_source="$project_root/device/charger-mode/liuqin-charger-mode-exit.c"
+charger_ui_source="$project_root/device/charger-mode/liuqin-charger-mode-ui.c"
 source_dir="$project_root/device/boot/initramfs"
 out_dir=${OUT_DIR:-"$project_root/out/build/initramfs-liuqin"}
 source_epoch=${SOURCE_DATE_EPOCH:-0}
@@ -380,14 +381,15 @@ if [ "$storage_mode" = persistent ]; then
 	fi
 fi
 if [ "$charger_mode" = 1 ]; then
-	printf '%s\n' hold-v1 >"$staging/etc/liuqin-charger-mode"
+	printf '%s\n' hold-v2 >"$staging/etc/liuqin-charger-mode"
 	chmod 0644 "$staging/etc/liuqin-charger-mode"
 	cp "$charger_mode_source" "$staging/bin/liuqin-charger-mode"
 	chmod 0755 "$staging/bin/liuqin-charger-mode"
-	for charger_helper in key exit; do
+	for charger_helper in key exit ui; do
 		case $charger_helper in
 		key) charger_source=$charger_key_source; charger_output=liuqin-charger-mode-power-key ;;
 		exit) charger_source=$charger_exit_source; charger_output=liuqin-charger-mode-exit ;;
+		ui) charger_source=$charger_ui_source; charger_output=liuqin-charger-mode-ui ;;
 		esac
 		"$slot_success_gcc" -static -Os -s -Wall -Wextra -Werror \
 			"$charger_source" -o "$staging/bin/$charger_output"
@@ -528,9 +530,9 @@ python3 "$project_root/build/lib/usb_identity.py" --output-directory "$staging/e
 python3 "$project_root/build/lib/root_filesystems.py" --kernel-config "${KERNEL_CONFIG:?set KERNEL_CONFIG}" \
     --output "$staging/etc/liuqin-filesystems"
 if [ "$root_profile" = native-updatable ] &&
-   grep -qx 'CONFIG_BACKLIGHT_KTZ8866=m' "${KERNEL_CONFIG:?set KERNEL_CONFIG}" &&
+   grep -Eqx 'CONFIG_(BACKLIGHT_KTZ8866|SM_DISPCC_8450)=m' "${KERNEL_CONFIG:?set KERNEL_CONFIG}" &&
    [ -z "${BOOT_SPLASH_RUNTIME:-}" ]; then
-    echo 'error: modular Liuqin backlight requires the staged early-graphics runtime' >&2
+    echo 'error: modular Liuqin backlight/display clocks require the staged early-graphics runtime' >&2
     exit 1
 fi
 if [ -n "${BOOT_SPLASH_RUNTIME:-}" ]; then

@@ -14,6 +14,11 @@ devbox run -- python3 tests/docs-links.py
 测试使用临时目录、合成镜像或模拟设备，不刷写平板；QML、源码阶段验证和真机验收另行执行。
 CI 的实际测试列表以 `.github/workflows/` 为准，不能把本地入口通过等同于全部 CI 作业通过。
 
+`charger-mode.py` 使用模拟电源属性和单调时钟检查拔线关机、防抖、重插、初始化及
+读取失败处理，替换系统调用验证关机与重启分派；使用 ASan/UBSan 和模拟 DRM 设备
+执行真实充电绘制代码，检查内屏/模式选择、缓冲区边界及释放。测试不关机、不访问
+真实显示或分区，已接入 Devbox 和 CI；实机检查见 [关机充电](../docs/FASTCHARGE.md#关机充电)。
+
 `fedora-stats.py` 用真实 ARM64 共享库生成 GPU 独立 RPM，检查文件清单只包含私有插件、
 服务 drop-in 和许可/源码记录，不占用官方守护进程或标准插件路径；同时检查共享库与 Qt/KDE
 版本依赖、错误架构和符号链接拒绝，以及构建流程的独立包产物路由。需要 ARM64 C 编译器、
@@ -367,6 +372,11 @@ uv run --project installer python tests/gui-device-first.py
 
 ## 设备优先向导与 Recovery
 
+`recovery-startup.py` 运行实际 init 片段，验证显示和触控准备先于存储检查结束、
+独立最终校验与触控完成后才开放维护，以及校验失败时保持关闭；同时编译真实电量读取
+代码，覆盖未知值、无效数据、0% 和刷新间隔。`native-touch-service.py` 与
+`native-ui-service.py` 覆盖早期 RAM 载荷校验及过期启动凭据拒绝。
+
 `workflow.py` 覆盖先读设备、删除/新建后安装 Linux、重装已安装 rootfs、单 Android 无引导存储安装、受保护目标拒绝、材料与计划变化拒绝，以及移除所有 rootfs 后删除引导存储。
 `partition-editor-device.py` 使用真实 sgdisk/mkfs 普通文件夹具验证删除与格式化事务、UUID 更新和保留数据；不访问块设备。
 `recovery-installer.py` 验证 v3/v4 结构、机型拒绝、gzip/LZ4、临时启动零 flash、仅固定 Recovery 两槽写入和部分写入回退。Recovery 镜像为合成夹具，不证明第三方镜像实际可启动。
@@ -398,7 +408,7 @@ devbox run -- python3 tests/partition-editor-device.py
 
 `partition-names.py` 检查 16/17 ASCII 字节边界、旧 20 字符标签拒绝、设备写入前拦截、旧布局只读且不自动重启，以及已知旧 boot 解析器的定点更新。`workflow.py` 还覆盖中断记录续接、篡改拒绝和重复初始化拒绝；这些都是离线测试，不操作真实设备。
 
-`native-touch-service.py` 检查触控衔接的只读环境、simplefb、模块/固件哈希门槛及模块失败处理。`native-touch-input.c` 覆盖快速点击、非零触点槽、多指隔离、事件丢失、启动时已按住及手写笔悬停；可独立编译或通过 UI 的 `UI_EVENT_TESTS` 运行，不接触真实输入设备。
+`native-touch-service.py` 检查触控衔接的只读环境、simplefb、模块/固件哈希门槛、模块失败处理及延迟看门狗故障拒绝，不允许用户态重绑驱动。`recovery-touch-startup.py` 编译 Rec 补丁中的实际固件健康检查代码，覆盖正常启动、延迟看门狗、单次恢复、持续故障、瞬态数据、SPI 失败、面板取消及重载失败。`native-touch-input.c` 覆盖快速点击、非零触点槽、多指隔离、事件丢失、启动时已按住及手写笔悬停；可独立编译或通过 UI 的 `UI_EVENT_TESTS` 运行，不接触真实输入设备。
 
 `recovery-kernel-components.py` 用主机 C 夹具执行内核 GPT 兼容谓词，拒绝其他磁盘和不一致的镜像表；有本地基线镜像及 DTC 时检查电池传输、USB 角色、触控面板及原版显示时钟/电源依赖的保留。有 Unicorn 和 ARM64 工具链时，在四种装载地址执行对齐入口，验证重叠复制及 FDT 参数。缺少可选构建输入时只跳过对应项目，不代替真机启动验收。
 

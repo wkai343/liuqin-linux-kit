@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #define _GNU_SOURCE
 #include "platform.h"
+#include "battery.h"
 #include "cJSON.h"
 #include <errno.h>
 #include <pthread.h>
@@ -22,6 +23,7 @@ enum job_kind { NO_JOB,LOAD_SYSTEMS,PLAN_SWITCH,APPLY_SWITCH };
 enum { WIDTH = 900, HEIGHT = 1440, HEADER_HEIGHT = 198, SYSTEMS_PER_PAGE = 5 };
 static enum page current=HOME;
 static bool demo;
+static bool starting;
 static volatile sig_atomic_t running=1;
 static lv_group_t *focus,*modal_focus;
 static lv_obj_t *screen,*body,*badge,*modal,*resume_focus,*brightness_label;
@@ -376,9 +378,23 @@ static void refresh_usb_status(lv_timer_t *timer) {
     lv_label_set_text(usb_label, usb_text(demo ? demo_usb_state : platform_usb_state()));
 }
 
+static const char *battery_text(void){
+    static char text[8];
+    if(demo)return strchr(demo_battery,'%')?demo_battery:"--";
+    int value=recovery_battery_percent();
+    if(value<0||value>100)return "--";
+    snprintf(text,sizeof(text),"%d%%",value);return text;
+}
+
+static void refresh_battery(lv_timer_t *timer){
+    const char *value=battery_text();
+    char text[32];snprintf(text,sizeof(text),"电量 %s",value);
+    if(strcmp(lv_label_get_text(battery_label),text))lv_label_set_text(battery_label,text);
+    if(timer)lv_timer_set_period(timer,!strcmp(value,"--")?200:2000);
+}
+
 static void update_status_labels(void) {
-    const char *battery = str(summary, "battery");
-    if (!strchr(battery, '%')) battery = "--";
+    const char *battery = battery_text();
     lv_label_set_text(badge, status_text(summary));
     lv_label_set_text_fmt(battery_label, "电量 %s", battery);
     refresh_usb_status(NULL);
@@ -403,7 +419,7 @@ static void header(const char *title) {
     badge = label(bar, "", 38, 143, 610, &ui_font_20, 0x9bebd7);
     lv_obj_t *info = panel(bar, 670, 51, 194, 91, 0x1e4651);
     lv_obj_set_style_border_width(info, 0, 0);
-    label(info, num(summary, "fixed_installer_version") == 1 ? "固定 Recovery" : "临时 Recovery",
+    label(info, starting ? "Recovery" : num(summary, "fixed_installer_version") == 1 ? "固定 Recovery" : "临时 Recovery",
           14, 11, 170, &ui_font_20, 0xd5e8ea);
     battery_label = label(info, "", 14, 46, 170, &ui_font_20, 0x9bebd7);
 }
@@ -564,27 +580,64 @@ static void refresh_status(lv_timer_t *timer){
     cJSON_Delete(summary);summary=r;
     update_status_labels();
 }
+
+static void render_startup(void){
+    screen=lv_screen_active();lv_obj_clean(screen);
+    lv_obj_set_style_bg_color(screen,lv_color_hex(BG),0);
+    lv_obj_set_style_text_font(screen,&ui_font_20,0);lv_obj_set_scrollable(screen,false);
+    header("恢复与维护");
+    lv_label_set_text(badge,"正在准备恢复环境");
+    label(screen,"正在准备恢复环境",80,490,740,&ui_font_34,INK);
+    refresh_battery(NULL);refresh_usb_status(NULL);
+}
+
+static void poll_startup(lv_timer_t *timer){
+    if(!starting||demo)return;
+    if(access("/run/liuqin-recovery-ui.sock",F_OK)==0){
+        /* The socket is created only after PID 1's storage proof and touch
+         * preparation. Open inputs now, including the newly created evdev. */
+        platform_inputs(focus);starting=false;
+        render_page(HOME);
+        lv_timer_create(refresh_status,2000,NULL);
+        lv_timer_delete(timer);
+        fprintf(stderr,"Recovery UI maintenance ready\n");
+    }else{
+        char result[16]={0};FILE *f=fopen("/run/liuqin-native-startup","r");
+        if(f){
+            if(fgets(result,sizeof(result),f)&&!strcmp(result,"failed\n"))
+                lv_label_set_text(badge,"存储检查未通过 · 维护操作未开放");
+            fclose(f);
+        }
+    }
+}
 int main(int argc,char **argv){
     const char *preview=NULL,*page="home";
     for(int i=1;i<argc;i++){
         if(!strcmp(argv[i],"--demo"))demo=true;
+        else if(!strcmp(argv[i],"--wait-service"))starting=true;
         else if(!strcmp(argv[i],"--preview")&&i+1<argc)preview=argv[++i];
         else if(!strcmp(argv[i],"--page")&&i+1<argc)page=argv[++i];
-        else {fprintf(stderr,"usage: [--demo --preview FILE --page home|systems|switch|tools|device|partitions|logs|power|confirm]\n");return 64;}
+        else {fprintf(stderr,"usage: [--wait-service] | [--demo --preview FILE --page home|starting|systems|switch|tools|device|partitions|logs|power|confirm]\n");return 64;}
     }
-    if((preview&&!demo)||(demo&&!preview))return 64;
+    if((preview&&!demo)||(demo&&!preview)||(demo&&starting))return 64;
+    if(preview&&!strcmp(page,"starting"))starting=true;
     signal(SIGINT,stop);signal(SIGTERM,stop);signal(SIGPIPE,SIG_IGN);
     lv_init();if(!platform_display(demo)){platform_close();return 2;}
-    focus=lv_group_create();lv_group_set_default(focus);platform_inputs(focus);
+    if(!demo)recovery_battery_start();
+    focus=lv_group_create();lv_group_set_default(focus);
+    if(!starting)platform_inputs(focus);
     enum page first = HOME;
     if (!strcmp(page, "device")) first = DEVICE;
     else if (!strcmp(page, "partitions")) first = PARTITIONS;
     else if (!strcmp(page, "logs")) first = LOGS;
     else if (!strcmp(page, "power") || !strcmp(page, "confirm")) first = POWER;
     else if (!strcmp(page, "tools")) first = TOOLS;
-    if (preview && (!strcmp(page, "systems") || !strcmp(page, "switch"))) load_systems(NULL);
+    if(starting)render_startup();
+    else if (preview && (!strcmp(page, "systems") || !strcmp(page, "switch"))) load_systems(NULL);
     else render_page(first);
-    lv_timer_create(refresh_status,2000,NULL);
+    if(starting)lv_timer_create(poll_startup,100,NULL);
+    else lv_timer_create(refresh_status,2000,NULL);
+    lv_timer_create(refresh_battery,200,NULL);
     lv_timer_create(refresh_usb_status,500,NULL);
     lv_timer_create(poll_job,100,NULL);
     if(preview){
@@ -598,5 +651,5 @@ int main(int argc,char **argv){
         bool ok=platform_save(preview);cJSON_Delete(summary);cJSON_Delete(parts);cJSON_Delete(systems);free(log_text);lv_deinit();platform_close();return ok?0:3;
     }
     while(running){platform_poll();lv_timer_handler();usleep(15000);}
-    cJSON_Delete(summary);cJSON_Delete(parts);cJSON_Delete(systems);free(log_text);lv_deinit();platform_close();return 0;
+    recovery_battery_stop();cJSON_Delete(summary);cJSON_Delete(parts);cJSON_Delete(systems);free(log_text);lv_deinit();platform_close();return 0;
 }

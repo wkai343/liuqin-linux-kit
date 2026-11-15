@@ -45,14 +45,16 @@ class Operations:
         self.root=Path(root);self.runner=runner;self.pending={};self.guard=threading.Lock()
         self.usb_snapshot=None
 
-    def collect(self):
-        value=status.collect(self.root)
+    def collect(self,include_battery=True):
+        value=status.collect(self.root,include_battery=include_battery)
         if value['device']!='liuqin' or not value['unlocked'] or value['slot']!='a':
             raise RuntimeError('设备身份或解锁状态未通过检查。')
         return value
 
     def summary(self):
-        value=self.collect();value.pop('blocks',None)
+        # The UI samples capacity independently; its periodic RPC must not
+        # wait for a PMIC response. Explicit maintenance checks still read it.
+        value=self.collect(include_battery=False);value.pop('blocks',None)
         cached=self.usb_snapshot
         connection=(self.usb_connection() if cached is None else cached[1]
                     if 0<=time.monotonic()-cached[0]<=5 else dict(usb_state='unknown',adb_ready=False))
@@ -171,7 +173,7 @@ class Operations:
         if (gate.marker(self.root) or {}).get('bcb_cleanup_version') != 1:
             return
         with self.operation_lock():
-            value = self.collect()
+            value = self.collect(include_battery=False)
             if not value['sealed']:
                 raise RuntimeError('BCB 启动快照要求存储已封存。')
             bcb, hardware, _agent = self.bcb_backend(value)
@@ -312,8 +314,11 @@ class Operations:
     def dispatch(self,request):
         if not isinstance(request,dict):raise ValueError('请求格式无效。')
         op=request.get('op')
-        self.collect()
         if op=='status':return self.summary()
+        value=self.collect()
+        if value['phase']=='starting' or (status.read(self.root/'run/liuqin-native-startup') and
+                                         status.startup_result(self.root)!='ready'):
+            raise RuntimeError('恢复环境尚未完成准备。')
         if op=='partitions':return dict(partitions=self.partitions())
         if op=='logs':return dict(text=self.logs(request.get('kind','kernel')))
         if op=='export_logs':return self.export_logs()
@@ -390,11 +395,54 @@ def supervise_ui(server, child):
     return stopping.is_set()
 
 
-def serve(supervise=True):
+def prepare_ui(root=Path('/')):
+    """Draw the noninteractive RAM-only startup page before storage is ready."""
     if os.geteuid()!=0 or os.uname().machine!='aarch64':raise RuntimeError('not ARM64 Recovery root')
-    operations=Operations();operations.collect()
+    value=status.collect(root,include_battery=False)
+    manifest=json.loads((root/'etc/liuqin-native-recovery.json').read_text())
+    if (manifest.get('recovery_fast_start_version')!=1 or manifest.get('ui_version')!=1 or
+        manifest.get('display_profile')!='bootloader-simplefb' or value['device']!='liuqin' or
+        value['slot']!='a' or not value['unlocked'] or value['kernel']!=manifest['kernel_release'] or
+        status.read(root/'etc/liuqin-storage-mode')!='readonly' or
+        not any(line.split()[1:3]==['/','rootfs'] for line in status.read(root/'proc/mounts').splitlines())):
+        raise RuntimeError('early UI requires the native readonly RAM Recovery')
+    for name in ('usr/bin/liuqin-recovery-ui','usr/lib/liuqin/native-ui-service.py'):
+        if hashlib.sha256((root/name).read_bytes()).hexdigest()!=manifest['payload_sha256'].get(name):
+            raise RuntimeError('early UI payload checksum mismatch: '+name)
+    return value
+
+
+def prepare():
+    prepare_ui()
     owner=open('/run/liuqin-native-ui.lock','a+b')
     fcntl.flock(owner.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+    Path('/proc/sys/kernel/printk').write_text('3 4 1 7\n')
+    child=subprocess.Popen(['/usr/bin/liuqin-recovery-ui','--wait-service'])
+    try:
+        while child.poll() is None:
+            result=status.startup_result()
+            if result=='ready':
+                print('Recovery UI storage admitted at',time.monotonic(),flush=True)
+                serve(prepared_child=child,owner=owner)
+                return
+            # A failed proof leaves only the startup/error page, no IPC or BCB.
+            time.sleep(.05)
+        raise RuntimeError('early UI exited before storage admission')
+    finally:
+        if child.poll() is None:
+            child.terminate();child.wait(timeout=5)
+        owner.close()
+
+
+def serve(supervise=True,prepared_child=None,owner=None):
+    if os.geteuid()!=0 or os.uname().machine!='aarch64':raise RuntimeError('not ARM64 Recovery root')
+    operations=Operations();operations.collect(include_battery=False)
+    manifest=json.loads(Path('/etc/liuqin-native-recovery.json').read_text())
+    if manifest.get('recovery_fast_start_version')==1 and status.startup_result()!='ready':
+        raise RuntimeError('storage admission is incomplete; maintenance service withheld')
+    if owner is None:
+        owner=open('/run/liuqin-native-ui.lock','a+b')
+        fcntl.flock(owner.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
     try:
         operations.capture_bcb()
     except (OSError, ValueError, RuntimeError) as error:
@@ -428,7 +476,7 @@ def serve(supervise=True):
         try:
             if not supervise:server.serve_forever();return
             Path('/proc/sys/kernel/printk').write_text('3 4 1 7\n')
-            child=subprocess.Popen(['/usr/bin/liuqin-recovery-ui'])
+            child=prepared_child or subprocess.Popen(['/usr/bin/liuqin-recovery-ui'])
             stopping=supervise_ui(server,child)
         finally:
             usb_stop.set()
@@ -441,7 +489,8 @@ def serve(supervise=True):
 
 
 if __name__=='__main__':
-    if sys.argv[1:]==['supervise']:serve()
+    if sys.argv[1:]==['prepare']:prepare()
+    elif sys.argv[1:]==['supervise']:serve()
     elif sys.argv[1:]==['serve']:serve(False)
     elif len(sys.argv)==3 and sys.argv[1]=='request':print(json.dumps(request(sys.argv[2]),ensure_ascii=False))
-    else:raise SystemExit('usage: supervise | serve | request OP')
+    else:raise SystemExit('usage: prepare | supervise | serve | request OP')

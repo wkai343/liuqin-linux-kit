@@ -67,6 +67,7 @@ const char *platform_usb_state(void){
     cJSON_Delete(doc);return result;
 }
 static void flush(lv_display_t *d,const lv_area_t *a,uint8_t *raw){
+    static bool first=true;
     const uint32_t *src=(const uint32_t *)raw;int width=a->x2-a->x1+1;
     if(a->x1<0||a->y1<0||a->x2>=W||a->y2>=H){lv_display_flush_ready(d);return;}
     for(int y=a->y1;y<=a->y2;y++){
@@ -75,6 +76,7 @@ static void flush(lv_display_t *d,const lv_area_t *a,uint8_t *raw){
         for(unsigned i=1;i<scale;i++)memcpy((uint8_t *)row+i*stride,row,(size_t)width*scale*4);
     }
     lv_display_flush_ready(d);
+    if(first&&!preview_mode){fprintf(stderr,"Recovery UI first frame at %.3f\n",tick()/1000.0);first=false;}
 }
 
 bool platform_display(bool preview){

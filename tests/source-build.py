@@ -282,13 +282,15 @@ class SourceTests(unittest.TestCase):
         for name in ('boot',):
             self.assertNotEqual(stages[0][name],stages[1][name])
 
-    def test_boot_arguments_and_busybox_changes_invalidate_target_image(self):
+    def test_boot_arguments_busybox_and_charger_changes_invalidate_target_image(self):
         device=self.project/'device';device.mkdir()
         for name in ('native-bootargs.txt',):
             shutil.copyfile(PROJECT/'device'/name,device/name)
         data=builder.config(PROJECT/'build/devbox/build.example.json')
         pipeline=flow.Flow(data,lambda *_a,**_k:self.fail('unexpected build'),distribution='fedora')
         busybox=self.root/'busybox';busybox.write_bytes(b'first binary')
+        charger=device/'charger-mode';charger.mkdir()
+        (charger/'helper.c').write_text('first helper\n')
         records={}
         def capture(name,dependency,_build,_artifacts):
             records[name]=helpers.key(dependency)
@@ -301,7 +303,7 @@ class SourceTests(unittest.TestCase):
              patch.object(pipeline,'board',return_value=self.root), \
              patch.object(pipeline,'board_inputs',return_value={'BUSYBOX':self.root/'busybox'}), \
              patch.object(flow,'sha',side_effect=digest), \
-             patch.object(flow,'tree_identity',side_effect=lambda path:str(path)), \
+             patch.object(flow,'tree_identity',side_effect=lambda path:helpers.tree_identity(path) if path==charger else str(path)), \
              patch.object(pipeline,'stage',side_effect=capture):
             pipeline.boot();first=dict(records)
             path=device/'native-bootargs.txt';path.write_text(path.read_text()+' consoleblank=0\n')
@@ -310,6 +312,10 @@ class SourceTests(unittest.TestCase):
             busybox.write_bytes(b'rebuilt binary')
             pipeline.boot()
             self.assertNotEqual(second['boot'],records['boot'])
+            third=dict(records)
+            (charger/'helper.c').write_text('updated helper\n')
+            pipeline.boot()
+            self.assertNotEqual(third['boot'],records['boot'])
 
     def test_splash_runtime_reaches_only_target_boot_and_has_an_independent_cache_identity(self):
         data=builder.config(PROJECT/'build/devbox/build.example.json')
