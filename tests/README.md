@@ -92,6 +92,11 @@ OpenCL CTS 须在平板执行，不加入无 GPU 的离线入口。按问题选�
 运行时调整超时的对照、修复内核的复现验证与完整 CTS 要分别记录，不能相互替代。
 实际镜像、软件包、环境、错误及结果记录保存在忽略的 `out/` 目录。
 
+`thermal-cooling.py --dtb <编译后的 DTB>` 检查 CPU 温区到频率域的完整绑定和保护阈值。
+`thermal-device.py` 在真机上临时降低一个被动阈值，以有界负载验证实际限频和自然降温恢复，
+结束后恢复阈值；GPU 使用配套 `thermal-gpu-load.py`。它们不加入离线默认入口，
+操作方法及验证边界见[温控](../docs/THERMAL.md)。
+
 `device-overlays.py` 检查通用板级文件、缺失来源、已有目标文件与父路径保护。
 `source-build.py` 另覆盖通用 DEB 打包，以及 Fedora 包的板级内容和装配代码缓存失效；补丁合并回归检查最终源码树相同，但生成新来源缓存与派生提交，再次构建可复用新缓存。
 `busybox-runtime.py --busybox /path/to/busybox` 使用 QEMU 执行真实 ARM64 BusyBox，检查静态链接、

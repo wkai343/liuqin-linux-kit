@@ -5,7 +5,7 @@
   "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
   "tag": "v7.3.4",
   "commit": "7595a62d45ee1a2297eafa5f2ef5d0a45142d84d",
-  "expected_source_tree": "892718e5ebf93d997d0f1ed045ea14910e1fbf77",
+  "expected_source_tree": "bbbd0fa5ff050376c18c8fb856d8fc42c46316a0",
   "config": {
     "path": "build/recovery/kernel/7.3.4.config",
     "sha256": "84e4eeb8b0004d8f73c7cb956efe53e13bf9a6d580918a1214892bda95469f39"
@@ -264,6 +264,10 @@
       "sha256": "43bde3894401542211eefcf4cec047709d850c40da125b57969343ff55732ca9"
     },
     {
+      "path": "build/kernel/patches/linux-7.3/0077-liuqin-cpu-thermal-maps.patch",
+      "sha256": "cdd05340d30dde84453f60b5f4f9c1050b05c645f10134875eb45d6db4607188"
+    },
+    {
       "path": "build/recovery/kernel/patches/linux-7.3/0001-recovery-peripheral-handoff.patch",
       "sha256": "ccb0f030fb1bed451301961d3d9c67d1b45060f67beb936a9aaf32a9db998f62"
     },
@@ -303,7 +307,7 @@
   "build_timestamp": "2026-11-11T00:00:00+00:00",
   "shared_kernel": {
     "path": "build/kernel/source.json",
-    "sha256": "3eb86e760cfbbc59f6f948de8498b046e4a0f3b76ab756cbf006bedae6dcb3b7"
+    "sha256": "6caa3fbb882f4b0c4214bc390294420a3ba8314dae64bf62b2ef106b26340a78"
   },
   "touch_patches": [
     {
