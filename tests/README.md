@@ -134,6 +134,8 @@ OpenCL CTS 须在平板执行，不加入无 GPU 的离线入口。按问题选�
 | `display-live-refresh.py` | 执行四档在线切换的实际 C 函数；双面板 24 个有向切换及 57 项故障、范围和回退检查。指定 `--source` 时追加 32 种 DPU 残留请求与关闭超时复现 |
 | `display-single-flush.py --source /path/to/kernel` | 执行视频使能和 CTL 提交函数；14 种版本/拓扑组合、主从接口位、单次提交与完成计数、禁用接口跳过，以及旧逻辑重复提交的负向对照 |
 | `display-brightness-minimum.py` | 当前 7.3 内核的最低非零亮度、原厂曲线其余档位、直接写零与关屏后的恢复 |
+| `ambient-light-reference.py --stock-overlay <原厂 APK> --aapt2 <aapt2>` | 固定 OS2.0.6.0 vendor 资源摘要及 lux/亮度完整数组；Plasma 默认曲线与已有用户配置保留另由 `fedora-build.py` 检查 |
+| `ssc-accel-integration.py <上游 ssc-test.py>` | 构建器启动专用 libssc mock server 并传入 `LIUQIN_SSC_TEST_SERVER_PID`；六项实际 D-Bus 测试覆盖光感/加速度采样、提前请求、提前释放、重取及共用，不接受跳过 |
 | `display-oem-backlight.py` | 执行指定源码中的背光初始化与亮灭逻辑：默认亮度、单/双芯片 I2C 故障、失败清理与重试；需候选和基线源码 |
 | `display-policy.py`、`display-recovery.py` | CABC 配置、活动会话、恢复限流、失败与退出处理 |
 | `resume-display.py` | 可选唤醒补偿服务的输出晚于恢复、单次请求、合盖/会话取消、超时、后台来源过滤与外屏连接拒绝 |

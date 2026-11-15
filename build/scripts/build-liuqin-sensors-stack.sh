@@ -363,14 +363,6 @@ else
 		--print-errorlogs --timeout-multiplier=4 $non_ssc_tests
 	cp /build/work/iio-sensor-proxy/meson-logs/testlog.txt "$non_ssc_log"
 fi
-# Preserve the already-observed upstream light publication race before the
-# required accelerometer run writes its own test log.
-current_log=/build/work/iio-sensor-proxy/meson-logs/testlog.txt
-light_fail_log=/build/work/iio-sensor-proxy/meson-logs/testlog-ssc-light-known-fail.txt
-if grep -q 'Tests.test_ssc_light' "$current_log" 2>/dev/null &&
-	grep -q '^result: *exit status [^0]' "$current_log" 2>/dev/null; then
-	cp "$current_log" "$light_fail_log"
-fi
 ssc_log=/build/work/iio-sensor-proxy/meson-logs/testlog-ssc.txt
 : >"$ssc_log"
 # iio-sensor-proxy's own ssc-test.py does not create a mock service.  Upstream
@@ -381,6 +373,9 @@ ssc_log=/build/work/iio-sensor-proxy/meson-logs/testlog-ssc.txt
 ssc_server_pid=$!
 cleanup_ssc_server() {
 	kill "$ssc_server_pid" 2>/dev/null || true
+	# A timed-out coldplug test may have left the mock stopped. Deliver the
+	# pending TERM before waiting, even if the Python cleanup did not run.
+	kill -CONT "$ssc_server_pid" 2>/dev/null || true
 	wait "$ssc_server_pid" 2>/dev/null || true
 }
 trap cleanup_ssc_server EXIT HUP INT TERM
@@ -394,11 +389,11 @@ kill -0 "$ssc_server_pid" 2>/dev/null || {
 # setup.  liuqin's sample gate has already bounded and proven that exact path.
 # Reuse upstream's test fixture and mock server, but wait for the asynchronous
 # D-Bus publications instead of reading immediately after driver discovery.
-# This requires HasAccelerometer=true, a normal post-discovery claim, and a
-# claim which re-enters synchronous coldplug discovery before the driver is
-# published.  Both paths must receive an orientation measurement, so a Meson
-# "SKIP" or the real Claim-before-device race cannot masquerade as coverage.
-if ! top_builddir=/build/work/iio-sensor-proxy \
+# Both accelerometer and light must publish readings, including pre-discovery
+# claims, release/reclaim and simultaneous use. The runner pauses this dedicated
+# mock server to exercise coldplug deterministically on native and QEMU hosts.
+if ! LIUQIN_SSC_TEST_SERVER_PID=$ssc_server_pid \
+	top_builddir=/build/work/iio-sensor-proxy \
 	top_srcdir=/build/source/iio-sensor-proxy \
 	timeout --signal=TERM --kill-after=5s 120s \
 	umockdev-wrapper python3 /build/source/liuqin-ssc-accel-integration.py \
@@ -406,26 +401,18 @@ if ! top_builddir=/build/work/iio-sensor-proxy \
 	cat "$ssc_log" >&2
 	exit 1
 fi
-grep -q '^OK$' "$ssc_log" || {
+grep -q '^OK$' "$ssc_log" && grep -q '^Ran 6 tests in ' "$ssc_log" || {
 	cat "$ssc_log" >&2
-	printf '%s\n' 'SSC accelerometer integration test did not complete with OK' >&2
+	printf '%s\n' 'SSC integration tests did not complete with six passing cases' >&2
 	exit 1
 }
-if grep -Eq '^test_liuqin_ssc_(accel|claim_during_coldplug) .* skipped ' "$ssc_log"; then
-	cat "$ssc_log" >&2
-	printf '%s\n' 'SSC accelerometer integration test was skipped' >&2
-	exit 1
-fi
-grep -Eq '^test_liuqin_ssc_accel .* ok$' "$ssc_log" || {
-	cat "$ssc_log" >&2
-	printf '%s\n' 'normal SSC accelerometer claim did not pass' >&2
-	exit 1
-}
-grep -Eq '^test_liuqin_ssc_claim_during_coldplug .* ok$' "$ssc_log" || {
-	cat "$ssc_log" >&2
-	printf '%s\n' 'SSC Claim-before-coldplug regression did not pass' >&2
-	exit 1
-}
+for name in accel claim_during_coldplug light light_during_coldplug light_and_accel light_released_during_coldplug; do
+	grep -Eq "^test_liuqin_ssc_$name .* ok$" "$ssc_log" || {
+		cat "$ssc_log" >&2
+		printf 'SSC integration case missing, failed or skipped: %s\n' "$name" >&2
+		exit 1
+	}
+done
 cleanup_ssc_server
 trap - EXIT HUP INT TERM
 DESTDIR=/build/dest meson install -C /build/work/iio-sensor-proxy
@@ -447,21 +434,15 @@ esac
 # Overlay mounts cannot bind a directory that is also the host destination;
 # the build wrote to merged/build/dest, which resolves to the overlay upper.
 cp -a "$merged/build/dest/." "$dest/"
-if [ -r "$merged/build/work/iio-sensor-proxy/meson-logs/testlog-ssc-light-known-fail.txt" ]; then
-	cp "$merged/build/work/iio-sensor-proxy/meson-logs/testlog-ssc-light-known-fail.txt" \
-		"$out_dir/artifacts/iio-ssc-light-known-fail.log"
-fi
-ssc_accel_log=$merged/build/work/iio-sensor-proxy/meson-logs/testlog-ssc.txt
-[ -r "$ssc_accel_log" ] || die 'SSC accelerometer integration log is absent'
-grep -q '^OK$' "$ssc_accel_log" || die 'SSC accelerometer integration log is not an unskipped PASS'
-if grep -Eq '^test_liuqin_ssc_(accel|claim_during_coldplug) .* skipped ' "$ssc_accel_log"; then
-	die 'SSC accelerometer integration log contains a skipped test'
-fi
-grep -Eq '^test_liuqin_ssc_accel .* ok$' "$ssc_accel_log" ||
-	die 'normal SSC accelerometer claim is absent from the integration log'
-grep -Eq '^test_liuqin_ssc_claim_during_coldplug .* ok$' "$ssc_accel_log" ||
-	die 'Claim-before-coldplug regression is absent from the integration log'
-cp "$ssc_accel_log" "$out_dir/artifacts/iio-ssc-accel-unskipped.log"
+ssc_integration_log=$merged/build/work/iio-sensor-proxy/meson-logs/testlog-ssc.txt
+[ -r "$ssc_integration_log" ] || die 'SSC integration log is absent'
+grep -q '^OK$' "$ssc_integration_log" && grep -q '^Ran 6 tests in ' "$ssc_integration_log" ||
+	die 'SSC integration log is not a six-case PASS'
+for name in accel claim_during_coldplug light light_during_coldplug light_and_accel light_released_during_coldplug; do
+	grep -Eq "^test_liuqin_ssc_$name .* ok$" "$ssc_integration_log" ||
+		die "SSC integration case missing, failed or skipped: $name"
+done
+cp "$ssc_integration_log" "$out_dir/artifacts/iio-ssc-unskipped.log"
 
 # libqrtr is a direct dependency of the upstream libssc test server and is not
 # present in the base root. Carry the complete runtime pair, including

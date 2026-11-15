@@ -1,0 +1,10 @@
+{
+  "source": {
+    "rom": "OS2.0.6.0.VMYCNXM",
+    "path": "vendor/overlay/FrameworksResTarget_Vendor.apk",
+    "sha256": "2ebc27d461d62631318bd5690d16b58319d2b11101a380c45ebc59444b1274e3",
+    "note": "Vendor resource reference, not the complete MIUI policy or a measured luminance calibration. Plasma uses linear interpolation and learns later user adjustments."
+  },
+  "config_autoBrightnessLevels": [1, 2, 5, 9, 13, 17, 21, 26, 30, 40, 83, 104, 200, 400, 500, 600, 700, 800, 1000, 1200, 1500, 1800, 2000, 2165, 2680, 3000, 3540, 4000],
+  "config_autoBrightnessLcdBacklightValues": [4, 4, 4, 8, 15, 20, 26, 35, 45, 46, 46, 46, 60, 60, 60, 64, 66, 70, 73, 80, 88, 110, 130, 135, 145, 180, 200, 240, 255]
+}

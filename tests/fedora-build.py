@@ -28,6 +28,30 @@ class FedoraTests(unittest.TestCase):
     def setUp(self):self.temp=tempfile.TemporaryDirectory();self.work=Path(self.temp.name)
     def tearDown(self):self.temp.cleanup()
 
+    def test_plasma_light_curve_is_desktop_only_and_preserves_user_configuration(self):
+        root=self.work/'root';root.mkdir()
+        user=root/'home/wk/.config/kwinoutputconfig.json'
+        user.parent.mkdir(parents=True)
+        saved='[{"name":"outputs","data":[{"connectorName":"DSI-1","automaticBrightness":false}]}]\n'
+        user.write_text(saved)
+        root_builder.configure_login_output(root)
+        self.assertEqual(user.read_text(),saved)
+        desktop=json.loads((root/'etc/xdg/kwinoutputconfig.json').read_text())[0]['data'][0]
+        greeter=json.loads((root/'usr/share/liuqin/plasma-login/kwinoutputconfig.json').read_text())[0]['data'][0]
+        self.assertTrue(desktop['automaticBrightness'])
+        self.assertNotIn('automaticBrightness',greeter)
+        self.assertNotIn('autoBrightnessCurve',greeter)
+        self.assertEqual(desktop['connectorName'],'DSI-1')
+        self.assertEqual(desktop['transform'],greeter['transform'])
+        curve=desktop['autoBrightnessCurve']
+        self.assertEqual(len(curve),29)
+        self.assertEqual(curve[0],[0,4/255])
+        self.assertEqual(curve[-1],[4000,1])
+        self.assertEqual(dict(curve)[30],46/255)
+        self.assertTrue(all(a[0]<b[0] and 0<a[1]<=b[1]<=1 for a,b in zip(curve,curve[1:])))
+        reference=json.loads((root/'usr/share/liuqin/auto-brightness-reference.json').read_text())
+        self.assertEqual(reference['source']['rom'],'OS2.0.6.0.VMYCNXM')
+
     def image(self, architecture='arm64', member='etc/test'):
         layer=io.BytesIO()
         with tarfile.open(fileobj=layer,mode='w') as tar:

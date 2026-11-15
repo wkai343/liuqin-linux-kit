@@ -1,10 +1,11 @@
 #!/usr/bin/python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Run iio-sensor-proxy's upstream SSC fixture with liuqin admission."""
+"""Exercise SSC accelerometer and ambient light through the real D-Bus proxy."""
 
 import importlib.util
 import os
 import pathlib
+import signal
 import subprocess
 import sys
 import tempfile
@@ -30,8 +31,84 @@ def main() -> int:
         raise RuntimeError("upstream SSC accelerometer test contract changed")
 
     class LiuqinSSCTests(module.Tests):
+        @staticmethod
+        def add_liuqin_light(testbed, with_accel=False):
+            testbed.add_device(
+                "misc", "fastrpc-sdsp", None,
+                ["name", "SSC Test Light Sensor"],
+                ["DEVNAME", "/dev/fastrpc-sdsp", "IIO_SENSOR_PROXY_TYPE",
+                 "ssc-light ssc-accel" if with_accel else "ssc-light"],
+            )
+
+        def assert_light_reading(self):
+            self.assertEventually(lambda: self.get_dbus_property("LightLevel") == 7)
+            self.assertEqual(self.get_dbus_property("LightLevelUnit"), "lux")
+            self.assertEqual(self.daemon.poll(), None, "daemon crashed")
+
+        def test_liuqin_ssc_light(self):
+            self.add_liuqin_light(self.testbed)
+            self.start_daemon()
+            # Discovery/open_sync iterates the main context. Bus ownership
+            # does not mean asynchronous sensor publication is complete.
+            self.assertEventually(lambda: bool(self.get_dbus_property("HasAmbientLight")))
+            self.assertEqual(self.get_dbus_property("HasAccelerometer"), False)
+            self.proxy.ClaimLight()
+            self.assert_light_reading()
+            self.proxy.ReleaseLight()
+            self.assertEventually(lambda: self.count_text_in_log("Disabling sensor (") >= 2)
+            before = self.count_text_in_log("Light level sent by driver")
+            self.proxy.ClaimLight()
+            self.assertEventually(lambda: self.count_text_in_log("Light level sent by driver") > before)
+            self.assert_light_reading()
+
+        def test_liuqin_ssc_light_during_coldplug(self):
+            self.add_liuqin_light(self.testbed)
+            self.start_daemon_before_coldplug_finishes()
+            self.assertEqual(self.get_dbus_property("HasAmbientLight"), False)
+            self.proxy.ClaimLight()
+            self.resume_mock_server()
+            self.assert_light_reading()
+            self.assertEqual(self.get_dbus_property("HasAmbientLight"), True)
+            self.assertEqual(self.count_text_in_log("Enabling sensor ("), 1)
+
+        def test_liuqin_ssc_light_released_during_coldplug(self):
+            self.add_liuqin_light(self.testbed)
+            self.start_daemon_before_coldplug_finishes()
+            self.proxy.ClaimLight()
+            self.proxy.ReleaseLight()
+            self.resume_mock_server()
+            self.assertEventually(lambda: bool(self.get_dbus_property("HasAmbientLight")))
+            self.assertEqual(self.count_text_in_log("Enabling sensor ("), 0)
+            self.proxy.ClaimLight()
+            self.assert_light_reading()
+
+        def test_liuqin_ssc_light_and_accel(self):
+            self.add_liuqin_light(self.testbed, with_accel=True)
+            self.start_daemon()
+            self.assertEventually(lambda: bool(self.get_dbus_property("HasAmbientLight")))
+            self.assertEventually(lambda: bool(self.get_dbus_property("HasAccelerometer")))
+            self.proxy.ClaimAccelerometer()
+            self.proxy.ClaimLight()
+            self.assert_light_reading()
+            self.assertEventually(lambda: self.get_dbus_property("AccelerometerOrientation") == "left-up")
+            self.proxy.ReleaseLight()
+            self.assertEqual(self.get_dbus_property("HasAccelerometer"), True)
+            self.assertEqual(self.get_dbus_property("AccelerometerOrientation"), "left-up")
+            self.proxy.ClaimLight()
+            self.assert_light_reading()
+            self.proxy.ReleaseAccelerometer()
+            self.assertEqual(self.get_dbus_property("HasAmbientLight"), True)
+
         def start_daemon_before_coldplug_finishes(self):
             """Own the proxy as soon as its bus name appears, before SSC discovery."""
+            # Hold the real mock server's responses while D-Bus dispatch runs
+            # inside libssc's synchronous discovery. Do not rely on a slow CPU
+            # or QEMU to win a race against discovery on native test hosts.
+            self.mock_pid = int(os.environ["LIUQIN_SSC_TEST_SERVER_PID"])
+            if self.mock_pid <= 1:
+                raise ValueError("invalid dedicated SSC mock server PID")
+            os.kill(self.mock_pid, signal.SIGSTOP)
+            self.addCleanup(self.resume_mock_server)
             env = os.environ.copy()
             env["G_DEBUG"] = "fatal-criticals"
             env["G_MESSAGES_DEBUG"] = "all"
@@ -64,6 +141,9 @@ def main() -> int:
                 self.fail("SensorProxy did not own its D-Bus name in 10 seconds")
 
             self.assertEqual(self.daemon.poll(), None, "daemon crashed")
+
+        def resume_mock_server(self):
+            os.kill(self.mock_pid, signal.SIGCONT)
 
         @staticmethod
         def add_liuqin_accelerometer(testbed):
@@ -110,6 +190,7 @@ def main() -> int:
 
             self.assertEqual(self.get_dbus_property("HasAccelerometer"), False)
             self.proxy.ClaimAccelerometer()
+            self.resume_mock_server()
             self.assertEventually(
                 lambda: self.get_dbus_property("AccelerometerOrientation")
                 == "left-up",
@@ -132,10 +213,14 @@ def main() -> int:
         (
             LiuqinSSCTests("test_liuqin_ssc_accel"),
             LiuqinSSCTests("test_liuqin_ssc_claim_during_coldplug"),
+            LiuqinSSCTests("test_liuqin_ssc_light"),
+            LiuqinSSCTests("test_liuqin_ssc_light_during_coldplug"),
+            LiuqinSSCTests("test_liuqin_ssc_light_and_accel"),
+            LiuqinSSCTests("test_liuqin_ssc_light_released_during_coldplug"),
         )
     )
     result = unittest.TextTestRunner(verbosity=2).run(suite)
-    return 0 if result.wasSuccessful() and result.testsRun == 2 else 1
+    return 0 if result.wasSuccessful() and result.testsRun == 6 and not result.skipped else 1
 
 
 if __name__ == "__main__":

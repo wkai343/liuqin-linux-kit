@@ -171,8 +171,22 @@ def configure_login_output(root):
     common.write_config(root,'usr/share/liuqin/plasma-login/kwinoutputconfig.json',
                         json.dumps(defaults,indent=2)+'\n')
     # Official Plasma Setup and new desktop accounts use the same static
-    # panel default; no compiled first-session helper is needed.
+    # panel default. Seed KWin's otherwise flat 100% light curve from the
+    # stock vendor resource. Existing per-user configurations take precedence.
+    reference=json.loads((PROJECT/'build/rootfs/liuqin-auto-brightness.json').read_text())
+    levels=[0]+reference['config_autoBrightnessLevels']
+    values=reference['config_autoBrightnessLcdBacklightValues']
+    if (len(levels)!=len(values) or len(values)<2 or
+        any(not isinstance(v,int) or isinstance(v,bool) for v in levels+values) or
+        any(a>=b for a,b in zip(levels,levels[1:])) or
+        any(a>b for a,b in zip(values,values[1:])) or
+        not 0<values[0]<=values[-1]<=255):
+        raise ValueError('Invalid liuqin ambient-light reference curve')
+    defaults[0]['data'][0].update(automaticBrightness=True,
+        autoBrightnessCurve=[[lux,value/255] for lux,value in zip(levels,values)])
     common.write_config(root,'etc/xdg/kwinoutputconfig.json',json.dumps(defaults,indent=2)+'\n')
+    common.write_config(root,'usr/share/liuqin/auto-brightness-reference.json',
+                        json.dumps(reference,indent=2)+'\n')
     common.write_config(root,'usr/lib/systemd/user/plasma-login-kwin_wayland.service.d/10-liuqin-display.conf',
         '[Service]\nEnvironment="XDG_CONFIG_DIRS=/usr/share/liuqin/plasma-login:%h/.config/kdedefaults:/etc/xdg"\n')
 

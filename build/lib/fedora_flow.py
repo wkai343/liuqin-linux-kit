@@ -65,6 +65,7 @@ class FedoraFlow(Flow):
         def build(out):self.target_action('sensors',archive,out/'assembled',rom_sensors=board/'sensors',jobs=self.data.get('jobs',12))
         return self.stage('fedora-sensors',dict(base=sha(archive),config=tree_identity(board/'sensors'),
             sources=tree_identity(PROJECT/'device/sensors'),overlay=tree_identity(PROJECT/'device/sensors-overlay'),
+            integration_test=sha(PROJECT/'tests/ssc-accel-integration.py'),
             builder=sha(PROJECT/'build/scripts/build-liuqin-sensors-stack.sh')),
             build,['assembled/sensor-stack.tar'])/'assembled/sensor-stack.tar'
 
@@ -172,6 +173,7 @@ class FedoraFlow(Flow):
         inputs=dict(base=sha(archive),rpms=tree_identity(devices),recipe=self.recipe,
             builder=sha(PROJECT/'build/scripts/build-fedora-root.py'),
             input_env=sha(PROJECT/'build/rootfs/fedora-input-env.sh'),
+            auto_brightness=sha(PROJECT/'build/rootfs/liuqin-auto-brightness.json'),
             shell_defaults=sha(PROJECT/'build/lib/shell_defaults.py'),
             firefox_media=tree_identity(PROJECT/'build/firefox'),
             firefox_media_installer=sha(PROJECT/'build/lib/firefox_media.py'),
