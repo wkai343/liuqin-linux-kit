@@ -78,14 +78,26 @@ class Operations:
         online=status.read(self.root/'sys/class/power_supply/qcom-battmgr-usb/online')
         vbus=True if online=='1' else False if online=='0' else None
         state=status.read(self.root/'sys/class/udc'/controller/'state','unknown') if ready else 'unknown'
-        value=dict(adb_ready=ready,usb_vbus_online=vbus,usb_controller_state=state)
-        # Fixed peripheral mode can retain "configured" after cable removal.
-        # The PMIC's live input-power state takes precedence over that latch.
+        link='unknown'
+        if ready and state in ('configured','suspended') and vbus is not True:
+            # Only resolve conflicting/unknown power telemetry. Reading this
+            # pinned DWC3 diagnostic can wake the controller, so do not poll
+            # it during the ordinary powered/connected case.
+            link=status.read(self.root/'sys/kernel/debug/usb'/controller/'link_state','unknown')
+        value=dict(adb_ready=ready,usb_vbus_online=vbus,usb_controller_state=state,
+                   usb_link_state=link)
+        # USB_ONLINE describes input power, not the data connection: PD
+        # negotiation can clear it while the enumerated link stays in U0.
+        # Conversely fixed peripheral mode can retain "configured" after
+        # unplug, with the link falling back to USB2 Suspend. Do not accept
+        # that latch alone as evidence of a connected host.
+        if state in ('configured','suspended') and link in ('U0','U1','U2','U3','On','Sleep'):
+            return dict(value,usb_state='suspended' if state=='suspended' else 'connected')
         if vbus is False:
             return dict(value,usb_state='disconnected')
         if not ready:
             return dict(value,usb_state='starting')
-        connection={'not attached':'disconnected','configured':'connected',
+        connection={'not attached':'connecting','configured':'connected',
                     'suspended':'suspended','attached':'connecting','powered':'connecting',
                     'default':'connecting','addressed':'connecting'}.get(state,'unknown')
         if vbus is None and connection in ('connected','suspended'):
@@ -97,6 +109,8 @@ class Operations:
         value=self.usb_connection()
         snapshot=dict(value,boot_id=status.read(self.root/'proc/sys/kernel/random/boot_id'),
                       monotonic=time.monotonic())
+        if self.usb_snapshot is None or self.usb_snapshot[1]!=value:
+            print('Recovery USB state at',snapshot['monotonic'],json.dumps(value),flush=True)
         path=self.root/'run/liuqin-native-usb.json'
         temporary=path.with_suffix('.tmp')
         temporary.write_text(json.dumps(snapshot)+'\n')

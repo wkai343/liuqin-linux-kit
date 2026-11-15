@@ -75,6 +75,7 @@ jobs:
           python3 tests/native-touch-service.py
           python3 tests/recovery-startup.py
           python3 tests/recovery-touch-startup.py
+          python3 tests/recovery-usb-session.py
           python3 tests/recovery-kernel-components.py
           python3 tests/recovery-source.py
           python3 tests/kernel-common-fixes.py

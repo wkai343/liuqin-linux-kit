@@ -1,0 +1,297 @@
+From: Liuqin Linux Kit maintainers
+Subject: [PATCH] usb: typec: defer connections until Liuqin lane preparation succeeds
+
+Do not publish an attach or start its USB role when the battery CC service,
+orientation switch or initial mux fails. Preserve acknowledged change bits,
+re-read current firmware state on bounded retries, and cancel connector work
+before suspend/unregister. Initial registration uses the existing bounded
+probe retry. Other transports retain their existing status callback.
+
+diff --git a/drivers/usb/typec/ucsi/ucsi.c b/drivers/usb/typec/ucsi/ucsi.c
+index 71d93f9..d9b6bc2 100644
+--- a/drivers/usb/typec/ucsi/ucsi.c
++++ b/drivers/usb/typec/ucsi/ucsi.c
+@@ -844,17 +844,59 @@ static void ucsi_unregister_altmodes(struct ucsi_connector *con, u8 recipient)
+ 	}
+ }
+ 
++/* Lane preparation can outlive the original, already acknowledged event. */
++#define UCSI_CONNECTION_RETRIES 10
++
++static void ucsi_retry_connection(struct ucsi_connector *con)
++{
++	if (!con->connection_pending ||
++	    con->connection_retries >= UCSI_CONNECTION_RETRIES)
++		return;
++	con->connection_retries++;
++	mod_delayed_work(con->wq, &con->connection_work, msecs_to_jiffies(500));
++}
++
++static void ucsi_cancel_connection_work(struct ucsi_connector *con)
++{
++	/* Disable first: an event already running must not rearm this work. */
++	disable_delayed_work_sync(&con->connection_work);
++	cancel_work_sync(&con->work);
++}
++
++static void ucsi_connection_work(struct work_struct *work)
++{
++	struct ucsi_connector *con = container_of(work, struct ucsi_connector,
++						  connection_work.work);
++
++	/* Re-read firmware through the normal event path, never replay an old role. */
++	ucsi_connector_change(con->ucsi, con->num);
++}
++
+ static int ucsi_get_connector_status(struct ucsi_connector *con, bool conn_ack)
+ {
++	DECLARE_BITMAP(previous, UCSI_GET_CONNECTOR_STATUS_SIZE);
+ 	u64 command = UCSI_GET_CONNECTOR_STATUS | UCSI_CONNECTOR_NUMBER(con->num);
+ 	size_t size = min(sizeof(con->status),
+ 			  UCSI_MAX_DATA_LENGTH(con->ucsi));
+ 	int ret;
+ 
++	bitmap_copy(previous, con->status, UCSI_GET_CONNECTOR_STATUS_SIZE);
+ 	ret = ucsi_send_command_common(con->ucsi, command, &con->status, size,
+ 				       NULL, 0, conn_ack);
++	if (ret < 0)
++		return ret;
+ 
+-	return ret < 0 ? ret : 0;
++	if (con->ucsi->ops->prepare_connection) {
++		ret = con->ucsi->ops->prepare_connection(con);
++		if (ret) {
++			con->pending_changes |= UCSI_CONSTAT(con, CHANGE);
++			con->connection_pending = true;
++			bitmap_copy(con->status, previous, UCSI_GET_CONNECTOR_STATUS_SIZE);
++			return -EAGAIN;
++		}
++		con->connection_pending = false;
++	}
++	return 0;
+ }
+ 
+ static int ucsi_read_pdos(struct ucsi_connector *con,
+@@ -1452,7 +1494,8 @@ static int ucsi_check_connection(struct ucsi_connector *con)
+ 	ret = ucsi_get_connector_status(con, false);
+ 	if (ret) {
+ 		dev_err(con->ucsi->dev, "GET_CONNECTOR_STATUS failed (%d)\n", ret);
+-		return ret;
++		ucsi_retry_connection(con);
++		return ret == -EAGAIN ? -EBUSY : ret;
+ 	}
+ 
+ 	if (UCSI_CONSTAT(con, CONNECTED)) {
+@@ -1515,6 +1558,7 @@ static void ucsi_handle_connector_change(struct work_struct *work)
+ 	u8 curr_scale, volt_scale;
+ 	enum typec_role role, prev_role;
+ 	u16 change;
++	bool retrying;
+ 	int ret;
+ 	u32 val;
+ 
+@@ -1531,6 +1575,7 @@ static void ucsi_handle_connector_change(struct work_struct *work)
+ 		dev_err(ucsi->dev, "%s: GET_CONNECTOR_STATUS failed (%d)\n",
+ 			__func__, ret);
+ 		clear_bit(EVENT_PENDING, &con->ucsi->flags);
++		ucsi_retry_connection(con);
+ 		goto out_unlock;
+ 	}
+ 
+@@ -1539,10 +1584,14 @@ static void ucsi_handle_connector_change(struct work_struct *work)
+ 	if (ucsi->ops->connector_status)
+ 		ucsi->ops->connector_status(con);
+ 
+-	change = UCSI_CONSTAT(con, CHANGE);
++	retrying = con->pending_changes != 0;
++	change = UCSI_CONSTAT(con, CHANGE) | con->pending_changes;
++	con->pending_changes = 0;
++	con->connection_retries = 0;
++	cancel_delayed_work(&con->connection_work);
+ 	role = UCSI_CONSTAT(con, PWR_DIR);
+ 
+-	if ((change & UCSI_CONSTAT_POWER_DIR_CHANGE) && role != prev_role) {
++	if ((change & UCSI_CONSTAT_POWER_DIR_CHANGE) && (role != prev_role || retrying)) {
+ 		typec_set_pwr_role(con->port, role);
+ 
+ 		/* Some power_supply properties vary depending on the power direction when
+@@ -1936,6 +1985,7 @@ static int ucsi_register_port(struct ucsi *ucsi, struct ucsi_connector *con)
+ 		return -ENOMEM;
+ 
+ 	INIT_WORK(&con->work, ucsi_handle_connector_change);
++	INIT_DELAYED_WORK(&con->connection_work, ucsi_connection_work);
+ 	init_completion(&con->complete);
+ 	mutex_init(&con->lock);
+ 	lockdep_set_class(&con->lock, &con->lock_key);
+@@ -2025,6 +2075,9 @@ static int ucsi_register_port(struct ucsi *ucsi, struct ucsi_connector *con)
+ 	ret = ucsi_get_connector_status(con, false);
+ 	if (ret) {
+ 		dev_err(ucsi->dev, "con%d: failed to get status\n", con->num);
++		/* Registration has no published connector to retry yet. */
++		if (ret == -EAGAIN)
++			ret = -EPROBE_DEFER;
+ 		goto out;
+ 	}
+ 
+@@ -2098,6 +2151,7 @@ static void ucsi_unregister_port(struct ucsi_connector *con)
+ 	struct ucsi_work *uwork;
+ 
+ 	if (con->wq) {
++		ucsi_cancel_connection_work(con);
+ 		mutex_lock(&con->lock);
+ 		ucsi_unregister_partner(con);
+ 		/*
+@@ -2287,6 +2341,8 @@ static void ucsi_resume_work(struct work_struct *work)
+ 
+ 	for (con = ucsi->connector; con->port; con++) {
+ 		mutex_lock(&con->lock);
++		con->connection_retries = 0;
++		ucsi_retry_connection(con);
+ 		ucsi_partner_task(con, ucsi_check_connection, 1, 0);
+ 		mutex_unlock(&con->lock);
+ 	}
+@@ -2306,7 +2362,7 @@ int ucsi_suspend(struct ucsi *ucsi)
+ 		return 0;
+ 
+ 	for (i = 0; i < ucsi->cap.num_connectors; i++)
+-		cancel_work_sync(&ucsi->connector[i].work);
++		ucsi_cancel_connection_work(&ucsi->connector[i]);
+ 
+ 	return 0;
+ }
+@@ -2314,8 +2370,14 @@ EXPORT_SYMBOL_GPL(ucsi_suspend);
+ 
+ int ucsi_resume(struct ucsi *ucsi)
+ {
+-	if (ucsi->connector)
++	int i;
++
++	if (ucsi->connector) {
++		/* Balance suspend even if restoring firmware notifications fails. */
++		for (i = 0; i < ucsi->cap.num_connectors; i++)
++			enable_delayed_work(&ucsi->connector[i].connection_work);
+ 		queue_work(system_long_wq, &ucsi->resume_work);
++	}
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(ucsi_resume);
+@@ -2495,7 +2557,6 @@ void ucsi_unregister(struct ucsi *ucsi)
+ 		return;
+ 
+ 	for (i = 0; i < ucsi->cap.num_connectors; i++) {
+-		cancel_work_sync(&ucsi->connector[i].work);
+ 		ucsi_unregister_port(&ucsi->connector[i]);
+ 		lockdep_unregister_key(&ucsi->connector[i].lock_key);
+ 	}
+diff --git a/drivers/usb/typec/ucsi/ucsi.h b/drivers/usb/typec/ucsi/ucsi.h
+index 29eea82..5ae021f 100644
+--- a/drivers/usb/typec/ucsi/ucsi.h
++++ b/drivers/usb/typec/ucsi/ucsi.h
+@@ -71,6 +71,8 @@ struct dentry;
+  * @update_altmodes: Squashes duplicate DP altmodes
+  * @update_connector: Update connector capabilities before registering
+  * @connector_status: Updates connector status, called holding connector lock
++ * @prepare_connection: Prepare lanes before publishing status or setting roles;
++ *                      called holding connector lock, return an error to retry
+  * @add_partner_altmodes: Start mode selection
+  * @remove_partner_altmodes: Clean mode selection
+  *
+@@ -92,6 +94,7 @@ struct ucsi_operations {
+ 				struct ucsi_altmode *updated);
+ 	void (*update_connector)(struct ucsi_connector *con);
+ 	void (*connector_status)(struct ucsi_connector *con);
++	int (*prepare_connection)(struct ucsi_connector *con);
+ 	void (*add_partner_altmodes)(struct ucsi_connector *con);
+ 	void (*remove_partner_altmodes)(struct ucsi_connector *con);
+ };
+@@ -534,6 +537,10 @@ struct ucsi_connector {
+ 	struct mutex lock; /* port lock */
+ 	struct lock_class_key lock_key;
+ 	struct work_struct work;
++	struct delayed_work connection_work;
++	bool connection_pending;
++	unsigned int connection_retries;
++	u16 pending_changes;
+ 	struct completion complete;
+ 	struct workqueue_struct *wq;
+ 	struct list_head partner_tasks;
+diff --git a/drivers/usb/typec/ucsi/ucsi_glink.c b/drivers/usb/typec/ucsi/ucsi_glink.c
+index 63bd7fb..8fd0a02 100644
+--- a/drivers/usb/typec/ucsi/ucsi_glink.c
++++ b/drivers/usb/typec/ucsi/ucsi_glink.c
+@@ -231,28 +231,27 @@ static int pmic_glink_ucsi_liuqin_orientation(struct pmic_glink_ucsi *ucsi,
+ 	return -EAGAIN;
+ }
+ 
+-static void pmic_glink_ucsi_connector_status(struct ucsi_connector *con)
++static int pmic_glink_ucsi_prepare_connection(struct ucsi_connector *con)
+ {
+ 	struct pmic_glink_ucsi *ucsi = ucsi_get_drvdata(con->ucsi);
+ 	unsigned int cc;
+ 	int orientation, ret;
+ 
+-	if (!UCSI_CONSTAT(con, CONNECTED)) {
+-		typec_set_orientation(con->port, TYPEC_ORIENTATION_NONE);
+-		return;
+-	}
++	/* A real detach must still retire the old session if the supplier is down. */
++	if (!UCSI_CONSTAT(con, CONNECTED))
++		return 0;
+ 
+ 	if (liuqin_board_quirks() && con->num == 1) {
+ 		ret = pmic_glink_ucsi_liuqin_orientation(ucsi, &cc);
+ 		if (ret) {
+ 			dev_warn_ratelimited(ucsi->dev, "CC orientation unavailable: %d\n", ret);
+-			return;
++			return ret;
+ 		}
+ 		orientation = cc == 1 ? TYPEC_ORIENTATION_NORMAL : TYPEC_ORIENTATION_REVERSE;
+ 		ret = typec_set_orientation(con->port, orientation);
+ 		if (ret) {
+ 			dev_err(ucsi->dev, "CC%u lane switch failed: %d\n", cc, ret);
+-			return;
++			return ret;
+ 		}
+ 		dev_dbg(ucsi->dev, "connector %u CC%u orientation applied\n", con->num, cc);
+ 
+@@ -268,12 +267,31 @@ static void pmic_glink_ucsi_connector_status(struct ucsi_connector *con)
+ 		    UCSI_CONSTAT(con, PARTNER_TYPE) != UCSI_CONSTAT_PARTNER_TYPE_AUDIO &&
+ 		    UCSI_CONSTAT(con, PARTNER_TYPE) != UCSI_CONSTAT_PARTNER_TYPE_DEBUG) {
+ 			ret = typec_set_mode(con->port, TYPEC_STATE_USB);
+-			if (ret)
++			if (ret) {
+ 				dev_err(ucsi->dev, "initial USB mux switch failed: %d\n", ret);
++				return ret;
++			}
+ 		}
++		return 0;
++	}
++
++	return 0;
++}
++
++static void pmic_glink_ucsi_connector_status(struct ucsi_connector *con)
++{
++	struct pmic_glink_ucsi *ucsi = ucsi_get_drvdata(con->ucsi);
++	int orientation;
++
++	if (!UCSI_CONSTAT(con, CONNECTED)) {
++		typec_set_orientation(con->port, TYPEC_ORIENTATION_NONE);
+ 		return;
+ 	}
+ 
++	/* Liuqin preparation is fallible and owned by the core's retry gate. */
++	if (liuqin_board_quirks() && con->num == 1)
++		return;
++
+ 	if (con->num > PMIC_GLINK_MAX_PORTS ||
+ 	    !ucsi->port_orientation[con->num - 1])
+ 		return;
+@@ -296,6 +314,7 @@ static const struct ucsi_operations pmic_glink_ucsi_ops = {
+ 	.async_control = pmic_glink_ucsi_async_control,
+ 	.update_connector = pmic_glink_ucsi_update_connector,
+ 	.connector_status = pmic_glink_ucsi_connector_status,
++	.prepare_connection = pmic_glink_ucsi_prepare_connection,
+ };
+ 
+ static void pmic_glink_ucsi_read_ack(struct pmic_glink_ucsi *ucsi, const void *data, size_t len)

@@ -937,6 +937,12 @@ mount -t devpts devpts /dev/pts
 mount -t tmpfs tmpfs /run
 mount -t configfs configfs /sys/kernel/config
 mount -t pstore pstore /sys/fs/pstore 2>/dev/null || true
+if [ -f /etc/liuqin-native-recovery.json ] && [ "$storage_mode" = readonly ]; then
+	# Recovery's USB status can inspect the pinned DWC3 link state when
+	# input-power telemetry disagrees with the enumerated data connection.
+	mkdir -p /sys/kernel/debug
+	mount -t debugfs -o ro debugfs /sys/kernel/debug 2>/dev/null || true
+fi
 
 hostname liuqin-firstboot
 [ ! -w /proc/sys/kernel/hotplug ] || echo /sbin/mdev >/proc/sys/kernel/hotplug

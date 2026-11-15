@@ -1,0 +1,366 @@
+From: Liuqin Linux Kit maintainers
+Subject: [PATCH] usb: synchronize Liuqin Recovery CC lanes and gadget sessions
+
+Read Xiaomi XM_CC_ORIENTATION through the serialized battery service.
+The fixed peripheral controller must stop its gadget and withdraw VBUS
+before the QMP lane reset, then reconnect only after orientation is set.
+Expose a NONE/DEVICE-only USB role switch for this Recovery policy; host
+mode, UCSI and DP remain disabled. Keep all changes behind the board
+helper and Recovery properties, and retain the shared Gen1 speed limit.
+
+diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
+index cacfba6aa..f00a667ea 100644
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -18,6 +18,10 @@
+ #include <linux/power_supply.h>
+ #include <linux/pm.h>
+ #include <linux/property.h>
++#include <linux/platform_data/liuqin.h>
++#include <linux/usb/typec_mux.h>
++#include <linux/usb/typec_altmode.h>
++#include <linux/usb/role.h>
+ #include <linux/soc/qcom/pdr.h>
+ #include <linux/soc/qcom/pmic_glink.h>
+ #include <linux/soc/qcom/battmgr.h>
+@@ -466,6 +470,14 @@ struct qcom_battmgr {
+ 	struct work_struct xm_notify_work;
+ 	struct delayed_work refresh_work;
+ 
++	/* Fixed-role Recovery has no UCSI/PAN owner of the USB lane switch. */
++	struct usb_role_switch *rec_role;
++	struct typec_switch *rec_switch;
++	struct typec_mux *rec_mux;
++	struct delayed_work rec_orientation_work;
++	unsigned int rec_orientation;
++	bool rec_session_dirty;
++
+ 	/*
+ 	 * @lock is used to prevent concurrent power supply requests to the
+ 	 * firmware, as it then stops responding.
+@@ -2039,6 +2051,142 @@ static const struct power_supply_desc sm8350_wls_psy_desc = {
+ 	.get_property = qcom_battmgr_wls_get_property,
+ };
+ 
++/*
++ * Xiaomi exposes CC orientation through the battery service (XM property 36),
++ * independently of DP PAN notifications. Serialize the read with all other
++ * battery requests. Only the fixed-role Liuqin Recovery owns this switch;
++ * normal Linux keeps its existing Type-C/alternate-mode policy.
++ */
++static void qcom_battmgr_rec_orientation_worker(struct work_struct *work)
++{
++	struct qcom_battmgr *battmgr = container_of(to_delayed_work(work),
++				struct qcom_battmgr, rec_orientation_work);
++	struct typec_mux_state state = { .mode = TYPEC_STATE_USB };
++	unsigned long flags;
++	unsigned int orientation;
++	u32 generation;
++	bool valid;
++	int ret;
++
++	spin_lock_irqsave(&battmgr->state_lock, flags);
++	generation = battmgr->service_generation;
++	valid = battmgr->service_up && !battmgr->stopping;
++	spin_unlock_irqrestore(&battmgr->state_lock, flags);
++	if (!valid) {
++		usb_role_switch_set_role(battmgr->rec_role, USB_ROLE_NONE);
++		battmgr->rec_orientation = TYPEC_ORIENTATION_NONE;
++		battmgr->rec_session_dirty = true;
++		return;
++	}
++
++	ret = qcom_battmgr_raw_property(battmgr, BATTMGR_XM_PROPERTY_GET,
++					XM_CC_ORIENTATION, &orientation);
++	spin_lock_irqsave(&battmgr->state_lock, flags);
++	valid = battmgr->service_up && !battmgr->stopping &&
++		generation == battmgr->service_generation;
++	spin_unlock_irqrestore(&battmgr->state_lock, flags);
++	if (!valid)
++		return;
++
++	/* Firmware: 0 detached, 1 CC1, 2 CC2. Never act on errors/unknowns. */
++	if (!ret && orientation <= TYPEC_ORIENTATION_REVERSE &&
++	    (battmgr->rec_session_dirty || orientation != battmgr->rec_orientation)) {
++		/* Any partial failure invalidates the whole session, even if CC
++		 * returns to the last successful value before the next poll.
++		 */
++		battmgr->rec_session_dirty = true;
++		/* Stop endpoints and withdraw VBUS before resetting live PHY lanes. */
++		ret = usb_role_switch_set_role(battmgr->rec_role, USB_ROLE_NONE);
++		if (!ret)
++			ret = typec_switch_set(battmgr->rec_switch, orientation);
++		if (!ret && orientation != TYPEC_ORIENTATION_NONE)
++			ret = typec_mux_set(battmgr->rec_mux, &state);
++		if (!ret && orientation != TYPEC_ORIENTATION_NONE)
++			ret = usb_role_switch_set_role(battmgr->rec_role, USB_ROLE_DEVICE);
++		if (!ret) {
++			dev_info(battmgr->dev, "Recovery CC orientation %u -> %u\n",
++				 battmgr->rec_orientation, orientation);
++			battmgr->rec_orientation = orientation;
++			battmgr->rec_session_dirty = false;
++		} else {
++			dev_err_ratelimited(battmgr->dev,
++				"Recovery USB lane switch failed: %d\n", ret);
++		}
++	}
++
++	/* Notifications expedite attach; polling covers missed/late CC updates. */
++	spin_lock_irqsave(&battmgr->state_lock, flags);
++	if (battmgr->service_up && !battmgr->stopping)
++		queue_delayed_work(system_dfl_wq, &battmgr->rec_orientation_work,
++				   msecs_to_jiffies(500));
++	spin_unlock_irqrestore(&battmgr->state_lock, flags);
++}
++
++static void qcom_battmgr_rec_put_role(void *data)
++{
++	usb_role_switch_put(data);
++}
++
++static void qcom_battmgr_rec_put_switch(void *data)
++{
++	typec_switch_put(data);
++}
++
++static void qcom_battmgr_rec_put_mux(void *data)
++{
++	typec_mux_put(data);
++}
++
++static int qcom_battmgr_rec_orientation_init(struct qcom_battmgr *battmgr)
++{
++	struct device *dev = battmgr->dev;
++	struct fwnode_handle *connector;
++	int ret;
++
++	if (!liuqin_board_quirks() ||
++	    !device_property_read_bool(dev->parent, "liuqin,recovery"))
++		return 0;
++
++	connector = device_get_named_child_node(dev->parent, "connector");
++	if (!connector)
++		return -ENODEV;
++	battmgr->rec_role = fwnode_usb_role_switch_get(connector);
++	if (IS_ERR_OR_NULL(battmgr->rec_role)) {
++		fwnode_handle_put(connector);
++		return dev_err_probe(dev, battmgr->rec_role ?
++				     PTR_ERR(battmgr->rec_role) : -ENODEV,
++				     "Recovery USB session switch unavailable\n");
++	}
++	ret = devm_add_action_or_reset(dev, qcom_battmgr_rec_put_role,
++				       battmgr->rec_role);
++	if (ret) {
++		fwnode_handle_put(connector);
++		return ret;
++	}
++	battmgr->rec_switch = fwnode_typec_switch_get(connector);
++	fwnode_handle_put(connector);
++	if (IS_ERR(battmgr->rec_switch))
++		return dev_err_probe(dev, PTR_ERR(battmgr->rec_switch),
++				     "Recovery orientation switch unavailable\n");
++	if (!battmgr->rec_switch)
++		return -ENODEV;
++	ret = devm_add_action_or_reset(dev, qcom_battmgr_rec_put_switch,
++				       battmgr->rec_switch);
++	if (ret)
++		return ret;
++
++	connector = device_get_named_child_node(dev->parent, "connector");
++	battmgr->rec_mux = fwnode_typec_mux_get(connector);
++	fwnode_handle_put(connector);
++	if (IS_ERR(battmgr->rec_mux))
++		return dev_err_probe(dev, PTR_ERR(battmgr->rec_mux),
++				     "Recovery USB mode switch unavailable\n");
++	if (!battmgr->rec_mux)
++		return -ENODEV;
++	return devm_add_action_or_reset(dev, qcom_battmgr_rec_put_mux,
++				       battmgr->rec_mux);
++}
++
+ /* Like the OEM xm_prop_change_work, publish vendor state outside GLINK RX. */
+ static void qcom_battmgr_xm_notify_worker(struct work_struct *work)
+ {
+@@ -2072,6 +2220,8 @@ static void qcom_battmgr_notification(struct qcom_battmgr *battmgr,
+ 		power_supply_changed(battmgr->bat_psy);
+ 		break;
+ 	case NOTIF_USB_PROPERTY:
++		if (battmgr->rec_switch)
++			mod_delayed_work(system_dfl_wq, &battmgr->rec_orientation_work, 0);
+ 		power_supply_changed(battmgr->usb_psy);
+ 		break;
+ 	case NOTIF_WLS_PROPERTY:
+@@ -2712,6 +2862,8 @@ static void qcom_battmgr_pdr_notify(void *priv, int state)
+ 		battmgr->service_generation++;
+ 		battmgr->enable_attempts = 0;
+ 		battmgr->notifications_enabled = false;
++		if (battmgr->rec_switch)
++			mod_delayed_work(system_dfl_wq, &battmgr->rec_orientation_work, 0);
+ 		if (up)
+ 			mod_delayed_work(system_wq, &battmgr->enable_work, 0);
+ 		else
+@@ -2731,6 +2883,11 @@ static void qcom_battmgr_stop(void *data)
+ 	battmgr->service_generation++;
+ 	spin_unlock_irqrestore(&battmgr->state_lock, flags);
+ 
++	if (battmgr->rec_switch) {
++		disable_delayed_work_sync(&battmgr->rec_orientation_work);
++		usb_role_switch_set_role(battmgr->rec_role, USB_ROLE_NONE);
++	}
++
+ 	/* Drain requests while the client is still alive, including probe unwind. */
+ 	disable_delayed_work_sync(&battmgr->enable_work);
+ 	if (battmgr->variant == QCOM_BATTMGR_SM8475) {
+@@ -2789,6 +2946,10 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
+ 	else
+ 		battmgr->variant = QCOM_BATTMGR_SM8350;
+ 
++	ret = qcom_battmgr_rec_orientation_init(battmgr);
++	if (ret)
++		return ret;
++
+ 	ret = qcom_battmgr_charge_control_thresholds_init(battmgr);
+ 	if (ret < 0)
+ 		return dev_err_probe(dev, ret,
+@@ -2870,6 +3031,13 @@ static int qcom_battmgr_probe(struct auxiliary_device *adev,
+ 			return ret;
+ 	}
+ 
++	if (battmgr->rec_switch) {
++		ret = devm_delayed_work_autocancel(dev, &battmgr->rec_orientation_work,
++					 qcom_battmgr_rec_orientation_worker);
++		if (ret)
++			return ret;
++	}
++
+ 	ret = devm_add_action_or_reset(dev, qcom_battmgr_stop, battmgr);
+ 	if (ret)
+ 		return ret;
+diff --git a/drivers/usb/dwc3/dwc3-qcom.c b/drivers/usb/dwc3/dwc3-qcom.c
+index fbb83eefc..0d66bfa6c 100644
+--- a/drivers/usb/dwc3/dwc3-qcom.c
++++ b/drivers/usb/dwc3/dwc3-qcom.c
+@@ -14,6 +14,7 @@
+ #include <linux/interconnect.h>
+ #include <linux/platform_device.h>
+ #include <linux/platform_data/liuqin.h>
++#include <linux/usb/gadget.h>
+ #include <linux/phy/phy.h>
+ #include <linux/usb/of.h>
+ #include <linux/reset.h>
+@@ -86,6 +87,8 @@ struct dwc3_qcom {
+ 	struct icc_path		*icc_path_apps;
+ 
+ 	enum usb_role		current_role;
++	bool			rec_vbus_managed;
++	struct usb_role_switch	*rec_role_sw;
+ };
+ 
+ #define to_dwc3_qcom(d) container_of((d), struct dwc3_qcom, dwc)
+@@ -586,6 +589,57 @@ static void dwc3_qcom_set_role_notifier(struct dwc3 *dwc, enum usb_role next_rol
+ 	qcom->current_role = next_role;
+ }
+ 
++/*
++ * Recovery stays peripheral-only but still needs a real detach/attach cycle.
++ * This switch accepts NONE/DEVICE only. Its consumer first stops the gadget,
++ * then sets the Type-C PHY orientation, and only then enables DEVICE again.
++ */
++static int dwc3_qcom_rec_set_role(struct usb_role_switch *sw, enum usb_role role)
++{
++	struct dwc3_qcom *qcom = usb_role_switch_get_drvdata(sw);
++	struct usb_gadget *gadget = qcom->dwc.gadget;
++	int ret;
++
++	if (role != USB_ROLE_NONE && role != USB_ROLE_DEVICE)
++		return -EOPNOTSUPP;
++	ret = pm_runtime_resume_and_get(qcom->dev);
++	if (ret < 0)
++		return ret;
++
++	WRITE_ONCE(qcom->current_role, role);
++	if (role == USB_ROLE_NONE) {
++		/* Prevent a concurrent FunctionFS bind from reconnecting the gadget. */
++		usb_udc_vbus_handler(gadget, false);
++		/* Synchronous endpoint stop, before the caller changes PHY lanes. */
++		ret = usb_gadget_disconnect(gadget);
++		dwc3_qcom_vbus_override_enable(qcom, false);
++	} else {
++		dwc3_qcom_vbus_override_enable(qcom, true);
++		usb_udc_vbus_handler(gadget, true);
++		ret = 0;
++	}
++	dev_info(qcom->dev, "Recovery USB session %s: %d\n",
++		 role == USB_ROLE_DEVICE ? "attach" : "detach", ret);
++	pm_runtime_mark_last_busy(qcom->dev);
++	pm_runtime_put_autosuspend(qcom->dev);
++	return ret;
++}
++
++static int dwc3_qcom_rec_register_role(struct dwc3_qcom *qcom)
++{
++	struct usb_role_switch_desc desc = {
++		.fwnode = dev_fwnode(qcom->dev),
++		.set = dwc3_qcom_rec_set_role,
++		.driver_data = qcom,
++	};
++
++	if (!qcom->rec_vbus_managed)
++		return 0;
++	usb_udc_vbus_handler(qcom->dwc.gadget, false);
++	qcom->rec_role_sw = usb_role_switch_register(qcom->dev, &desc);
++	return PTR_ERR_OR_ZERO(qcom->rec_role_sw);
++}
++
+ static void dwc3_qcom_run_stop_notifier(struct dwc3 *dwc, bool is_on)
+ {
+ 	struct dwc3_qcom *qcom = to_dwc3_qcom(dwc);
+@@ -598,6 +652,9 @@ static void dwc3_qcom_run_stop_notifier(struct dwc3 *dwc, bool is_on)
+ 	 */
+ 	if (!is_on)
+ 		return;
++	if (qcom->rec_vbus_managed &&
++	    READ_ONCE(qcom->current_role) != USB_ROLE_DEVICE)
++		return;
+ 
+ 	dwc3_qcom_vbus_override_enable(qcom, true);
+ 	pm_runtime_mark_last_busy(qcom->dev);
+@@ -685,12 +742,15 @@ static int dwc3_qcom_probe(struct platform_device *pdev)
+ 		dwc3_qcom_select_utmi_clk(qcom);
+ 
+ 	qcom->mode = usb_get_dr_mode(dev);
++	qcom->rec_vbus_managed = liuqin_board_quirks() &&
++		device_property_read_bool(dev, "liuqin,recovery") &&
++		qcom->mode == USB_DR_MODE_PERIPHERAL;
+ 
+ 	if (qcom->mode == USB_DR_MODE_HOST) {
+ 		qcom->current_role = USB_ROLE_HOST;
+ 	} else if (qcom->mode == USB_DR_MODE_PERIPHERAL) {
+-		qcom->current_role = USB_ROLE_DEVICE;
+-		dwc3_qcom_vbus_override_enable(qcom, true);
++		qcom->current_role = qcom->rec_vbus_managed ? USB_ROLE_NONE : USB_ROLE_DEVICE;
++		dwc3_qcom_vbus_override_enable(qcom, !qcom->rec_vbus_managed);
+ 	} else {
+ 		/* Match the core's initial device role while Liuqin waits for CC. */
+ 		if (!liuqin_board_quirks() &&
+@@ -718,6 +778,12 @@ static int dwc3_qcom_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		goto remove_core;
+ 
++	ret = dwc3_qcom_rec_register_role(qcom);
++	if (ret) {
++		dwc3_qcom_interconnect_exit(qcom);
++		goto remove_core;
++	}
++
+ 	wakeup_source = of_property_read_bool(dev->of_node, "wakeup-source");
+ 	device_init_wakeup(&pdev->dev, wakeup_source);
+ 
+@@ -738,6 +804,7 @@ static void dwc3_qcom_remove(struct platform_device *pdev)
+ 	struct dwc3 *dwc = platform_get_drvdata(pdev);
+ 	struct dwc3_qcom *qcom = to_dwc3_qcom(dwc);
+ 
++	usb_role_switch_unregister(qcom->rec_role_sw);
+ 	if (pm_runtime_resume_and_get(qcom->dev) < 0)
+ 		return;
+ 

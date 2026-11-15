@@ -1,0 +1,64 @@
+From: Liuqin Linux Kit maintainers
+Subject: [PATCH] usb: dwc3: defer Liuqin initial host start until UCSI sets lanes
+
+UCSI's connector-status hook runs after DWC3 probe. With a host default,
+a preattached reverse USB drive can finish USB2 enumeration before ADSP
+reports CC2. Correcting the PHY alone then leaves that USB2 session alive.
+Start the DRD core and Qualcomm glue consistently in peripheral mode;
+UCSI applies CC lanes before requesting the first role. Keep the host
+fallback for later NONE requests, the rescue gadget path, fixed-role
+controllers, other boards, and the shared Gen1 speed ceiling unchanged.
+
+diff --git a/drivers/usb/dwc3/drd.c b/drivers/usb/dwc3/drd.c
+--- a/drivers/usb/dwc3/drd.c
++++ b/drivers/usb/dwc3/drd.c
+@@ -10,6 +10,7 @@
+ #include <linux/extcon.h>
+ #include <linux/of_platform.h>
+ #include <linux/platform_device.h>
++#include <linux/platform_data/liuqin.h>
+ #include <linux/property.h>
+ 
+ #include "debug.h"
+@@ -508,7 +509,16 @@
+ 
+ 	dwc->role_switch_default_mode = usb_get_role_switch_default_mode(dwc->dev);
+ 	if (dwc->role_switch_default_mode == USB_DR_MODE_HOST) {
+-		mode = DWC3_GCTL_PRTCAP_HOST;
++		/*
++		 * Liuqin learns CC orientation from the ADSP after core probe.
++		 * Starting xHCI now can enumerate a reverse cable as USB2;
++		 * changing the PHY later does not retire that USB2 session.
++		 * Start unconfigured peripheral and let UCSI apply the lanes
++		 * before its first role request. Keep HOST as the later NONE
++		 * fallback for docks with incomplete firmware partner flags.
++		 */
++		mode = liuqin_board_quirks() ? DWC3_GCTL_PRTCAP_DEVICE :
++			DWC3_GCTL_PRTCAP_HOST;
+ 	} else {
+ 		dwc->role_switch_default_mode = USB_DR_MODE_PERIPHERAL;
+ 		mode = DWC3_GCTL_PRTCAP_DEVICE;
+diff --git a/drivers/usb/dwc3/dwc3-qcom.c b/drivers/usb/dwc3/dwc3-qcom.c
+--- a/drivers/usb/dwc3/dwc3-qcom.c
++++ b/drivers/usb/dwc3/dwc3-qcom.c
+@@ -13,6 +13,7 @@
+ #include <linux/kernel.h>
+ #include <linux/interconnect.h>
+ #include <linux/platform_device.h>
++#include <linux/platform_data/liuqin.h>
+ #include <linux/phy/phy.h>
+ #include <linux/usb/of.h>
+ #include <linux/reset.h>
+@@ -691,8 +692,10 @@
+ 		qcom->current_role = USB_ROLE_DEVICE;
+ 		dwc3_qcom_vbus_override_enable(qcom, true);
+ 	} else {
+-		if ((device_property_read_bool(dev, "usb-role-switch")) &&
+-		    (usb_get_role_switch_default_mode(dev) == USB_DR_MODE_HOST))
++		/* Match the core's initial device role while Liuqin waits for CC. */
++		if (!liuqin_board_quirks() &&
++		    device_property_read_bool(dev, "usb-role-switch") &&
++		    usb_get_role_switch_default_mode(dev) == USB_DR_MODE_HOST)
+ 			qcom->current_role = USB_ROLE_HOST;
+ 		else
+ 			qcom->current_role = USB_ROLE_DEVICE;

@@ -143,6 +143,10 @@ Fedora 与 Rec 共用 51 个补丁；TDDI 首帧唤醒与校准恢复集中在 `
 合并补丁时须保持最终源码树一致，并同步 Rec 锁中的补丁摘要及公共源码锁摘要。
 补丁文件或顺序改变会更新构建身份。
 
+`0071` 为正式内核和 Rec 共用的 USB 控制器补齐原厂 Gen1 速率上限；使用主线
+`maximum-speed` 绑定，由 DWC3 核心统一约束设备模式及链路配置，见
+[USB 配置与核验](NATIVE-RECOVERY.md)。
+
 修改源码后先提交，再更换 `kernel_localversion`。用 `--target kernel --configure-only` 检查自定义片段；zram 选项只提供内核能力，容量和算法由 rootfs 服务配置。Fedora 额外应用 `fedora.config` 启用 SELinux，并将 `ath11k` / `ath11k_pci` 编为模块；Rec 保留原有内置配置。
 
 ### 启动与设备适配

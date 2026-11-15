@@ -1,0 +1,22 @@
+From: Liuqin Linux Kit maintainers
+Subject: [PATCH] arm64: dts: qcom: liuqin: preserve the board USB Gen1 limit
+
+The shipping Liuqin DT limits DWC3 to SuperSpeed and forces Gen1.
+Without a board ceiling, DWC_usb31 advertises its IP-level Gen2 capability
+even though this board path fails during enhanced-speed negotiation.
+Use the common binding so desktop and Recovery share the same limit,
+including gadgets that leave their own maximum speed at its default.
+The existing DWC3 core also programs LLUCTL.ForceGen1 for this DRD IP.
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+@@ -1892,6 +1892,8 @@
+ 	 * UDC is registered.
+ 	 */
+ 	role-switch-default-mode = "host";
++	/* The shipping board is qualified for USB 3.2 Gen1. */
++	maximum-speed = "super-speed";
+ 	phys = <&usb_1_hsphy>, <&usb_1_qmpphy QMP_USB43DP_USB3_PHY>;
+ 	phy-names = "usb2-phy", "usb3-phy";
+ };

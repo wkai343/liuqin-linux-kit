@@ -10,6 +10,21 @@ Fedora 的实机结果不代表新的 Rec 镜像已通过验收，详见[设备�
 
 Rec 专用差异集中在 `patches/linux-7.3/`：内核补丁隔离 ABL 占位节点的供应依赖、固定 USB peripheral，并保留 PMIC 电池/充电服务；外部模块补丁仅应用到触控接管模块的构建副本，通知新版 NVT 驱动已有画面就绪。
 
+USB 速率由公共补丁 `0071` 的板级 `maximum-speed = "super-speed"` 统一约束，
+Rec 不再通过 ADB gadget 脚本另行限速。控制器限制与实际枚举的核验见
+[USB 配置](../../../docs/NATIVE-RECOVERY.md)。
+
+Rec 通过电池服务的 `XM_CC_ORIENTATION` 驱动 QMP 的 Type-C 方向与 USB
+通道切换，保留连接器到高速 PHY 的双向设备树连接。属性定义与只读诊断接口由
+公共补丁 `0072` 提供；正式系统的 UCSI 查询路径在 Rec 中不启用。专用补丁 `0005` 使用
+已有电池请求锁，处理服务重启、USB 通知和迟到的方向状态；读取失败不切换。
+此路径同时要求板级 helper 与 Rec 标记，不接管正式系统的 Type-C 策略。
+切换通道前同步停止 gadget、撤销 VBUS 有效状态，完成后通过仅接受
+NONE/DEVICE 的控制器开关重新连接；连接器到控制器的设备树连接也予以保留。
+Rec 不启用 UCSI/PAN 客户端，控制器仍固定为 peripheral，不进入 DP/USB4
+模式。翻面验收必须分别检查两面的
+`current_speed` 为 `super-speed` 并完成数据校验，不能仅以 ADB 已连接判定通过。
+
 Rec 标记还会跳过桌面 ADSP 的音频 PRM 时钟子设备创建。Rec 已禁用 GPR 音频子树，
 不能因无法创建其时钟设备而使整个 ADSP 探测失败；电池和充电服务仍依赖 ADSP。
 板级识别继续使用 `liuqin_board_quirks()`，桌面音频的时钟初始化路径保持原有行为。

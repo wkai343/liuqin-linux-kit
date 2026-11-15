@@ -116,13 +116,19 @@ def configure_recovery_dtb(output):
     # must remain available to the RAM-only touch follower handoff module.
     run([put, output, '/soc@0/phy@88e8000', 'liuqin,recovery'])
     run([put, '-t', 's', output, usb, 'dr_mode', 'peripheral'])
-    remove_property(usb, 'usb-role-switch')
+    run([put, output, usb, 'usb-role-switch'])
+    run([put, output, usb, 'liuqin,recovery'])
     if usb == '/soc@0/usb@a600000':
         remove_property(usb, 'role-switch-default-mode')
-    for node in ('/pmic-glink/connector@0', usb+'/ports', '/soc@0/phy@88e8000/ports'):
+    # The battery service CC state drives QMP orientation/mode in Recovery.
+    # Keep the session-control and SuperSpeed links. The controller's Rec
+    # switch accepts NONE/DEVICE only; no UCSI, DP or host policy is enabled.
+    connector = '/pmic-glink/connector@0'
+    phy = '/soc@0/phy@88e8000'
+    run([put, '-t', 's', output, connector, 'data-role', 'device'])
+    for node in (usb+'/ports/port@1', connector+'/ports/port@2',
+                 phy+'/ports/port@1', phy+'/ports/port@2'):
         run([put, '-r', output, node])
-    for name in ('orientation-switch', 'mode-switch'):
-        remove_property('/soc@0/phy@88e8000', name)
     # LVGL's maintenance input consumes finger contacts only. Avoid starting
     # the unsupported stylus report path, without changing finger firmware.
     touch='/soc@0/geniqup@9c0000/spi@990000/touchscreen@0'

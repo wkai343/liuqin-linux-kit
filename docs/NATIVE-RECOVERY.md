@@ -27,6 +27,60 @@ uv run --project installer installer/install-gui.py \
 
 显示使用 Bootloader simplefb 和保留的时钟，触屏通过专用面板状态衔接加载 RAM 固件。USB 使用 [ADB](NATIVE-RECOVERY-INSTALLER.md#adb-连接与传输)，不创建 USB 网卡；USB 已连接不代表已建立 ADB 会话。桌面 Fedora 使用自己的 DRM、音频与 OTG 配置。
 
+正式内核和 Rec 共用的板级设备树将 USB 控制器最高速率设为 SuperSpeed（5 Gbit/s），与
+[小米平板 6 Pro 的 USB 3.2 Gen1 官方规格](https://www.mi.com/xiaomi-pad-6-pro/specs)
+一致，并保留 USB 2 回退。ADB 启动脚本不另行设置 gadget 的 `max_speed`；即使该值
+保留通用默认值，实际连接也受控制器上限约束。可读取
+`/sys/class/udc/*/maximum_speed` 核对控制器上限，并用
+`/sys/class/udc/*/state` 与 `current_speed` 核对实际枚举状态和连接速率。
+
+Rec 保留连接器到 QMP PHY 的 SuperSpeed 设备树连接，通过电池服务读取
+小米 `XM_CC_ORIENTATION`（属性 36），驱动 `orientation-switch` 与
+`mode-switch`，让正反插头使用对应的高速通道。该属性来自
+[原厂充电驱动](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/power/supply/qti_battery_charger.c)。
+普通 USB 插拔不保证产生 DP PAN 通知，因此不能只依赖 altmode 客户端。
+方向查询与其他电池请求串行，USB 通知触发立即读取，另以 500 毫秒周期补查
+迟到或遗漏的状态；读取失败和未知值不会改变通道。切换前通过控制器的
+`NONE`/`DEVICE` 专用开关同步停止 gadget 并撤销 VBUS 有效状态，方向和 USB
+通道就绪后再允许连接；拔线或电池服务离线也撤销连接。这个开关拒绝主机模式，
+`dr_mode` 仍为 `peripheral`，UCSI 角色切换和 DisplayPort
+显示路径不在 Rec 启动范围内。翻面测试需分别确认 UDC 已配置、`current_speed`
+为 `super-speed`、主机报告 5000M，并校验双向传输；USB 2 回退仅表示仍可连接，
+不能算两面 USB 3 验收通过。
+
+方向缓存只代表最后完整成功的会话。断开、方向切换、通道切换或重新连接任一步骤失败，
+都会保留“会话未完成”状态，后续有效读数触发完整重试；即使方向回到缓存值，也不能
+跳过恢复。供电服务重新上线同样需要重新建立会话，未知方向和通信错误不触发盲目切换。
+
+方向可从 `pmic_glink.power-supply.*/sm8475_raw/raw_xm_cc_orientation`
+只读属性核验：0 表示拔线，1/2 分别表示 CC1/CC2。测试时每次翻面后保持插头
+不动，分别记录该属性、UDC 的 `current_speed` 和主机 USB 设备的 `speed`；
+方向应在 1/2 间切换，两面速率都应为 `super-speed` / `5000`。还需覆盖
+插线启动、拔线冷启动后再插线，以及每个方向的数据往返哈希校验。
+
+这个上限也有原厂板级配置依据：锁定 ROM 的 Liuqin DTBO（entry 15）在 USB 节点设置
+`qcom,force-gen1`，并在 DWC3 子节点设置 `maximum-speed = "super-speed"`。
+[原厂驱动](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/usb/dwc3/dwc3-msm-core.c)
+将前者映射到 `LLUCTL.ForceGen1`（偏移 `0xd024`，bit 10）。通用 DWC3 驱动在没有
+板级速率上限时依据控制器 `GHWPARAMS3` 选择默认能力；控制器支持 Gen2 并不证明
+整机 PHY 配置也支持 Gen2。公共补丁 `0071` 使用主线支持的 `maximum-speed` 属性，
+现有 DWC3 核心据此约束 gadget，并为此 DRD 控制器设置 `LLUCTL.ForceGen1`。
+不添加主线驱动不识别的原厂私有属性，也不依赖 Rec 用户态单独限速。
+
+排查训练阶段时应先核对 IP 类型：Liuqin 使用 DWC_usb31，其 `GDBGLTSSM` 位于
+`0xd050`，不是旧 DWC_usb3 的 `0xc164`。原厂驱动同样区分这两个地址；通用
+debugfs `regdump` 中名为 `GDBGLTSSM` 的条目若仍使用旧偏移，不能用于解码训练
+子状态。`link_state` 从独立的 `DSTS` 获取，不受这个转储地址问题影响。枚举未完成时
+不能只凭 `current_speed` 宣告回退成功，应同时确认 UDC 已配置、链路有效及主机已识别。
+
+USB 状态区分输入供电与数据链路。启动时从 SDP 转入 PD 的过程中，PMIC 的 `online`
+可能暂时为零，而已经枚举的数据链路仍保持连接；反过来，固定 peripheral 模式也可能
+在拔线后保留 UDC 的 `configured` 状态。Rec 以只读方式挂载 debugfs，仅在供电读数
+为零或未知、UDC 仍显示已枚举时，补读此内核的 DWC3 `link_state`：有效 USB 3 链路或
+USB 2 活跃链路可以证明数据连接仍在，拔线后的 USB 2 `Suspend` 不能覆盖供电离线。
+诊断接口不可读时保留供电与 UDC 判断，不猜测连接成功；等待枚举显示“连接中”。
+这项显示判断不重置控制器，也不改变充电协议或 ADB 授权状态。
+
 ADB Rec 的准备画面和触控初始化与 UFS 枚举、只读检查并行。准备阶段只使用 RAM 中
 已经核验的程序和触控固件，不开放维护套接字。PID 1 完成最终存储只读校验、等待触控
 准备结束后，发布绑定当前启动 ID 的结果，再开放维护界面及 ADB；触控失败可使用按键

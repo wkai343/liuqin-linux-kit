@@ -5,7 +5,7 @@
   "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
   "tag": "v7.3.4",
   "commit": "7595a62d45ee1a2297eafa5f2ef5d0a45142d84d",
-  "expected_source_tree": "faff3a5fb2b50f138ee432f71022d1afd9da7642",
+  "expected_source_tree": "892718e5ebf93d997d0f1ed045ea14910e1fbf77",
   "config": {
     "path": "build/recovery/kernel/7.3.4.config",
     "sha256": "84e4eeb8b0004d8f73c7cb956efe53e13bf9a6d580918a1214892bda95469f39"
@@ -240,6 +240,30 @@
       "sha256": "634e53e4e128394972dbcad99015a0f6db22cdba9f37978c6b723303afb6e266"
     },
     {
+      "path": "build/kernel/patches/linux-7.3/0071-arm64-dts-liuqin-usb-gen1-limit.patch",
+      "sha256": "bddf1db7f2b22fa1fa7ce1e4f22219280530a196efffb1eea8c1f1953fb7a801"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0072-liuqin-usb-cc-orientation.patch",
+      "sha256": "f1b888a89355e0cf578227d3d68c77d07680b33c86824c46d8636256cfc62c74"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0073-liuqin-usb-wait-initial-cc.patch",
+      "sha256": "b0cf6855e329d06198300d7b708ae8c16ac59a64ff04446742771638a212adc1"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0074-liuqin-usb-initial-mux.patch",
+      "sha256": "2577907d39fdcc92d4e92d07bd90b6f922bc2a4fa2ced2436befe396061bd238"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0075-liuqin-usb-complete-serdes-init.patch",
+      "sha256": "ad4b1adea4b56b99d495df6cb547408bbf80e5b2a5ec8592d12b66f310ff337f"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0076-liuqin-usb-retry-connection.patch",
+      "sha256": "43bde3894401542211eefcf4cec047709d850c40da125b57969343ff55732ca9"
+    },
+    {
       "path": "build/recovery/kernel/patches/linux-7.3/0001-recovery-peripheral-handoff.patch",
       "sha256": "ccb0f030fb1bed451301961d3d9c67d1b45060f67beb936a9aaf32a9db998f62"
     },
@@ -250,6 +274,10 @@
     {
       "path": "build/recovery/kernel/patches/linux-7.3/0004-recovery-touch-startup-health.patch",
       "sha256": "96c7f13f4baca1554d0d3882ab0cfe04b3bbb113650ec42eaf2d0a2656637a5b"
+    },
+    {
+      "path": "build/recovery/kernel/patches/linux-7.3/0005-recovery-typec-orientation.patch",
+      "sha256": "9b05d9335575cc76d212d445b35a964153a1c2f5cc2fd794af2679492862ed8d"
     }
   ],
   "dtb": "qcom/sm8475-xiaomi-liuqin.dtb",
@@ -275,7 +303,7 @@
   "build_timestamp": "2026-11-11T00:00:00+00:00",
   "shared_kernel": {
     "path": "build/kernel/source.json",
-    "sha256": "72d4a2e02d7a4a0f4992b39f14634b3ea6a331f900b9e38fca7705a1c7daa26c"
+    "sha256": "3eb86e760cfbbc59f6f948de8498b046e4a0f3b76ab756cbf006bedae6dcb3b7"
   },
   "touch_patches": [
     {

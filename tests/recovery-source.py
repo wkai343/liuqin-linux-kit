@@ -302,7 +302,7 @@ class BuiltKernelTests(unittest.TestCase):
                     'EXT4_FS','BTRFS_FS','DEVTMPFS','FB_SIMPLE','FRAMEBUFFER_CONSOLE',
                     'BACKLIGHT_KTZ8866','TOUCHSCREEN_NT36523_SPI','HID_NANOSIC',
                     'QCOM_Q6V5_PAS','QCOM_PMIC_GLINK','BATTERY_QCOM_BATTMGR',
-                    'QCOM_ICC_BWMON'):
+                    'QCOM_ICC_BWMON','TYPEC','PHY_QCOM_QMP_COMBO','USB_ROLE_SWITCH'):
             self.assertIn('CONFIG_'+key+'=y\n',config,key)
         self.assertIn('# CONFIG_SND is not set\n',config)
 
@@ -315,9 +315,30 @@ class BuiltKernelTests(unittest.TestCase):
         usb=('/soc@0/usb@a600000' if '/soc@0/usb@a600000' in nodes else
              '/soc@0/usb@a6f8800/usb@a600000')
         self.assertEqual(nodes[usb]['dr_mode'],b'peripheral\0')
-        self.assertNotIn('usb-role-switch',nodes[usb]);self.assertNotIn(usb+'/ports',nodes)
+        self.assertEqual(nodes[usb]['maximum-speed'],b'super-speed\0',
+                         'Recovery overlays must retain the shared board speed limit')
+        self.assertIn('usb-role-switch',nodes[usb])
+        self.assertIn('liuqin,recovery',nodes[usb])
         if usb == '/soc@0/usb@a600000':
             self.assertNotIn('role-switch-default-mode',nodes[usb])
+        connector='/pmic-glink/connector@0'
+        phy='/soc@0/phy@88e8000'
+        self.assertEqual(nodes[connector]['data-role'],b'device\0')
+        self.assertIn('orientation-switch',nodes[phy])
+        self.assertIn('mode-switch',nodes[phy])
+        # A surviving switch property alone is insufficient: the PMIC client
+        # must discover the PHY through a reciprocal SuperSpeed graph link.
+        cable=connector+'/ports/port@1/endpoint'
+        lanes=phy+'/ports/port@0/endpoint'
+        self.assertEqual(nodes[cable]['remote-endpoint'],nodes[lanes]['phandle'])
+        self.assertEqual(nodes[lanes]['remote-endpoint'],nodes[cable]['phandle'])
+        session=connector+'/ports/port@0/endpoint'
+        controller=usb+'/ports/port@0/endpoint'
+        self.assertEqual(nodes[session]['remote-endpoint'],nodes[controller]['phandle'])
+        self.assertEqual(nodes[controller]['remote-endpoint'],nodes[session]['phandle'])
+        for node in (usb+'/ports/port@1',connector+'/ports/port@2',
+                     phy+'/ports/port@1',phy+'/ports/port@2'):
+            self.assertNotIn(node,nodes)
         touch='/soc@0/geniqup@9c0000/spi@990000/touchscreen@0'
         self.assertNotIn('novatek,pen-support',nodes[touch])
         panel='/soc@0/display-subsystem@ae00000/dsi@ae94000/panel@0'

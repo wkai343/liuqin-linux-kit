@@ -1,0 +1,52 @@
+From: Liuqin Linux Kit maintainers
+Subject: [PATCH] usb: typec: ucsi: set Liuqin initial USB mux before the role
+
+Initial port registration applies orientation and role but does not call
+ucsi_partner_change(), leaving QMP in its default USB+DP mode. A subsequent
+ordinary USB notification switches to USB-only and power-cycles the PHY
+after xHCI has started training. Prepare ordinary USB in the pre-role
+status hook while no partner is registered. Do not replace an existing
+partner's mux or the policy for alternate modes and audio/debug accessories.
+
+diff --git a/drivers/usb/typec/ucsi/ucsi_glink.c b/drivers/usb/typec/ucsi/ucsi_glink.c
+--- a/drivers/usb/typec/ucsi/ucsi_glink.c
++++ b/drivers/usb/typec/ucsi/ucsi_glink.c
+@@ -13,6 +13,7 @@
+ #include <linux/property.h>
+ #include <linux/soc/qcom/pdr.h>
+ #include <linux/usb/typec_mux.h>
++#include <linux/usb/typec_altmode.h>
+ #include <linux/gpio/consumer.h>
+ #include <linux/soc/qcom/pmic_glink.h>
+ #include "ucsi.h"
+@@ -249,10 +250,27 @@
+ 		}
+ 		orientation = cc == 1 ? TYPEC_ORIENTATION_NORMAL : TYPEC_ORIENTATION_REVERSE;
+ 		ret = typec_set_orientation(con->port, orientation);
+-		if (ret)
++		if (ret) {
+ 			dev_err(ucsi->dev, "CC%u lane switch failed: %d\n", cc, ret);
+-		else
+-			dev_dbg(ucsi->dev, "connector %u CC%u orientation applied\n", con->num, cc);
++			return;
++		}
++		dev_dbg(ucsi->dev, "connector %u CC%u orientation applied\n", con->num, cc);
++
++		/*
++		 * Initial port registration sets the role without calling
++		 * ucsi_partner_change(). Select ordinary USB before that role:
++		 * a later notification otherwise resets the QMP mux while xHCI
++		 * is already training. Existing partners and alternate-mode
++		 * accessories retain their current mux policy.
++		 */
++		if (!con->partner && UCSI_CONSTAT(con, PARTNER_FLAG_USB) &&
++		    !UCSI_CONSTAT(con, PARTNER_FLAG_ALT_MODE) &&
++		    UCSI_CONSTAT(con, PARTNER_TYPE) != UCSI_CONSTAT_PARTNER_TYPE_AUDIO &&
++		    UCSI_CONSTAT(con, PARTNER_TYPE) != UCSI_CONSTAT_PARTNER_TYPE_DEBUG) {
++			ret = typec_set_mode(con->port, TYPEC_STATE_USB);
++			if (ret)
++				dev_err(ucsi->dev, "initial USB mux switch failed: %d\n", ret);
++		}
+ 		return;
+ 	}
+ 

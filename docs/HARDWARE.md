@@ -90,6 +90,59 @@ WN8030 使用 GPIO50 通知 HID 数据，GPIO46 通知状态与唤醒；GPIO42 �
 | 运动传感器：SLPI / FastRPC | 加速度计通路已接入，依赖 SSC 用户态 | 实际采样与自动旋转 | 待核实：陀螺仪等其他传感器；待验证：精度、轴向与睡眠恢复 |
 | 环境光及其他传感器 | 实际硬件清单、通路和输出待核实 | 环境光真实测量未验收 | 待解决：逐项枚举和数据接入，不能用自动旋转代表全部传感器可用 |
 
+### USB-C 方向与速率
+
+公共补丁 [`0071`](../build/kernel/patches/linux-7.3/0071-arm64-dts-liuqin-usb-gen1-limit.patch)
+将板级最高速率设为 `super-speed`（5 Gbit/s）。方向由 CC 状态决定，速率上限本身
+不会选择正反面的高速通道。正式系统通过
+[`0072`](../build/kernel/patches/linux-7.3/0072-liuqin-usb-cc-orientation.patch)
+在 UCSI 的连接状态回调中读取小米电池服务属性 `XM_CC_ORIENTATION`（36），
+在设置 USB 角色前调用 Type-C 方向开关。编码为 0 拔线、1 CC1、2 CC2；查询与
+电池请求共用锁，并保持服务设备绑定直到请求结束。短暂的 0 或 `EAGAIN` 最多查询
+十次、间隔 50 毫秒，其他错误或无效值保留错误且不猜测方向。GPIO91 是 PHY
+端口选择输入，不能作为 CC 方向来源。
+
+板级默认主机策略还会让 DWC3 在 ADSP/UCSI 就绪前启动 xHCI。反面预接 U 盘可能
+先完成 USB 2 枚举，此后仅修正 PHY 方向不会结束这个已有会话。
+[`0073`](../build/kernel/patches/linux-7.3/0073-liuqin-usb-wait-initial-cc.patch)
+让 Liuqin 的 DRD 核心与 Qualcomm glue 首次都处于设备模式，由 UCSI 在处理方向后
+发出第一个角色请求。后续 `NONE` 请求仍使用板级主机回退，兼容固件未完整报告
+伙伴类型或 USB 标志的扩展坞；固定主机、固定设备及 Rec 的角色策略不变。
+
+UCSI 初次注册端口不会经过热插拔的 USB 模式设置。QMP 初始为 USB＋DP 模式，
+若等后续通知才切到 USB 模式，会在主机训练期间重启 PHY。
+[`0074`](../build/kernel/patches/linux-7.3/0074-liuqin-usb-initial-mux.patch)
+在尚未注册伙伴的普通 USB 连接中，紧接方向设置完成 USB 通道配置，再交给 UCSI
+设置角色。已有伙伴、报告替代模式能力的设备，以及音频和调试附件保留原有模式策略。
+
+[`0076`](../build/kernel/patches/linux-7.3/0076-liuqin-usb-retry-connection.patch)
+将方向和初始通道准备纳入连接准入：查询或切换失败时不发布新的连接状态，也不继续
+请求 USB 角色。初始注册沿用 UCSI 的有限重试；已注册端口保留已经确认的变化位，
+以 500 毫秒间隔最多安排十次补查，每次重新读取固件状态，避免拔线后重放旧角色。
+挂起和卸载先禁止重试任务再次排队，再等待当前事件处理结束。
+
+SM8475 的 USB SerDes 公共寄存器采用 4 nm/V6 布局。
+[`0075`](../build/kernel/patches/linux-7.3/0075-liuqin-usb-complete-serdes-init.patch)
+补齐原厂初始化表中的 `VCO_TUNE2_MODE1`、`CORE_CLK_EN` 和 `CMN_CONFIG_1`，
+分别位于 PHY 基址的 `0x104c`、`0x1170`、`0x1174`，在释放 PHY 复位前写入
+`0x02`、`0x20`、`0x04`。其他寄存器地址和值保持不变；原先借用的 V5 COM 名称
+改为与实际地址对应的 V6 名称。来源为固定原厂 ROM 的 DTBO 第 15 项，以及
+MiCode 提交 `eb49e10028e27fa98856cb5e458c0f0ec5b4554e` 中
+`liuqin-sm8475.dtsi` 的 `usb_qmp_dp_phy` 初始化表。
+`tests/usb-phy-oem.py --source <完整适配源码>` 编译执行实际初始化表及写入函数，
+对照原厂的 173 项寄存器配置；该检查不能代替实机链路训练验收。
+
+普通 USB 插线不保证产生 DisplayPort PAN 通知，因而不能仅靠 altmode 客户端设置
+方向。正式系统保留 UCSI 角色和 DP 策略；Rec 的固定设备模式使用独立的连接时序，
+见 [Rec USB 配置](NATIVE-RECOVERY.md)。两者共用电量属性定义及板级速率上限。
+
+验收时通过 Wi-Fi 保持控制，先核对 U 盘身份，再分别翻转平板端插头并读取
+`/sys/bus/usb/devices/<U盘节点>/speed`；两面都应为 `5000`。同时核对
+`/sys/class/typec/port0/orientation` 与电池服务的
+`sm8475_raw/raw_xm_cc_orientation`，确认方向实际改变。根集线器声明的速率
+不能替代 U 盘叶节点的协商结果。翻面前卸载该 U 盘分区，并覆盖预接启动和热插拔；
+日志及设备身份保存在忽略的 `out/` 目录。
+
 ## 电源、温控与时间
 
 | 项目 / 内核入口 | 实现状态 | 已验证范围 | 待解决 / 待验证 |

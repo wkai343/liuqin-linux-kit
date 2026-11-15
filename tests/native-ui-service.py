@@ -105,7 +105,7 @@ class ServiceTests(unittest.TestCase):
         online=self.root/'sys/class/power_supply/qcom-battmgr-usb/online'
         online.parent.mkdir(parents=True)
         online.write_text('1\n')
-        for raw,expected in (('configured','connected'),('not attached','disconnected'),
+        for raw,expected in (('configured','connected'),('not attached','connecting'),
                              ('addressed','connecting'),('suspended','suspended'),
                              ('unexpected','unknown')):
             state.write_text(raw+'\n')
@@ -126,6 +126,45 @@ class ServiceTests(unittest.TestCase):
         (gadget/'UDC').write_text('')
         self.assertEqual(self.ops.summary()['usb_state'],'starting')
         self.assertFalse(self.ops.summary()['adb_ready'])
+        self.runner.assert_not_called()
+
+    def test_usb_power_negotiation_does_not_override_an_active_data_link(self):
+        def put(name,value):
+            p=self.root/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_text(value)
+        put('sys/kernel/config/usb_gadget/liuqin-adb/UDC','a600000.usb')
+        put('sys/kernel/config/usb_gadget/liuqin-adb/functions/ffs.adb/ready','1')
+        put('sys/class/udc/a600000.usb/state','configured')
+        put('sys/class/power_supply/qcom-battmgr-usb/online','0')
+        link='sys/kernel/debug/usb/a600000.usb/link_state'
+        for raw in ('U0','U1','U2','U3','On','Sleep'):
+            put(link,raw)
+            with self.subTest(link=raw):
+                result=self.ops.usb_connection()
+                self.assertEqual(result['usb_state'],'connected')
+                self.assertFalse(result['usb_vbus_online'])
+                self.assertNotIn('adb_connected',result)
+        # Actual unplug can leave the UDC state latched at configured.
+        for raw in ('Suspend','Disconnected','Rx.Detect','unknown'):
+            put(link,raw)
+            with self.subTest(unplug=raw):self.assertEqual(self.ops.usb_connection()['usb_state'],'disconnected')
+        put(link,'U0')
+        (self.root/'sys/class/power_supply/qcom-battmgr-usb/online').unlink()
+        self.assertEqual(self.ops.usb_connection()['usb_state'],'connected')
+        put(link,'Suspend')
+        self.assertEqual(self.ops.usb_connection()['usb_state'],'unknown')
+        put(link,'U0')
+        put('sys/class/power_supply/qcom-battmgr-usb/online','0')
+        put('sys/class/udc/a600000.usb/state','not attached')
+        self.assertEqual(self.ops.usb_connection()['usb_state'],'disconnected')
+        put('sys/class/power_supply/qcom-battmgr-usb/online','1')
+        self.assertEqual(self.ops.usb_connection()['usb_state'],'connecting')
+        put('sys/class/udc/a600000.usb/state','configured')
+        read=service.status.read
+        def powered_read(path,*args):
+            if str(path).endswith('/link_state'):raise AssertionError('unnecessary controller wake')
+            return read(path,*args)
+        with patch.object(service.status,'read',side_effect=powered_read):
+            self.assertEqual(self.ops.usb_connection()['usb_state'],'connected')
         self.runner.assert_not_called()
 
     def test_supervised_socket_bcb_cleanup_runs_on_main_thread(self):
