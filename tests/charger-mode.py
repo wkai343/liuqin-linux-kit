@@ -145,9 +145,48 @@ exit 2
         self.assertEqual((self.root / 'key-windows').read_text().splitlines(), [
             '--arm-after-ms 3000 --timeout-ms 3000',
             '--arm-after-ms 0 --timeout-ms 1000',
-            '--arm-after-ms 0 --timeout-ms 30000'])
+            '--arm-after-ms 0 --timeout-ms 1000'])
         self.assertTrue((self.root / 'ui-started').exists())
         self.assertFalse((self.root / 'exits').exists())
+
+    def test_failed_first_display_preparation_retries_without_a_key(self):
+        self.env['LIUQIN_CHARGER_MAX_TICKS'] = '5'
+        self.program('key', 'sleep .1\nexit 2\n')
+        self.program('prepare', '''n=$(cat "$FIXTURE/prepare-count" 2>/dev/null || echo 0)
+echo $((n+1)) >"$FIXTURE/prepare-count"
+[ "$n" != 0 ] || exit 1
+''')
+        self.program('ui', 'echo frame >>"$FIXTURE/frames"\n')
+        result = subprocess.run(['sh', str(SOURCE / 'liuqin-charger-mode')], env=self.env,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / 'prepare-count').read_text().strip(), '2')
+        self.assertEqual((self.root / 'frames').read_text().splitlines(), ['frame'])
+        self.assertFalse((self.root / 'exits').exists())
+
+    def test_failed_ui_retries_but_normal_completion_does_not_relight(self):
+        self.env['LIUQIN_CHARGER_MAX_TICKS'] = '5'
+        self.program('key', 'sleep .1\nexit 2\n')
+        self.program('ui', '''n=$(cat "$FIXTURE/ui-count" 2>/dev/null || echo 0)
+echo $((n+1)) >"$FIXTURE/ui-count"
+[ "$n" != 0 ] || exit 2
+echo frame >>"$FIXTURE/frames"
+''')
+        result = subprocess.run(['sh', str(SOURCE / 'liuqin-charger-mode')], env=self.env,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / 'ui-count').read_text().strip(), '2')
+        self.assertEqual((self.root / 'frames').read_text().splitlines(), ['frame'])
+        self.assertFalse((self.root / 'exits').exists())
+
+    def test_pending_first_display_never_starts_a_second_worker(self):
+        self.env['LIUQIN_CHARGER_MAX_TICKS'] = '5'
+        self.program('key', 'sleep .1\nexit 2\n')
+        self.program('ui', 'echo frame >>"$FIXTURE/frames"\nsleep 1\n')
+        result = subprocess.run(['sh', str(SOURCE / 'liuqin-charger-mode')], env=self.env,
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / 'frames').read_text().splitlines(), ['frame'])
 
     def test_startup_zero_does_not_permanently_suppress_the_screen(self):
         (self.root / 'usb/online').write_text('0\n')

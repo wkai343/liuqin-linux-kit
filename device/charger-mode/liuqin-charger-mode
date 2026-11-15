@@ -278,19 +278,30 @@ charger_cleanup() {
 	[ -z "$charger_monitor_pid" ] || wait "$charger_monitor_pid" 2>/dev/null || :
 }
 
-charger_wake_display() {
+charger_reap_display() {
 	if [ -n "$charger_display_pid" ] && [ -e "$run_dir/display-finished" ]; then
-		wait "$charger_display_pid" 2>/dev/null || :
+		if wait "$charger_display_pid" 2>/dev/null; then
+			charger_display_started=true
+		else
+			charger_log 'display attempt failed; keeping charger mode'
+		fi
 		charger_display_pid=
 	fi
+}
+
+charger_start_display() {
+	rm -f "$run_dir/display-finished"
+	(charger_show_display; charger_result=$?; : >"$run_dir/display-finished"; exit "$charger_result") &
+	charger_display_pid=$!
+}
+
+charger_wake_display() {
+	charger_reap_display
 	# A short press while already displaying keeps the current display window.
 	[ -z "$charger_display_pid" ] || return 0
 	[ -x "$ui_tool" ] || return 1
 	charger_lock_ufs && charger_apply_lowpower && charger_panel_off || return 1
-	rm -f "$run_dir/display-finished"
-	(charger_show_display; : >"$run_dir/display-finished") &
-	charger_display_pid=$!
-	charger_display_started=true
+	charger_start_display
 	charger_log 'display requested by power key'
 }
 
@@ -309,10 +320,7 @@ charger_monitor_pid=$!
 charger_ticks=0
 charger_first_key_window=true
 while :; do
-	if [ -n "$charger_display_pid" ] && [ -e "$run_dir/display-finished" ]; then
-		wait "$charger_display_pid" 2>/dev/null || :
-		charger_display_pid=
-	fi
+	charger_reap_display
 	charger_ufs=failed
 	charger_panel=failed
 	charger_lowpower=failed
@@ -327,10 +335,8 @@ while :; do
 	fi
 	if [ "$charger_ufs:$charger_lowpower" = ro:applied ] && [ "$charger_panel" != failed ]; then
 		charger_state=hold
-		if [ "$charger_display_started" = false ] && [ -x "$ui_tool" ]; then
-			(charger_show_display; : >"$run_dir/display-finished") &
-			charger_display_pid=$!
-			charger_display_started=true
+		if [ "$charger_display_started" = false ] && [ -z "$charger_display_pid" ] && [ -x "$ui_tool" ]; then
+			charger_start_display
 		fi
 	else
 		charger_state=retry
