@@ -1,0 +1,30 @@
+From: Liuqin Linux contributors
+Subject: [PATCH] libcamera: sensor: add IMX596 cell size and control delays
+
+The stock AAC module declares 0.8 um cells and two-frame delays for both
+line count and gain. Preserve the generic blanking delays: simple only
+uses the exposure/gain delays and blanking response remains unmeasured.
+
+diff --git a/src/libcamera/sensor/camera_sensor_properties.cpp b/src/libcamera/sensor/camera_sensor_properties.cpp
+index 28043150..e0089703 100644
+--- a/src/libcamera/sensor/camera_sensor_properties.cpp
++++ b/src/libcamera/sensor/camera_sensor_properties.cpp
+@@ -309,6 +309,18 @@ const CameraSensorProperties *CameraSensorProperties::get(const std::string &sen
+ 				.hblankDelay = 3
+ 			},
+ 		} },
++		{ "imx596", {
++			/* AAC module: 0.8 um cells, two-frame exposure/gain delay. */
++			.unitCellSize = { 800, 800 },
++			.testPatternModes = {},
++			.sensorDelays = {
++				.exposureDelay = 2,
++				.gainDelay = 2,
++				/* Keep the legacy defaults for unused blanking delays. */
++				.vblankDelay = 2,
++				.hblankDelay = 2
++			},
++		} },
+ 		{ "imx678", {
+ 			.unitCellSize = { 2000, 2000 },
+ 			.testPatternModes = {},

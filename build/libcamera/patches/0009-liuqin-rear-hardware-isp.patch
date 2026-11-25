@@ -1,0 +1,550 @@
+diff --git a/src/libcamera/pipeline/simple/liuqin_colour.h b/src/libcamera/pipeline/simple/liuqin_colour.h
+index f906d5e1..14ddc597 100644
+--- a/src/libcamera/pipeline/simple/liuqin_colour.h
++++ b/src/libcamera/pipeline/simple/liuqin_colour.h
+@@ -19,21 +19,21 @@ inline constexpr MatrixAnchor matrices[] = {
+  {4500, 5500, {1.2678f, -.2751f, .0073f, -.1373f, 1.2508f, -.1135f, -.0101f, -.3168f, 1.3269f}},
+  {5800, 8500, {1.24929f, -.21534f, -.03395f, -.10731f, 1.30871f, -.2014f, -.00383f, -.27879f, 1.28262f}},
+ };
+-inline std::array<float, 9> matrix(double kelvin)
++inline std::array<float, 9> matrix(double kelvin, const MatrixAnchor (&anchors)[5] = matrices)
+ {
+  if (!std::isfinite(kelvin)) kelvin = 5000;
+- for (unsigned int i = 0; i < std::size(matrices); ++i) {
+-  if (kelvin <= matrices[i].end || i + 1 == std::size(matrices))
+-   return matrices[i].matrix;
+-  if (kelvin < matrices[i + 1].start) {
+-   double t = (kelvin - matrices[i].end) / (matrices[i + 1].start - matrices[i].end);
+-   auto result = matrices[i].matrix;
++ for (unsigned int i = 0; i < std::size(anchors); ++i) {
++  if (kelvin <= anchors[i].end || i + 1 == std::size(anchors))
++   return anchors[i].matrix;
++  if (kelvin < anchors[i + 1].start) {
++   double t = (kelvin - anchors[i].end) / (anchors[i + 1].start - anchors[i].end);
++   auto result = anchors[i].matrix;
+    for (unsigned int j = 0; j < result.size(); ++j)
+-    result[j] += t * (matrices[i + 1].matrix[j] - result[j]);
++    result[j] += t * (anchors[i + 1].matrix[j] - result[j]);
+    return result;
+   }
+  }
+- return matrices[3].matrix;
++ return anchors[3].matrix;
+ }
+ /* refPtV1 (module 197) indexes 7, 6, 3, 2, 1: A, TL84, D50, D65, D75.
+  * Kelvin values are nominal illuminant temperatures used by our estimator;
+@@ -46,35 +46,35 @@ inline constexpr WhiteAnchor whites[] = {
+  {2856, .83547, .35374}, {4000, .59795, .4458},
+  {5000, .53362, .54795}, {6500, .45391, .6851}, {7500, .42896, .73227},
+ };
+-inline std::pair<double, double> gains(double kelvin, double unitRG, double unitBG)
++inline std::pair<double, double> gains(double kelvin, double unitRG, double unitBG, const WhiteAnchor (&points)[5] = whites)
+ {
+- kelvin = std::isfinite(kelvin) ? std::clamp(kelvin, whites[0].kelvin, whites[4].kelvin) : 5000;
+- for (unsigned int i = 0; i + 1 < std::size(whites); ++i) {
+-  if (kelvin > whites[i + 1].kelvin) continue;
+-  double t = (1 / kelvin - 1 / whites[i].kelvin) / (1 / whites[i + 1].kelvin - 1 / whites[i].kelvin);
+-  double rg = std::exp((1 - t) * std::log(whites[i].rg) + t * std::log(whites[i + 1].rg));
+-  double bg = std::exp((1 - t) * std::log(whites[i].bg) + t * std::log(whites[i + 1].bg));
+-  return {std::clamp(whites[2].rg / (rg * unitRG), 1.0, 16.0),
+-          std::clamp(whites[2].bg / (bg * unitBG), 1.0, 16.0)};
++ kelvin = std::isfinite(kelvin) ? std::clamp(kelvin, points[0].kelvin, points[4].kelvin) : 5000;
++ for (unsigned int i = 0; i + 1 < std::size(points); ++i) {
++  if (kelvin > points[i + 1].kelvin) continue;
++  double t = (1 / kelvin - 1 / points[i].kelvin) / (1 / points[i + 1].kelvin - 1 / points[i].kelvin);
++  double rg = std::exp((1 - t) * std::log(points[i].rg) + t * std::log(points[i + 1].rg));
++  double bg = std::exp((1 - t) * std::log(points[i].bg) + t * std::log(points[i + 1].bg));
++  return {std::clamp(points[2].rg / (rg * unitRG), 1.0, 16.0),
++          std::clamp(points[2].bg / (bg * unitBG), 1.0, 16.0)};
+  }
+  return {1, 1};
+ }
+ struct Estimate { double kelvin = 5000, distance = std::numeric_limits<double>::infinity(); };
+-inline Estimate estimate(double rg, double bg, double unitRG, double unitBG)
++inline Estimate estimate(double rg, double bg, double unitRG, double unitBG, const WhiteAnchor (&points)[5] = whites)
+ {
+  Estimate result;
+  if (!(rg > 0 && bg > 0 && unitRG > 0 && unitBG > 0) ||
+      !std::isfinite(rg + bg + unitRG + unitBG)) return result;
+- double x = std::log(rg / unitRG * whites[2].rg);
+- double y = std::log(bg / unitBG * whites[2].bg);
+- for (unsigned int i = 0; i + 1 < std::size(whites); ++i) {
+-  double ax = std::log(whites[i].rg), ay = std::log(whites[i].bg);
+-  double dx = std::log(whites[i + 1].rg) - ax, dy = std::log(whites[i + 1].bg) - ay;
++ double x = std::log(rg / unitRG * points[2].rg);
++ double y = std::log(bg / unitBG * points[2].bg);
++ for (unsigned int i = 0; i + 1 < std::size(points); ++i) {
++  double ax = std::log(points[i].rg), ay = std::log(points[i].bg);
++  double dx = std::log(points[i + 1].rg) - ax, dy = std::log(points[i + 1].bg) - ay;
+   double t = std::clamp(((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy), 0.0, 1.0);
+   double distance = std::hypot(x - ax - t * dx, y - ay - t * dy);
+   if (distance < result.distance) {
+    result.distance = distance;
+-   result.kelvin = 1 / ((1 - t) / whites[i].kelvin + t / whites[i + 1].kelvin);
++   result.kelvin = 1 / ((1 - t) / points[i].kelvin + t / points[i + 1].kelvin);
+   }
+  }
+  return result;
+diff --git a/src/libcamera/pipeline/simple/liuqin_isp.cpp b/src/libcamera/pipeline/simple/liuqin_isp.cpp
+index e9361e0a..27fd3087 100644
+--- a/src/libcamera/pipeline/simple/liuqin_isp.cpp
++++ b/src/libcamera/pipeline/simple/liuqin_isp.cpp
+@@ -3,6 +3,10 @@
+ #include "liuqin_colour.h"
+ #include "liuqin_awb.h"
+ #include "libcamera/internal/request.h"
++#include "libcamera/internal/camera_lens.h"
++#include "libcamera/internal/mapped_framebuffer.h"
++#include "libcamera/internal/dma_buf_allocator.h"
++#include <libcamera/base/utils.h>
+ 
+ #include <algorithm>
+ #include <tuple>
+@@ -14,7 +18,7 @@
+ namespace libcamera {
+ LOG_DEFINE_CATEGORY(LiuqinIsp)
+ 
+-bool LiuqinIsp::supported(V4L2Subdevice *isp)
++bool LiuqinIsp::supported(V4L2Subdevice *isp, bool rear)
+ {
+ 	const uint32_t types[] = { V4L2_CTRL_TYPE_INTEGER, V4L2_CTRL_TYPE_U32,
+ 				  V4L2_CTRL_TYPE_U32, V4L2_CTRL_TYPE_U16 };
+@@ -26,7 +30,8 @@ bool LiuqinIsp::supported(V4L2Subdevice *isp)
+ 	}
+ 	const uint32_t id[] = { LiuqinIspBase };
+ 	ControlList abi = isp->getControls(id);
+-	return abi.contains(id[0]) && abi.get(id[0]).get<int32_t>() == 1;
++	return abi.contains(id[0]) && (abi.get(id[0]).get<int32_t>() == 2 ||
++		(!rear && abi.get(id[0]).get<int32_t>() == 1));
+ }
+ 
+ float LiuqinIsp::shading(unsigned int channel, float x, float y) const
+@@ -47,59 +52,81 @@ float LiuqinIsp::shading(unsigned int channel, float x, float y) const
+ 	return std::clamp(a * (1 - fy) + b * fy, 0.5f, 15.999f);
+ }
+ 
+-int LiuqinIsp::configure(Transform transform, ControlInfoMap *controlsInfo)
++int LiuqinIsp::configure(Transform transform, ControlInfoMap *controlsInfo, unsigned int stride)
+ {
+-	if (!calibration_.load()) {
++	if (!rear_ && !calibration_.load()) {
+ 		LOG(LiuqinIsp, Error) << "Valid per-module IMX596 calibration is required";
+ 		return -ENODATA;
+ 	}
++	if (rear_) {
++		calibration_.rg = liuqinRearColour::whites[2].rg;
++		calibration_.bg = liuqinRearColour::whites[2].bg;
++		calibration_.grgb = 1;
++		calibration_.lsc.clear();
++		margin_ = 22; minimumLines_ = 8; maxGain_ = 64;
++	}
+ 	int ret = sensor_->sensorInfo(&info_);
+ 	if (ret)
+ 		return ret;
++	stride_ = stride ? stride : info_.outputSize.width;
++	if (stride_ < info_.outputSize.width)
++		return -EINVAL;
+ 	transform_ = transform;
+ 	lineUs_ = info_.minLineLength * 1000000.0 / info_.pixelRate;
+ 	frameLines_ = info_.minFrameLength;
+-	unsigned int h = info_.outputSize.height;
+-	unsigned int level = h == 1952 ? 1 : 2;
+-	unsigned int sx = h == 1952 ? 41 : 21, sy = h == 1952 ? 41 : 16;
+-	unsigned int dx = h == 1952 ? 8 : 24, dy = h == 1952 ? 4 : 16;
+-	std::array<uint16_t, 884> mesh;
+-	for (unsigned int c = 0; c < 4; c++) {
+-		for (unsigned int y = 0; y < 13; y++) {
+-			for (unsigned int x = 0; x < 17; x++) {
+-				float px = (int(x * (sx << level)) - int(dx)) / 1295.0f;
+-				float py = (int(y * (sy << level)) - int(dy) + (1952 - h) / 4) / 975.0f;
+-				float balance = c == 1 ? std::sqrt(calibration_.grgb) :
+-						c == 2 ? 1 / std::sqrt(calibration_.grgb) : 1;
+-				mesh[c * 221 + y * 17 + x] = std::clamp<int>(
+-					std::lround(1024 * shading(c, px, py) * balance), 512, 16383);
++	if (!rear_) {
++		unsigned int h = info_.outputSize.height;
++		unsigned int level = h == 1952 ? 1 : 2;
++		unsigned int sx = h == 1952 ? 41 : 21, sy = h == 1952 ? 41 : 16;
++		unsigned int dx = h == 1952 ? 8 : 24, dy = h == 1952 ? 4 : 16;
++		std::array<uint16_t, 884> mesh;
++		for (unsigned int c = 0; c < 4; c++) {
++			for (unsigned int y = 0; y < 13; y++) {
++				for (unsigned int x = 0; x < 17; x++) {
++					float px = (int(x * (sx << level)) - int(dx)) / 1295.0f;
++					float py = (int(y * (sy << level)) - int(dy) + (1952 - h) / 4) / 975.0f;
++					float balance = c == 1 ? std::sqrt(calibration_.grgb) :
++							c == 2 ? 1 / std::sqrt(calibration_.grgb) : 1;
++					mesh[c * 221 + y * 17 + x] = std::clamp<int>(
++						std::lround(1024 * shading(c, px, py) * balance), 512, 16383);
++				}
+ 			}
+ 		}
++		ControlList ispControls(isp_->controls());
++		ispControls.set(LiuqinIspBase + 3, Span<const uint16_t>(mesh));
++		ret = isp_->setControls(&ispControls);
++		if (ret)
++			return ret;
+ 	}
+-	ControlList ispControls(isp_->controls());
+-	ispControls.set(LiuqinIspBase + 3, Span<const uint16_t>(mesh));
+-	ret = isp_->setControls(&ispControls);
+-	if (ret)
+-		return ret;
++	const auto *wide = isp_->controlInfo(LiuqinIspBase + 5);
++	wideMatrix_ = wide && wide->type == V4L2_CTRL_TYPE_U16 && wide->elems == 9 && wide->minimum == 0 && wide->maximum == 8191;
+ 	const auto *cc = isp_->controlInfo(LiuqinIspBase + 4);
+ 	colourMatrix_ = cc && cc->type == V4L2_CTRL_TYPE_U16 && cc->elems == 9 &&
+ 		cc->minimum == 0 && cc->maximum == 4095;
+-	ccm_ = liuqinColour::matrix(temperature_);
++	ccm_ = matrix(temperature_);
+ 	ControlInfoMap::Map map;
+ 	if (colourMatrix_) {
+-		map[&controls::ColourCorrectionMatrix] = ControlInfo(-2.0f, 2047.0f / 1024, 1.0f);
++		map[&controls::ColourCorrectionMatrix] = ControlInfo(wideMatrix_ ? -4.0f : -2.0f, (wideMatrix_ ? 4095.0f : 2047.0f) / 1024, 1.0f);
+ 		map[&controls::ColourTemperature] = ControlInfo(2856, 7500, 5000);
+ 	}
+ 	map[&controls::AeEnable] = ControlInfo(false, true, true);
+ 	map[&controls::AwbEnable] = ControlInfo(false, true, true);
+-	map[&controls::ExposureTime] = ControlInfo(int(std::ceil(4 * lineUs_)), int((info_.maxFrameLength - 24) * lineUs_), 10000);
+-	map[&controls::AnalogueGain] = ControlInfo(1.0f, 16.0f, 1.0f);
++	map[&controls::ExposureTime] = ControlInfo(int(std::ceil(minimumLines_ * lineUs_)), int((info_.maxFrameLength - margin_) * lineUs_), 10000);
++	map[&controls::AnalogueGain] = ControlInfo(1.0f, float(maxGain_), 1.0f);
+ 	map[&controls::ColourGains] = ControlInfo(1.0f, 16.0f, 1.0f);
+ 	int64_t minimum = std::ceil(frameLines_ * lineUs_);
+ 	int64_t maximum = info_.maxFrameLength * lineUs_;
+ 	map[&controls::FrameDurationLimits] = ControlInfo(minimum, maximum, minimum);
++	hasAf_ = rear_ && sensor_->focusLens() && sensor_->focusLens()->controls().count(V4L2_CID_FOCUS_ABSOLUTE);
++	if (hasAf_) {
++		const auto &f = sensor_->focusLens()->controls().at(V4L2_CID_FOCUS_ABSOLUTE);
++		af_.configure(f.min().get<int32_t>(), f.max().get<int32_t>());
++		map[&controls::AfMode] = ControlInfo(controls::AfModeAuto, controls::AfModeContinuous, controls::AfModeContinuous);
++		map[&controls::AfTrigger] = ControlInfo(controls::AfTriggerValues);
++		map[&controls::AfState] = ControlInfo(controls::AfStateValues);
++	}
+ 	*controlsInfo = ControlInfoMap(std::move(map), controls::controls);
+-	LOG(LiuqinIsp, Info) << "IFE680 NV12, hardware Bayer statistics and calibrated LSC, " << info_.outputSize << (colourMatrix_ ? ", stock multi-illuminant CC131" : "");
++	LOG(LiuqinIsp, Info) << "IFE680 NV12, hardware Bayer statistics, " << (rear_ ? "stock S5KJN1 model white point (no per-unit LSC), " : "calibrated LSC, ") << info_.outputSize << (colourMatrix_ ? ", stock multi-illuminant CC131" : "");
+ 	return 0;
+ }
+ 
+@@ -123,48 +150,54 @@ void LiuqinIsp::update(const ControlList &controls)
+ 		if (auto value = controls.get(controls::ColourTemperature)) {
+ 			temperature_ = std::clamp<int>(*value, 2856, 7500);
+ 			if (!controls.contains(controls::ColourGains.id()))
+-				std::tie(red_, blue_) = liuqinColour::gains(temperature_, calibration_.rg, calibration_.bg);
+-			ccm_ = liuqinColour::matrix(temperature_);
++				std::tie(red_, blue_) = gains(temperature_);
++			ccm_ = matrix(temperature_);
+ 		}
+ 		if (auto value = controls.get(controls::ColourGains)) {
+ 			if (std::isfinite((*value)[0]) && std::isfinite((*value)[1])) {
+ 				red_ = std::clamp<double>((*value)[0], 1, 16);
+ 				blue_ = std::clamp<double>((*value)[1], 1, 16);
+ 				if (!controls.contains(controls::ColourTemperature.id()))
+-					temperature_ = liuqinColour::estimate(1 / red_, 1 / blue_, calibration_.rg, calibration_.bg).kelvin;
+-				ccm_ = liuqinColour::matrix(temperature_);
++					temperature_ = estimate(1 / red_, 1 / blue_).kelvin;
++				ccm_ = matrix(temperature_);
+ 			}
+ 		}
+ 		if (auto value = controls.get(controls::ColourCorrectionMatrix)) {
+-			if (std::all_of(value->begin(), value->end(), [](float v) {
+-				return std::isfinite(v) && v >= -2 && v <= 2047.0f / 1024;
++			if (std::all_of(value->begin(), value->end(), [this](float v) {
++				return std::isfinite(v) && v >= (wideMatrix_ ? -4 : -2) && v <= (wideMatrix_ ? 4095.0f : 2047.0f) / 1024;
+ 			}))
+ 				std::copy(value->begin(), value->end(), ccm_.begin());
+ 		}
+ 	} else {
+-		ccm_ = liuqinColour::matrix(temperature_);
++		ccm_ = matrix(temperature_);
+ 	}
+ }
+ 
+ int LiuqinIsp::apply()
+ {
+-	exposure_ = std::clamp(exposure_, 4 * lineUs_, (frameLines_ - 24) * lineUs_);
+-	gain_ = std::clamp(gain_, 1.0, 16.0);
++	exposure_ = std::clamp(exposure_, minimumLines_ * lineUs_, (frameLines_ - margin_) * lineUs_);
++	gain_ = std::clamp(gain_, 1.0, maxGain_);
+ 	ControlList blanking(sensor_->controls());
+ 	blanking.set(V4L2_CID_VBLANK, int32_t(frameLines_ - info_.outputSize.height));
+ 	int ret = sensor_->setControls(&blanking);
+ 	if (ret)
+ 		return ret;
+ 	ControlList sensorControls(sensor_->controls());
+-	int lines = std::clamp<int>(std::lround(exposure_ / lineUs_), 4, frameLines_ - 24);
+-	int gainCode = std::clamp<int>(std::lround(1024 - 1024 / gain_), 0, 960);
++	int lines = std::clamp<int>(std::lround(exposure_ / lineUs_), minimumLines_, frameLines_ - margin_);
++	int gainCode = rear_ ? std::clamp<int>(std::lround(gain_), 1, 64) :
++		std::clamp<int>(std::lround(1024 - 1024 / gain_), 0, 960);
+ 	sensorControls.set(V4L2_CID_EXPOSURE, lines);
+ 	sensorControls.set(V4L2_CID_ANALOGUE_GAIN, gainCode);
+ 	ret = sensor_->setControls(&sensorControls);
+ 	if (ret)
+ 		return ret;
+ 	exposure_ = lines * lineUs_;
+-	gain_ = 1024.0 / (1024 - gainCode);
++	/* Keep the fractional AE target for the integer rear gain control.
++	 * Quantizing the integrator itself traps AE between adjacent codes.
++	 * Metadata reports the gain actually written to the sensor. */
++	appliedGain_ = rear_ ? gainCode : 1024.0 / (1024 - gainCode);
++	if (!rear_)
++		gain_ = appliedGain_;
+ 	std::array<uint32_t, 2> wb = {
+ 		uint32_t(std::lround(std::clamp(red_, 1.0, 16.0) * 1024)),
+ 		uint32_t(std::lround(std::clamp(blue_, 1.0, 16.0) * 1024))
+@@ -173,12 +206,14 @@ int LiuqinIsp::apply()
+ 	ispControls.set(LiuqinIspBase + 1, Span<const uint32_t>(wb));
+ 	if (colourMatrix_) {
+ 		std::array<uint16_t, 9> matrix;
++		bool reduce = wideMatrix_ && std::any_of(ccm_.begin(), ccm_.end(), [](float v) { return v > 2047.0f / 1024 || v < -2; });
+ 		for (unsigned int i = 0; i < matrix.size(); i++) {
+-			int q = std::clamp<int>(std::lround(ccm_[i] * 1024), -2048, 2047);
+-			matrix[i] = q + 2048;
++			int q = std::clamp<int>(std::lround(ccm_[i] * 1024), wideMatrix_ ? -4096 : -2048, wideMatrix_ ? 4095 : 2047);
++			if (reduce) q = q / 2 * 2;
++			matrix[i] = q + (wideMatrix_ ? 4096 : 2048);
+ 			ccm_[i] = q / 1024.0f;
+ 		}
+-		ispControls.set(LiuqinIspBase + 4, Span<const uint16_t>(matrix));
++		ispControls.set(LiuqinIspBase + (wideMatrix_ ? 5 : 4), Span<const uint16_t>(matrix));
+ 	}
+ 	return isp_->setControls(&ispControls);
+ }
+@@ -186,8 +221,9 @@ int LiuqinIsp::apply()
+ int LiuqinIsp::start(const ControlList &controls)
+ {
+ 	ae_ = awb_ = true;
++	if (hasAf_) af_.reset();
+ 	temperature_ = 5000;
+-	ccm_ = liuqinColour::matrix(temperature_);
++	ccm_ = matrix(temperature_);
+ 	red_ = 1.0 / calibration_.rg;
+ 	blue_ = 1.0 / calibration_.bg;
+ 	nextUpdate_ = 0;
+@@ -196,17 +232,53 @@ int LiuqinIsp::start(const ControlList &controls)
+ 	ControlList current = sensor_->getControls(ids);
+ 	if (current.contains(V4L2_CID_EXPOSURE) && current.contains(V4L2_CID_ANALOGUE_GAIN)) {
+ 		exposure_ = current.get(V4L2_CID_EXPOSURE).get<int32_t>() * lineUs_;
+-		gain_ = 1024.0 / (1024 - current.get(V4L2_CID_ANALOGUE_GAIN).get<int32_t>());
++		int value = current.get(V4L2_CID_ANALOGUE_GAIN).get<int32_t>();
++		gain_ = rear_ ? value : 1024.0 / (1024 - value);
+ 	}
+ 	update(controls);
+ 	int ret = apply();
+-	effective_ = { 0, int(exposure_), float(gain_), float(red_), float(blue_), int64_t(frameLines_ * lineUs_), ccm_, int(std::lround(temperature_)) };
++	effective_ = { 0, int(exposure_), float(appliedGain_), float(red_), float(blue_), int64_t(frameLines_ * lineUs_), ccm_, int(std::lround(temperature_)) };
+ 	return ret;
+ }
+ 
++void LiuqinIsp::focus(FrameBuffer *buffer, Request *request)
++{
++	if (auto mode = request->controls().get(controls::AfMode)) af_.setMode(*mode);
++	if (auto trigger = request->controls().get(controls::AfTrigger)) af_.trigger(*trigger == controls::AfTriggerStart);
++	if (buffer->metadata().sequence % 4 == 0 && !buffer->planes().empty()) {
++		DmaSyncer sync(buffer->planes()[0].fd, DmaSyncer::SyncType::Read);
++		MappedFrameBuffer mapped(buffer, MappedFrameBuffer::MapFlag::Read);
++		unsigned int w = info_.outputSize.width, h = info_.outputSize.height;
++		if (mapped.isValid() && !mapped.planes().empty() && mapped.planes()[0].size() >= stride_ * h) {
++			const uint8_t *p = mapped.planes()[0].data();
++			uint64_t gradient = 0, sum = 0, samples = 0;
++			for (unsigned int y = h / 4; y < h * 3 / 4; y += 4) {
++				for (unsigned int x = w / 4; x < w * 3 / 4; x += 4) {
++					int dx = int(p[y * stride_ + x + 2]) - p[y * stride_ + x - 2];
++					int dy = int(p[(y + 2) * stride_ + x]) - p[(y - 2) * stride_ + x];
++					gradient += dx * dx + dy * dy;
++					sum += p[y * stride_ + x]; samples++;
++				}
++			}
++			double score = ipa::soft::ContrastAf::contrast(gradient, sum, samples, 0);
++			auto position = af_.process(buffer->metadata().timestamp, score, true);
++			if (position) {
++				int ret = sensor_->focusLens()->setFocusPosition(*position);
++				uint64_t ready = std::chrono::duration_cast<std::chrono::nanoseconds>(
++					std::chrono::steady_clock::now().time_since_epoch()).count() + 100000000ULL;
++				af_.applied(*position, ready, ret);
++				LOG(LiuqinIsp, Debug) << "AF lens=" << *position << " score=" << score << " result=" << ret;
++			}
++		}
++	}
++	request->_d()->metadata().set(controls::AfMode, int32_t(af_.mode()));
++	request->_d()->metadata().set(controls::AfState, int32_t(af_.state()));
++}
++
+ void LiuqinIsp::process(FrameBuffer *buffer, Request *request)
+ {
+ 	uint32_t sequence = buffer->metadata().sequence;
++	if (hasAf_) focus(buffer, request);
+ 	while (!pending_.empty() && pending_.front().sequence <= sequence) {
+ 		effective_ = pending_.front();
+ 		pending_.pop_front();
+@@ -251,35 +323,38 @@ void LiuqinIsp::process(FrameBuffer *buffer, Request *request)
+ 			weights += weight;
+ 			if (green < 0.01 || green > 0.75 || r < 0.003 || b < 0.003 || r > 0.95 || b > 0.95)
+ 				continue;
+-			auto white = liuqinColour::estimate(r / green, b / green, calibration_.rg, calibration_.bg);
++			auto white = estimate(r / green, b / green);
+ 			if (white.distance < 0.10) {
+ 				neutrals.push_back({ green / r, green / b, white.kelvin, green, weight });
+ 			}
+ 		}
+ 	}
+-	if (weights && ae_) {
++	if (weights && ae_ && !(hasAf_ && af_.searching())) {
+ 		double mean = luminance / weights;
+ 		double correction = std::clamp(0.18 / std::max(mean, 0.0001), 0.5, 2.0);
+-		if (std::abs(correction - 1) < 0.05)
++		/* The rear control has whole-gain steps. Keep a small hysteresis
++		 * around half a step to avoid alternating adjacent gain codes. */
++		double tolerance = rear_ && gain_ > 1 ? 0.05 + 0.5 / appliedGain_ : 0.05;
++		if (std::abs(correction - 1) < tolerance)
+ 			correction = 1;
+ 		double product = exposure_ * gain_ * std::sqrt(correction);
+-		double maxExposure = (frameLines_ - 24) * lineUs_;
++		double maxExposure = (frameLines_ - margin_) * lineUs_;
+ 		exposure_ = std::min(product, maxExposure);
+ 		/* Indoor 50 Hz anti-banding once exposure reaches 10 ms. */
+ 		if (exposure_ > 10000)
+ 			exposure_ = std::floor(exposure_ / 10000) * 10000;
+-		gain_ = std::clamp(product / exposure_, 1.0, 16.0);
++		gain_ = std::clamp(product / exposure_, 1.0, maxGain_);
+ 	}
+ 	auto selected = liuqinColour::balance(std::move(neutrals));
+-	if (awb_ && selected.selected) {
++	if (awb_ && selected.selected && !(hasAf_ && af_.searching())) {
+ 		red_ = red_ * 0.8 + selected.red * 0.2;
+ 		blue_ = blue_ * 0.8 + selected.blue * 0.2;
+-		temperature_ = liuqinColour::estimate(1 / red_, 1 / blue_, calibration_.rg, calibration_.bg).kelvin;
+-		ccm_ = liuqinColour::matrix(temperature_);
++		temperature_ = estimate(1 / red_, 1 / blue_).kelvin;
++		ccm_ = matrix(temperature_);
+ 	}
+ 	int ret = apply();
+ 	if (!ret)
+-		pending_.push_back({ sequence + 3, int(exposure_), float(gain_), float(red_), float(blue_), int64_t(frameLines_ * lineUs_), ccm_, int(std::lround(temperature_)) });
++		pending_.push_back({ sequence + 3, int(exposure_), float(appliedGain_), float(red_), float(blue_), int64_t(frameLines_ * lineUs_), ccm_, int(std::lround(temperature_)) });
+ 	else
+ 		LOG(LiuqinIsp, Error) << "Failed to apply automatic controls: " << ret;
+ 	nextUpdate_ = sequence + 6;
+diff --git a/src/libcamera/pipeline/simple/liuqin_isp.h b/src/libcamera/pipeline/simple/liuqin_isp.h
+index f637070c..468bc73c 100644
+--- a/src/libcamera/pipeline/simple/liuqin_isp.h
++++ b/src/libcamera/pipeline/simple/liuqin_isp.h
+@@ -7,6 +7,9 @@
+ #include <libcamera/request.h>
+ #include "libcamera/internal/camera_sensor.h"
+ #include "liuqin_calibration.h"
++#include "liuqin_colour.h"
++#include "liuqin_rear_colour.h"
++#include "../../../ipa/simple/contrast_af.h"
+ 
+ namespace libcamera {
+ 
+@@ -14,13 +17,17 @@ namespace libcamera {
+ constexpr uint32_t LiuqinIspBase = V4L2_CID_USER_BASE + 0x3000;
+ class LiuqinIsp {
+ public:
+-	LiuqinIsp(CameraSensor *sensor, V4L2Subdevice *isp) : sensor_(sensor), isp_(isp) {}
+-	static bool supported(V4L2Subdevice *isp);
+-	int configure(Transform transform, ControlInfoMap *controls);
++	LiuqinIsp(CameraSensor *sensor, V4L2Subdevice *isp) : sensor_(sensor), isp_(isp), rear_(sensor->model() == "s5kjn1") {}
++	static bool supported(V4L2Subdevice *isp, bool rear = false);
++	int configure(Transform transform, ControlInfoMap *controls, unsigned int stride = 0);
+ 	int start(const ControlList &controls);
+ 	void process(FrameBuffer *buffer, Request *request);
+ 
+ private:
++	std::array<float, 9> matrix(double t) const { return liuqinColour::matrix(t, rear_ ? liuqinRearColour::matrices : liuqinColour::matrices); }
++	std::pair<double, double> gains(double t) const { return liuqinColour::gains(t, calibration_.rg, calibration_.bg, rear_ ? liuqinRearColour::whites : liuqinColour::whites); }
++	liuqinColour::Estimate estimate(double r, double b) const { return liuqinColour::estimate(r, b, calibration_.rg, calibration_.bg, rear_ ? liuqinRearColour::whites : liuqinColour::whites); }
++	void focus(FrameBuffer *buffer, Request *request);
+ 	void update(const ControlList &controls);
+ 	int apply();
+ 	float shading(unsigned int channel, float x, float y) const;
+@@ -31,8 +38,12 @@ private:
+ 	Transform transform_;
+ 	double lineUs_ = 0, exposure_ = 10000, gain_ = 1, red_ = 1, blue_ = 1;
+ 	double temperature_ = 5000;
+-	unsigned int frameLines_ = 0;
++	unsigned int frameLines_ = 0, stride_ = 0;
+ 	bool ae_ = true, awb_ = true, colourMatrix_ = false;
++	bool rear_ = false, wideMatrix_ = false, hasAf_ = false;
++	unsigned int margin_ = 24, minimumLines_ = 4;
++	double maxGain_ = 16, appliedGain_ = 1;
++	ipa::soft::ContrastAf af_;
+ 	std::array<float, 9> ccm_;
+ 	uint32_t nextUpdate_ = 0;
+ 	struct Applied { uint32_t sequence; int exposure; float gain, red, blue; int64_t duration; std::array<float, 9> ccm; int temperature; };
+diff --git a/src/libcamera/pipeline/simple/liuqin_rear_colour.h b/src/libcamera/pipeline/simple/liuqin_rear_colour.h
+new file mode 100644
+index 00000000..35b76b6d
+--- /dev/null
++++ b/src/libcamera/pipeline/simple/liuqin_rear_colour.h
+@@ -0,0 +1,23 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#pragma once
++#include "liuqin_colour.h"
++namespace libcamera::liuqinRearColour {
++/* Shipping Qtech S5KJN1 IPE CC13, module 60, DRC 1..100, custom 1..64,
++ * LED 0, lux 226..316, CCT table 2053. Nominal white references from refPtV1
++ * module 197. These are model references, not per-unit EEPROM calibration.
++ */
++inline constexpr liuqinColour::MatrixAnchor matrices[] = {
++ {1, 2450, {1.457999945f, -0.508000016f, 0.050000001f, -0.191000000f, 0.957000017f, 0.233999997f, -0.291999996f, -0.964999974f, 2.256999969f}},
++ {2650, 3250, {1.574000001f, -0.395999998f, -0.178000003f, -0.128000006f, 1.157999992f, -0.029999999f, -0.128000006f, -1.062000036f, 2.190000057f}},
++ {3500, 4300, {1.379999995f, -0.458000004f, 0.078000002f, -0.112000003f, 1.190999985f, -0.079000004f, -0.088000000f, -0.873000026f, 1.960999966f}},
++ {4500, 5500, {1.457000017f, -0.405000001f, -0.052000001f, -0.149000004f, 1.195999980f, -0.046999998f, 0.025000000f, -0.857999980f, 1.832999945f}},
++ {5800, 8500, {1.608999968f, -0.653999984f, 0.045000002f, -0.057999998f, 1.116999984f, -0.059000000f, 0.077000000f, -1.074000001f, 1.996999979f}},
++};
++inline constexpr liuqinColour::WhiteAnchor whites[] = {
++ {2856, 0.891938984, 0.434854001},
++ {4000, 0.731582999, 0.503295004},
++ {5000, 0.605382025, 0.584285021},
++ {6500, 0.540277004, 0.690738022},
++ {7500, 0.513728976, 0.729680002},
++};
++} /* namespace libcamera::liuqinRearColour */
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index 7d6050e0..be6171b9 100644
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -501,9 +501,10 @@ SimpleCameraData::SimpleCameraData(SimplePipelineHandler *pipe,
+ 	MediaEntity *video = nullptr;
+ 	MediaPad *sinkPad;
+ 
++	bool rearHardware = sensor->name().rfind("s5kjn1 ", 0) == 0;
+ 	bool seekHardware = sensor->name().rfind("imx596 ", 0) == 0;
+ 	LiuqinCalibration calibration;
+-	seekHardware = seekHardware && calibration.load();
++	seekHardware = (seekHardware && calibration.load()) || rearHardware;
+ 	MediaEntity *fallback = nullptr;
+ 	MediaPad *fallbackSink = nullptr;
+ 	queue.push({ sensor, nullptr });
+@@ -520,7 +521,7 @@ SimpleCameraData::SimpleCameraData(SimplePipelineHandler *pipe,
+ 				MediaEntity *upstream = parents.at(entity).entity;
+ 				if (upstream->name().find("_pix") != std::string::npos) {
+ 					V4L2Subdevice probe(upstream);
+-					if (!probe.open() && LiuqinIsp::supported(&probe))
++					if (!probe.open() && LiuqinIsp::supported(&probe, rearHardware))
+ 						hwEntity_ = upstream;
+ 				}
+ 				if (!hwEntity_) {
+@@ -635,7 +636,7 @@ int SimpleCameraData::init()
+ 
+ 	/* Open the converter, if any. */
+ 	std::shared_ptr<MediaDevice> converter = pipe->converter();
+-	if (converter && (converter->driver() != "qcom-ipe" || hwEntity_)) {
++	if (converter && (converter->driver() != "qcom-ipe" || (hwEntity_ && sensor_->model() == "imx596"))) {
+ 		converter_ = ConverterFactoryBase::create(converter);
+ 		if (!converter_) {
+ 			LOG(SimplePipeline, Warning)
+@@ -1674,7 +1675,7 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
+ 	}
+ 
+ 	if (data->hwIsp_) {
+-		ret = data->hwIsp_->configure(config->combinedTransform(), &data->controlInfo_);
++		ret = data->hwIsp_->configure(config->combinedTransform(), &data->controlInfo_, captureFormat.planes[0].bpl);
+ 		if (ret || !data->useConversion_)
+ 			return ret;
+ 	}

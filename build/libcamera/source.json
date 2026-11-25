@@ -1,0 +1,30 @@
+{
+  "url": "https://dl.fedoraproject.org/pub/fedora/linux/updates/45/Everything/source/tree/Packages/l/libcamera-0.7.2-5.fc45.src.rpm",
+  "srpm": "libcamera-0.7.2-5.fc45.src.rpm",
+  "sha256": "1a4b1bc1d161d85b42e7de0b043842f0ce0bb4394a10bf7dc2f34722804a600e",
+  "spec_sha256": "4bce58f13cd4b4dad1abca7c125a20f3026e43441f81e6a515b420868cddcd58",
+  "version": "0.7.2",
+  "dist": "fc45",
+  "release": "5.liuqin23",
+  "patches": [
+    "0001-liuqin-front-gain-and-contrast-af.patch",
+    "0002-imx596-static-properties.patch",
+    "0003-imx596-video-timing-and-colour-baseline.patch",
+    "0004-liuqin-ife680-hardware-isp.patch",
+    "0005-liuqin-ife680-colour-correction.patch",
+    "0006-liuqin-ife680-multi-illuminant-colour.patch",
+    "0007-liuqin-ipe-video-converter.patch",
+    "0008-liuqin-awb-neutral-selection.patch",
+    "0009-liuqin-rear-hardware-isp.patch",
+    "0010-liuqin-rear-calibration-and-ipe.patch",
+    "0011-liuqin-signed-lsc-edge-coordinates.patch",
+    "0012-liuqin-fixed-exposure-capture.patch",
+    "0013-liuqin-direct-ife-capture.patch",
+    "0014-liuqin-calibrated-manual-focus.patch",
+    "0015-liuqin-reconcile-camss-links.patch",
+    "0016-liuqin-retain-requested-isp-controls.patch",
+    "0017-liuqin-native-wide-ife-modes.patch",
+    "0018-liuqin-probe-ipe-stride-at-requested-size.patch",
+    "0019-liuqin-tap-autofocus.patch"
+  ]
+}

@@ -1,0 +1,255 @@
+diff --git a/src/video/flashframewindow.h b/src/video/flashframewindow.h
+new file mode 100644
+index 0000000..64c1352
+--- /dev/null
++++ b/src/video/flashframewindow.h
+@@ -0,0 +1,92 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++
++#include <gst/video/video.h>
++#include <condition_variable>
++#include <memory>
++#include <mutex>
++
++namespace FlashCapture {
++using Sample = std::shared_ptr<GstSample>;
++struct Window {
++    const GstClockTime base;
++    GstClockTime before = GST_CLOCK_TIME_NONE, after = GST_CLOCK_TIME_NONE;
++    GstClockTime selectedStamp = GST_CLOCK_TIME_NONE;
++    unsigned early = 0, late = 0, invalid = 0, incomplete = 0;
++    guint rejectedFlags = 0;
++    std::mutex mutex;
++    std::condition_variable ready;
++    Sample frame;
++    explicit Window(GstClockTime baseTime) : base(baseTime) {}
++};
++using WindowPtr = std::shared_ptr<Window>;
++
++inline GstPadProbeReturn selectFrame(GstPad *pad, GstPadProbeInfo *info, gpointer data)
++{
++    auto &w = **static_cast<WindowPtr *>(data);
++    auto *buffer = GST_PAD_PROBE_INFO_BUFFER(info);
++    std::lock_guard lock(w.mutex);
++    if (!GST_CLOCK_TIME_IS_VALID(w.after) || GST_CLOCK_TIME_IS_VALID(w.selectedStamp))
++        return GST_PAD_PROBE_OK;
++    GstEvent *event = gst_pad_get_sticky_event(pad, GST_EVENT_SEGMENT, 0);
++    GstClockTime running = GST_CLOCK_TIME_NONE;
++    if (event) {
++        const GstSegment *segment;
++        gst_event_parse_segment(event, &segment);
++        if (segment->format == GST_FORMAT_TIME && GST_BUFFER_PTS_IS_VALID(buffer))
++            running = gst_segment_to_running_time(segment, GST_FORMAT_TIME, GST_BUFFER_PTS(buffer));
++        gst_event_unref(event);
++    }
++    if (!GST_CLOCK_TIME_IS_VALID(running) || running >= GST_CLOCK_TIME_NONE - w.base) {
++        ++w.invalid;
++        return GST_PAD_PROBE_OK;
++    }
++    // S5KJN1, 4080x3060 at 30 fps: allow for integration, rolling readout and IPE delay.
++    const auto stamp = w.base + running;
++    if (stamp < w.after || stamp - w.after < 130 * GST_MSECOND) {
++        ++w.early;
++    } else if (stamp - w.before > 190 * GST_MSECOND) {
++        ++w.late;
++    } else {
++        // DISCONT can mark the first complete raw image after a skipped image.
++        // It is safe only with a current TIME segment, matching raw caps and a full payload.
++        GstCaps *caps = gst_pad_get_current_caps(pad);
++        GstVideoInfo video;
++        if (!(GST_BUFFER_FLAGS(buffer) & (GST_BUFFER_FLAG_CORRUPTED | GST_BUFFER_FLAG_GAP | GST_BUFFER_FLAG_DECODE_ONLY | GST_BUFFER_FLAG_HEADER))
++            && caps && gst_structure_has_name(gst_caps_get_structure(caps, 0), "video/x-raw")
++            && gst_video_info_from_caps(&video, caps) && video.width == 4080 && video.height == 3060
++            && GST_VIDEO_INFO_INTERLACE_MODE(&video) == GST_VIDEO_INTERLACE_MODE_PROGRESSIVE
++            && gst_buffer_get_size(buffer) >= GST_VIDEO_INFO_SIZE(&video)) {
++            w.frame.reset(gst_sample_new(buffer, caps, nullptr, nullptr), gst_sample_unref);
++            w.selectedStamp = stamp;
++            w.ready.notify_one();
++        } else {
++            ++w.incomplete;
++            w.rejectedFlags |= GST_BUFFER_FLAGS(buffer);
++        }
++        gst_clear_caps(&caps);
++    }
++    return GST_PAD_PROBE_OK;
++}
++
++// Observe buffers before firing. Only the STROBE write brackets the instant of ignition;
++// the separate STATUS ioctl authorizes saving, but cannot move either exposure bound.
++template<class Clock, class Fire, class Status>
++bool arm(const WindowPtr &w, GstPad *pad, gulong &probe, Clock now, Fire fire, Status lit)
++{
++    if (!GST_CLOCK_TIME_IS_VALID(w->base))
++        return false;
++    probe = gst_pad_add_probe(pad, GST_PAD_PROBE_TYPE_BUFFER, selectFrame,
++                              new WindowPtr(w), [](gpointer p) { delete static_cast<WindowPtr *>(p); });
++    if (!probe)
++        return false;
++    {
++        std::lock_guard lock(w->mutex);
++        w->before = now();
++        if (!fire())
++            return false;
++        w->after = now();
++    }
++    return lit();
++}
++}
+diff --git a/src/video/rearflash.cpp b/src/video/rearflash.cpp
+index 87d0b74..826a044 100644
+--- a/src/video/rearflash.cpp
++++ b/src/video/rearflash.cpp
+@@ -1,5 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ #include "rearflash.h"
++#include "flashframewindow.h"
+ 
+ #include <KIO/CopyJob>
+ #include <KLocalizedString>
+@@ -17,7 +18,6 @@
+ #include <algorithm>
+ #include <array>
+ #include <chrono>
+-#include <condition_variable>
+ #include <optional>
+ #include <memory>
+ #include <mutex>
+@@ -26,23 +26,8 @@
+ Q_LOGGING_CATEGORY(flashLog, "kamoso.rearflash", QtWarningMsg)
+ 
+ namespace {
+-// PipeWire timestamps the processed S5KJN1 frame. Allow for sensor integration,
+-// rolling readout and the IPE frame delay at 4080 x 3060, 30 fps.
+-constexpr GstClockTime firstFrame = 130 * GST_MSECOND;
+-constexpr GstClockTime lastFrame = 190 * GST_MSECOND;
++using namespace FlashCapture;
+ constexpr int pulseUs = 200000;
+-using Sample = std::shared_ptr<GstSample>;
+-
+-struct Window {
+-    GstClockTime triggerBefore;
+-    GstClockTime triggerAfter;
+-    GstClockTime base;
+-    std::mutex mutex;
+-    std::condition_variable ready;
+-    Sample frame;
+-    bool selected = false;
+-};
+-using WindowPtr = std::shared_ptr<Window>;
+ 
+ bool control(int fd, __u32 id, int value)
+ {
+@@ -155,51 +140,18 @@ GstPadProbeReturn meterFrame(GstPad *pad, GstPadProbeInfo *info, gpointer data)
+     return GST_PAD_PROBE_OK;
+ }
+ 
+-GstPadProbeReturn selectFrame(GstPad *pad, GstPadProbeInfo *info, gpointer data)
+-{
+-    auto &window = **static_cast<WindowPtr *>(data);
+-    auto *buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+-    if (!GST_BUFFER_PTS_IS_VALID(buffer) || GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DISCONT)
+-        || GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_CORRUPTED))
+-        return GST_PAD_PROBE_OK;
+-    GstEvent *event = gst_pad_get_sticky_event(pad, GST_EVENT_SEGMENT, 0);
+-    if (!event)
+-        return GST_PAD_PROBE_OK;
+-    const GstSegment *segment;
+-    gst_event_parse_segment(event, &segment);
+-    GstClockTime running = segment->format == GST_FORMAT_TIME
+-        ? gst_segment_to_running_time(segment, GST_FORMAT_TIME, GST_BUFFER_PTS(buffer)) : GST_CLOCK_TIME_NONE;
+-    gst_event_unref(event);
+-    if (!GST_CLOCK_TIME_IS_VALID(running) || running > G_MAXUINT64 - window.base)
+-        return GST_PAD_PROBE_OK;
+-    const auto stamp = window.base + running;
+-    if (stamp < window.triggerAfter || stamp - window.triggerAfter < firstFrame
+-        || stamp - window.triggerBefore > lastFrame)
+-        return GST_PAD_PROBE_OK;
+-
+-    std::lock_guard lock(window.mutex);
+-    if (!window.selected) {
+-        GstCaps *caps = gst_pad_get_current_caps(pad);
+-        GstVideoInfo video;
+-        if (caps && gst_video_info_from_caps(&video, caps) && video.width == 4080 && video.height == 3060) {
+-            window.frame.reset(gst_sample_new(buffer, caps, nullptr, nullptr), gst_sample_unref);
+-            qCDebug(flashLog) << "Selected" << video.width << video.height << "at"
+-                              << (stamp - window.triggerAfter) / GST_MSECOND << "ms";
+-            window.selected = true;
+-            window.ready.notify_one();
+-        }
+-        gst_clear_caps(&caps);
+-    }
+-    return GST_PAD_PROBE_OK;
+-}
+-
+ QByteArray encode(const WindowPtr &window)
+ {
+     Sample frame;
+     {
+         std::unique_lock lock(window->mutex);
+-        if (!window->ready.wait_for(lock, std::chrono::milliseconds(650), [&] { return window->selected; }))
++        if (!window->ready.wait_for(lock, std::chrono::milliseconds(650), [&] { return bool(window->frame); })) {
++            qCWarning(flashLog) << "No complete flash frame: strobe ioctl (us)" << (window->after - window->before) / GST_USECOND
++                                << "early/late/invalid timestamp/incomplete in-window" << window->early << window->late
++                                << window->invalid << window->incomplete << "rejected flags" << Qt::hex << window->rejectedFlags;
+             return {};
++        }
++        qCDebug(flashLog) << "Selected 4080 3060 at" << (window->selectedStamp - window->after) / GST_MSECOND << "ms";
+         frame = std::move(window->frame);
+     }
+     GstCaps *caps = gst_caps_new_empty_simple("image/jpeg");
+@@ -344,6 +296,8 @@ void RearFlash::cancel()
+     if (waiting)
+         Q_EMIT busyChanged();
+     if (m_watcher) {
++        if (!m_watcher->isFinished())
++            qCWarning(flashLog) << "Pending flash capture cancelled before save";
+         disconnect(m_watcher, nullptr, this, nullptr);
+         m_watcher->deleteLater();
+         m_watcher = nullptr;
+@@ -382,7 +336,8 @@ void RearFlash::tryCapture()
+ 
+ void RearFlash::captureLocked(GstPipeline *pipeline, GstElement *filter, const QUrl &destination)
+ {
+-    auto window = std::make_shared<Window>();
++    auto window = std::make_shared<Window>(gst_element_get_base_time(GST_ELEMENT(pipeline)));
++    bool fired = false;
+     GstClock *clock = gst_element_get_clock(GST_ELEMENT(pipeline));
+     m_pad = filter ? gst_element_get_static_pad(filter, "src") : nullptr;
+     m_led.setFileName(flashNode());
+@@ -390,23 +345,17 @@ void RearFlash::captureLocked(GstPipeline *pipeline, GstElement *filter, const Q
+                       << "filter" << (filter ? GST_OBJECT_NAME(filter) : "none") << "pad" << bool(m_pad) << m_led.fileName();
+     if (clock && m_pad && m_led.open(QIODevice::ReadWrite | QIODevice::Unbuffered)) {
+         int fd = m_led.handle();
+-        window->base = gst_element_get_base_time(GST_ELEMENT(pipeline));
+         if (control(fd, V4L2_CID_FLASH_LED_MODE, V4L2_FLASH_LED_MODE_FLASH)
+             && control(fd, V4L2_CID_FLASH_TIMEOUT, pulseUs)
+             && control(fd, V4L2_CID_FLASH_INTENSITY, 250000)) {
+-            // Both bounds matter if the shutter thread is preempted during the ioctl.
+-            window->triggerBefore = gst_clock_get_time(clock);
+-            if (control(fd, V4L2_CID_FLASH_STROBE, 0) && strobing(fd)) {
+-                window->triggerAfter = gst_clock_get_time(clock);
+-                // A previous pulse changes the ISP's AE readings for several frames.
++            fired = arm(window, m_pad, m_probe, [clock] { return gst_clock_get_time(clock); },
++                        [fd] { return control(fd, V4L2_CID_FLASH_STROBE, 0); }, [fd] { return strobing(fd); });
++            if (fired)
+                 m_meterAfter = QDeadlineTimer(1200, Qt::PreciseTimer);
+-                m_probe = gst_pad_add_probe(m_pad, GST_PAD_PROBE_TYPE_BUFFER, selectFrame,
+-                                            new WindowPtr(window), [](gpointer p) { delete static_cast<WindowPtr *>(p); });
+-            }
+         }
+     }
+     gst_clear_object(&clock);
+-    if (!m_probe) {
++    if (!fired) {
+         cancel();
+         qCWarning(flashLog) << "Strobe setup failed" << m_led.errorString();
+         Q_EMIT failed(i18n("Could not fire the rear flash."));
+@@ -423,6 +372,7 @@ void RearFlash::captureLocked(GstPipeline *pipeline, GstElement *filter, const Q
+         if (destination.isLocalFile()) {
+             QSaveFile file(destination.toLocalFile());
+             if (!file.open(QIODevice::WriteOnly) || file.write(jpeg) != jpeg.size() || !file.commit()) {
++                qCWarning(flashLog) << "Could not save flash JPEG" << file.errorString();
+                 Q_EMIT failed(file.errorString());
+                 return;
+             }

@@ -1,0 +1,75 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 3576953..e8ec582 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -47,6 +47,7 @@ endif()
+ find_package(PkgConfig REQUIRED)
+ pkg_check_modules(GStreamer IMPORTED_TARGET gstreamer-1.0>=${GSTREAMER_MIN_VERSION})
+ pkg_check_modules(GStreamerVideo IMPORTED_TARGET gstreamer-video-1.0)
++pkg_check_modules(GStreamerPbutils REQUIRED IMPORTED_TARGET gstreamer-pbutils-1.0)
+ 
+ include(ECMQMLModules)
+ 
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index ff85e8f..0a5a816 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -24,7 +24,7 @@ kconfig_add_kcfg_files(kamoso kamosoSettings.kcfgc GENERATE_MOC)
+ target_link_libraries(kamoso
+     Qt::Concurrent Qt::Core Qt::Gui Qt::Widgets Qt::Quick
+     KF6::KIOFileWidgets KF6::ConfigGui KF6::I18n KF6::Notifications
+-    PkgConfig::GStreamerVideo PkgConfig::GStreamer
++    PkgConfig::GStreamerVideo PkgConfig::GStreamerPbutils PkgConfig::GStreamer
+ )
+ 
+ install(TARGETS kamoso ${KDE_INSTALL_TARGETS_DEFAULT_ARGS})
+diff --git a/src/video/webcamcontrol.cpp b/src/video/webcamcontrol.cpp
+index ef45ed2..dfcc819 100644
+--- a/src/video/webcamcontrol.cpp
++++ b/src/video/webcamcontrol.cpp
+@@ -16,6 +16,7 @@
+ #include <KLocalizedString>
+ 
+ #include <gst/gstcaps.h>
++#include <gst/pbutils/encoding-profile.h>
+ #include <gst/gstpad.h>
+ #include <gst/gststructure.h>
+ #include <gst/gstbuffer.h>
+@@ -342,6 +343,29 @@ void WebcamControl::captureReadyChanged(GObject *camera_bin, GParamSpec *pspec,
+     wc->setReadyForCapture(is_ready);
+ }
+ 
++static void configureVideoEncoder(GstElement *camerabin)
++{
++    GstPointer<GstElementFactory> encoder(gst_element_factory_find("v4l2h264enc"));
++    if (!encoder)
++        return;
++
++    g_autoptr(GstCaps) containerCaps = gst_caps_new_empty_simple("video/x-matroska");
++    g_autoptr(GstCaps) videoCaps = gst_caps_new_simple("video/x-h264", "profile", G_TYPE_STRING, "high", nullptr);
++    // PipeWire can advertise a variable rate (0/1). Give encodebin a real
++    // timebase so Iris rate control and Matroska frame durations agree.
++    g_autoptr(GstCaps) rawCaps = gst_caps_new_simple("video/x-raw", "framerate", GST_TYPE_FRACTION, 30, 1, nullptr);
++    g_autoptr(GstCaps) audioCaps = gst_caps_new_empty_simple("audio/x-vorbis");
++    auto *container = gst_encoding_container_profile_new("mkv", "H.264 and Vorbis", containerCaps, nullptr);
++    auto *video = gst_encoding_video_profile_new(videoCaps, nullptr, rawCaps, 1);
++    // Select this encoder for recording without changing process-wide codec ranks.
++    gst_encoding_profile_set_preset_name(GST_ENCODING_PROFILE(video), "v4l2h264enc");
++    gst_encoding_container_profile_add_profile(container, GST_ENCODING_PROFILE(video));
++    auto *audio = gst_encoding_audio_profile_new(audioCaps, nullptr, nullptr, 1);
++    gst_encoding_container_profile_add_profile(container, GST_ENCODING_PROFILE(audio));
++    g_object_set(camerabin, "video-profile", container, nullptr);
++    gst_encoding_profile_unref(container);
++}
++
+ bool WebcamControl::playDevice(Device *device)
+ {
+     Q_ASSERT(device);
+@@ -397,6 +421,7 @@ bool WebcamControl::playDevice(Device *device)
+ 
+     if (!m_pipeline) {
+         m_pipeline.reset(GST_PIPELINE(gst_element_factory_make("camerabin", "camerabin")));
++        configureVideoEncoder(GST_ELEMENT(m_pipeline.data()));
+         gst_bus_add_watch (gst_pipeline_get_bus(m_pipeline.data()), &webcamWatch, this);
+         g_object_set(m_pipeline.data(), "camera-source", m_cameraSource.data(), nullptr);
+         g_object_set(m_pipeline.data(), "viewfinder-sink", m_viewfinder.data(), nullptr);

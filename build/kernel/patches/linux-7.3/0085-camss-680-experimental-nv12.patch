@@ -1,0 +1,558 @@
+diff --git a/drivers/media/platform/qcom/camss/camss-csid-680.c b/drivers/media/platform/qcom/camss/camss-csid-680.c
+index 345a67c8f..c16fc54b3 100644
+--- a/drivers/media/platform/qcom/camss/camss-csid-680.c
++++ b/drivers/media/platform/qcom/camss/camss-csid-680.c
+@@ -12,6 +12,7 @@
+ #include "camss.h"
+ #include "camss-csid.h"
+ #include "camss-csid-gen2.h"
++#include "camss-vfe.h"
+ 
+ #define CSID_TOP_IO_PATH_CFG0(csid)				(0x4 * (csid))
+ #define		CSID_TOP_IO_PATH_CFG0_INTERNAL_CSID		BIT(0)
+@@ -165,8 +166,26 @@
+ #define CSID_RDI_LINE_DROP_PATTERN(rdi)				(0x560 + 0x100 * (rdi))
+ #define CSID_RDI_LINE_DROP_PERIOD(rdi)				(0x564 + 0x100 * (rdi))
+ 
++#define CSID_IPP_IRQ_STATUS 0x0ac
++#define CSID_IPP_IRQ_MASK 0x0b0
++#define CSID_IPP_IRQ_CLEAR 0x0b4
++#define CSID_IPP_CFG0 0x300
++#define CSID_IPP_CTRL 0x304
++#define CSID_IPP_MULTI_VCDT_CFG0 0x30c
++#define CSID_IPP_CFG1 0x310
++#define CSID_IPP_ERR_RECOVERY_CFG0 0x318
++#define CSID_IPP_CAMIF_FRAME_CFG 0x330
++#define CSID_IPP_EPOCH_IRQ_CFG 0x334
++#define CSID_IPP_HCROP 0x35c
++#define CSID_IPP_VCROP 0x360
++#define CSID_IPP_PIX_DROP_PATTERN 0x364
++#define CSID_IPP_IRQ_SUBSAMPLE_PATTERN 0x37c
++#define CSID_IPP_IRQ_SUBSAMPLE_PERIOD 0x380
++
+ static inline int reg_update_rdi(struct csid_device *csid, int n)
+ {
++	if (camss_680_pix && !csid_is_lite(csid) && n == VFE_LINE_PIX)
++		return BIT(0) | BIT(16);
+ 	return BIT(4 + n) + BIT(20 + n);
+ }
+ 
+@@ -296,6 +315,42 @@ static void __csid_configure_rdi_stream(struct csid_device *csid, u8 enable, u8
+ 	writel(val, csid->base + CSID_RDI_CFG0(port));
+ }
+ 
++static void csid680_ipp(struct csid_device *csid, bool enable)
++{
++	struct v4l2_mbus_framefmt *in =
++		&csid->fmt[MSM_CSID_PAD_FIRST_SRC + VFE_LINE_PIX];
++	const struct csid_format_info *f =
++		csid_get_fmt_entry(csid->res->formats->formats,
++				   csid->res->formats->nformats, in->code);
++	unsigned int i;
++
++	if (!enable) {
++		writel(0, csid->base + CSID_IPP_IRQ_MASK);
++		writel(0, csid->base + CSID_IPP_CTRL);
++		writel(0, csid->base + CSID_IPP_CFG0);
++		return;
++	}
++	writel(0, csid->base + CSID_IPP_CTRL);
++	writel(0, csid->base + CSID_IPP_MULTI_VCDT_CFG0);
++	writel((f->data_type << 16) | (f->decode_format << 12),
++	       csid->base + CSID_IPP_CFG0);
++	writel(BIT(14) | BIT(13) | BIT(12) | BIT(9),
++	       csid->base + CSID_IPP_CFG1);
++	writel((in->width - 1) << 16, csid->base + CSID_IPP_HCROP);
++	writel((in->height - 1) << 16, csid->base + CSID_IPP_VCROP);
++	writel(9, csid->base + CSID_IPP_ERR_RECOVERY_CFG0);
++	writel(0, csid->base + CSID_IPP_CAMIF_FRAME_CFG);
++	writel((in->height / 2) << 16, csid->base + CSID_IPP_EPOCH_IRQ_CFG);
++	for (i = CSID_IPP_PIX_DROP_PATTERN; i <= CSID_IPP_IRQ_SUBSAMPLE_PERIOD;
++	     i += 4)
++		writel(0, csid->base + i);
++	writel(1, csid->base + CSID_IPP_IRQ_SUBSAMPLE_PATTERN);
++	writel(BIT(23), csid->base + CSID_IPP_IRQ_MASK);
++	writel(BIT(31) | (f->data_type << 16) | (f->decode_format << 12),
++	       csid->base + CSID_IPP_CFG0);
++	writel(1, csid->base + CSID_IPP_CTRL);
++}
++
+ static void csid_configure_stream(struct csid_device *csid, u8 enable)
+ {
+ 	int i;
+@@ -305,6 +360,12 @@ static void csid_configure_stream(struct csid_device *csid, u8 enable)
+ 	/* Loop through all enabled ports and configure a stream for each */
+ 	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++) {
+ 		if (csid->phy.en_vc & BIT(i)) {
++			if (camss_680_pix && !csid_is_lite(csid) &&
++			    i == VFE_LINE_PIX) {
++				__csid_configure_rx(csid, &csid->phy, 0);
++				csid680_ipp(csid, enable);
++				continue;
++			}
+ 			__csid_configure_rdi_stream(csid, enable, i, 0);
+ 			__csid_configure_rx(csid, &csid->phy, 0);
+ 			__csid_ctrl_rdi(csid, enable, i);
+@@ -389,6 +450,15 @@ static irqreturn_t csid_isr(int irq, void *dev)
+ 	buf_done_val = readl(csid->base + CSID_BUF_DONE_IRQ_STATUS);
+ 	writel(buf_done_val, csid->base + CSID_BUF_DONE_IRQ_CLEAR);
+ 
++	if (camss_680_pix && !csid_is_lite(csid)) {
++		val = readl(csid->base + CSID_IPP_IRQ_STATUS);
++		writel(val, csid->base + CSID_IPP_IRQ_CLEAR);
++		if (val & BIT(23))
++			csid_rup_complete(csid, VFE_LINE_PIX);
++		if (buf_done_val & BIT(0))
++			camss_buf_done(csid->camss, csid->id, VFE_LINE_PIX);
++	}
++
+ 	/* Process state for each RDI channel */
+ 	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++) {
+ 		val = readl(csid->base + CSID_CSI2_RDIN_IRQ_STATUS(i));
+diff --git a/drivers/media/platform/qcom/camss/camss-vfe-680-pix.h b/drivers/media/platform/qcom/camss/camss-vfe-680-pix.h
+new file mode 100644
+index 000000000..d1c5d6e38
+--- /dev/null
++++ b/drivers/media/platform/qcom/camss/camss-vfe-680-pix.h
+@@ -0,0 +1,182 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * Experimental IFE680 single-IFE NV12 pipeline. Register addresses/packing
++ * checked against the shipping Liuqin Titan680 IQ implementation; this is
++ * deliberately not the older Titan480 register layout.
++ * No statistics, per-frame tuning, LSC, black subtraction or HDR yet.
++ */
++static unsigned int ife680_red_gain = 1024;
++static unsigned int ife680_blue_gain = 1024;
++module_param(ife680_red_gain, uint, 0444);
++module_param(ife680_blue_gain, uint, 0444);
++MODULE_PARM_DESC(ife680_red_gain, "Manual red gain, Q10, clamped to 1..32767");
++MODULE_PARM_DESC(ife680_blue_gain,
++		 "Manual blue gain, Q10, clamped to 1..32767");
++
++/* sRGB OETF sampled at i / 256, rounded to the Gamma151 12-bit domain. */
++static const u16 vfe680_srgb[257] = {
++	0,    203,  347,  452,	538,  613,  679,  739,	794,  845,  894,  939,
++	982,  1023, 1062, 1099, 1136, 1170, 1204, 1237, 1268, 1299, 1329, 1358,
++	1386, 1414, 1441, 1467, 1493, 1518, 1543, 1567, 1591, 1615, 1638, 1660,
++	1683, 1704, 1726, 1747, 1768, 1789, 1809, 1829, 1849, 1868, 1888, 1907,
++	1926, 1944, 1962, 1981, 1998, 2016, 2034, 2051, 2068, 2085, 2102, 2119,
++	2135, 2151, 2168, 2184, 2199, 2215, 2231, 2246, 2261, 2277, 2292, 2307,
++	2321, 2336, 2351, 2365, 2379, 2394, 2408, 2422, 2436, 2449, 2463, 2477,
++	2490, 2504, 2517, 2530, 2543, 2557, 2570, 2582, 2595, 2608, 2621, 2633,
++	2646, 2658, 2670, 2683, 2695, 2707, 2719, 2731, 2743, 2755, 2767, 2778,
++	2790, 2802, 2813, 2825, 2836, 2847, 2859, 2870, 2881, 2892, 2903, 2914,
++	2925, 2936, 2947, 2958, 2969, 2979, 2990, 3001, 3011, 3022, 3032, 3043,
++	3053, 3063, 3074, 3084, 3094, 3104, 3114, 3124, 3134, 3144, 3154, 3164,
++	3174, 3184, 3194, 3203, 3213, 3223, 3232, 3242, 3252, 3261, 3271, 3280,
++	3289, 3299, 3308, 3317, 3327, 3336, 3345, 3354, 3363, 3372, 3382, 3391,
++	3400, 3409, 3418, 3426, 3435, 3444, 3453, 3462, 3471, 3479, 3488, 3497,
++	3505, 3514, 3523, 3531, 3540, 3548, 3557, 3565, 3574, 3582, 3590, 3599,
++	3607, 3615, 3624, 3632, 3640, 3648, 3656, 3665, 3673, 3681, 3689, 3697,
++	3705, 3713, 3721, 3729, 3737, 3745, 3753, 3761, 3769, 3776, 3784, 3792,
++	3800, 3807, 3815, 3823, 3831, 3838, 3846, 3854, 3861, 3869, 3876, 3884,
++	3891, 3899, 3906, 3914, 3921, 3929, 3936, 3944, 3951, 3958, 3966, 3973,
++	3980, 3988, 3995, 4002, 4009, 4017, 4024, 4031, 4038, 4045, 4053, 4060,
++	4067, 4074, 4081, 4088, 4095,
++};
++
++#define VFE680_WB_MODULE_CFG 0x4560
++#define VFE680_WB_GAIN_G 0x4568
++#define VFE680_WB_GAIN_B 0x456c
++#define VFE680_WB_GAIN_R 0x4570
++#define VFE680_WB_OFFSETS 0x4574
++#define VFE680_WB_CHANNEL_CFG 0x4594
++#define VFE680_DEMOSAIC_MODULE_CFG 0x5660
++#define VFE680_DEMOSAIC_CFG 0x5668
++#define VFE680_GAMMA_DMI_ADDR 0x5f08
++#define VFE680_GAMMA_DMI_SELECT 0x5f0c
++#define VFE680_GAMMA_DMI_DATA 0x5f10
++#define VFE680_GAMMA_DMI_BANK 0x5f58
++#define VFE680_GAMMA_BANK 0x5f5c
++#define VFE680_GAMMA_MODULE_CFG 0x5f60
++#define VFE680_CST_MODULE_CFG 0x6160
++#define VFE680_CST_CFG 0x6168
++#define VFE680_MNDS_Y 0x9860
++#define VFE680_MNDS_C 0x9a60
++#define VFE680_ROUND_Y_MODULE_CFG 0x9c60
++#define VFE680_ROUND_Y_CFG 0x9c70
++#define VFE680_ROUND_C_MODULE_CFG 0x9e60
++#define VFE680_ROUND_C_CFG 0x9e70
++
++static void vfe680_write_words(struct vfe_device *vfe, u32 offset,
++			       const u32 *data, unsigned int count)
++{
++	unsigned int i;
++
++	for (i = 0; i < count; i++)
++		writel(data[i], vfe->base + offset + 4 * i);
++}
++
++static void vfe680_pix_configure(struct vfe_device *vfe, struct vfe_line *line)
++{
++	struct v4l2_pix_format_mplane *p =
++		&line->video_out.active_fmt.fmt.pix_mp;
++	u32 w = p->width, h = p->height;
++	/* MNDS23: full-size luma; 2:1 chroma reduction in both dimensions. */
++	u32 mnds[] = {
++		1,	    0x600, ((w - 1) << 16) | (h - 1),
++		0xc0200000, 0,	   0xc0200000,
++		0,	    0,	   0,
++		0,
++	};
++	static const u32 demosaic[] = { 0x80, 0, 0x00200000, 0x66 };
++	/* CST12: G/B/R input, BT.601 full-range Y/Cb/Cr, 12-bit offsets. */
++	static const u32 cst[] = {
++		0x00750259, 0x00000132, 0,	    0, 0, 0xfff00000,
++		0x01fe1ea6, 0x00001f54, 0x40000000, 0, 0, 0xfff00000,
++		0x1fad1e55, 0x000001fe, 0x40000000, 0, 0, 0xfff00000,
++	};
++	static const u32 round_y[] = { 0, 0x16, 0, 0, 0, 0, 255, 0, 0, 0 };
++	static const u32 round_c[] = { 0, 0x17, 0, 0x17, 0, 0, 255, 255, 0, 0 };
++	unsigned int i, j;
++
++	/* Top680 configuration, bypassing the unused DS4/DS16 branches. */
++	writel(0x1e000, vfe->base + 0x24);
++	writel(0, vfe->base + 0x28);
++	writel(0, vfe->base + 0x2c);
++	writel(0, vfe->base + 0x8c);
++	writel(1, vfe->base + 0x90);
++	writel(h / 2, vfe->base + 0x9c);
++	/* Common configuration emitted by IFEPipelineTitan680. */
++	writel(1, vfe->base + 0x2300);
++	writel(1, vfe->base + 0x2600);
++
++	/* WB201: Q10 gains in G/B/R order, zero offsets, no channel reduction. */
++	writel(1024 << 17, vfe->base + VFE680_WB_GAIN_G);
++	writel(clamp_t(u32, ife680_blue_gain, 1, 32767) << 17,
++	       vfe->base + VFE680_WB_GAIN_B);
++	writel(clamp_t(u32, ife680_red_gain, 1, 32767) << 17,
++	       vfe->base + VFE680_WB_GAIN_R);
++	for (i = 0; i < 8; i++)
++		writel(0, vfe->base + VFE680_WB_OFFSETS + 4 * i);
++	writel(3 << 8, vfe->base + VFE680_WB_CHANNEL_CFG);
++	writel(1, vfe->base + VFE680_WB_MODULE_CFG);
++
++	vfe680_write_words(vfe, VFE680_DEMOSAIC_CFG, demosaic,
++			   ARRAY_SIZE(demosaic));
++	writel(1, vfe->base + VFE680_DEMOSAIC_MODULE_CFG);
++
++	/* Gamma151: 256 entries, 12-bit base and signed 12-bit delta. */
++	writel(0, vfe->base + VFE680_GAMMA_DMI_BANK);
++	writel(0, vfe->base + VFE680_GAMMA_BANK);
++	for (i = 1; i <= 3; i++) {
++		writel(0, vfe->base + VFE680_GAMMA_DMI_ADDR);
++		writel(i, vfe->base + VFE680_GAMMA_DMI_SELECT);
++		for (j = 0; j < 256; j++) {
++			u32 delta = vfe680_srgb[j + 1] - vfe680_srgb[j];
++
++			writel(vfe680_srgb[j] | (delta << 12),
++			       vfe->base + VFE680_GAMMA_DMI_DATA);
++		}
++	}
++	writel(0, vfe->base + VFE680_GAMMA_DMI_SELECT);
++	writel(1, vfe->base + VFE680_GAMMA_MODULE_CFG);
++
++	vfe680_write_words(vfe, VFE680_CST_CFG, cst, ARRAY_SIZE(cst));
++	writel(1, vfe->base + VFE680_CST_MODULE_CFG);
++	vfe680_write_words(vfe, VFE680_MNDS_Y, mnds, ARRAY_SIZE(mnds));
++	mnds[3] = 0xc0400000;
++	mnds[5] = 0xc0400000;
++	vfe680_write_words(vfe, VFE680_MNDS_C, mnds, ARRAY_SIZE(mnds));
++	vfe680_write_words(vfe, VFE680_ROUND_Y_CFG, round_y,
++			   ARRAY_SIZE(round_y));
++	vfe680_write_words(vfe, VFE680_ROUND_C_CFG, round_c,
++			   ARRAY_SIZE(round_c));
++	writel(0xc01, vfe->base + VFE680_ROUND_Y_MODULE_CFG);
++	writel(0x3c01, vfe->base + VFE680_ROUND_C_MODULE_CFG);
++}
++
++static void vfe680_pix_start(struct vfe_device *vfe, struct vfe_line *line)
++{
++	struct v4l2_pix_format_mplane *p =
++		&line->video_out.active_fmt.fmt.pix_mp;
++	u32 stride = p->plane_fmt[0].bytesperline;
++	unsigned int wm;
++
++	vfe680_pix_configure(vfe, line);
++	for (wm = 0; wm < 2; wm++) {
++		u32 height = p->height >> wm;
++
++		writel((height << 16) | p->width,
++		       vfe->base + VFE_BUS_IMAGE_CFG0(vfe, wm));
++		writel(0, vfe->base + VFE_BUS_IMAGE_CFG1(vfe, wm));
++		writel(stride, vfe->base + VFE_BUS_IMAGE_CFG2(vfe, wm));
++		writel(3, vfe->base + VFE_BUS_PACKER_CFG(vfe, wm));
++		writel(0, vfe->base + 0xe1c + wm * 0x100);
++		writel(11 << 8, vfe->base + 0xe80 + wm * 0x100);
++		writel(stride * height,
++		       vfe->base + VFE_BUS_FRAME_INCR(vfe, wm));
++		writel(1, vfe->base + VFE_BUS_MMU_PREFETCH_CFG(vfe, wm));
++		writel(stride * height - 1,
++		       vfe->base + VFE_BUS_MMU_PREFETCH_MAX_OFFSET(vfe, wm));
++		writel(1, vfe->base + VFE_BUS_FRAMEDROP_PATTERN(vfe, wm));
++		writel(0, vfe->base + VFE_BUS_FRAMEDROP_PERIOD(vfe, wm));
++		writel(1, vfe->base + VFE_BUS_IRQ_SUBSAMPLE_PATTERN(vfe, wm));
++		writel(0, vfe->base + VFE_BUS_IRQ_SUBSAMPLE_PERIOD(vfe, wm));
++		writel(1, vfe->base + VFE_BUS_WRITE_CLIENT_CFG(vfe, wm));
++	}
++}
+diff --git a/drivers/media/platform/qcom/camss/camss-vfe-680.c b/drivers/media/platform/qcom/camss/camss-vfe-680.c
+index 99036e7c1..e433c7fc1 100644
+--- a/drivers/media/platform/qcom/camss/camss-vfe-680.c
++++ b/drivers/media/platform/qcom/camss/camss-vfe-680.c
+@@ -144,11 +144,22 @@ static void vfe_disable_irq(struct vfe_device *vfe)
+ 	writel(0u, vfe->base + VFE_BUS_IRQn_MASK(vfe, 1));
+ }
+ 
++#include "camss-vfe-680-pix.h"
++
+ static void vfe_wm_update(struct vfe_device *vfe, u8 rdi, u32 addr,
+ 			  struct vfe_line *line)
+ {
+ 	u8 wm = RDI_WM(rdi);
+ 
++	if (camss_680_pix && !vfe_is_lite(vfe) && rdi == VFE_LINE_PIX) {
++		struct v4l2_pix_format_mplane *p =
++			&line->video_out.active_fmt.fmt.pix_mp;
++		writel(addr, vfe->base + VFE_BUS_IMAGE_ADDR(vfe, 0));
++		writel(addr + p->plane_fmt[0].bytesperline * p->height,
++		       vfe->base + VFE_BUS_IMAGE_ADDR(vfe, 1));
++		return;
++	}
++
+ 	writel(addr, vfe->base + VFE_BUS_IMAGE_ADDR(vfe, wm));
+ }
+ 
+@@ -160,6 +171,12 @@ static void vfe_wm_start(struct vfe_device *vfe, u8 rdi, struct vfe_line *line)
+ 	u32 cfg;
+ 	u8 wm;
+ 
++	if (camss_680_pix && !vfe_is_lite(vfe) && rdi == VFE_LINE_PIX) {
++		vfe_disable_irq(vfe);
++		vfe680_pix_start(vfe, line);
++		return;
++	}
++
+ 	cfg = VFE_BUS_IMAGE_CFG0_DATA(pix->height, stride);
+ 	wm = RDI_WM(rdi);
+ 
+@@ -197,6 +214,22 @@ static void vfe_wm_stop(struct vfe_device *vfe, u8 rdi)
+ {
+ 	u8 wm = RDI_WM(rdi);
+ 
++	if (camss_680_pix && !vfe_is_lite(vfe) && rdi == VFE_LINE_PIX) {
++		u32 violation = readl(vfe->base +
++				      VFE_BUS_WR_IMAGE_VIOLATION_STATUS(vfe));
++		u32 overflow =
++			readl(vfe->base + VFE_BUS_WR_OVERFLOW_STATUS(vfe));
++
++		if (violation || overflow)
++			dev_warn(
++				vfe->camss->dev,
++				"IFE680 PIX image violation %#x overflow %#x\n",
++				violation, overflow);
++		writel(0, vfe->base + VFE_BUS_WRITE_CLIENT_CFG(vfe, 0));
++		writel(0, vfe->base + VFE_BUS_WRITE_CLIENT_CFG(vfe, 1));
++		return;
++	}
++
+ 	writel(0, vfe->base + VFE_BUS_WRITE_CLIENT_CFG(vfe, wm));
+ }
+ 
+diff --git a/drivers/media/platform/qcom/camss/camss-vfe.c b/drivers/media/platform/qcom/camss/camss-vfe.c
+index 862786803..a18718d89 100644
+--- a/drivers/media/platform/qcom/camss/camss-vfe.c
++++ b/drivers/media/platform/qcom/camss/camss-vfe.c
+@@ -283,11 +283,34 @@ const struct camss_formats vfe_formats_pix_845 = {
+ 	.formats = formats_rdi_845
+ };
+ 
++/* Opt-in until the statistics / per-frame parameter API is implemented. */
++bool camss_680_pix;
++module_param_named(ife680_pix, camss_680_pix, bool, 0444);
++MODULE_PARM_DESC(ife680_pix, "Experimental IFE680 RAW10 to NV12 path");
++
++static const struct camss_format_info formats_pix_680[] = {
++	{ MEDIA_BUS_FMT_SRGGB10_1X10, 10, V4L2_PIX_FMT_SRGGB10P, 1,
++	  PER_PLANE_DATA(0, 1, 1, 1, 1, 10) },
++	{ MEDIA_BUS_FMT_YUYV8_1_5X8, 8, V4L2_PIX_FMT_NV12, 1,
++	  PER_PLANE_DATA(0, 1, 1, 2, 3, 8) },
++};
++
++static bool vfe680_pix_enabled(struct vfe_line *line)
++{
++	struct vfe_device *vfe = to_vfe(line);
++
++	return camss_680_pix && vfe->res->hw_ops == &vfe_ops_680 &&
++	       !vfe_is_lite(vfe) && line->id == VFE_LINE_PIX;
++}
++
+ static u32 vfe_src_pad_code(struct vfe_line *line, u32 sink_code,
+ 			    unsigned int index, u32 src_req_code)
+ {
+ 	struct vfe_device *vfe = to_vfe(line);
+ 
++	if (vfe680_pix_enabled(line))
++		return index ? 0 : MEDIA_BUS_FMT_YUYV8_1_5X8;
++
+ 	switch (vfe->camss->res->version) {
+ 	case CAMSS_8x16:
+ 	case CAMSS_8x39:
+@@ -611,8 +634,31 @@ int vfe_enable_v2(struct vfe_line *line)
+ 	const struct vfe_hw_ops *ops = vfe->res->hw_ops;
+ 	int ret;
+ 
++	if (vfe680_pix_enabled(line)) {
++		struct v4l2_pix_format_mplane *p =
++			&line->video_out.active_fmt.fmt.pix_mp;
++		struct v4l2_mbus_framefmt *sink = &line->fmt[MSM_VFE_PAD_SINK];
++
++		/* Only the two IMX596 binned modes have validated register geometry. */
++		if (p->pixelformat != V4L2_PIX_FMT_NV12 ||
++		    sink->code != MEDIA_BUS_FMT_SRGGB10_1X10 ||
++		    p->width != 2592 ||
++		    (p->height != 1952 && p->height != 1472) ||
++		    p->width != sink->width || p->height != sink->height)
++			return -EINVAL;
++	}
++
+ 	mutex_lock(&vfe->stream_lock);
+ 
++	/* The experimental PIX configuration owns the full IFE pipeline. */
++	if (vfe->res->line_num > VFE_LINE_PIX &&
++	    vfe680_pix_enabled(&vfe->line[VFE_LINE_PIX]) && vfe->stream_count &&
++	    (line->id == VFE_LINE_PIX ||
++	     vfe->line[VFE_LINE_PIX].output.state != VFE_OUTPUT_OFF)) {
++		mutex_unlock(&vfe->stream_lock);
++		return -EBUSY;
++	}
++
+ 	if (vfe->res->hw_ops->enable_irq)
+ 		ops->enable_irq(vfe);
+ 
+@@ -968,6 +1014,9 @@ static int vfe_set_clock_rates(struct vfe_device *vfe)
+ 
+ 				if (j == VFE_LINE_PIX) {
+ 					tmp = pixel_clock[j];
++					if (vfe680_pix_enabled(&vfe->line[j]))
++						tmp = DIV_ROUND_UP_ULL(
++							pixel_clock[j], 2);
+ 				} else {
+ 					struct vfe_line *l = &vfe->line[j];
+ 
+@@ -1049,6 +1098,9 @@ static int vfe_check_clock_rates(struct vfe_device *vfe)
+ 
+ 				if (j == VFE_LINE_PIX) {
+ 					tmp = pixel_clock[j];
++					if (vfe680_pix_enabled(&vfe->line[j]))
++						tmp = DIV_ROUND_UP_ULL(
++							pixel_clock[j], 2);
+ 				} else {
+ 					struct vfe_line *l = &vfe->line[j];
+ 
+@@ -1336,6 +1388,24 @@ static void vfe_try_format(struct vfe_line *line,
+ 	unsigned int i;
+ 	u32 code;
+ 
++	if (vfe680_pix_enabled(line)) {
++		if (pad == MSM_VFE_PAD_SINK) {
++			fmt->code = MEDIA_BUS_FMT_SRGGB10_1X10;
++			fmt->width = 2592;
++			fmt->height = fmt->height <= 1472 ? 1472 : 1952;
++		} else {
++			*fmt = *__vfe_get_format(line, sd_state,
++						 MSM_VFE_PAD_SINK, which);
++			fmt->code = MEDIA_BUS_FMT_YUYV8_1_5X8;
++		}
++		fmt->field = V4L2_FIELD_NONE;
++		fmt->colorspace = V4L2_COLORSPACE_SRGB;
++		fmt->ycbcr_enc = V4L2_YCBCR_ENC_601;
++		fmt->quantization = V4L2_QUANTIZATION_FULL_RANGE;
++		fmt->xfer_func = V4L2_XFER_FUNC_SRGB;
++		return;
++	}
++
+ 	switch (pad) {
+ 	case MSM_VFE_PAD_SINK:
+ 		/* Set format on sink pad */
+@@ -1476,6 +1546,15 @@ static int vfe_enum_mbus_code(struct v4l2_subdev *sd,
+ {
+ 	struct vfe_line *line = v4l2_get_subdevdata(sd);
+ 
++	if (vfe680_pix_enabled(line)) {
++		if (code->index)
++			return -EINVAL;
++		code->code = code->pad == MSM_VFE_PAD_SINK ?
++				     MEDIA_BUS_FMT_SRGGB10_1X10 :
++				     MEDIA_BUS_FMT_YUYV8_1_5X8;
++		return 0;
++	}
++
+ 	if (code->pad == MSM_VFE_PAD_SINK) {
+ 		if (code->index >= line->nformats)
+ 			return -EINVAL;
+@@ -1577,6 +1656,11 @@ static int vfe_set_format(struct v4l2_subdev *sd,
+ 	struct vfe_line *line = v4l2_get_subdevdata(sd);
+ 	struct v4l2_mbus_framefmt *format;
+ 
++	if (vfe680_pix_enabled(line) &&
++	    fmt->which == V4L2_SUBDEV_FORMAT_ACTIVE &&
++	    line->output.state != VFE_OUTPUT_OFF)
++		return -EBUSY;
++
+ 	format = __vfe_get_format(line, sd_state, fmt->pad, fmt->which);
+ 	if (format == NULL)
+ 		return -EINVAL;
+@@ -1702,6 +1786,18 @@ static int vfe_set_selection(struct v4l2_subdev *sd,
+ 	if (line->id != VFE_LINE_PIX)
+ 		return -EINVAL;
+ 
++	if (vfe680_pix_enabled(line)) {
++		struct v4l2_mbus_framefmt *sink;
++
++		if (sel->which == V4L2_SUBDEV_FORMAT_ACTIVE &&
++		    line->output.state != VFE_OUTPUT_OFF)
++			return -EBUSY;
++		sink = __vfe_get_format(line, sd_state, MSM_VFE_PAD_SINK,
++					sel->which);
++		sel->r = (struct v4l2_rect){ .width = sink->width,
++					     .height = sink->height };
++	}
++
+ 	if (sel->target == V4L2_SEL_TGT_COMPOSE &&
+ 		sel->pad == MSM_VFE_PAD_SINK) {
+ 		struct v4l2_subdev_selection crop = { 0 };
+@@ -1915,7 +2011,10 @@ int msm_vfe_subdev_init(struct camss *camss, struct vfe_device *vfe,
+ 		init_completion(&l->output.sof);
+ 		init_completion(&l->output.reg_update);
+ 
+-		if (i == VFE_LINE_PIX) {
++		if (vfe680_pix_enabled(l)) {
++			l->nformats = ARRAY_SIZE(formats_pix_680);
++			l->formats = formats_pix_680;
++		} else if (i == VFE_LINE_PIX) {
+ 			l->nformats = res->vfe.formats_pix->nformats;
+ 			l->formats = res->vfe.formats_pix->formats;
+ 		} else {
+@@ -2115,6 +2214,10 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
+ 
+ 		video_out->nformats = vfe->line[i].nformats;
+ 		video_out->formats = vfe->line[i].formats;
++		if (vfe680_pix_enabled(&vfe->line[i])) {
++			video_out->formats = &formats_pix_680[1];
++			video_out->nformats = 1;
++		}
+ 
+ 		snprintf(name, ARRAY_SIZE(name), "%s%d_%s%d",
+ 			 MSM_VFE_NAME, vfe->id, "video", i);
+diff --git a/drivers/media/platform/qcom/camss/camss-vfe.h b/drivers/media/platform/qcom/camss/camss-vfe.h
+index ae9dad353..1ad582df9 100644
+--- a/drivers/media/platform/qcom/camss/camss-vfe.h
++++ b/drivers/media/platform/qcom/camss/camss-vfe.h
+@@ -315,3 +315,5 @@ int vfe_queue_buffer_v2(struct camss_video *vid,
+ 			struct camss_buffer *buf);
+ 
+ #endif /* QC_MSM_CAMSS_VFE_H */
++
++extern bool camss_680_pix;

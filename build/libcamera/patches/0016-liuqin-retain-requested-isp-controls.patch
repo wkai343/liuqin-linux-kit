@@ -1,0 +1,93 @@
+--- a/src/libcamera/pipeline/simple/liuqin_isp.h
++++ b/src/libcamera/pipeline/simple/liuqin_isp.h
+@@ -32,6 +32,7 @@
+ 	int setManualFocus(const ControlList &controls, bool starting);
+ 	void update(const ControlList &controls);
+ 	int apply();
++	bool adjustFromStatistics(uint32_t sequence);
+ 	float shading(unsigned int channel, float x, float y) const;
+ 	CameraSensor *sensor_;
+ 	V4L2Subdevice *isp_;
+@@ -49,6 +50,7 @@
+ 	struct LensMove { uint64_t issued, settled; int dac; };
+ 	std::deque<LensMove> lensHistory_;
+ 	std::array<float, 9> ccm_;
++	bool controlsPending_ = false;
+ 	uint32_t nextUpdate_ = 0;
+ 	struct Applied { uint32_t sequence; int exposure; float gain, red, blue; int64_t duration; std::array<float, 9> ccm; int temperature; };
+ 	std::deque<Applied> pending_;
+--- a/src/libcamera/pipeline/simple/liuqin_isp.cpp
++++ b/src/libcamera/pipeline/simple/liuqin_isp.cpp
+@@ -312,6 +312,7 @@
+ 	ccm_ = matrix(temperature_);
+ 	red_ = 1.0 / calibration_.rg;
+ 	blue_ = 1.0 / calibration_.bg;
++	controlsPending_ = false;
+ 	nextUpdate_ = 0;
+ 	pending_.clear();
+ 	const uint32_t ids[] = { V4L2_CID_EXPOSURE, V4L2_CID_ANALOGUE_GAIN };
+@@ -398,26 +399,42 @@
+ 	 * Focus-only requests must not rewrite imaging controls from every frame
+ 	 * or manufacture sequence+3 updates. Live changes retain the asynchronous
+ 	 * path and must not be used as an exact HDR capture contract. */
+-	bool imagingControls = false;
+ 	for (const auto &[id, value] : request->controls()) {
+ 		if (id == controls::AeEnable.id() || id == controls::AwbEnable.id() ||
+ 		    id == controls::ExposureTime.id() || id == controls::AnalogueGain.id() ||
+ 		    id == controls::FrameDurationLimits.id() || id == controls::ColourGains.id() ||
+ 		    id == controls::ColourTemperature.id() || id == controls::ColourCorrectionMatrix.id())
+-			imagingControls = true;
++			controlsPending_ = true;
+ 	}
+ 	update(request->controls());
+-	if (!ae_ && !awb_ && !imagingControls)
++	/* Statistics only gate the automatic algorithms. Explicit controls
++	 * may arrive once, even on a frame without matching statistics.
++	 */
++	bool adjusted = (ae_ || awb_) && sequence >= nextUpdate_ &&
++			adjustFromStatistics(sequence);
++	if (!adjusted && !controlsPending_)
+ 		return;
+-	if (sequence < nextUpdate_ && request->controls().empty())
++
++	int ret = apply();
++	if (ret) {
++		LOG(LiuqinIsp, Error) << "Failed to apply imaging controls: " << ret;
+ 		return;
++	}
++	controlsPending_ = false;
++	pending_.push_back({ sequence + 3, int(exposure_), float(appliedGain_), float(red_), float(blue_), int64_t(frameLines_ * lineUs_), ccm_, int(std::lround(temperature_)) });
++	if (adjusted)
++		nextUpdate_ = sequence + 6;
++}
++
++bool LiuqinIsp::adjustFromStatistics(uint32_t sequence)
++{
+ 	const uint32_t ids[] = { LiuqinIspBase + 2 };
+ 	ControlList values = isp_->getControls(ids);
+ 	if (!values.contains(ids[0]))
+-		return;
++		return false;
+ 	auto grid = values.get(ids[0]).get<Span<const uint32_t>>();
+ 	if (grid.size() != 15362 || !grid[1] || grid[0] != sequence)
+-		return;
++		return false;
+ 	std::vector<liuqinColour::Neutral> neutrals;
+ 	double luminance = 0, weights = 0;
+ 	for (unsigned int y = 0; y < 24; y++) {
+@@ -469,14 +486,9 @@
+ 		temperature_ = estimate(1 / red_, 1 / blue_).kelvin;
+ 		ccm_ = matrix(temperature_);
+ 	}
+-	int ret = apply();
+-	if (!ret)
+-		pending_.push_back({ sequence + 3, int(exposure_), float(appliedGain_), float(red_), float(blue_), int64_t(frameLines_ * lineUs_), ccm_, int(std::lround(temperature_)) });
+-	else
+-		LOG(LiuqinIsp, Error) << "Failed to apply automatic controls: " << ret;
+-	nextUpdate_ = sequence + 6;
+ 	LOG(LiuqinIsp, Debug) << "frame=" << sequence << " mean=" << (weights ? luminance / weights : 0)
+ 		<< " neutral=" << selected.selected << " exposure=" << exposure_ << " gain=" << gain_
+ 		<< " CCT=" << temperature_ << " WB=" << red_ << ',' << blue_;
++	return true;
+ }
+ } /* namespace libcamera */

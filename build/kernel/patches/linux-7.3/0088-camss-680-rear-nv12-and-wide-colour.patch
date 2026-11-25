@@ -1,0 +1,193 @@
+diff --git a/drivers/media/platform/qcom/camss/camss-vfe-680-iq.h b/drivers/media/platform/qcom/camss/camss-vfe-680-iq.h
+index 07f5538..895905d 100644
+--- a/drivers/media/platform/qcom/camss/camss-vfe-680-iq.h
++++ b/drivers/media/platform/qcom/camss/camss-vfe-680-iq.h
+@@ -21,7 +21,7 @@ struct vfe680_iq {
+ 	u32 gains[2];
+ 	u16 mesh[884];
+ 	u16 cc[9];
+-	bool cc_dirty;
++	bool cc_dirty, cc_wide;
+ 	bool lsc;
+ 	u32 stats[VFE680_STATS_WORDS + 2];
+ };
+@@ -42,8 +42,9 @@ static int vfe680_iq_set(struct v4l2_ctrl *ctrl)
+ 		memcpy(iq->mesh, ctrl->p_new.p_u16, sizeof(iq->mesh));
+ 		iq->lsc = true;
+ 	}
+-	if (ctrl->id == VFE680_CID_BASE + 4) {
++	if (ctrl->id == VFE680_CID_BASE + 4 || ctrl->id == VFE680_CID_BASE + 5) {
+ 		memcpy(iq->cc, ctrl->p_new.p_u16, sizeof(iq->cc));
++		iq->cc_wide = ctrl->id == VFE680_CID_BASE + 5;
+ 		iq->cc_dirty = true;
+ 	}
+ 	if (ctrl->id == VFE680_CID_BASE + 1)
+@@ -79,10 +80,10 @@ int vfe680_iq_init(struct vfe_line *line)
+ 		{ .id = VFE680_CID_BASE,
+ 		  .name = "IFE680 IQ ABI",
+ 		  .type = V4L2_CTRL_TYPE_INTEGER,
+-		  .min = 1,
+-		  .max = 1,
++		  .min = 2,
++		  .max = 2,
+ 		  .step = 1,
+-		  .def = 1,
++		  .def = 2,
+ 		  .flags = V4L2_CTRL_FLAG_READ_ONLY },
+ 		{ .ops = &vfe680_iq_ops,
+ 		  .id = VFE680_CID_BASE + 1,
+@@ -121,6 +122,15 @@ int vfe680_iq_init(struct vfe_line *line)
+ 		  .def = 2048,
+ 		  .p_def.p_const = vfe680_cc_identity,
+ 		  .dims = { 9 } },
++		{ .ops = &vfe680_iq_ops,
++		  .id = VFE680_CID_BASE + 5,
++		  .name = "IFE680 wide RGB colour matrix",
++		  .type = V4L2_CTRL_TYPE_U16,
++		  .min = 0,
++		  .max = 8191,
++		  .step = 1,
++		  .def = 4096,
++		  .dims = { 9 } },
+ 	};
+ 	unsigned int i;
+ 
+@@ -177,7 +187,9 @@ static void vfe680_lsc_start(struct vfe_device *vfe, struct vfe_line *line)
+ 	};
+ 	unsigned int i, bank;
+ 
+-	if (!iq->lsc) {
++	/* Front calibration must never leak into the rear camera. Rear per-unit
++	 * shading and its grid geometry are not part of this baseline. */
++	if (!iq->lsc || line->fmt[0].width != 2592) {
+ 		writel(0, vfe->base + 0x4360);
+ 		return;
+ 	}
+@@ -253,7 +265,9 @@ static void vfe680_iq_start(struct vfe_device *vfe, struct vfe_line *line)
+ 	writel(0x10001, vfe->base + VFE_BUS_WRITE_CLIENT_CFG(vfe, 14));
+ }
+ 
+-/* CC131: G/B/R input/output, signed 12-bit coefficients, Q7 + qfactor 3.
++/* CC131: G/B/R input/output, signed 12-bit coefficients, Q7 + qfactor.
++ * Legacy control is Q10 biased by 2048. The wide control is Q10 biased by
++ * 4096; select Q9 for the whole matrix when needed, preserving white balance.
+  * Verified against the shipping Titan680 packer. Public payload stays RGB.
+  * Called under output_lock, alongside WB and the next register update.
+  */
+@@ -261,19 +275,27 @@ static void vfe680_cc_queue(struct vfe_device *vfe, struct vfe680_iq *iq)
+ {
+ 	static const u8 order[] = { 4, 7, 1, 5, 8, 2, 3, 6, 0 };
+ 	u32 c[9];
+-	unsigned int i;
++	unsigned int i, shift = 0;
++	int bias = iq->cc_wide ? 4096 : 2048;
+ 
+ 	if (!iq->cc_dirty)
+ 		return;
+ 	for (i = 0; i < ARRAY_SIZE(c); i++)
+-		c[i] = (iq->cc[order[i]] - 2048) & 0xfff;
++		if ((int)iq->cc[i] - bias > 2047 || (int)iq->cc[i] - bias < -2048)
++			shift = 1;
++	for (i = 0; i < ARRAY_SIZE(c); i++) {
++		int value = (int)iq->cc[order[i]] - bias;
++		if (shift)
++			value /= 2;
++		c[i] = value & 0xfff;
++	}
+ 	for (i = 0; i < 3; i++) {
+ 		writel(c[3 * i] | (c[3 * i + 1] << 16),
+ 		       vfe->base + 0x5868 + 8 * i);
+ 		writel(c[3 * i + 2], vfe->base + 0x586c + 8 * i);
+ 		writel(0, vfe->base + 0x5880 + 4 * i);
+ 	}
+-	writel(3, vfe->base + 0x588c);
++	writel(3 - shift, vfe->base + 0x588c);
+ 	writel(1, vfe->base + 0x5860);
+ 	iq->cc_dirty = false;
+ }
+diff --git a/drivers/media/platform/qcom/camss/camss-vfe.c b/drivers/media/platform/qcom/camss/camss-vfe.c
+index be31100..6a5d9ce 100644
+--- a/drivers/media/platform/qcom/camss/camss-vfe.c
++++ b/drivers/media/platform/qcom/camss/camss-vfe.c
+@@ -644,14 +644,14 @@ int vfe_enable_v2(struct vfe_line *line)
+ 			&line->video_out.active_fmt.fmt.pix_mp;
+ 		struct v4l2_mbus_framefmt *sink = &line->fmt[MSM_VFE_PAD_SINK];
+ 
+-		/* Only the two IMX596 binned modes have validated register geometry. */
++		/* Bounded binned IMX596 and S5KJN1 geometries. */
+ 		if (p->pixelformat != V4L2_PIX_FMT_NV12 ||
+ 		    (sink->code != MEDIA_BUS_FMT_SRGGB10_1X10 &&
+ 		     sink->code != MEDIA_BUS_FMT_SGRBG10_1X10 &&
+ 		     sink->code != MEDIA_BUS_FMT_SGBRG10_1X10 &&
+ 		     sink->code != MEDIA_BUS_FMT_SBGGR10_1X10) ||
+-		    p->width != 2592 ||
+-		    (p->height != 1952 && p->height != 1472) ||
++		    !((p->width == 2592 && (p->height == 1952 || p->height == 1472)) ||
++		      (p->width == 4080 && p->height == 3060)) ||
+ 		    p->width != sink->width || p->height != sink->height)
+ 			return -EINVAL;
+ 	}
+@@ -1403,8 +1403,13 @@ static void vfe_try_format(struct vfe_line *line,
+ 					break;
+ 			if (i == ARRAY_SIZE(vfe680_bayer_codes))
+ 				fmt->code = MEDIA_BUS_FMT_SRGGB10_1X10;
+-			fmt->width = 2592;
+-			fmt->height = fmt->height <= 1472 ? 1472 : 1952;
++			if (fmt->width >= 4080) {
++				fmt->width = 4080;
++				fmt->height = 3060;
++			} else {
++				fmt->width = 2592;
++				fmt->height = fmt->height <= 1472 ? 1472 : 1952;
++			}
+ 		} else {
+ 			*fmt = *__vfe_get_format(line, sd_state,
+ 						 MSM_VFE_PAD_SINK, which);
+diff --git a/drivers/media/platform/qcom/camss/camss-video.c b/drivers/media/platform/qcom/camss/camss-video.c
+index 0852eb6..0a6da1a 100644
+--- a/drivers/media/platform/qcom/camss/camss-video.c
++++ b/drivers/media/platform/qcom/camss/camss-video.c
+@@ -474,15 +474,6 @@ static int __video_try_fmt(struct camss_video *video, struct v4l2_format *f)
+ 
+ 	pix_mp = &f->fmt.pix_mp;
+ 
+-	if (video->line_based)
+-		for (i = 0; i < pix_mp->num_planes && i < 3; i++) {
+-			p = &pix_mp->plane_fmt[i];
+-			bytesperline[i] = clamp_t(u32, p->bytesperline,
+-						  1, 65528);
+-			sizeimage[i] = clamp_t(u32, p->sizeimage,
+-					       bytesperline[i],
+-					       bytesperline[i] * CAMSS_FRAME_MAX_HEIGHT_PIX);
+-		}
+ 
+ 	for (j = 0; j < video->nformats; j++)
+ 		if (pix_mp->pixelformat == video->formats[j].pixelformat)
+@@ -492,6 +483,17 @@ static int __video_try_fmt(struct camss_video *video, struct v4l2_format *f)
+ 		j = 0; /* default format */
+ 
+ 	fi = &video->formats[j];
++	if (video->line_based)
++		for (i = 0; i < pix_mp->num_planes && i < fi->planes && i < 3; i++) {
++			p = &pix_mp->plane_fmt[i];
++			bytesperline[i] = clamp_t(u32, p->bytesperline,
++						  1, 65528);
++			sizeimage[i] = clamp_t(u32, p->sizeimage,
++					       bytesperline[i],
++					       bytesperline[i] * CAMSS_FRAME_MAX_HEIGHT_PIX /
++					       fi->vsub[i].numerator * fi->vsub[i].denominator);
++		}
++
+ 	width = pix_mp->width;
+ 	height = pix_mp->height;
+ 
+@@ -528,7 +530,8 @@ static int __video_try_fmt(struct camss_video *video, struct v4l2_format *f)
+ 						  1, 65528);
+ 			p->sizeimage = clamp_t(u32, p->sizeimage,
+ 					       p->bytesperline,
+-					       p->bytesperline * CAMSS_FRAME_MAX_HEIGHT_PIX);
++					       p->bytesperline * CAMSS_FRAME_MAX_HEIGHT_PIX /
++					       fi->vsub[i].numerator * fi->vsub[i].denominator);
+ 			lines = p->sizeimage / p->bytesperline;
+ 
+ 			if (p->bytesperline < bytesperline[i])

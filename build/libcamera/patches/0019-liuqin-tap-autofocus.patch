@@ -1,0 +1,180 @@
+diff --git a/include/libcamera/meson.build b/include/libcamera/meson.build
+index 30ea76f..0780109 100644
+--- a/include/libcamera/meson.build
++++ b/include/libcamera/meson.build
+@@ -39,6 +39,7 @@ controls_map = {
+         'draft': 'control_ids_draft.yaml',
+         'rpi/pisp': 'control_ids_rpi.yaml',
+         'rpi/vc4': 'control_ids_rpi.yaml',
++        'simple': 'control_ids_liuqin.yaml',
+     },
+ 
+     'properties': {
+diff --git a/src/libcamera/control_ids_liuqin.yaml b/src/libcamera/control_ids_liuqin.yaml
+new file mode 100644
+index 0000000..d7d298b
+--- /dev/null
++++ b/src/libcamera/control_ids_liuqin.yaml
+@@ -0,0 +1,20 @@
++# SPDX-License-Identifier: LGPL-2.1-or-later
++%YAML 1.1
++---
++vendor: liuqin
++controls:
++  - AfPointX:
++      type: float
++      direction: in
++      description: |
++        Horizontal centre of the autofocus region, normalized from 0 (left)
++        to 1 (right) in the current ISP output. Submit both coordinates with
++        AfModeAuto and AfTriggerStart in the same request. Scalar coordinates
++        can be forwarded by the PipeWire libcamera source.
++  - AfPointY:
++      type: float
++      direction: in
++      description: |
++        Vertical centre of the autofocus region, normalized from 0 (top) to
++        1 (bottom) in the current ISP output. See AfPointX.
++...
+diff --git a/src/libcamera/control_ranges.yaml b/src/libcamera/control_ranges.yaml
+index 6752eb9..a0843ca 100644
+--- a/src/libcamera/control_ranges.yaml
++++ b/src/libcamera/control_ranges.yaml
+@@ -15,6 +15,8 @@ ranges:
+   rpi: 20000
+   # Controls for debug metadata
+   debug: 30000
+-  # Next range starts at 40000
++  # Liuqin hardware ISP controls
++  liuqin: 40000
++  # Next range starts at 50000
+ 
+ ...
+diff --git a/src/libcamera/pipeline/simple/liuqin_isp.cpp b/src/libcamera/pipeline/simple/liuqin_isp.cpp
+index ef64992..b2202b6 100644
+--- a/src/libcamera/pipeline/simple/liuqin_isp.cpp
++++ b/src/libcamera/pipeline/simple/liuqin_isp.cpp
+@@ -160,6 +160,8 @@ int LiuqinIsp::configure(Transform transform, ControlInfoMap *controlsInfo, unsi
+ 			calibration_.focus.points.clear();
+ 		map[&controls::AfMode] = ControlInfo(manual ? controls::AfModeManual : controls::AfModeAuto,
+ 		                                    controls::AfModeContinuous, controls::AfModeContinuous);
++		map[&controls::liuqin::AfPointX] = ControlInfo(0.0f, 1.0f, 0.5f);
++		map[&controls::liuqin::AfPointY] = ControlInfo(0.0f, 1.0f, 0.5f);
+ 		map[&controls::AfTrigger] = ControlInfo(controls::AfTriggerValues);
+ 		map[&controls::AfState] = ControlInfo(controls::AfStateValues);
+ 	}
+@@ -288,27 +290,54 @@ int LiuqinIsp::setManualFocus(const ControlList &controls, bool starting)
+ 	return moveLens(dac);
+ }
+ 
++void LiuqinIsp::setFocusControls(const ControlList &controls)
++{
++	auto mode = controls.get(controls::AfMode);
++	if (mode && (*mode != controls::AfModeManual || !calibration_.focus.points.empty()))
++		af_.setMode(*mode);
++
++	if (af_.mode() != ipa::soft::ContrastAf::Auto)
++		focusWindow_ = {};
++
++	auto trigger = controls.get(controls::AfTrigger);
++	if (!trigger)
++		return;
++	auto x = controls.get(controls::liuqin::AfPointX);
++	auto y = controls.get(controls::liuqin::AfPointY);
++	if (*trigger == controls::AfTriggerStart && af_.mode() == ipa::soft::ContrastAf::Auto &&
++	    x && y && *x >= 0 && *x <= 1 && *y >= 0 && *y <= 1) {
++		const Size &size = info_.outputSize;
++		const Size window(std::max(1U, size.width / 6), std::max(1U, size.height / 6));
++		const Point centre(std::lround(*x * (size.width - 1)), std::lround(*y * (size.height - 1)));
++		const Rectangle next = window.centeredTo(centre).boundedTo(Rectangle(size));
++		if (next != focusWindow_) {
++			focusWindow_ = next;
++			/* Discard scores accumulated on a previously selected object. */
++			af_.trigger(false);
++		}
++		LOG(LiuqinIsp, Debug) << "Tap AF region " << focusWindow_;
++	}
++	af_.trigger(*trigger == controls::AfTriggerStart);
++}
++
+ int LiuqinIsp::start(const ControlList &controls)
+ {
+ 	ae_ = awb_ = true;
+ 	if (hasAf_) {
+ 		af_.reset();
++		focusWindow_ = {};
+ 		lensHistory_.clear();
+ 		if (!calibration_.focus.points.empty()) {
+ 			auto current = sensor_->focusLens()->focusPosition();
+ 			if (current)
+ 				lensHistory_.push_back({ 0, focusNow() + 100000000ULL, *current });
+ 		}
+-		if (auto mode = controls.get(controls::AfMode)) {
+-			if (*mode != controls::AfModeManual || !calibration_.focus.points.empty())
+-				af_.setMode(*mode);
+-		}
++		setFocusControls(controls);
+ 		if (af_.mode() == ipa::soft::ContrastAf::Manual) {
+ 			int ret = setManualFocus(controls, true);
+ 			if (ret)
+ 				return ret;
+ 		}
+-		if (auto trigger = controls.get(controls::AfTrigger)) af_.trigger(*trigger == controls::AfTriggerStart);
+ 	}
+ 	temperature_ = 5000;
+ 	ccm_ = matrix(temperature_);
+@@ -339,10 +368,7 @@ void LiuqinIsp::focus(FrameBuffer *buffer, Request *request)
+ 		if (auto pos = calibration_.focus.dioptres(lensHistory_.front().dac))
+ 			request->_d()->metadata().set(controls::LensPosition, *pos);
+ 	}
+-	if (auto mode = request->controls().get(controls::AfMode)) {
+-		if (*mode != controls::AfModeManual || !calibration_.focus.points.empty())
+-			af_.setMode(*mode);
+-	}
++	setFocusControls(request->controls());
+ 	if (af_.mode() == ipa::soft::ContrastAf::Manual) {
+ 		if (int ret = setManualFocus(request->controls(), false))
+ 			LOG(LiuqinIsp, Error) << "Manual lens control failed: " << ret;
+@@ -350,16 +376,18 @@ void LiuqinIsp::focus(FrameBuffer *buffer, Request *request)
+ 		request->_d()->metadata().set(controls::AfState, int32_t(controls::AfStateIdle));
+ 		return;
+ 	}
+-	if (auto trigger = request->controls().get(controls::AfTrigger)) af_.trigger(*trigger == controls::AfTriggerStart);
+ 	if (buffer->metadata().sequence % 4 == 0 && !buffer->planes().empty()) {
+ 		DmaSyncer sync(buffer->planes()[0].fd, DmaSyncer::SyncType::Read);
+ 		MappedFrameBuffer mapped(buffer, MappedFrameBuffer::MapFlag::Read);
+ 		unsigned int w = info_.outputSize.width, h = info_.outputSize.height;
+-		if (mapped.isValid() && !mapped.planes().empty() && mapped.planes()[0].size() >= stride_ * h) {
++		if (mapped.isValid() && !mapped.planes().empty() && w > 4 && h > 4 && mapped.planes()[0].size() >= size_t(stride_) * h) {
+ 			const uint8_t *p = mapped.planes()[0].data();
+ 			uint64_t gradient = 0, sum = 0, samples = 0;
+-			for (unsigned int y = h / 4; y < h * 3 / 4; y += 4) {
+-				for (unsigned int x = w / 4; x < w * 3 / 4; x += 4) {
++			Rectangle region = focusWindow_.isNull() ? Rectangle(w / 4, h / 4, w / 2, h / 2) : focusWindow_;
++			/* Leave two real pixels on each side for the gradient, even at the image edge. */
++			region = region.boundedTo(Rectangle(2, 2, w - 4, h - 4));
++			for (unsigned int y = region.y; y < region.y + region.height; y += 4) {
++				for (unsigned int x = region.x; x < region.x + region.width; x += 4) {
+ 					int dx = int(p[y * stride_ + x + 2]) - p[y * stride_ + x - 2];
+ 					int dy = int(p[(y + 2) * stride_ + x]) - p[(y - 2) * stride_ + x];
+ 					gradient += dx * dx + dy * dy;
+diff --git a/src/libcamera/pipeline/simple/liuqin_isp.h b/src/libcamera/pipeline/simple/liuqin_isp.h
+index 1e291d8..bef0b3d 100644
+--- a/src/libcamera/pipeline/simple/liuqin_isp.h
++++ b/src/libcamera/pipeline/simple/liuqin_isp.h
+@@ -28,6 +28,7 @@ private:
+ 	std::pair<double, double> gains(double t) const { return liuqinColour::gains(t, calibration_.rg, calibration_.bg, rear_ ? liuqinRearColour::whites : liuqinColour::whites); }
+ 	liuqinColour::Estimate estimate(double r, double b) const { return liuqinColour::estimate(r, b, calibration_.rg, calibration_.bg, rear_ ? liuqinRearColour::whites : liuqinColour::whites); }
+ 	void focus(FrameBuffer *buffer, Request *request);
++	void setFocusControls(const ControlList &controls);
+ 	int moveLens(int dac);
+ 	int setManualFocus(const ControlList &controls, bool starting);
+ 	void update(const ControlList &controls);
+@@ -47,6 +48,7 @@ private:
+ 	unsigned int margin_ = 24, minimumLines_ = 4;
+ 	double maxGain_ = 16, appliedGain_ = 1;
+ 	ipa::soft::ContrastAf af_;
++	Rectangle focusWindow_;
+ 	struct LensMove { uint64_t issued, settled; int dac; };
+ 	std::deque<LensMove> lensHistory_;
+ 	std::array<float, 9> ccm_;

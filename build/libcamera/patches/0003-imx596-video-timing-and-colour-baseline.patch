@@ -1,0 +1,774 @@
+Subject: [PATCH] simple: configure IMX596 video timing and stock colour baseline
+
+Refresh mode timing, set frame periods before stream-on, track delayed VBLANK,
+and constrain exposure for fixed-rate recording. Use the AAC RAW10 black
+pedestal and conservative CC13 matrices, with temporal AWB smoothing.
+This baseline does not implement Qualcomm custom trigger 1001 or the
+proprietary scene, denoise, lens shading and per-module calibration paths.
+Drain pending metadata requests on stop and avoid requeueing buffers after
+the software ISP has stopped, including high-rate recording EOS.
+Preserve the sensor exposure product on restart and redistribute shutter
+and analogue gain within the requested frame period to avoid noisy restarts.
+
+diff --git a/include/libcamera/internal/software_isp/software_isp.h b/include/libcamera/internal/software_isp/software_isp.h
+index 4aa7312e..5c30af2f 100644
+--- a/include/libcamera/internal/software_isp/software_isp.h
++++ b/include/libcamera/internal/software_isp/software_isp.h
+@@ -65,7 +65,7 @@ public:
+ 
+ 	int configure(const StreamConfiguration &inputCfg,
+ 		      const std::vector<std::reference_wrapper<const StreamConfiguration>> &outputCfgs,
+-		      const ipa::soft::IPAConfigInfo &configInfo);
++		      const ipa::soft::IPAConfigInfo &configInfo, ControlInfoMap *controls);
+ 
+ 	int exportBuffers(const Stream *stream, unsigned int count,
+ 			  std::vector<std::unique_ptr<FrameBuffer>> *buffers);
+@@ -73,7 +73,8 @@ public:
+ 	void processStats(const uint32_t frame, const uint32_t bufferId,
+ 			  const ControlList &sensorControls, uint64_t timestamp);
+ 
+-	int start(const ControlList &controls);
++	int start(const ControlList &controls, const ControlList &currentSensorControls,
++		  ControlList *sensorControls);
+ 	void stop();
+ 
+ 	void queueRequest(const uint32_t frame, const ControlList &controls);
+diff --git a/include/libcamera/ipa/soft.mojom b/include/libcamera/ipa/soft.mojom
+index b67ed000..993a1ec8 100644
+--- a/include/libcamera/ipa/soft.mojom
++++ b/include/libcamera/ipa/soft.mojom
+@@ -9,6 +9,7 @@ module ipa.soft;
+ import "include/libcamera/ipa/core.mojom";
+ 
+ struct IPAConfigInfo {
++	libcamera.IPACameraSensorInfo sensorInfo;
+ 	libcamera.ControlInfoMap sensorControls;
+ };
+ 
+@@ -20,10 +21,12 @@ interface IPASoftInterface {
+ 	     libcamera.ControlInfoMap sensorControls,
+ 	     libcamera.ControlInfoMap lensControls)
+ 		=> (int32 ret, libcamera.ControlInfoMap ipaControls, bool ccmEnabled);
++	prepareStart(libcamera.ControlList controls, libcamera.ControlList currentSensorControls)
++		=> (int32 ret, libcamera.ControlList sensorControls);
+ 	start(libcamera.ControlList controls) => (int32 ret);
+ 	stop();
+ 	configure(IPAConfigInfo configInfo)
+-		=> (int32 ret);
++		=> (int32 ret, libcamera.ControlInfoMap ipaControls);
+ 
+ 	[async] queueRequest(uint32 frame, libcamera.ControlList sensorControls);
+ 	[async] computeParams(uint32 frame);
+diff --git a/src/ipa/libipa/camera_sensor_helper.cpp b/src/ipa/libipa/camera_sensor_helper.cpp
+index 6f1b608e..700979ec 100644
+--- a/src/ipa/libipa/camera_sensor_helper.cpp
++++ b/src/ipa/libipa/camera_sensor_helper.cpp
+@@ -547,6 +547,8 @@ class CameraSensorHelperImx596 : public CameraSensorHelper
+ public:
+ 	CameraSensorHelperImx596()
+ 	{
++		/* AAC stock module: all four Bayer black levels are 64 / 1024. */
++		blackLevel_ = 4096;
+ 		gain_ = AnalogueGainLinear{ 0, 1024, -1, 1024 };
+ 	}
+ };
+diff --git a/src/ipa/simple/algorithms/awb.cpp b/src/ipa/simple/algorithms/awb.cpp
+index 05155c83..0c7b5b3a 100644
+--- a/src/ipa/simple/algorithms/awb.cpp
++++ b/src/ipa/simple/algorithms/awb.cpp
+@@ -8,6 +8,7 @@
+ #include "awb.h"
+ 
+ #include <numeric>
++#include <cmath>
+ #include <stdint.h>
+ 
+ #include <libcamera/base/log.h>
+@@ -23,9 +24,17 @@ LOG_DEFINE_CATEGORY(IPASoftAwb)
+ 
+ namespace ipa::soft::algorithms {
+ 
++int Awb::init([[maybe_unused]] IPAContext &context, const ValueNode &tuningData)
++{
++	speed_ = tuningData["speed"].get<float>(1.0f);
++	return std::isfinite(speed_) && speed_ > 0.0f && speed_ <= 1.0f ? 0 : -EINVAL;
++}
++
+ int Awb::configure(IPAContext &context,
+ 		   [[maybe_unused]] const IPAConfigInfo &configInfo)
+ {
++	initialized_ = false;
++	context.activeState.awb.temperatureK = 5000;
+ 	auto &gains = context.activeState.awb.gains;
+ 	gains = { { 1.0, 1.0, 1.0 } };
+ 
+@@ -78,12 +87,19 @@ void Awb::process(IPAContext &context,
+ 	 * Clamp max gain at 4.0, this also avoids 0 division.
+ 	 */
+ 	auto &gains = context.activeState.awb.gains;
+-	gains = { {
++	RGB<float> target = { {
+ 		sum.r() <= sum.g() / 4 ? 4.0f : static_cast<float>(sum.g()) / sum.r(),
+ 		1.0,
+ 		sum.b() <= sum.g() / 4 ? 4.0f : static_cast<float>(sum.g()) / sum.b(),
+ 	} };
+ 
++	/* Freeze empty/black frames; smooth valid video updates after startup. */
++	if (!nPixels || stats->sum_.g() <= offset + nPixels * 2)
++		return;
++	const float speed = initialized_ ? speed_ : 1.0f;
++	gains = gains * (1.0f - speed) + target * speed;
++	initialized_ = true;
++
+ 	RGB<double> rgbGains{ { 1 / gains.r(), 1 / gains.g(), 1 / gains.b() } };
+ 	context.activeState.awb.temperatureK = estimateCCT(rgbGains);
+ 	metadata.set(controls::ColourTemperature, context.activeState.awb.temperatureK);
+diff --git a/src/ipa/simple/algorithms/awb.h b/src/ipa/simple/algorithms/awb.h
+index ad993f39..3faf4e9f 100644
+--- a/src/ipa/simple/algorithms/awb.h
++++ b/src/ipa/simple/algorithms/awb.h
+@@ -19,6 +19,7 @@ public:
+ 	Awb() = default;
+ 	~Awb() = default;
+ 
++	int init(IPAContext &context, const ValueNode &tuningData) override;
+ 	int configure(IPAContext &context, const IPAConfigInfo &configInfo) override;
+ 	void prepare(IPAContext &context,
+ 		     const uint32_t frame,
+@@ -29,6 +30,9 @@ public:
+ 		     IPAFrameContext &frameContext,
+ 		     const SwIspStats *stats,
+ 		     ControlList &metadata) override;
++private:
++	float speed_ = 1.0f;
++	bool initialized_ = false;
+ };
+ 
+ } /* namespace ipa::soft::algorithms */
+diff --git a/src/ipa/simple/data/imx596.yaml b/src/ipa/simple/data/imx596.yaml
+new file mode 100644
+index 00000000..313aed0a
+--- /dev/null
++++ b/src/ipa/simple/data/imx596.yaml
+@@ -0,0 +1,37 @@
++# SPDX-License-Identifier: CC0-1.0
++%YAML 1.1
++---
++version: 1
++# AAC IMX596 baseline. See docs/LIBCAMERA.md in liuqin-linux-kit.
++# Stock RAW10 black = 64; conservative stock IPE CC13 colour matrices.
++# This does not reproduce the proprietary trigger/AWB/noise/LSC algorithms.
++algorithms:
++  - BlackLevel:
++      blackLevel: 4096
++  - Awb:
++      speed: 0.25
++  - Ccm:
++      ccms:
++        - ct: 2000
++          ccm: [ 1.4726, -0.60985, 0.13725, -0.27053, 1.21319, 0.05734, -0.16336, -0.49502, 1.65838 ]
++        - ct: 2450
++          ccm: [ 1.4726, -0.60985, 0.13725, -0.27053, 1.21319, 0.05734, -0.16336, -0.49502, 1.65838 ]
++        - ct: 2650
++          ccm: [ 1.37475, -0.44368, 0.06893, -0.21636, 1.20229, 0.01407, -0.09141, -0.49107, 1.58248 ]
++        - ct: 3250
++          ccm: [ 1.37475, -0.44368, 0.06893, -0.21636, 1.20229, 0.01407, -0.09141, -0.49107, 1.58248 ]
++        - ct: 3500
++          ccm: [ 1.2229, -0.365, 0.1421, -0.1435, 1.2306, -0.0871, -0.0098, -0.362, 1.3718 ]
++        - ct: 4300
++          ccm: [ 1.2229, -0.365, 0.1421, -0.1435, 1.2306, -0.0871, -0.0098, -0.362, 1.3718 ]
++        - ct: 4500
++          ccm: [ 1.2678, -0.2751, 0.0073, -0.1373, 1.2508, -0.1135, -0.0101, -0.3168, 1.3269 ]
++        - ct: 5500
++          ccm: [ 1.2678, -0.2751, 0.0073, -0.1373, 1.2508, -0.1135, -0.0101, -0.3168, 1.3269 ]
++        - ct: 5800
++          ccm: [ 1.24929, -0.21534, -0.03395, -0.10731, 1.30871, -0.2014, -0.00383, -0.27879, 1.28262 ]
++        - ct: 8500
++          ccm: [ 1.24929, -0.21534, -0.03395, -0.10731, 1.30871, -0.2014, -0.00383, -0.27879, 1.28262 ]
++  - Adjust:
++  - Agc:
++...
+diff --git a/src/ipa/simple/data/meson.build b/src/ipa/simple/data/meson.build
+index 92795ee4..336cb078 100644
+--- a/src/ipa/simple/data/meson.build
++++ b/src/ipa/simple/data/meson.build
+@@ -2,6 +2,7 @@
+ 
+ conf_files = files([
+     'uncalibrated.yaml',
++    'imx596.yaml',
+ ])
+ 
+ # The install_dir must match the name from the IPAModuleInfo
+diff --git a/src/ipa/simple/frame_duration.h b/src/ipa/simple/frame_duration.h
+new file mode 100644
+index 00000000..e65f92ae
+--- /dev/null
++++ b/src/ipa/simple/frame_duration.h
+@@ -0,0 +1,66 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#pragma once
++
++#include <algorithm>
++#include <cstdint>
++#include <utility>
++
++namespace libcamera::ipa::soft {
++
++/* Fixed-period video: prefer the shortest period within the requested range. */
++class FrameDuration
++{
++public:
++	void configure(uint32_t lineLength, uint64_t pixelRate, uint32_t height,
++		       int32_t minBlank, int32_t maxBlank, int32_t defaultBlank,
++		       uint32_t margin)
++	{
++		lineLength_ = lineLength;
++		pixelRate_ = pixelRate;
++		height_ = height;
++		minBlank_ = minBlank;
++		maxBlank_ = maxBlank;
++		defaultBlank_ = defaultBlank;
++		blank_ = defaultBlank;
++		margin_ = margin;
++	}
++
++	int64_t durationUs(int32_t blank) const
++	{
++		return uint64_t(height_ + blank) * lineLength_ * 1000000 / pixelRate_;
++	}
++	int64_t minUs() const { return durationUs(minBlank_); }
++	int64_t maxUs() const { return durationUs(maxBlank_); }
++	int64_t defaultUs() const { return durationUs(defaultBlank_); }
++	int32_t vblank() const { return blank_; }
++	int32_t exposureMax() const { return height_ + blank_ - margin_; }
++
++	/* Preserve exposure product while preferring shutter time over gain. */
++	std::pair<int32_t, double> exposureAndGain(int32_t exposure, double gain) const
++	{
++		double total = exposure * gain;
++		int32_t lines = std::clamp<double>(total, 1, exposureMax());
++		return { lines, total / lines };
++	}
++
++	void set(int64_t minUs, int64_t maxUs)
++	{
++		if (minUs <= 0 && maxUs <= 0) {
++			blank_ = defaultBlank_;
++			return;
++		}
++		/* Zero means the mode default; never multiply an unchecked request. */
++		int64_t period = std::clamp(minUs > 0 ? minUs : defaultUs(), this->minUs(), this->maxUs());
++		if (maxUs > 0)
++			period = std::min(period, std::clamp(maxUs, this->minUs(), this->maxUs()));
++		int64_t lines = uint64_t(period) * pixelRate_ / (uint64_t(lineLength_) * 1000000);
++		blank_ = std::clamp<int64_t>(lines - height_, minBlank_, maxBlank_);
++	}
++
++private:
++	uint64_t pixelRate_ = 1;
++	uint32_t lineLength_ = 1, height_ = 0, margin_ = 0;
++	int32_t minBlank_ = 0, maxBlank_ = 0, defaultBlank_ = 0, blank_ = 0;
++};
++
++} /* namespace libcamera::ipa::soft */
+diff --git a/src/ipa/simple/ipa_context.h b/src/ipa/simple/ipa_context.h
+index 4fb3e935..9b9de863 100644
+--- a/src/ipa/simple/ipa_context.h
++++ b/src/ipa/simple/ipa_context.h
+@@ -64,6 +64,7 @@ struct IPAActiveState {
+ };
+ 
+ struct IPAFrameContext : public FrameContext {
++	ControlList frameControls;
+ 	std::optional<int32_t> afMode;
+ 	std::optional<int32_t> afTrigger;
+ 	Matrix<float, 3, 3> ccm;
+diff --git a/src/ipa/simple/soft_simple.cpp b/src/ipa/simple/soft_simple.cpp
+index 5031d506..e037406c 100644
+--- a/src/ipa/simple/soft_simple.cpp
++++ b/src/ipa/simple/soft_simple.cpp
+@@ -31,6 +31,7 @@
+ 
+ #include "module.h"
+ #include "contrast_af.h"
++#include "frame_duration.h"
+ 
+ namespace libcamera {
+ LOG_DEFINE_CATEGORY(IPASoft)
+@@ -60,8 +61,10 @@ public:
+ 		 const ControlInfoMap &lensControls,
+ 		 ControlInfoMap *ipaControls,
+ 		 bool *ccmEnabled) override;
+-	int configure(const IPAConfigInfo &configInfo) override;
++	int configure(const IPAConfigInfo &configInfo, ControlInfoMap *ipaControls) override;
+ 
++	int prepareStart(const ControlList &controls, const ControlList &currentSensorControls,
++			 ControlList *sensorControls) override;
+ 	int start(const ControlList &controls) override;
+ 	void lensPositionApplied(int32_t position, uint64_t readyAt, int32_t error) override;
+ 	void stop() override;
+@@ -79,10 +82,15 @@ private:
+ 
+ 	ContrastAf af_;
+ 	bool hasAf_ = false;
++	bool running_ = false;
+ 	DebayerParams *params_ = nullptr;
+ 	SwIspStats *stats_ = nullptr;
+ 	std::unique_ptr<CameraSensorHelper> camHelper_;
+ 	ControlInfoMap sensorInfoMap_;
++	ControlInfoMap ipaControls_;
++	FrameDuration frameDuration_;
++	bool hasFrameDuration_ = false;
++	void applyFrameDuration(const ControlList &controls);
+ 
+ 	/* Local parameter storage */
+ 	struct IPAContext context_;
+@@ -192,7 +200,16 @@ int IPASoftSimple::init(const IPASettings &settings,
+ 		ctrlMap[&controls::AfTrigger] = ControlInfo(controls::AfTriggerValues);
+ 		ctrlMap[&controls::AfState] = ControlInfo(controls::AfStateValues);
+ 	}
+-	*ipaControls = ControlInfoMap(std::move(ctrlMap), controls::controls);
++	if (settings.sensorModel == "imx596" && sensorControls.count(V4L2_CID_VBLANK)) {
++		const auto &blank = sensorControls.at(V4L2_CID_VBLANK);
++		frameDuration_.configure(sensorInfo.minLineLength, sensorInfo.pixelRate,
++			sensorInfo.outputSize.height, blank.min().get<int32_t>(),
++			blank.max().get<int32_t>(), blank.def().get<int32_t>(), 24);
++		ctrlMap[&controls::FrameDurationLimits] = ControlInfo(
++			frameDuration_.minUs(), frameDuration_.maxUs(), frameDuration_.defaultUs());
++	}
++	ipaControls_ = ControlInfoMap(std::move(ctrlMap), controls::controls);
++	*ipaControls = ipaControls_;
+ 
+ 	/*
+ 	 * Check if the sensor driver supports the controls required by the
+@@ -213,9 +230,12 @@ int IPASoftSimple::init(const IPASettings &settings,
+ 	return 0;
+ }
+ 
+-int IPASoftSimple::configure(const IPAConfigInfo &configInfo)
++int IPASoftSimple::configure(const IPAConfigInfo &configInfo, ControlInfoMap *ipaControls)
+ {
++	context_.sensorInfo = configInfo.sensorInfo;
+ 	sensorInfoMap_ = configInfo.sensorControls;
++	hasFrameDuration_ = context_.sensorInfo.model == "imx596" &&
++		 sensorInfoMap_.count(V4L2_CID_VBLANK);
+ 
+ 	const ControlInfo &exposureInfo = sensorInfoMap_.find(V4L2_CID_EXPOSURE)->second;
+ 	const ControlInfo &gainInfo = sensorInfoMap_.find(V4L2_CID_ANALOGUE_GAIN)->second;
+@@ -263,6 +283,19 @@ int IPASoftSimple::configure(const IPAConfigInfo &configInfo)
+ 		context_.configuration.agc.againMinStep = 1.0;
+ 	}
+ 
++	ControlInfoMap::Map ctrlMap(ipaControls_.begin(), ipaControls_.end());
++	if (hasFrameDuration_) {
++		const auto &info = context_.sensorInfo;
++		const auto &blank = sensorInfoMap_.at(V4L2_CID_VBLANK);
++		frameDuration_.configure(info.minLineLength, info.pixelRate,
++			info.outputSize.height, blank.min().get<int32_t>(),
++			blank.max().get<int32_t>(), blank.def().get<int32_t>(), 24);
++		ctrlMap[&controls::FrameDurationLimits] = ControlInfo(
++			frameDuration_.minUs(), frameDuration_.maxUs(), frameDuration_.defaultUs());
++		context_.configuration.agc.exposureMax = frameDuration_.exposureMax();
++	}
++	*ipaControls = ControlInfoMap(std::move(ctrlMap), controls::controls);
++
+ 	for (const auto &algo : algorithms()) {
+ 		int ret = algo->configure(context_, configInfo);
+ 		if (ret)
+@@ -279,8 +312,43 @@ int IPASoftSimple::configure(const IPAConfigInfo &configInfo)
+ 	return 0;
+ }
+ 
++void IPASoftSimple::applyFrameDuration(const ControlList &controls)
++{
++	if (!hasFrameDuration_)
++		return;
++	if (auto limits = controls.get(controls::FrameDurationLimits))
++		frameDuration_.set((*limits)[0], (*limits)[1]);
++	context_.configuration.agc.exposureMax = frameDuration_.exposureMax();
++	if (context_.activeState.agc.valid)
++		context_.activeState.agc.exposure = std::min(context_.activeState.agc.exposure,
++							 frameDuration_.exposureMax());
++}
++
++int IPASoftSimple::prepareStart(const ControlList &controls, const ControlList &currentSensorControls,
++			       ControlList *sensorControls)
++{
++	*sensorControls = ControlList(sensorInfoMap_);
++	applyFrameDuration(controls);
++	if (hasFrameDuration_) {
++		if (!currentSensorControls.contains(V4L2_CID_EXPOSURE) ||
++		    !currentSensorControls.contains(V4L2_CID_ANALOGUE_GAIN))
++			return -EINVAL;
++		auto [exposure, gain] = frameDuration_.exposureAndGain(
++			currentSensorControls.get(V4L2_CID_EXPOSURE).get<int32_t>(),
++			camHelper_->gain(currentSensorControls.get(V4L2_CID_ANALOGUE_GAIN).get<int32_t>()));
++		gain = std::clamp(gain, context_.configuration.agc.againMin,
++				 context_.configuration.agc.againMax);
++		sensorControls->set(V4L2_CID_VBLANK, frameDuration_.vblank());
++		sensorControls->set(V4L2_CID_EXPOSURE, exposure);
++		sensorControls->set(V4L2_CID_ANALOGUE_GAIN,
++				    static_cast<int32_t>(camHelper_->gainCode(gain)));
++	}
++	return 0;
++}
++
+ int IPASoftSimple::start(const ControlList &controls)
+ {
++	running_ = true;
+ 	af_.reset();
+ 	if (auto mode = controls.get(controls::AfMode))
+ 		af_.setMode(*mode);
+@@ -291,13 +359,17 @@ int IPASoftSimple::start(const ControlList &controls)
+ 
+ void IPASoftSimple::stop()
+ {
++	running_ = false;
+ 	context_.frameContexts.clear();
+ 	af_.reset();
+ }
+ 
+ void IPASoftSimple::queueRequest(const uint32_t frame, const ControlList &controls)
+ {
++	if (!running_)
++		return;
+ 	IPAFrameContext &frameContext = context_.frameContexts.alloc(frame);
++	frameContext.frameControls = controls;
+ 	frameContext.afMode = controls.get(controls::AfMode);
+ 	frameContext.afTrigger = controls.get(controls::AfTrigger);
+ 
+@@ -307,6 +379,8 @@ void IPASoftSimple::queueRequest(const uint32_t frame, const ControlList &contro
+ 
+ void IPASoftSimple::computeParams(const uint32_t frame)
+ {
++	if (!running_)
++		return;
+ 	context_.activeState.combinedMatrix = Matrix<float, 3, 3>::identity();
+ 
+ 	IPAFrameContext &frameContext = context_.frameContexts.get(frame);
+@@ -321,8 +395,12 @@ void IPASoftSimple::processStats(const uint32_t frame,
+ 				 [[maybe_unused]] const uint32_t bufferId,
+ 				 const ControlList &sensorControls, uint64_t timestamp)
+ {
++	/* Isolated IPA calls queued before stop may arrive after its reset. */
++	if (!running_)
++		return;
+ 	IPAFrameContext &frameContext = context_.frameContexts.get(frame);
+ 
++	applyFrameDuration(frameContext.frameControls);
+ 	frameContext.sensor.exposure =
+ 		sensorControls.get(V4L2_CID_EXPOSURE).get<int32_t>();
+ 	int32_t again = sensorControls.get(V4L2_CID_ANALOGUE_GAIN).get<int32_t>();
+@@ -355,6 +433,9 @@ void IPASoftSimple::processStats(const uint32_t frame,
+ 			frameContext.sensor.gain = context_.activeState.agc.again = gain;
+ 		}
+ 	}
++	if (hasFrameDuration_ && sensorControls.contains(V4L2_CID_VBLANK))
++		metadata.set(controls::FrameDuration, frameDuration_.durationUs(
++			sensorControls.get(V4L2_CID_VBLANK).get<int32_t>()));
+ 	metadataReady.emit(frame, metadata);
+ 
+ 	/* Sanity check */
+@@ -366,6 +447,11 @@ void IPASoftSimple::processStats(const uint32_t frame,
+ 
+ 	ControlList ctrls(sensorInfoMap_);
+ 
++	if (hasFrameDuration_) {
++		ctrls.set(V4L2_CID_VBLANK, frameDuration_.vblank());
++		frameContext.sensor.exposure = std::min(frameContext.sensor.exposure,
++							frameDuration_.exposureMax());
++	}
+ 	auto &againNew = frameContext.sensor.gain;
+ 	ctrls.set(V4L2_CID_EXPOSURE, frameContext.sensor.exposure);
+ 	ctrls.set(V4L2_CID_ANALOGUE_GAIN,
+@@ -376,7 +462,8 @@ void IPASoftSimple::processStats(const uint32_t frame,
+ 
+ void IPASoftSimple::lensPositionApplied(int32_t position, uint64_t readyAt, int32_t error)
+ {
+-	af_.applied(position, readyAt, error);
++	if (running_)
++		af_.applied(position, readyAt, error);
+ }
+ 
+ std::string IPASoftSimple::logPrefix() const
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index d985ba9b..49fcd3b3 100644
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -206,7 +206,7 @@ class SimpleFrames
+ public:
+ 	void create(Request *request, bool metadataRequested);
+ 	void destroy(uint32_t frame);
+-	void clear();
++	std::vector<Request *> clear();
+ 
+ 	SimpleFrameInfo *find(uint32_t frame);
+ 
+@@ -226,9 +226,13 @@ void SimpleFrames::destroy(uint32_t frame)
+ 	frameInfo_.erase(frame);
+ }
+ 
+-void SimpleFrames::clear()
++std::vector<Request *> SimpleFrames::clear()
+ {
++	std::vector<Request *> requests;
++	for (auto &[frame, info] : frameInfo_)
++		requests.push_back(info.request);
+ 	frameInfo_.clear();
++	return requests;
+ }
+ 
+ SimpleFrameInfo *SimpleFrames::find(uint32_t frame)
+@@ -349,6 +353,7 @@ public:
+ 	std::map<PixelFormat, std::vector<const Configuration *>> formats_;
+ 
+ 	std::unique_ptr<DelayedControls> delayedCtrls_;
++	bool stopping_ = false;
+ 
+ 	std::vector<std::unique_ptr<FrameBuffer>> conversionBuffers_;
+ 	struct RequestOutputs {
+@@ -572,6 +577,9 @@ SimpleCameraData::SimpleCameraData(SimplePipelineHandler *pipe,
+ 		{ V4L2_CID_ANALOGUE_GAIN, { delays.gainDelay, false } },
+ 		{ V4L2_CID_EXPOSURE, { delays.exposureDelay, false } },
+ 	};
++	/* IMX596 frame length and exposure latch on the same frame boundary. */
++	if (sensor_->model() == "imx596")
++		params[V4L2_CID_VBLANK] = { delays.exposureDelay, true };
+ 	delayedCtrls_ = std::make_unique<DelayedControls>(sensor_->device(), params);
+ 
+ 	LOG(SimplePipeline, Debug)
+@@ -981,6 +989,7 @@ void SimpleCameraData::imageBufferReady(FrameBuffer *buffer)
+ void SimpleCameraData::clearIncompleteRequests()
+ {
+ 	while (!conversionQueue_.empty()) {
++		frameInfo_.destroy(conversionQueue_.front().request->sequence());
+ 		pipe()->cancelRequest(conversionQueue_.front().request);
+ 		conversionQueue_.pop();
+ 	}
+@@ -1013,7 +1022,8 @@ void SimpleCameraData::conversionInputDone(FrameBuffer *buffer)
+ 			tryCompleteRequest(request);
+ 	} else {
+ 		/* Queue the input buffer back for capture. */
+-		video_->queueBuffer(buffer);
++		if (!stopping_)
++			video_->queueBuffer(buffer);
+ 	}
+ }
+ 
+@@ -1030,7 +1040,9 @@ void SimpleCameraData::conversionOutputDone(FrameBuffer *buffer)
+ void SimpleCameraData::ispStatsReady(uint32_t frame, uint32_t bufferId)
+ {
+ 	SimpleFrameInfo *info = frameInfo_.find(frame);
+-	uint64_t timestamp = info ? info->request->metadata().get(controls::SensorTimestamp).value_or(0) : 0;
++	if (stopping_ || !info)
++		return;
++	uint64_t timestamp = info->request->metadata().get(controls::SensorTimestamp).value_or(0);
+ 	swIsp_->processStats(frame, bufferId, delayedCtrls_->get(frame), timestamp);
+ }
+ 
+@@ -1608,8 +1620,12 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
+ 			data->rawStream_ = &data->streams_[i];
+ 	}
+ 
+-	if (outputCfgs.empty())
++	if (outputCfgs.empty()) {
++		ControlInfoMap::Map ctrlMap(data->controlInfo_.begin(), data->controlInfo_.end());
++		ctrlMap.erase(&controls::FrameDurationLimits);
++		data->controlInfo_ = ControlInfoMap(std::move(ctrlMap), controls::controls);
+ 		return 0;
++	}
+ 
+ 	StreamConfiguration inputCfg;
+ 	inputCfg.pixelFormat = videoFormat.toPixelFormat();
+@@ -1621,8 +1637,12 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
+ 		return data->converter_->configure(inputCfg, outputCfgs);
+ 	} else {
+ 		ipa::soft::IPAConfigInfo configInfo;
++		ret = data->sensor_->sensorInfo(&configInfo.sensorInfo);
++		if (ret)
++			return ret;
+ 		configInfo.sensorControls = data->sensor_->controls();
+-		return data->swIsp_->configure(inputCfg, outputCfgs, configInfo);
++		return data->swIsp_->configure(inputCfg, outputCfgs, configInfo,
++					       &data->controlInfo_);
+ 	}
+ }
+ 
+@@ -1658,6 +1678,7 @@ int SimplePipelineHandler::start(Camera *camera, [[maybe_unused]] const ControlL
+ 			<< pad->entity()->name() << " in use";
+ 		return -EBUSY;
+ 	}
++	data->stopping_ = false;
+ 
+ 	if (data->useConversion_ && !data->rawStream_) {
+ 		/*
+@@ -1681,6 +1702,26 @@ int SimplePipelineHandler::start(Camera *camera, [[maybe_unused]] const ControlL
+ 
+ 	video->bufferReady.connect(data, &SimpleCameraData::imageBufferReady);
+ 
++	/* Program the requested frame period before the first sensor frame. */
++	if (data->useConversion_ && data->swIsp_) {
++		ControlList sensorControls(data->sensor_->controls());
++		const uint32_t ids[] = { V4L2_CID_EXPOSURE, V4L2_CID_ANALOGUE_GAIN };
++		ControlList current = data->sensor_->getControls(ids);
++		ret = data->swIsp_->start(controls ? *controls : ControlList(controls::controls),
++					  current, &sensorControls);
++		if (!ret && sensorControls.contains(V4L2_CID_VBLANK)) {
++			/* Expand the kernel exposure range before writing a longer shutter. */
++			ControlList blanking(data->sensor_->controls());
++			blanking.set(V4L2_CID_VBLANK, sensorControls.get(V4L2_CID_VBLANK));
++			ret = data->sensor_->setControls(&blanking);
++		}
++		if (!ret && !sensorControls.empty())
++			ret = data->sensor_->setControls(&sensorControls);
++		if (ret) {
++			stop(camera);
++			return ret;
++		}
++	}
+ 	data->delayedCtrls_->reset();
+ 	if (frameStartEmitter) {
+ 		ret = frameStartEmitter->setFrameStartEnabled(true);
+@@ -1701,8 +1742,6 @@ int SimplePipelineHandler::start(Camera *camera, [[maybe_unused]] const ControlL
+ 	if (data->useConversion_) {
+ 		if (data->converter_)
+ 			ret = data->converter_->start();
+-		else if (data->swIsp_)
+-			ret = data->swIsp_->start(controls ? *controls : ControlList(controls::controls));
+ 		else
+ 			ret = 0;
+ 
+@@ -1725,6 +1764,7 @@ void SimplePipelineHandler::stopDevice(Camera *camera)
+ 	SimpleCameraData *data = cameraData(camera);
+ 	V4L2VideoDevice *video = data->video_;
+ 	V4L2Subdevice *frameStartEmitter = data->frameStartEmitter_;
++	data->stopping_ = true;
+ 
+ 	if (frameStartEmitter) {
+ 		frameStartEmitter->setFrameStartEnabled(false);
+@@ -1744,8 +1784,10 @@ void SimplePipelineHandler::stopDevice(Camera *camera)
+ 
+ 	video->bufferReady.disconnect(data, &SimpleCameraData::imageBufferReady);
+ 
+-	data->frameInfo_.clear();
+ 	data->clearIncompleteRequests();
++	/* Converted buffers may still be waiting for asynchronous IPA metadata. */
++	for (Request *request : data->frameInfo_.clear())
++		cancelRequest(request);
+ 	data->conversionBuffers_.clear();
+ 
+ 	releasePipeline(data);
+diff --git a/src/libcamera/software_isp/software_isp.cpp b/src/libcamera/software_isp/software_isp.cpp
+index d12bc9e0..dadcf330 100644
+--- a/src/libcamera/software_isp/software_isp.cpp
++++ b/src/libcamera/software_isp/software_isp.cpp
+@@ -290,11 +290,11 @@ uint32_t SoftwareIsp::preferredInputStride(const PixelFormat &inputFormat, const
+  */
+ int SoftwareIsp::configure(const StreamConfiguration &inputCfg,
+ 			   const std::vector<std::reference_wrapper<const StreamConfiguration>> &outputCfgs,
+-			   const ipa::soft::IPAConfigInfo &configInfo)
++			   const ipa::soft::IPAConfigInfo &configInfo, ControlInfoMap *controls)
+ {
+ 	ASSERT(ipa_ && debayer_);
+ 
+-	int ret = ipa_->configure(configInfo);
++	int ret = ipa_->configure(configInfo, controls);
+ 	if (ret < 0)
+ 		return ret;
+ 
+@@ -381,9 +381,16 @@ int SoftwareIsp::queueBuffers(uint32_t frame, FrameBuffer *input,
+  * \brief Starts the Software ISP streaming operation
+  * \return 0 on success, any other value indicates an error
+  */
+-int SoftwareIsp::start(const ControlList &controls)
++int SoftwareIsp::start(const ControlList &controls, const ControlList &currentSensorControls,
++		       ControlList *sensorControls)
+ {
+-	int ret = ipa_->start(controls);
++	/* Camera::start() also accepts lists constructed without an ID map. */
++	ControlList ipaControls(controls::controls);
++	ipaControls.merge(controls);
++	int ret = ipa_->prepareStart(ipaControls, currentSensorControls, sensorControls);
++	if (ret)
++		return ret;
++	ret = ipa_->start(ipaControls);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -401,11 +408,13 @@ int SoftwareIsp::start(const ControlList &controls)
+  */
+ void SoftwareIsp::stop()
+ {
+-	debayer_->invokeMethod(&Debayer::stop,
+-			       ConnectionTypeBlocking);
+-
+-	ispWorkerThread_.exit();
+-	ispWorkerThread_.wait();
++	/* prepareStart() can fail before the worker thread has been started. */
++	if (ispWorkerThread_.isRunning()) {
++		debayer_->invokeMethod(&Debayer::stop,
++				       ConnectionTypeBlocking);
++		ispWorkerThread_.exit();
++		ispWorkerThread_.wait();
++	}
+ 
+ 	Thread::current()->dispatchMessages(Message::Type::InvokeMessage, this);
+ 
+diff --git a/test/frame-duration.cpp b/test/frame-duration.cpp
+new file mode 100644
+index 00000000..66d0b198
+--- /dev/null
++++ b/test/frame-duration.cpp
+@@ -0,0 +1,39 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#include <cassert>
++#include <cstdint>
++#include <cmath>
++#include <limits>
++#include "../src/ipa/simple/frame_duration.h"
++using libcamera::ipa::soft::FrameDuration;
++int main()
++{
++	FrameDuration timing;
++	timing.configure(4644, 878080000, 1472, 1679, 65535 - 1472, 4830, 24);
++	assert(timing.defaultUs() == 33330);
++	timing.set(16666, 16666);
++	assert(timing.vblank() == 1679 && timing.exposureMax() == 3127);
++	assert(timing.durationUs(timing.vblank()) == 16665);
++	timing.set(33333, 33333);
++	assert(timing.vblank() == 4830 && timing.exposureMax() == 6278);
++	auto [exposure, gain] = timing.exposureAndGain(1000, 42.666668);
++	assert(exposure == 6278 && gain < 7);
++	assert(std::abs(exposure * gain - 42666.668) < 0.001);
++	timing.set(16666, 16666);
++	auto fast = timing.exposureAndGain(exposure, gain);
++	assert(fast.first == 3127 && std::abs(fast.first * fast.second - 42666.668) < 0.001);
++	auto low = timing.exposureAndGain(1000, 1);
++	assert(low.first == 1000 && low.second == 1);
++	timing.set(0, 0);
++	assert(timing.vblank() == 4830);
++	timing.set(std::numeric_limits<int64_t>::max(), std::numeric_limits<int64_t>::max());
++	assert(timing.vblank() <= 65535 - 1472 && timing.exposureMax() <= 65535 - 24);
++	timing.set(-1, -1);
++	assert(timing.vblank() == 4830);
++	timing.configure(7288, 727040000, 3904, 6071, 65535 - 3904, 6071, 24);
++	timing.set(33333, 33333);
++	assert(timing.vblank() == 6071 && timing.exposureMax() == 9951);
++	assert(timing.defaultUs() == 99991);
++	timing.configure(4644, 878080000, 1952, 4350, 65535 - 1952, 4350, 24);
++	timing.set(16666, 16666);
++	assert(timing.vblank() == 4350);
++}
+diff --git a/test/meson.build b/test/meson.build
+index cb181983..0493444f 100644
+--- a/test/meson.build
++++ b/test/meson.build
+@@ -41,6 +41,7 @@ subdir('v4l2_subdevice')
+ subdir('v4l2_videodevice')
+ 
+ public_tests = [
++    {'name': 'frame-duration', 'sources': ['frame-duration.cpp']},
+     {'name': 'contrast-af', 'sources': ['contrast-af.cpp']},
+     {'name': 'color-space', 'sources': ['color-space.cpp']},
+     {'name': 'geometry', 'sources': ['geometry.cpp']},

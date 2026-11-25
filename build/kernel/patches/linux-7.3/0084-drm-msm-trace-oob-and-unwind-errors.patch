@@ -1,0 +1,122 @@
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_gmu.c b/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
+index ba5940928..15e57f34c 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
+@@ -395,6 +395,7 @@ int a6xx_gmu_set_oob(struct a6xx_gmu *gmu, enum a6xx_gmu_oob_state state)
+ 	struct a6xx_gpu *a6xx_gpu = container_of(gmu, struct a6xx_gpu, gmu);
+ 	struct adreno_gpu *adreno_gpu = &a6xx_gpu->base;
+ 	int ret, attempt;
++	ktime_t start;
+ 	u32 val;
+ 	int request, ack;
+ 
+@@ -421,7 +422,8 @@ int a6xx_gmu_set_oob(struct a6xx_gmu *gmu, enum a6xx_gmu_oob_state state)
+ 		}
+ 	}
+ 
+-	/* Trigger the equested OOB operation */
++	start = ktime_get();
++	/* Trigger the requested OOB operation */
+ 	gmu_write(gmu, REG_A6XX_GMU_HOST2GMU_INTR_SET, 1 << request);
+ 
+ 	for (attempt = 0; attempt < 2; attempt++) {
+@@ -454,6 +456,15 @@ int a6xx_gmu_set_oob(struct a6xx_gmu *gmu, enum a6xx_gmu_oob_state state)
+ 				gmu_read(gmu, REG_A6XX_GMU_GMU2HOST_INTR_INFO),
+ 				__builtin_return_address(0));
+ 
++	if (trace_msm_gmu_oob_enabled())
++		trace_msm_gmu_oob(state, ret, ktime_us_delta(ktime_get(), start),
++			val, gmu_read(gmu, adreno_is_a8xx(adreno_gpu) ?
++				REG_A8XX_GPU_GMU_CX_GMU_RPMH_POWER_STATE :
++				REG_A6XX_GPU_GMU_CX_GMU_RPMH_POWER_STATE),
++			gmu_read(gmu, REG_A6XX_GPU_GMU_AO_GPU_CX_BUSY_STATUS), gmu->hung,
++			adreno_gpu->base.needs_hw_init,
++			(unsigned long)__builtin_return_address(0));
++
+ 	/* Clear the acknowledge interrupt */
+ 	gmu_write(gmu, REG_A6XX_GMU_GMU2HOST_INTR_CLR, 1 << ack);
+ 
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_gpu.c b/drivers/gpu/drm/msm/adreno/a6xx_gpu.c
+index 253f25c09..011e37a68 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_gpu.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_gpu.c
+@@ -1202,8 +1202,11 @@ static int hw_init(struct msm_gpu *gpu)
+ 	if (!adreno_has_gmu_wrapper(adreno_gpu)) {
+ 		/* Make sure the GMU keeps the GPU on while we set it up */
+ 		ret = a6xx_gmu_set_oob(&a6xx_gpu->gmu, GMU_OOB_GPU_SET);
+-		if (ret)
++		if (ret) {
++			/* The request remains asserted even if its ACK times out. */
++			a6xx_gmu_clear_oob(gmu, GMU_OOB_GPU_SET);
+ 			return ret;
++		}
+ 	}
+ 
+ 	/* Clear GBIF halt in case GX domain was not collapsed */
+diff --git a/drivers/gpu/drm/msm/adreno/adreno_gpu.c b/drivers/gpu/drm/msm/adreno/adreno_gpu.c
+index 5832dc25d..8d3eaaae5 100644
+--- a/drivers/gpu/drm/msm/adreno/adreno_gpu.c
++++ b/drivers/gpu/drm/msm/adreno/adreno_gpu.c
+@@ -369,6 +369,7 @@ int adreno_get_param(struct msm_gpu *gpu, struct msm_context *ctx,
+ 	struct drm_device *drm = gpu->dev;
+ 	/* Note ctx can be NULL when called from rd_open(): */
+ 	struct drm_gpuvm *vm = ctx ? msm_context_vm(drm, ctx) : NULL;
++	int ret;
+ 
+ 	/* No pointer params yet */
+ 	if (*len != 0)
+@@ -397,7 +398,9 @@ int adreno_get_param(struct msm_gpu *gpu, struct msm_context *ctx,
+ 		return 0;
+ 	case MSM_PARAM_TIMESTAMP:
+ 		if (adreno_gpu->funcs->get_timestamp) {
+-			pm_runtime_get_sync(&gpu->pdev->dev);
++			ret = pm_runtime_resume_and_get(&gpu->pdev->dev);
++			if (ret < 0)
++				return ret;
+ 			*value = adreno_gpu->funcs->get_timestamp(gpu);
+ 			pm_runtime_put_autosuspend(&gpu->pdev->dev);
+ 
+diff --git a/drivers/gpu/drm/msm/msm_gpu_trace.h b/drivers/gpu/drm/msm/msm_gpu_trace.h
+index 5417f8d38..77e44ea8a 100644
+--- a/drivers/gpu/drm/msm/msm_gpu_trace.h
++++ b/drivers/gpu/drm/msm/msm_gpu_trace.h
+@@ -8,6 +8,39 @@
+ #define TRACE_SYSTEM drm_msm_gpu
+ #define TRACE_INCLUDE_FILE msm_gpu_trace
+ 
++TRACE_EVENT(msm_gmu_oob,
++	TP_PROTO(u32 state, int ret, u64 elapsed_us, u32 info,
++		 u32 power, u32 busy, bool hung, bool needs_hw_init,
++		 unsigned long caller),
++	TP_ARGS(state, ret, elapsed_us, info, power, busy, hung, needs_hw_init, caller),
++	TP_STRUCT__entry(
++		__field(u32, state)
++		__field(int, ret)
++		__field(u64, elapsed_us)
++		__field(u32, info)
++		__field(u32, power)
++		__field(u32, busy)
++		__field(bool, hung)
++		__field(bool, needs_hw_init)
++		__field(unsigned long, caller)
++	),
++	TP_fast_assign(
++		__entry->state = state;
++		__entry->ret = ret;
++		__entry->elapsed_us = elapsed_us;
++		__entry->info = info;
++		__entry->power = power;
++		__entry->busy = busy;
++		__entry->hung = hung;
++		__entry->needs_hw_init = needs_hw_init;
++		__entry->caller = caller;
++	),
++	TP_printk("state=%u ret=%d elapsed_us=%llu info=%#x power=%#x busy=%#x hung=%d needs_hw_init=%d caller=%pS",
++		__entry->state, __entry->ret, __entry->elapsed_us,
++		__entry->info, __entry->power, __entry->busy,
++		__entry->hung, __entry->needs_hw_init, (void *)__entry->caller)
++);
++
+ TRACE_EVENT(msm_gpu_submit,
+ 	    TP_PROTO(pid_t pid, u32 ringid, u32 id, u32 nr_bos, u32 nr_cmds),
+ 	    TP_ARGS(pid, ringid, id, nr_bos, nr_cmds),

@@ -1,0 +1,507 @@
+From: Liuqin Linux contributors <liuqin@localhost>
+Subject: [PATCH] simple: use calibrated IFE680 NV12 for the Liuqin front camera
+
+Select PIX only when the exact local IQ ABI and valid per-module calibration
+are present. Otherwise retain the RAW/software ISP path. Implement basic AE
+and AWB from hardware Bayer statistics, with sensor blanking/exposure/gain,
+black-preserving IFE WB and a transformed per-module lens shading mesh.
+
+The hardware path exposes one NV12 stream at the two supported sensor sizes.
+Automatic algorithms are local policies, not the proprietary OEM algorithms.
+Request controls are asynchronous; effective metadata uses a conservative
+three-frame delay and is not a frame-exact capture contract.
+
+diff --git a/src/libcamera/pipeline/simple/liuqin_calibration.h b/src/libcamera/pipeline/simple/liuqin_calibration.h
+new file mode 100644
+index 00000000..03440254
+--- /dev/null
++++ b/src/libcamera/pipeline/simple/liuqin_calibration.h
+@@ -0,0 +1,45 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#pragma once
++
++#include <cmath>
++#include <vector>
++#include <libcamera/base/file.h>
++#include "libcamera/internal/yaml_parser.h"
++
++namespace libcamera {
++
++struct LiuqinCalibration {
++	float rg = 1.0f, bg = 1.0f, grgb = 1.0f;
++	std::vector<float> lsc;
++	bool load()
++	{
++		File file("/run/libcamera/liuqin-imx596.json");
++		if (!file.open(File::OpenModeFlag::ReadOnly))
++			return false;
++		auto data = YamlParser::parse(file);
++		if (!data || (*data)["schema"].get<unsigned int>(0) != 1 ||
++		    (*data)["model"].get<std::string>("") != "imx596" ||
++		    (*data)["mesh_width"].get<unsigned int>(0) != 17 ||
++		    (*data)["mesh_height"].get<unsigned int>(0) != 13)
++			return false;
++		rg = (*data)["rg"].get<float>(0);
++		bg = (*data)["bg"].get<float>(0);
++		grgb = (*data)["grgb"].get<float>(0);
++		if (!std::isfinite(rg) || !std::isfinite(bg) || !std::isfinite(grgb) ||
++		    rg < 0.1f || rg > 4.0f || bg < 0.1f || bg > 4.0f || grgb < 0.5f || grgb > 2.0f)
++			return false;
++		std::vector<float> mesh;
++		for (const auto &node : (*data)["lsc"].asList()) {
++			float v = node.get<float>(0);
++			if (!std::isfinite(v) || v < 0.5f || v > 16.0f)
++				return false;
++			mesh.push_back(v);
++		}
++		if (mesh.size() != 884)
++			return false;
++		lsc = std::move(mesh);
++		return true;
++	}
++};
++
++} /* namespace libcamera */
+diff --git a/src/libcamera/pipeline/simple/liuqin_isp.cpp b/src/libcamera/pipeline/simple/liuqin_isp.cpp
+new file mode 100644
+index 00000000..1155fceb
+--- /dev/null
++++ b/src/libcamera/pipeline/simple/liuqin_isp.cpp
+@@ -0,0 +1,245 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#include "liuqin_isp.h"
++#include "libcamera/internal/request.h"
++
++#include <algorithm>
++#include <cmath>
++#include <numeric>
++#include <libcamera/control_ids.h>
++#include <libcamera/base/log.h>
++
++namespace libcamera {
++LOG_DEFINE_CATEGORY(LiuqinIsp)
++
++bool LiuqinIsp::supported(V4L2Subdevice *isp)
++{
++	const uint32_t types[] = { V4L2_CTRL_TYPE_INTEGER, V4L2_CTRL_TYPE_U32,
++				  V4L2_CTRL_TYPE_U32, V4L2_CTRL_TYPE_U16 };
++	const uint32_t sizes[] = { 1, 2, 15362, 884 };
++	for (unsigned int i = 0; i < 4; i++) {
++		const auto *info = isp->controlInfo(LiuqinIspBase + i);
++		if (!info || info->type != types[i] || info->elems != sizes[i])
++			return false;
++	}
++	const uint32_t id[] = { LiuqinIspBase };
++	ControlList abi = isp->getControls(id);
++	return abi.contains(id[0]) && abi.get(id[0]).get<int32_t>() == 1;
++}
++
++float LiuqinIsp::shading(unsigned int channel, float x, float y) const
++{
++	if (!!(transform_ & Transform::HFlip))
++		x = 1 - x;
++	if (!!(transform_ & Transform::VFlip))
++		y = 1 - y;
++	/* Mesh locations are in the full binned sensor, including the video crop. */
++	x *= 16;
++	y *= 12;
++	int ix = std::clamp(static_cast<int>(std::floor(x)), 0, 15);
++	int iy = std::clamp(static_cast<int>(std::floor(y)), 0, 11);
++	float fx = x - ix, fy = y - iy;
++	const float *m = calibration_.lsc.data() + channel * 221;
++	float a = m[iy * 17 + ix] * (1 - fx) + m[iy * 17 + ix + 1] * fx;
++	float b = m[(iy + 1) * 17 + ix] * (1 - fx) + m[(iy + 1) * 17 + ix + 1] * fx;
++	return std::clamp(a * (1 - fy) + b * fy, 0.5f, 15.999f);
++}
++
++int LiuqinIsp::configure(Transform transform, ControlInfoMap *controlsInfo)
++{
++	if (!calibration_.load()) {
++		LOG(LiuqinIsp, Error) << "Valid per-module IMX596 calibration is required";
++		return -ENODATA;
++	}
++	int ret = sensor_->sensorInfo(&info_);
++	if (ret)
++		return ret;
++	transform_ = transform;
++	lineUs_ = info_.minLineLength * 1000000.0 / info_.pixelRate;
++	frameLines_ = info_.minFrameLength;
++	unsigned int h = info_.outputSize.height;
++	unsigned int level = h == 1952 ? 1 : 2;
++	unsigned int sx = h == 1952 ? 41 : 21, sy = h == 1952 ? 41 : 16;
++	unsigned int dx = h == 1952 ? 8 : 24, dy = h == 1952 ? 4 : 16;
++	std::array<uint16_t, 884> mesh;
++	for (unsigned int c = 0; c < 4; c++) {
++		for (unsigned int y = 0; y < 13; y++) {
++			for (unsigned int x = 0; x < 17; x++) {
++				float px = (int(x * (sx << level)) - int(dx)) / 1295.0f;
++				float py = (int(y * (sy << level)) - int(dy) + (1952 - h) / 4) / 975.0f;
++				float balance = c == 1 ? std::sqrt(calibration_.grgb) :
++						c == 2 ? 1 / std::sqrt(calibration_.grgb) : 1;
++				mesh[c * 221 + y * 17 + x] = std::clamp<int>(
++					std::lround(1024 * shading(c, px, py) * balance), 512, 16383);
++			}
++		}
++	}
++	ControlList ispControls(isp_->controls());
++	ispControls.set(LiuqinIspBase + 3, Span<const uint16_t>(mesh));
++	ret = isp_->setControls(&ispControls);
++	if (ret)
++		return ret;
++	ControlInfoMap::Map map;
++	map[&controls::AeEnable] = ControlInfo(false, true, true);
++	map[&controls::AwbEnable] = ControlInfo(false, true, true);
++	map[&controls::ExposureTime] = ControlInfo(int(std::ceil(4 * lineUs_)), int((info_.maxFrameLength - 24) * lineUs_), 10000);
++	map[&controls::AnalogueGain] = ControlInfo(1.0f, 16.0f, 1.0f);
++	map[&controls::ColourGains] = ControlInfo(1.0f, 16.0f, 1.0f);
++	int64_t minimum = std::ceil(frameLines_ * lineUs_);
++	int64_t maximum = info_.maxFrameLength * lineUs_;
++	map[&controls::FrameDurationLimits] = ControlInfo(minimum, maximum, minimum);
++	*controlsInfo = ControlInfoMap(std::move(map), controls::controls);
++	LOG(LiuqinIsp, Info) << "IFE680 NV12, hardware Bayer statistics and calibrated LSC, " << info_.outputSize;
++	return 0;
++}
++
++void LiuqinIsp::update(const ControlList &controls)
++{
++	if (auto value = controls.get(controls::AeEnable))
++		ae_ = *value;
++	if (auto value = controls.get(controls::AwbEnable))
++		awb_ = *value;
++	if (auto value = controls.get(controls::FrameDurationLimits)) {
++		/* Fixed frame period chosen within the requested interval. */
++		frameLines_ = std::clamp<unsigned int>(std::ceil((*value)[0] / lineUs_), info_.minFrameLength, info_.maxFrameLength);
++	}
++	if (!ae_) {
++		if (auto value = controls.get(controls::ExposureTime))
++			exposure_ = *value;
++		if (auto value = controls.get(controls::AnalogueGain))
++			gain_ = *value;
++	}
++	if (!awb_) {
++		if (auto value = controls.get(controls::ColourGains)) {
++			red_ = (*value)[0];
++			blue_ = (*value)[1];
++		}
++	}
++}
++
++int LiuqinIsp::apply()
++{
++	exposure_ = std::clamp(exposure_, 4 * lineUs_, (frameLines_ - 24) * lineUs_);
++	gain_ = std::clamp(gain_, 1.0, 16.0);
++	ControlList blanking(sensor_->controls());
++	blanking.set(V4L2_CID_VBLANK, int32_t(frameLines_ - info_.outputSize.height));
++	int ret = sensor_->setControls(&blanking);
++	if (ret)
++		return ret;
++	ControlList sensorControls(sensor_->controls());
++	int lines = std::clamp<int>(std::lround(exposure_ / lineUs_), 4, frameLines_ - 24);
++	int gainCode = std::clamp<int>(std::lround(1024 - 1024 / gain_), 0, 960);
++	sensorControls.set(V4L2_CID_EXPOSURE, lines);
++	sensorControls.set(V4L2_CID_ANALOGUE_GAIN, gainCode);
++	ret = sensor_->setControls(&sensorControls);
++	if (ret)
++		return ret;
++	exposure_ = lines * lineUs_;
++	gain_ = 1024.0 / (1024 - gainCode);
++	std::array<uint32_t, 2> wb = {
++		uint32_t(std::lround(std::clamp(red_, 1.0, 16.0) * 1024)),
++		uint32_t(std::lround(std::clamp(blue_, 1.0, 16.0) * 1024))
++	};
++	ControlList ispControls(isp_->controls());
++	ispControls.set(LiuqinIspBase + 1, Span<const uint32_t>(wb));
++	return isp_->setControls(&ispControls);
++}
++
++int LiuqinIsp::start(const ControlList &controls)
++{
++	ae_ = awb_ = true;
++	red_ = 1.0 / calibration_.rg;
++	blue_ = 1.0 / calibration_.bg;
++	nextUpdate_ = 0;
++	pending_.clear();
++	const uint32_t ids[] = { V4L2_CID_EXPOSURE, V4L2_CID_ANALOGUE_GAIN };
++	ControlList current = sensor_->getControls(ids);
++	if (current.contains(V4L2_CID_EXPOSURE) && current.contains(V4L2_CID_ANALOGUE_GAIN)) {
++		exposure_ = current.get(V4L2_CID_EXPOSURE).get<int32_t>() * lineUs_;
++		gain_ = 1024.0 / (1024 - current.get(V4L2_CID_ANALOGUE_GAIN).get<int32_t>());
++	}
++	update(controls);
++	int ret = apply();
++	effective_ = { 0, int(exposure_), float(gain_), float(red_), float(blue_), int64_t(frameLines_ * lineUs_) };
++	return ret;
++}
++
++void LiuqinIsp::process(FrameBuffer *buffer, Request *request)
++{
++	uint32_t sequence = buffer->metadata().sequence;
++	while (!pending_.empty() && pending_.front().sequence <= sequence) {
++		effective_ = pending_.front();
++		pending_.pop_front();
++	}
++	request->_d()->metadata().set(controls::ExposureTime, effective_.exposure);
++	request->_d()->metadata().set(controls::AnalogueGain, effective_.gain);
++	request->_d()->metadata().set(controls::ColourGains, { effective_.red, effective_.blue });
++	request->_d()->metadata().set(controls::FrameDuration, effective_.duration);
++	update(request->controls());
++	if (sequence < nextUpdate_ && request->controls().empty())
++		return;
++	const uint32_t ids[] = { LiuqinIspBase + 2 };
++	ControlList values = isp_->getControls(ids);
++	if (!values.contains(ids[0]))
++		return;
++	auto grid = values.get(ids[0]).get<Span<const uint32_t>>();
++	if (grid.size() != 15362 || !grid[1] || grid[0] != sequence)
++		return;
++	std::vector<double> reds, blues;
++	double luminance = 0, weights = 0;
++	for (unsigned int y = 0; y < 24; y++) {
++		for (unsigned int x = 0; x < 32; x++) {
++			const uint32_t *p = grid.data() + 2 + (y * 32 + x) * 20;
++			double rgb[4];
++			bool valid = true;
++			for (unsigned int c = 0; c < 4; c++) {
++				unsigned int count = p[2 * c + 1] >> 16;
++				if (!count) { valid = false; break; }
++				uint64_t sum = p[2 * c] | (uint64_t(p[2 * c + 1] & 0xffff) << 32);
++				rgb[c] = std::max(0.0, sum / double(count) - 16384.0) / (262144 - 16384);
++			}
++			if (!valid)
++				continue;
++			double green = (rgb[1] + rgb[2]) / 2;
++			double r = rgb[0], b = rgb[3];
++			double weight = (x >= 8 && x < 24 && y >= 6 && y < 18) ? 4 : 1;
++			luminance += weight * (0.299 * r * red_ + 0.587 * green + 0.114 * b * blue_);
++			weights += weight;
++			if (green < 0.01 || green > 0.75 || r < 0.003 || b < 0.003)
++				continue;
++			double nr = r / (green * calibration_.rg), nb = b / (green * calibration_.bg);
++			if (nr > 0.55 && nr < 1.8 && nb > 0.55 && nb < 1.8) {
++				reds.push_back(green / r);
++				blues.push_back(green / b);
++			}
++		}
++	}
++	if (weights && ae_) {
++		double mean = luminance / weights;
++		double correction = std::clamp(0.18 / std::max(mean, 0.0001), 0.5, 2.0);
++		if (std::abs(correction - 1) < 0.05)
++			correction = 1;
++		double product = exposure_ * gain_ * std::sqrt(correction);
++		double maxExposure = (frameLines_ - 24) * lineUs_;
++		exposure_ = std::min(product, maxExposure);
++		/* Indoor 50 Hz anti-banding once exposure reaches 10 ms. */
++		if (exposure_ > 10000)
++			exposure_ = std::floor(exposure_ / 10000) * 10000;
++		gain_ = std::clamp(product / exposure_, 1.0, 16.0);
++	}
++	if (awb_ && reds.size() >= 24) {
++		std::sort(reds.begin(), reds.end());
++		std::sort(blues.begin(), blues.end());
++		red_ = red_ * 0.8 + std::clamp(reds[reds.size() / 2], 1.0, 4.0) * 0.2;
++		blue_ = blue_ * 0.8 + std::clamp(blues[blues.size() / 2], 1.0, 4.0) * 0.2;
++	}
++	int ret = apply();
++	if (!ret)
++		pending_.push_back({ sequence + 3, int(exposure_), float(gain_), float(red_), float(blue_), int64_t(frameLines_ * lineUs_) });
++	else
++		LOG(LiuqinIsp, Error) << "Failed to apply automatic controls: " << ret;
++	nextUpdate_ = sequence + 6;
++	LOG(LiuqinIsp, Debug) << "frame=" << sequence << " mean=" << (weights ? luminance / weights : 0)
++		<< " neutral=" << reds.size() << " exposure=" << exposure_ << " gain=" << gain_
++		<< " WB=" << red_ << ',' << blue_;
++}
++} /* namespace libcamera */
+diff --git a/src/libcamera/pipeline/simple/liuqin_isp.h b/src/libcamera/pipeline/simple/liuqin_isp.h
+new file mode 100644
+index 00000000..dc0fa4da
+--- /dev/null
++++ b/src/libcamera/pipeline/simple/liuqin_isp.h
+@@ -0,0 +1,41 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#pragma once
++
++#include <array>
++#include <deque>
++#include <libcamera/ipa/core_ipa_interface.h>
++#include <libcamera/request.h>
++#include "libcamera/internal/camera_sensor.h"
++#include "liuqin_calibration.h"
++
++namespace libcamera {
++
++/* Local experimental ABI, deliberately checked before selecting the PIX path. */
++constexpr uint32_t LiuqinIspBase = V4L2_CID_USER_BASE + 0x3000;
++class LiuqinIsp {
++public:
++	LiuqinIsp(CameraSensor *sensor, V4L2Subdevice *isp) : sensor_(sensor), isp_(isp) {}
++	static bool supported(V4L2Subdevice *isp);
++	int configure(Transform transform, ControlInfoMap *controls);
++	int start(const ControlList &controls);
++	void process(FrameBuffer *buffer, Request *request);
++
++private:
++	void update(const ControlList &controls);
++	int apply();
++	float shading(unsigned int channel, float x, float y) const;
++	CameraSensor *sensor_;
++	V4L2Subdevice *isp_;
++	LiuqinCalibration calibration_;
++	IPACameraSensorInfo info_;
++	Transform transform_;
++	double lineUs_ = 0, exposure_ = 10000, gain_ = 1, red_ = 1, blue_ = 1;
++	unsigned int frameLines_ = 0;
++	bool ae_ = true, awb_ = true;
++	uint32_t nextUpdate_ = 0;
++	struct Applied { uint32_t sequence; int exposure; float gain, red, blue; int64_t duration; };
++	std::deque<Applied> pending_;
++	Applied effective_{};
++};
++
++} /* namespace libcamera */
+diff --git a/src/libcamera/pipeline/simple/meson.build b/src/libcamera/pipeline/simple/meson.build
+index dda3de97..b0b92d86 100644
+--- a/src/libcamera/pipeline/simple/meson.build
++++ b/src/libcamera/pipeline/simple/meson.build
+@@ -2,4 +2,5 @@
+ 
+ libcamera_internal_sources += files([
+     'simple.cpp',
++    'liuqin_isp.cpp',
+ ])
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index 49fcd3b3..0f574250 100644
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -49,6 +49,8 @@
+ #include "libcamera/internal/v4l2_subdevice.h"
+ #include "libcamera/internal/v4l2_videodevice.h"
+ 
++#include "liuqin_isp.h"
++
+ namespace libcamera {
+ 
+ LOG_DEFINE_CATEGORY(SimplePipeline)
+@@ -365,6 +367,8 @@ public:
+ 
+ 	std::unique_ptr<Converter> converter_;
+ 	std::unique_ptr<SoftwareIsp> swIsp_;
++	std::unique_ptr<LiuqinIsp> hwIsp_;
++	MediaEntity *hwEntity_ = nullptr;
+ 	SimpleFrames frameInfo_;
+ 
+ private:
+@@ -497,6 +501,11 @@ SimpleCameraData::SimpleCameraData(SimplePipelineHandler *pipe,
+ 	MediaEntity *video = nullptr;
+ 	MediaPad *sinkPad;
+ 
++	bool seekHardware = sensor->name().rfind("imx596 ", 0) == 0;
++	LiuqinCalibration calibration;
++	seekHardware = seekHardware && calibration.load();
++	MediaEntity *fallback = nullptr;
++	MediaPad *fallbackSink = nullptr;
+ 	queue.push({ sensor, nullptr });
+ 
+ 	while (!queue.empty()) {
+@@ -507,6 +516,19 @@ SimpleCameraData::SimpleCameraData(SimplePipelineHandler *pipe,
+ 		if (entity->function() == MEDIA_ENT_F_IO_V4L) {
+ 			LOG(SimplePipeline, Debug)
+ 				<< "Found capture device " << entity->name();
++			if (seekHardware) {
++				MediaEntity *upstream = parents.at(entity).entity;
++				if (upstream->name().find("_pix") != std::string::npos) {
++					V4L2Subdevice probe(upstream);
++					if (!probe.open() && LiuqinIsp::supported(&probe))
++						hwEntity_ = upstream;
++				}
++				if (!hwEntity_) {
++					if (!fallback) { fallback = entity; fallbackSink = sinkPad; }
++					continue;
++				}
++				streams_.resize(1);
++			}
+ 			video = entity;
+ 			break;
+ 		}
+@@ -550,6 +572,10 @@ SimpleCameraData::SimpleCameraData(SimplePipelineHandler *pipe,
+ 		}
+ 	}
+ 
++	if (!video && fallback) {
++		video = entity = fallback;
++		sinkPad = fallbackSink;
++	}
+ 	if (!video)
+ 		return;
+ 
+@@ -624,7 +650,9 @@ int SimpleCameraData::init()
+ 	/*
+ 	 * Instantiate Soft ISP if this is enabled for the given driver and no converter is used.
+ 	 */
+-	if (!converter_ && pipe->swIspEnabled()) {
++	if (hwEntity_)
++		hwIsp_ = std::make_unique<LiuqinIsp>(sensor_.get(), pipe->subdev(hwEntity_));
++	if (!hwIsp_ && !converter_ && pipe->swIspEnabled()) {
+ 		swIsp_ = std::make_unique<SoftwareIsp>(pipe, sensor_.get(), &controlInfo_);
+ 		if (!swIsp_->isValid()) {
+ 			LOG(SimplePipeline, Warning)
+@@ -673,6 +701,18 @@ int SimpleCameraData::init()
+ 			formats_[fmt].push_back(&config);
+ 	}
+ 
++	if (hwIsp_) {
++		V4L2SubdeviceFormat initial{};
++		initial.code = configs_.front().code;
++		initial.size = configs_.front().sensorSize;
++		ret = setupFormats(&initial, V4L2Subdevice::ActiveFormat);
++		if (ret)
++			return ret;
++		ret = hwIsp_->configure(Transform::Identity, &controlInfo_);
++		if (ret)
++			return ret;
++	}
++
+ 	properties_ = sensor_->properties();
+ 
+ 	/* Find the first subdev that can generate a frame start signal, if any. */
+@@ -981,6 +1021,9 @@ void SimpleCameraData::imageBufferReady(FrameBuffer *buffer)
+ 		return;
+ 	}
+ 
++	if (hwIsp_)
++		hwIsp_->process(buffer, request);
++
+ 	/* Otherwise simply complete the request. */
+ 	pipe->completeBuffer(request, buffer);
+ 	tryCompleteRequest(request);
+@@ -1554,7 +1597,7 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
+ 
+ 	/* Configure the video node, taking into account any Bayer pattern change. */
+ 	V4L2PixelFormat videoFormat;
+-	if (format.code == pipeConfig->code) {
++	if (data->hwIsp_ || format.code == pipeConfig->code) {
+ 		videoFormat = video->toV4L2PixelFormat(pipeConfig->captureFormat);
+ 	} else {
+ 		/*
+@@ -1620,6 +1663,9 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
+ 			data->rawStream_ = &data->streams_[i];
+ 	}
+ 
++	if (data->hwIsp_)
++		return data->hwIsp_->configure(config->combinedTransform(), &data->controlInfo_);
++
+ 	if (outputCfgs.empty()) {
+ 		ControlInfoMap::Map ctrlMap(data->controlInfo_.begin(), data->controlInfo_.end());
+ 		ctrlMap.erase(&controls::FrameDurationLimits);
+@@ -1722,6 +1768,10 @@ int SimplePipelineHandler::start(Camera *camera, [[maybe_unused]] const ControlL
+ 			return ret;
+ 		}
+ 	}
++	if (data->hwIsp_) {
++		ret = data->hwIsp_->start(controls ? *controls : ControlList(controls::controls));
++		if (ret) { stop(camera); return ret; }
++	}
+ 	data->delayedCtrls_->reset();
+ 	if (frameStartEmitter) {
+ 		ret = frameStartEmitter->setFrameStartEnabled(true);

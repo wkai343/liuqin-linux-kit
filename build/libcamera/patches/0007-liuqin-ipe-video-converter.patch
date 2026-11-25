@@ -1,0 +1,149 @@
+diff --git a/src/libcamera/converter/converter_v4l2_m2m.cpp b/src/libcamera/converter/converter_v4l2_m2m.cpp
+index ffba0434..cdcce21f 100644
+--- a/src/libcamera/converter/converter_v4l2_m2m.cpp
++++ b/src/libcamera/converter/converter_v4l2_m2m.cpp
+@@ -818,6 +818,7 @@ bool V4L2M2MConverter::supportsRequests()
+ static std::initializer_list<std::string> compatibles = {
+ 	"mtk-mdp",
+ 	"pxp",
++	"qcom-ipe",
+ };
+ 
+ REGISTER_CONVERTER("v4l2_m2m", V4L2M2MConverter, compatibles)
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index 0f574250..7d6050e0 100644
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -270,7 +270,7 @@ static const SimplePipelineInfo supportedDevices[] = {
+ 	{ "j721e-csi2rx", {}, true },
+ 	{ "mtk-seninf", { { "mtk-mdp", 3 } }, false },
+ 	{ "mxc-isi", {}, false },
+-	{ "qcom-camss", {}, true },
++	{ "qcom-camss", { { "qcom-ipe", 1 } }, true },
+ 	{ "sun6i-csi", {}, false },
+ };
+ 
+@@ -635,7 +635,7 @@ int SimpleCameraData::init()
+ 
+ 	/* Open the converter, if any. */
+ 	std::shared_ptr<MediaDevice> converter = pipe->converter();
+-	if (converter) {
++	if (converter && (converter->driver() != "qcom-ipe" || hwEntity_)) {
+ 		converter_ = ConverterFactoryBase::create(converter);
+ 		if (!converter_) {
+ 			LOG(SimplePipeline, Warning)
+@@ -999,16 +999,29 @@ void SimpleCameraData::imageBufferReady(FrameBuffer *buffer)
+ 	 * ISP if format conversion is needed. If there's no queued request, just
+ 	 * requeue the captured buffer for capture.
+ 	 */
++	if (hwIsp_ && request)
++		hwIsp_->process(buffer, request);
++
+ 	if (useConversion_) {
++		if (stopping_)
++			return;
+ 		if (conversionQueue_.empty()) {
+ 			if (!rawStream_)
+ 				video_->queueBuffer(buffer);
+ 			return;
+ 		}
+ 
+-		if (converter_)
+-			converter_->queueBuffers(buffer, conversionQueue_.front().outputs);
+-		else
++		if (converter_) {
++			int ret = converter_->queueBuffers(buffer, conversionQueue_.front().outputs);
++			if (ret && hwIsp_) {
++				LOG(SimplePipeline, Error) << "IPE queue failed: " << ret;
++				stopping_ = true;
++				/* Stop both converter queues before cancelling their requests. */
++				converter_->stop();
++				clearIncompleteRequests();
++				return;
++			}
++		} else
+ 			/*
+ 			 * request->sequence() cannot be retrieved from `buffer' inside
+ 			 * queueBuffers because unique_ptr's make buffer->request() invalid
+@@ -1021,9 +1034,6 @@ void SimpleCameraData::imageBufferReady(FrameBuffer *buffer)
+ 		return;
+ 	}
+ 
+-	if (hwIsp_)
+-		hwIsp_->process(buffer, request);
+-
+ 	/* Otherwise simply complete the request. */
+ 	pipe->completeBuffer(request, buffer);
+ 	tryCompleteRequest(request);
+@@ -1333,7 +1343,7 @@ CameraConfiguration::Status SimpleCameraConfiguration::validate()
+ 	 * require any conversion, similar to raw capture use cases). This is
+ 	 * left as a future improvement.
+ 	 */
+-	needConversion_ = config_.size() > 1 + rawCount;
++	needConversion_ = config_.size() > 1 + rawCount || (data_->hwIsp_ && data_->converter_);
+ 
+ 	for (unsigned int i = 0; i < config_.size(); ++i) {
+ 		StreamConfiguration &cfg = config_[i];
+@@ -1663,8 +1673,11 @@ int SimplePipelineHandler::configure(Camera *camera, CameraConfiguration *c)
+ 			data->rawStream_ = &data->streams_[i];
+ 	}
+ 
+-	if (data->hwIsp_)
+-		return data->hwIsp_->configure(config->combinedTransform(), &data->controlInfo_);
++	if (data->hwIsp_) {
++		ret = data->hwIsp_->configure(config->combinedTransform(), &data->controlInfo_);
++		if (ret || !data->useConversion_)
++			return ret;
++	}
+ 
+ 	if (outputCfgs.empty()) {
+ 		ControlInfoMap::Map ctrlMap(data->controlInfo_.begin(), data->controlInfo_.end());
+@@ -1783,6 +1796,15 @@ int SimplePipelineHandler::start(Camera *camera, [[maybe_unused]] const ControlL
+ 						      &DelayedControls::applyControls);
+ 	}
+ 
++	/* Authenticate and initialise ICP before starting the live IFE path. */
++	if (data->hwIsp_ && data->converter_) {
++		ret = data->converter_->start();
++		if (ret < 0) {
++			stop(camera);
++			return ret;
++		}
++	}
++
+ 	ret = video->streamOn();
+ 	if (ret < 0) {
+ 		stop(camera);
+@@ -1790,7 +1812,7 @@ int SimplePipelineHandler::start(Camera *camera, [[maybe_unused]] const ControlL
+ 	}
+ 
+ 	if (data->useConversion_) {
+-		if (data->converter_)
++		if (data->converter_ && !data->hwIsp_)
+ 			ret = data->converter_->start();
+ 		else
+ 			ret = 0;
+@@ -1846,6 +1868,8 @@ void SimplePipelineHandler::stopDevice(Camera *camera)
+ int SimplePipelineHandler::queueRequestDevice(Camera *camera, Request *request)
+ {
+ 	SimpleCameraData *data = cameraData(camera);
++	if (data->stopping_)
++		return -EIO;
+ 	int ret;
+ 
+ 	std::map<const Stream *, FrameBuffer *> buffers;
+@@ -1993,9 +2017,12 @@ bool SimplePipelineHandler::matchDevice(std::shared_ptr<MediaDevice> media,
+ 		/*
+ 		 * When the software ISP is enabled, the simple pipeline handler
+ 		 * exposes the raw stream, giving a total of two streams. This
+-		 * is mutually exclusive with the presence of a converter.
++		 * is mutually exclusive with the presence of a converter, except
++		 * for CAMSS: its front camera uses IFE/IPE while the rear camera
++		 * still uses the software ISP. CameraData selects them separately.
+ 		 */
+-		ASSERT(!converter_);
++		ASSERT(!converter_ || (info.driver == std::string("qcom-camss") &&
++				       converter_->driver() == "qcom-ipe"));
+ 		numStreams = 2;
+ 	}
+ 

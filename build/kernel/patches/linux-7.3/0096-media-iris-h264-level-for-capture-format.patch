@@ -1,0 +1,130 @@
+Subject: [PATCH] media: iris: constrain SM8450 H.264 level to the capture format
+
+An encoder consumer can select the first supported level before configuring
+the raw queue. An unconstrained GStreamer H.264 profile then produces an
+SPS marked level 1 even for full-resolution camera frames. Recompute the
+session's menu floor from coded geometry and frame rate (H.264 Annex A)
+as those are negotiated. Preserve any higher requested level and reject
+an unsupported final format before queuing firmware work.
+
+diff --git a/drivers/media/platform/qcom/iris/iris_venc.c b/drivers/media/platform/qcom/iris/iris_venc.c
+index a945992f6..ee7578d65 100644
+--- a/drivers/media/platform/qcom/iris/iris_venc.c
++++ b/drivers/media/platform/qcom/iris/iris_venc.c
+@@ -203,6 +203,64 @@ int iris_venc_try_fmt(struct iris_inst *inst, struct v4l2_format *f)
+ 	return 0;
+ }
+ 
++/*
++ * H.264 Annex A, Table A-1. The capture format determines the picture
++ * size; the OUTPUT queue may include extra rows and stride padding.
++ */
++static int iris_venc_update_h264_level(struct iris_inst *inst, bool starting)
++{
++	static const struct {
++		u32 level, max_fs, max_mbps;
++	} limits[] = {
++		{ V4L2_MPEG_VIDEO_H264_LEVEL_1_0,    99,    1485 },
++		{ V4L2_MPEG_VIDEO_H264_LEVEL_1_1,   396,    3000 },
++		{ V4L2_MPEG_VIDEO_H264_LEVEL_1_2,   396,    6000 },
++		{ V4L2_MPEG_VIDEO_H264_LEVEL_1_3,   396,   11880 },
++		{ V4L2_MPEG_VIDEO_H264_LEVEL_2_1,   792,   19800 },
++		{ V4L2_MPEG_VIDEO_H264_LEVEL_2_2,  1620,   20250 },
++		{ V4L2_MPEG_VIDEO_H264_LEVEL_3_0,  1620,   40500 },
++		{ V4L2_MPEG_VIDEO_H264_LEVEL_3_1,  3600,  108000 },
++		{ V4L2_MPEG_VIDEO_H264_LEVEL_3_2,  5120,  216000 },
++		{ V4L2_MPEG_VIDEO_H264_LEVEL_4_0,  8192,  245760 },
++		{ V4L2_MPEG_VIDEO_H264_LEVEL_4_2,  8704,  522240 },
++		{ V4L2_MPEG_VIDEO_H264_LEVEL_5_0, 22080,  589824 },
++		{ V4L2_MPEG_VIDEO_H264_LEVEL_5_1, 36864,  983040 },
++		{ V4L2_MPEG_VIDEO_H264_LEVEL_5_2, 36864, 2073600 },
++		{ V4L2_MPEG_VIDEO_H264_LEVEL_6_0, 139264, 4177920 },
++	};
++	struct v4l2_ctrl *level;
++	u32 i, width_mbs, height_mbs;
++	u64 frame_mbs, side_mbs;
++
++	if (inst->core->iris_platform_data != &sm8450_data ||
++	    inst->codec != V4L2_PIX_FMT_H264)
++		return 0;
++
++	level = v4l2_ctrl_find(&inst->ctrl_handler, V4L2_CID_MPEG_VIDEO_H264_LEVEL);
++	if (!level)
++		return 0;
++
++	width_mbs = DIV_ROUND_UP(inst->enc_scale_width, 16);
++	height_mbs = DIV_ROUND_UP(inst->enc_scale_height, 16);
++	frame_mbs = (u64)width_mbs * height_mbs;
++	side_mbs = max(width_mbs, height_mbs);
++	for (i = 0; i < ARRAY_SIZE(limits); i++) {
++		if (frame_mbs > limits[i].max_fs || side_mbs * side_mbs > 8 * limits[i].max_fs ||
++		    frame_mbs * inst->frame_rate > limits[i].max_mbps)
++			continue;
++
++		/* A running H.264 stream cannot renegotiate its SPS here. */
++		if (vb2_is_streaming(v4l2_m2m_get_src_vq(inst->m2m_ctx)))
++			return limits[i].level <= inst->fw_caps[LEVEL_H264].value ? 0 : -EBUSY;
++
++		return v4l2_ctrl_modify_range(level, limits[i].level, level->maximum,
++					      level->menu_skip_mask, limits[i].level);
++	}
++
++	/* Userspace may set geometry and frame interval in either order. */
++	return starting ? -ERANGE : 0;
++}
++
+ static int iris_venc_s_fmt_output(struct iris_inst *inst, struct v4l2_format *f)
+ {
+ 	struct v4l2_format *fmt;
+@@ -249,7 +307,7 @@ static int iris_venc_s_fmt_output(struct iris_inst *inst, struct v4l2_format *f)
+ 	inst->codec = f->fmt.pix_mp.pixelformat;
+ 	memcpy(f, fmt, sizeof(struct v4l2_format));
+ 
+-	return 0;
++	return iris_venc_update_h264_level(inst, false);
+ }
+ 
+ static int iris_venc_s_fmt_input(struct iris_inst *inst, struct v4l2_format *f)
+@@ -303,7 +361,7 @@ static int iris_venc_s_fmt_input(struct iris_inst *inst, struct v4l2_format *f)
+ 
+ 	memcpy(f, fmt, sizeof(struct v4l2_format));
+ 
+-	return 0;
++	return iris_venc_update_h264_level(inst, false);
+ }
+ 
+ int iris_venc_s_fmt(struct iris_inst *inst, struct v4l2_format *f)
+@@ -383,7 +441,7 @@ int iris_venc_s_param(struct iris_inst *inst, struct v4l2_streamparm *s_parm)
+ 	struct v4l2_fract *timeperframe = NULL;
+ 	u32 default_rate = DEFAULT_FPS;
+ 	bool is_frame_rate = false;
+-	u32 fps, max_rate;
++	u32 fps, max_rate, old_rate = inst->frame_rate;
+ 
+ 	int ret = 0;
+ 
+@@ -429,7 +487,12 @@ int iris_venc_s_param(struct iris_inst *inst, struct v4l2_streamparm *s_parm)
+ 			goto reset_rate;
+ 	}
+ 
+-	return 0;
++	if (is_frame_rate) {
++		ret = iris_venc_update_h264_level(inst, false);
++		if (ret)
++			inst->frame_rate = old_rate;
++	}
++	return ret;
+ 
+ reset_rate:
+ 	if (ret) {
+@@ -465,6 +528,10 @@ int iris_venc_streamon_input(struct iris_inst *inst)
+ {
+ 	int ret;
+ 
++	ret = iris_venc_update_h264_level(inst, true);
++	if (ret)
++		return ret;
++
+ 	ret = iris_set_properties(inst, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
+ 	if (ret)
+ 		return ret;

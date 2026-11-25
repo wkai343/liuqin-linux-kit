@@ -19,6 +19,8 @@ from source_build import mounted_root, sha, arm64_execution
 from fedora_oci import extract as extract_oci
 from shell_defaults import check_skeleton, ensure as ensure_shell_defaults
 from splash_assets import install_themes
+import fedora_libcamera
+import fedora_kamoso
 import fedora_ffmpeg
 import fedora_obs
 import firefox_media
@@ -146,19 +148,23 @@ def configure_firefox_languages(root):
             target.symlink_to('../../langpacks/'+name)
 
 
-def configure_qrca_camera(root):
-    # Qt's default FFmpeg backend only enumerates V4L2 cameras here. QRCA
-    # needs GStreamer's libcamera provider for the tablet's CAMSS pipeline.
-    # Converting to a CPU-backed grayscale frame also avoids the live scanner
-    # compatibility failure seen with the default colour-buffer path.
-    desktop=root/'usr/share/applications/org.kde.qrca.desktop'
-    if not (root/'usr/bin/qrca').is_file() or not desktop.is_file():return
-    lines=desktop.read_text().splitlines()
-    command='env QT_MEDIA_BACKEND=gstreamer '
-    command+='"QT_GSTREAMER_OVERRIDE_VIDEO_CONVERSION_ELEMENT=videoconvert ! capsfilter caps=video/x-raw,format=GRAY8" '
-    common.write_config(root,'usr/local/share/applications/org.kde.qrca.desktop',
-        '\n'.join('Exec='+command+line[5:]
-                  if line.startswith('Exec=') else line for line in lines)+'\n')
+def configure_snapshot(root):
+    desktop = 'share/applications/org.gnome.Snapshot.desktop'
+    source = root/'usr'/desktop
+    if not source.is_file():
+        return
+    # The board disables GTK DMA-BUF imports globally. Snapshot needs them
+    # for its PipeWire preview. D-Bus activation would bypass the Exec line.
+    entry = re.sub(r'^Exec=', 'Exec=/usr/bin/env GDK_DISABLE=vulkan GSK_RENDERER=gl ',
+                   source.read_text(), flags=re.MULTILINE)
+    entry = re.sub(r'^DBusActivatable=.*$', 'DBusActivatable=false', entry, flags=re.MULTILINE)
+    if not re.search(r'^TryExec=', entry, re.MULTILINE):
+        entry = entry.replace('[Desktop Entry]\n', '[Desktop Entry]\nTryExec=/usr/bin/snapshot\n', 1)
+    common.write_config(root, 'usr/local/'+desktop, entry)
+    # The overlay is copied after RPM's GLib schema trigger has run.
+    schemas = '/usr/share/glib-2.0/schemas'
+    if (root/schemas[1:]/'90-liuqin-snapshot.gschema.override').is_file():
+        chroot(root, ['glib-compile-schemas', schemas])
 
 
 def configure_login_output(root):
@@ -279,7 +285,7 @@ def install_kernel_packages(root, packages):
 def install_desktop_packages(root, data, local_packages=()):
     desktop_dnf(root,data,'install',*DEVICE_PACKAGES,*PLASMA_PACKAGES,*data.get('packages',[]),
         *(FIRST_BOOT_PACKAGES if data['first_boot_setup'] else []),
-        *(['dnf5-plugins'] if fedora_ffmpeg.selected(data) else []),*local_packages)
+        *(['dnf5-plugins'] if fedora_ffmpeg.selected(data) or fedora_libcamera.selected(data) or 'kamoso' in data.get('packages', []) else []),*local_packages)
     desktop_dnf(root,data,'install','--allowerasing','fedora-release-kde','fedora-release-identity-kde')
 
 
@@ -361,7 +367,7 @@ def configure(root, data, output):
     configure_login_output(root)
     configure_firefox_languages(root)
     if fedora_ffmpeg.selected(data):firefox_media.install(root)
-    configure_qrca_camera(root)
+    configure_snapshot(root)
     legacy_panel=root/'etc/xdg/autostart/liuqin-plasma-panel-defaults.desktop'
     if not legacy_panel.is_symlink() and legacy_panel.is_file() and 'TryExec=/usr/libexec/liuqin-plasma-panel-defaults' in legacy_panel.read_text():
         legacy_panel.unlink()
@@ -391,6 +397,12 @@ def configure(root, data, output):
     link('multi-user.target.wants/iio-sensor-proxy.service','/usr/lib/systemd/system/iio-sensor-proxy.service')
     link('graphical.target.wants/liuqin-backlight-default.service','../liuqin-backlight-default.service')
     link('multi-user.target.wants/liuqin-display-policy.service','../liuqin-display-policy.service')
+    if (root/'usr/lib/systemd/system/liuqin-front-calibration.service').is_file():
+        link('multi-user.target.wants/liuqin-front-calibration.service',
+             '/usr/lib/systemd/system/liuqin-front-calibration.service')
+    if (root/'usr/lib/systemd/system/liuqin-rear-calibration.service').is_file():
+        link('multi-user.target.wants/liuqin-rear-calibration.service',
+             '/usr/lib/systemd/system/liuqin-rear-calibration.service')
     link('display-manager.service','/usr/lib/systemd/system/plasmalogin.service')
     link('graphical.target.wants/plasmalogin.service','/usr/lib/systemd/system/plasmalogin.service')
     link('default.target','/usr/lib/systemd/system/graphical.target')
@@ -433,12 +445,17 @@ def configure(root, data, output):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=('runtime','apps','extract','sensors','kernel-files','stats','fingerprint','splash','ffmpeg','obs-v4l2'))
+    parser.add_argument('action',choices=('runtime','apps','extract','sensors','kernel-files','stats','fingerprint','splash','ffmpeg','obs-v4l2','libcamera','kamoso'))
     parser.add_argument('--archive',type=Path,required=True);parser.add_argument('--archive-sha256',required=True)
     parser.add_argument('--out',type=Path,required=True);parser.add_argument('--recipe',type=Path)
     parser.add_argument('--rpms',type=Path);parser.add_argument('--rom-sensors',type=Path)
     parser.add_argument('--jobs',type=int,default=12)
     parser.add_argument('--stats-source',type=Path)
+    parser.add_argument('--kamoso-source',type=Path)
+    parser.add_argument('--kamoso-bundle',type=Path)
+    parser.add_argument('--libcamera-source',type=Path)
+    parser.add_argument('--libcamera-bundle',type=Path)
+    parser.add_argument('--require-libcamera',action='store_true')
     parser.add_argument('--ffmpeg-source',type=Path)
     parser.add_argument('--ffmpeg-bundle',type=Path)
     parser.add_argument('--require-ffmpeg',action='store_true')
@@ -486,6 +503,12 @@ def main():
             if not args.stats_source:parser.error('需要 KSystemStats 源码。')
             from fedora_stats import build
             build(root,args.stats_source,output,args.jobs,chroot,dnf);return
+        elif args.action=='kamoso':
+            if not args.kamoso_source:parser.error('需要 Fedora Kamoso 源码包。')
+            fedora_kamoso.build(root,args.kamoso_source,output,args.jobs,chroot,dnf);return
+        elif args.action=='libcamera':
+            if not args.libcamera_source:parser.error('需要固定的 Fedora libcamera 源码包。')
+            fedora_libcamera.build(root,args.libcamera_source,output,args.jobs,chroot,dnf);return
         elif args.action=='ffmpeg':
             if not args.ffmpeg_source:parser.error('需要固定的 Fedora FFmpeg 源码包。')
             fedora_ffmpeg.build(root,args.ffmpeg_source,output,args.jobs,chroot,dnf);return
@@ -506,12 +529,20 @@ def main():
             if not args.rpms or not args.rpms.is_dir():parser.error('需要已构建的 RPM 目录。')
             if args.action=='apps':
                 data=common.recipe(args.recipe,'fedora')
+                if fedora_libcamera.selected(data) and not args.libcamera_bundle:
+                    parser.error('相机配方需要包含对焦支持的 libcamera 构建包。')
                 if fedora_ffmpeg.selected(data) and not args.ffmpeg_bundle:
                     parser.error('含 ffmpeg-free 的配方需要修订版 FFmpeg 构建包。')
                 if fedora_obs.selected(data) and not args.obs_bundle:
                     parser.error('含 obs-studio 的配方需要独立 V4L2 插件构建包。')
             staging=root/'tmp/liuqin-packages';staging.mkdir()
             for file in sorted(args.rpms.glob('*.rpm')):shutil.copyfile(file,staging/file.name)
+            if args.action=='apps' and 'kamoso' in data['packages']:
+                if not args.kamoso_bundle:parser.error('含 Kamoso 的桌面配方需要后摄快门构建包。')
+                name=fedora_kamoso.nvr()+'.aarch64.rpm'
+                shutil.copyfile(args.kamoso_bundle/name,staging/name)
+            if args.action=='apps' and fedora_libcamera.selected(data):
+                fedora_libcamera.stage(args.libcamera_bundle,staging,extras=fedora_libcamera.requested_extras(data))
             if args.action=='apps' and fedora_ffmpeg.selected(data):
                 fedora_ffmpeg.stage(args.ffmpeg_bundle,staging)
             if args.action=='apps' and fedora_obs.selected(data):
@@ -525,14 +556,24 @@ def main():
             shutil.rmtree(staging)
             if args.action=='apps':
                 if data.get('remove'):desktop_dnf(root,data,'remove',*data['remove'])
+                if 'kamoso' in data['packages']:
+                    chroot(root,['dnf','-y','--disable-repo=*','versionlock','add','kamoso'])
+                    fedora_kamoso.check_image(root,chroot)
+                    source=fedora_kamoso.nvr()+'.src.rpm'
+                    shutil.copyfile(args.kamoso_bundle/source,root/'usr/share/licenses/kamoso'/source)
                 restore_core_manpages(root)
                 if data.get('overlay'):common.overlay(data['overlay'],root)
                 configure(root,data,output)
                 if fedora_ffmpeg.selected(data):fedora_ffmpeg.configure(root,args.ffmpeg_bundle,chroot)
                 if fedora_obs.selected(data):fedora_obs.check_image(root,chroot)
+                if fedora_libcamera.selected(data):fedora_libcamera.configure(root,args.libcamera_bundle,chroot,fedora_libcamera.requested_extras(data))
                 check_desktop_runtime(root,first_boot_setup=data['first_boot_setup'])
             elif args.require_ffmpeg or (root/fedora_ffmpeg.LICENSE_DIR).exists():
                 fedora_ffmpeg.check_image(root,chroot)
+            if args.action=='kernel-files' and any((root/'usr/share/licenses/kamoso').glob('kamoso-*.liuqin*.src.rpm')):
+                fedora_kamoso.check_image(root,chroot)
+            if args.action=='kernel-files' and (args.require_libcamera or (root/fedora_libcamera.LICENSE_DIR).exists()):
+                fedora_libcamera.check_image(root,chroot)
             if args.action=='kernel-files' and (args.require_obs or (root/fedora_obs.LICENSE).exists()):
                 fedora_obs.check_image(root,chroot)
         inventory=chroot(root,['rpm','-qa','--qf','%{NAME}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n'],capture_output=True).stdout

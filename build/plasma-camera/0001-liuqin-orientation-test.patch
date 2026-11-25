@@ -1,0 +1,253 @@
+diff --git a/src/camerasettings.kcfg b/src/camerasettings.kcfg
+index 9677028..a8947da 100644
+--- a/src/camerasettings.kcfg
++++ b/src/camerasettings.kcfg
+@@ -7,10 +7,13 @@
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0
+                           http://www.kde.org/standards/kcfg/1.0/kcfg.xsd" >
+-    <kcfgfile name="plasmacamerarc" />
++    <kcfgfile name="plasma-camera-liuqin-testrc" />
+     <group name="General">
+         <entry key="resolution" type="size"></entry> <!-- Unused -->
+         <entry key="cameraDeviceId" type="string"></entry>
++        <entry key="mirrorSelfies" type="Bool">
++            <default>false</default>
++        </entry>
+         <entry key="cameraPosition" type="int"></entry> <!-- Unused -->
+         <entry key="whiteBalanceMode" type="int"></entry> <!-- Unused -->
+         <entry key="videoRecordingFps" type="int">
+diff --git a/src/contents/ui/SettingsDialog.qml b/src/contents/ui/SettingsDialog.qml
+index eb153d0..f21649c 100644
+--- a/src/contents/ui/SettingsDialog.qml
++++ b/src/contents/ui/SettingsDialog.qml
+@@ -29,6 +29,19 @@ Kirigami.MenuDialog {
+             }
+         },
+ 
++        Kirigami.Action {
++            text: CameraSettings.mirrorSelfies
++                ? i18nd("plasma-camera-liuqin-test", "Save mirrored selfies (on)")
++                : i18nd("plasma-camera-liuqin-test", "Save mirrored selfies (off)")
++            icon.name: "object-flip-horizontal"
++            checkable: true
++            checked: CameraSettings.mirrorSelfies
++            onTriggered: {
++                CameraSettings.mirrorSelfies = !CameraSettings.mirrorSelfies;
++                CameraSettings.save();
++            }
++        },
++
+         Kirigami.Action {
+             text: i18n("Video recording resolution")
+             icon.name: 'view-fullscreen-symbolic'
+diff --git a/src/main.cpp b/src/main.cpp
+index b147eb7..d66eb2b 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -55,9 +55,9 @@ Q_DECL_EXPORT int main(int argc, char *argv[])
+ 
+     QCoreApplication::setOrganizationName(u"KDE"_s);
+     QCoreApplication::setOrganizationDomain(u"kde.org"_s);
+-    QCoreApplication::setApplicationName(u"plasma-camera"_s);
++    QCoreApplication::setApplicationName(u"plasma-camera-liuqin-test"_s);
+     QCoreApplication::setApplicationVersion(QStringLiteral(PLASMACAMERA_VERSION_STRING));
+-    QGuiApplication::setApplicationDisplayName(u"Plasma Camera"_s);
++    QGuiApplication::setApplicationDisplayName(u"Plasma Camera (liuqin test)"_s);
+     QGuiApplication::setWindowIcon(QIcon::fromTheme(QStringLiteral("camera-photo")));
+ 
+     KAboutData about(
+@@ -89,6 +89,7 @@ Q_DECL_EXPORT int main(int argc, char *argv[])
+ 
+     about.addAuthor(i18n("Devin Lin"), QString(), QStringLiteral("devin@kde.org"), QStringLiteral("https://espi.dev/"));
+ 
++    about.setDesktopFileName(u"org.kde.plasma.camera.liuqintest"_s);
+     about.setProgramLogo(QApplication::windowIcon());
+ 
+     // set about as the information about the app
+diff --git a/src/plasmacamera.cpp b/src/plasmacamera.cpp
+index c67502c..637690c 100644
+--- a/src/plasmacamera.cpp
++++ b/src/plasmacamera.cpp
+@@ -52,6 +52,10 @@ PlasmaCamera::PlasmaCamera(QObject *parent) : QObject(parent)
+         setBusy(false);
+     });
+ 
++    connect(m_cameraWorker, &Worker::liuqinStreamConfigured, this, [this](bool upright) {
++        m_uprightLiuqinStream = upright;
++    });
++
+     // resend frames that we received from the camera worker
+     connect(m_cameraWorker, &Worker::viewFinderFrame, this, &PlasmaCamera::viewFinderFrame);
+     connect(m_cameraWorker, &Worker::stillCaptureFrames, this, &PlasmaCamera::stillCaptureFrames);
+diff --git a/src/plasmacamera.h b/src/plasmacamera.h
+index 86af1af..ff80641 100644
+--- a/src/plasmacamera.h
++++ b/src/plasmacamera.h
+@@ -162,6 +162,7 @@ public:
+     // Camera settings
+     Settings settings() const;
+     float fps() const;
++    bool uprightLiuqinStream() const { return m_uprightLiuqinStream; }
+     int softwareRotationDegrees() const;
+     bool mirrorOutput() const;
+ 
+@@ -277,6 +278,7 @@ private:
+ 
+     // The amount of degrees to rotate captured input by.
+     int m_softwareRotationDegrees = 0;
++    bool m_uprightLiuqinStream = false;
+ 
+     // Whether the camera output should be mirrored
+     bool m_mirrorOutput = false;
+diff --git a/src/plasmacamera/liuqinorientation.h b/src/plasmacamera/liuqinorientation.h
+new file mode 100644
+index 0000000..2513fc5
+--- /dev/null
++++ b/src/plasmacamera/liuqinorientation.h
+@@ -0,0 +1,24 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++
++#include <QImage>
++#include <QTransform>
++
++namespace LiuqinOrientation
++{
++// Both built-in streams are already upright in RightUp landscape. The two
++// cameras look in opposite directions when the device turns about the lens.
++constexpr int degrees(int poseDegrees, bool front)
++{
++    const int fromLandscape = poseDegrees - 270;
++    return ((front ? -fromLandscape : fromLandscape) + 360) % 360;
++}
++
++inline QImage rotateStill(const QImage &frame, int degrees, bool mirror = false)
++{
++    // Qt has exact integer paths for canonical quarter-turns. An equivalent
++    // angle of 450 degrees goes through the general transform and grows the image.
++    QImage upright = frame.transformed(QTransform().rotate((degrees % 360 + 360) % 360));
++    return mirror ? upright.flipped(Qt::Horizontal) : upright;
++}
++}
+diff --git a/src/plasmacamera/worker.cpp b/src/plasmacamera/worker.cpp
+index db11662..64a9f69 100644
+--- a/src/plasmacamera/worker.cpp
++++ b/src/plasmacamera/worker.cpp
+@@ -490,6 +490,13 @@ void Worker::configure()
+         return;
+     }
+ 
++    const auto &id = m_camera->id();
++    const bool builtIn = id == "/base/soc@0/cci@ac15000/i2c-bus@0/camera@10"
++                      || id == "/base/soc@0/cci@ac15000/i2c-bus@1/camera@10";
++    const bool upright = builtIn && m_config->orientation == libcamera::Orientation::Rotate0;
++    qInfo() << "Configured camera" << QString::fromStdString(id) << "buffer orientation (EXIF)"
++            << static_cast<int>(m_config->orientation) << "liuqin orientation enabled" << upright;
++    Q_EMIT liuqinStreamConfigured(upright);
+     m_stream = m_config->at(0).stream();
+ 
+     ret = setFormat(QSize(static_cast<int>(streamConfig.size.width), static_cast<int>(streamConfig.size.height)),
+diff --git a/src/plasmacamera/worker.h b/src/plasmacamera/worker.h
+index f2e92c7..5294fe8 100644
+--- a/src/plasmacamera/worker.h
++++ b/src/plasmacamera/worker.h
+@@ -43,6 +43,7 @@ Q_SIGNALS:
+ 
+     // Get supported features
+     void cameraFormatChanged();
++    void liuqinStreamConfigured(bool upright);
+     void supportedFeaturesChanged();
+ 
+     // Get frames
+diff --git a/src/plasmacameramanager.cpp b/src/plasmacameramanager.cpp
+index ceedb3a..8bc8163 100644
+--- a/src/plasmacameramanager.cpp
++++ b/src/plasmacameramanager.cpp
+@@ -6,6 +6,7 @@
+ 
+ #include "camerasettings.h"
+ #include "plasmacamera/path.h"
++#include "plasmacamera/liuqinorientation.h"
+ #include "plasmacameramanager.h"
+ 
+ #include <exiv2/exiv2.hpp>
+@@ -526,7 +527,17 @@ void PlasmaCameraManager::processViewfinderFrame(const QImage &image)
+     frame.setMirrored(m_plasmaCamera->mirrorOutput());
+ 
+     // Add to sink
+-    m_videoSink->setVideoFrame(frame);
++    if (m_plasmaCamera->uprightLiuqinStream()) {
++        // QVideoFrame copies share metadata. Wrap the same QImage separately
++        // so the viewfinder transform does not change the recorder frame.
++        QVideoFrame preview(image);
++        const bool front = m_plasmaCamera->mirrorOutput();
++        preview.setRotation(static_cast<QtVideo::Rotation>(LiuqinOrientation::degrees(m_lastCardinalDegrees, front)));
++        preview.setMirrored(front);
++        m_videoSink->setVideoFrame(preview);
++    } else {
++        m_videoSink->setVideoFrame(frame);
++    }
+ 
+     // Set as video frame for video recording
+     m_videoFrame = std::move(frame);
+@@ -545,17 +556,10 @@ void PlasmaCameraManager::processCaptureImage(const QQueue<QImage> &frames)
+ 
+     QImage image = frames.head();
+ 
+-    // Flip image if requested
+-    if (m_plasmaCamera->mirrorOutput()) {
+-        image = image.mirrored(); // Deprecated, replace with image.flipped() once we are on Qt 6.9
++    if (m_shutterFlipVertical) {
++        image = image.flipped(Qt::Vertical);
+     }
+-
+-    // Do software rotation
+-    // From testing, most drivers don't seem to implement hardware orientation correctly (CameraConfiguration::orientation),
+-    // it either isn't supported or just crashes. So we will just use software rotation for best hardware compatibility.
+-    QTransform transform;
+-    transform.rotate(outputOrientationDegrees());
+-    image = image.transformed(transform);
++    image = LiuqinOrientation::rotateStill(image, m_shutterDegrees, m_mirrorSavedSelfie);
+ 
+     // TODO: set format and quality
+     qDebug() << "saving image to " << fileName;
+@@ -665,8 +669,9 @@ void PlasmaCameraManager::updateFromOrientationSensor()
+     case QOrientationReading::Orientation::Undefined:
+     default:
+         m_orientationSensorDegrees = 0.0f;
+-        break;
++        return;
+     }
++    m_lastCardinalDegrees = static_cast<int>(m_orientationSensorDegrees);
+ }
+ 
+ int PlasmaCameraManager::captureImageInternal()
+@@ -682,6 +687,12 @@ int PlasmaCameraManager::captureImageInternal()
+     }
+ 
+     m_imageCaptureNum = newImageCaptureId;
++    const bool liuqin = m_plasmaCamera->uprightLiuqinStream();
++    const bool front = m_plasmaCamera->mirrorOutput();
++    m_shutterFlipVertical = !liuqin && front;
++    m_mirrorSavedSelfie = liuqin && front && CameraSettings::self()->mirrorSelfies();
++    m_shutterDegrees = liuqin ? LiuqinOrientation::degrees(m_lastCardinalDegrees, front)
++                              : static_cast<int>(outputOrientationDegrees());
+     m_plasmaCamera->captureImage();
+ 
+     return newImageCaptureId;
+diff --git a/src/plasmacameramanager.h b/src/plasmacameramanager.h
+index c890c17..b626b8b 100644
+--- a/src/plasmacameramanager.h
++++ b/src/plasmacameramanager.h
+@@ -279,6 +279,10 @@ private:
+     // Device orientation for correct rotation
+     QOrientationSensor m_orientationSensor;
+     float m_orientationSensorDegrees = 0.0f;
++    int m_lastCardinalDegrees = 270; // RightUp, native camera landscape on liuqin.
++    int m_shutterDegrees = 0;
++    bool m_shutterFlipVertical = false;
++    bool m_mirrorSavedSelfie = false;
+ 
+     // internal
+     Settings m_settings;

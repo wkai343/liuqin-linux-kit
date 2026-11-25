@@ -1,0 +1,34 @@
+From f7af2f1c5f80d497e3f426b4a5df4627d35d201f Mon Sep 17 00:00:00 2001
+From: wk <58632380+wkai343@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 22:20:49 +0800
+Subject: [PATCH] libcamera: simple: keep liuqin shading coordinates signed
+
+---
+ src/libcamera/pipeline/simple/liuqin_isp.cpp | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/src/libcamera/pipeline/simple/liuqin_isp.cpp b/src/libcamera/pipeline/simple/liuqin_isp.cpp
+index 14783bc9..f4e6ff05 100644
+--- a/src/libcamera/pipeline/simple/liuqin_isp.cpp
++++ b/src/libcamera/pipeline/simple/liuqin_isp.cpp
+@@ -88,6 +88,8 @@ int LiuqinIsp::configure(Transform transform, ControlInfoMap *controlsInfo, unsi
+ 		unsigned int sy = rear_ ? 16 : h == 1952 ? 41 : 16;
+ 		unsigned int dx = rear_ ? 4 : h == 1952 ? 8 : 24;
+ 		unsigned int dy = rear_ ? 3 : h == 1952 ? 4 : 16;
++		/* The first mesh row precedes the image: keep every offset signed. */
++		int cropY = rear_ ? 0 : (1952 - static_cast<int>(h)) / 4;
+ 		if (rear_ && info_.outputSize != Size(4080, 3060))
+ 			return -EINVAL;
+ 		std::array<uint16_t, 884> mesh;
+@@ -95,7 +97,7 @@ int LiuqinIsp::configure(Transform transform, ControlInfoMap *controlsInfo, unsi
+ 			for (unsigned int y = 0; y < 13; y++) {
+ 				for (unsigned int x = 0; x < 17; x++) {
+ 					float px = (int(x * (sx << level)) - int(dx)) / (rear_ ? 2039.0f : 1295.0f);
+-					float py = (int(y * (sy << level)) - int(dy) + (rear_ ? 0 : (1952 - h) / 4)) / (rear_ ? 1529.0f : 975.0f);
++					float py = (int(y * (sy << level)) - int(dy) + cropY) / (rear_ ? 1529.0f : 975.0f);
+ 					float balance = c == 1 ? std::sqrt(calibration_.grgb) :
+ 							c == 2 ? 1 / std::sqrt(calibration_.grgb) : 1;
+ 					mesh[c * 221 + y * 17 + x] = std::clamp<int>(
+-- 
+2.56.0
+

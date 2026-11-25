@@ -1,0 +1,320 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 6a0e014..ff85e8f 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -11,12 +11,15 @@ add_executable(kamoso
+     main.cpp
+     kamoso.cpp
+     previewfetcher.cpp
++    video/tapfocus.cpp
+     video/rearflash.cpp
+     video/webcamcontrol.cpp
+ 
+     resources.qrc
+ )
+ 
++target_compile_definitions(kamoso PRIVATE KAMOSO_FOCUS_HELPER="${KDE_INSTALL_FULL_LIBEXECDIR}/kamoso-liuqin-focus")
++
+ kconfig_add_kcfg_files(kamoso kamosoSettings.kcfgc GENERATE_MOC)
+ target_link_libraries(kamoso
+     Qt::Concurrent Qt::Core Qt::Gui Qt::Widgets Qt::Quick
+diff --git a/src/qml/Main.qml b/src/qml/Main.qml
+index c343dbe..22e7f7b 100644
+--- a/src/qml/Main.qml
++++ b/src/qml/Main.qml
+@@ -4,7 +4,7 @@
+     SPDX-License-Identifier: GPL-2.0-or-later
+ */
+ 
+-import QtQuick 2.5
++import QtQuick
+ import QtQuick.Controls 2.0 as QQC2
+ import QtQuick.Layouts 1.1
+ import QtQuick.Window 2.2
+@@ -267,6 +267,46 @@ Kirigami.ApplicationWindow
+             anchors.fill: parent
+         }
+ 
++        Item {
++            anchors.fill: parent
++            visible: !!DeviceManager.playingDevice && DeviceManager.playingDevice.rearFlash
++            onWidthChanged: focusMark.visible = false
++            onHeightChanged: focusMark.visible = false
++
++            TapHandler {
++                acceptedButtons: Qt.LeftButton
++                onTapped: (eventPoint) => {
++                    const pos = eventPoint.position
++                    if (WebcamControl.focusAt(pos)) {
++                        focusMark.x = pos.x - focusMark.width / 2
++                        focusMark.y = pos.y - focusMark.height / 2
++                        focusMark.visible = true
++                        hideMark.restart()
++                    }
++                }
++            }
++
++            Rectangle {
++                id: focusMark
++                visible: false
++                width: Kirigami.Units.gridUnit * 2.5
++                height: width
++                color: "transparent"
++                border.color: "#ffcc42"
++                border.width: 2
++                radius: 4
++            }
++            Timer {
++                id: hideMark
++                interval: 1800
++                onTriggered: focusMark.visible = false
++            }
++            Connections {
++                target: WebcamControl
++                function onFocusTargetCleared() { focusMark.visible = false }
++            }
++        }
++
+         Text {
+             anchors {
+                 horizontalCenter: parent.horizontalCenter
+diff --git a/src/video/tapfocus.cpp b/src/video/tapfocus.cpp
+new file mode 100644
+index 0000000..20ca402
+--- /dev/null
++++ b/src/video/tapfocus.cpp
+@@ -0,0 +1,75 @@
++/*
++    SPDX-License-Identifier: GPL-2.0-or-later
++*/
++#include "tapfocus.h"
++
++#include <gst/video/video.h>
++#include <algorithm>
++#include <cmath>
++
++namespace {
++bool videoInfo(GstPad *pad, GstVideoInfo *info)
++{
++    GstCaps *caps = gst_pad_get_current_caps(pad);
++    if (!caps)
++        return false;
++    const bool valid = gst_video_info_from_caps(info, caps);
++    gst_caps_unref(caps);
++    return valid;
++}
++
++struct FocusEvent {
++    guint32 seqnum;
++    std::optional<QPointF> point;
++};
++
++GstPadProbeReturn readPoint(GstPad *, GstPadProbeInfo *probe, gpointer data)
++{
++    auto *focus = static_cast<FocusEvent *>(data);
++    GstEvent *event = GST_PAD_PROBE_INFO_EVENT(probe);
++    if (GST_EVENT_TYPE(event) != GST_EVENT_NAVIGATION || gst_event_get_seqnum(event) != focus->seqnum)
++        return GST_PAD_PROBE_OK;
++    double x, y;
++    if (gst_navigation_event_get_coordinates(event, &x, &y))
++        focus->point = QPointF(x, y);
++    return GST_PAD_PROBE_DROP;
++}
++}
++
++std::optional<QPointF> cameraFocusPoint(GstPad *preview, GstPad *camera, QSize item, QPointF tap)
++{
++    GstVideoInfo view, source;
++    if (!preview || !camera || item.isEmpty() || !videoInfo(preview, &view) || !videoInfo(camera, &source))
++        return {};
++    // qml6glsink keeps the display aspect ratio inside the logical Quick item.
++    guint num, den;
++    if (!gst_video_calculate_display_ratio(&num, &den, view.width, view.height,
++                                           view.par_n, view.par_d, 1, 1))
++        return {};
++    GstVideoRectangle display{0, 0, view.width, view.height};
++    if (view.height % den == 0 || view.width % num != 0)
++        display.w = gst_util_uint64_scale_int(view.height, num, den);
++    else
++        display.h = gst_util_uint64_scale_int(view.width, den, num);
++    const GstVideoRectangle bounds{0, 0, item.width(), item.height()};
++    GstVideoRectangle content;
++    gst_video_center_rect(&display, &bounds, &content, TRUE);
++    const double x = tap.x() - content.x;
++    const double y = tap.y() - content.y;
++    if (!(x >= 0 && x < content.w && y >= 0 && y < content.h))
++        return {};
++
++    // Navigation travels upstream synchronously. Each videoflip, crop and
++    // scaler translates the coordinates using its actually negotiated geometry.
++    GstEvent *event = gst_navigation_event_new_mouse_move(x * view.width / content.w,
++                                                          y * view.height / content.h,
++                                                          GST_NAVIGATION_MODIFIER_NONE);
++    FocusEvent focus{gst_event_get_seqnum(event), {}};
++    gulong probe = gst_pad_add_probe(camera, GST_PAD_PROBE_TYPE_EVENT_UPSTREAM, readPoint, &focus, nullptr);
++    gst_pad_push_event(preview, event);
++    gst_pad_remove_probe(camera, probe);
++    if (!focus.point || !std::isfinite(focus.point->x()) || !std::isfinite(focus.point->y()))
++        return {};
++    return QPointF(std::clamp(focus.point->x() / source.width, 0., 1.),
++                   std::clamp(focus.point->y() / source.height, 0., 1.));
++}
+diff --git a/src/video/tapfocus.h b/src/video/tapfocus.h
+new file mode 100644
+index 0000000..06a5554
+--- /dev/null
++++ b/src/video/tapfocus.h
+@@ -0,0 +1,12 @@
++/*
++    SPDX-License-Identifier: GPL-2.0-or-later
++*/
++#pragma once
++
++#include <gst/gst.h>
++#include <QPointF>
++#include <QSize>
++#include <optional>
++
++// Return the corresponding point in the camera source, before preview transforms.
++std::optional<QPointF> cameraFocusPoint(GstPad *preview, GstPad *camera, QSize item, QPointF tap);
+diff --git a/src/video/webcamcontrol.cpp b/src/video/webcamcontrol.cpp
+index e02b199..ef45ed2 100644
+--- a/src/video/webcamcontrol.cpp
++++ b/src/video/webcamcontrol.cpp
+@@ -26,6 +26,7 @@
+ #include <gst/gstmessage.h>
+ #include <gst/gst.h>
+ 
++#include "tapfocus.h"
+ #include <QDir>
+ #include <QDebug>
+ #include <QRunnable>
+@@ -202,6 +203,21 @@ private:
+ 
+ WebcamControl::WebcamControl()
+ {
++    connect(&m_focusProcess, &QProcess::finished, this, [this](int code, QProcess::ExitStatus status) {
++        if (status == QProcess::NormalExit && code != 0) {
++            qWarning() << "Tap focus:" << m_focusProcess.readAllStandardError().trimmed();
++            if (!m_pendingFocus)
++                Q_EMIT focusTargetCleared();
++        }
++        sendPendingFocus();
++    });
++    connect(&m_focusProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
++        if (error == QProcess::FailedToStart) {
++            qWarning() << "Tap focus:" << m_focusProcess.errorString();
++            m_pendingFocus.reset();
++            Q_EMIT focusTargetCleared();
++        }
++    });
+     QQmlApplicationEngine* engine = new QQmlApplicationEngine(this);
+     engine->rootContext()->setContextObject(new KLocalizedContext(engine));
+     m_kamoso = new Kamoso(this);
+@@ -245,8 +261,58 @@ WebcamControl::~WebcamControl()
+     delete m_kamoso;
+ }
+ 
++bool WebcamControl::focusAt(const QPointF &tap)
++{
++    Device *device = DeviceManager::self()->playingDevice();
++    if (!device || !device->rearFlash() || m_currentDevice != device->objectId() ||
++        !m_viewfinder || !m_cameraSource || !m_surface)
++        return false;
++
++    // Spatial effects such as kaleidoscope can show one object several times.
++    if (!m_extraFilters.isEmpty() && m_extraFilters != QStringLiteral("identity") &&
++        !m_extraFilters.startsWith(QStringLiteral("videobalance ")) &&
++        !m_extraFilters.startsWith(QStringLiteral("coloreffects ")))
++        return false;
++
++    GstElement *source = nullptr;
++    g_object_get(m_cameraSource.data(), "video-source", &source, nullptr);
++    GstPointer<GstElement> camera(source);
++    GstPointer<GstElement> view(gst_bin_get_by_name(GST_BIN(m_viewfinder.data()), "videosink"));
++    if (!camera || !view)
++        return false;
++    GstPointer<GstPad> src(gst_element_get_static_pad(camera.data(), "src"));
++    GstPointer<GstPad> sink(gst_element_get_static_pad(view.data(), "sink"));
++    const QSize size(int(m_surface->width()), int(m_surface->height()));
++    auto point = cameraFocusPoint(sink.data(), src.data(), size, tap);
++    if (!point)
++        return false;
++    m_pendingFocus = point;
++    sendPendingFocus();
++    return true;
++}
++
++void WebcamControl::sendPendingFocus()
++{
++    if (!m_pendingFocus || m_focusProcess.state() != QProcess::NotRunning)
++        return;
++    const QPointF point = *m_pendingFocus;
++    m_pendingFocus.reset();
++    m_focusProcess.start(QStringLiteral(KAMOSO_FOCUS_HELPER),
++                         {QStringLiteral("tap"), QString::number(point.x(), 'f', 7),
++                          QString::number(point.y(), 'f', 7)});
++}
++
++void WebcamControl::clearFocusTarget()
++{
++    m_pendingFocus.reset();
++    if (m_focusProcess.state() != QProcess::NotRunning)
++        m_focusProcess.kill();
++    Q_EMIT focusTargetCleared();
++}
++
+ void WebcamControl::stop()
+ {
++    clearFocusTarget();
+     m_flash.cancel();
+     if(m_pipeline) {
+         gst_element_set_state(GST_ELEMENT(m_pipeline.data()), GST_STATE_NULL);
+@@ -498,6 +564,7 @@ void WebcamControl::setExtraFilters(const QString& extraFilters)
+ 
+ void WebcamControl::updateSourceFilter()
+ {
++    clearFocusTarget();
+     m_flash.resetMeter();
+     if (!m_pipeline)
+         return;
+diff --git a/src/video/webcamcontrol.h b/src/video/webcamcontrol.h
+index 4ea821c..faead4e 100644
+--- a/src/video/webcamcontrol.h
++++ b/src/video/webcamcontrol.h
+@@ -9,6 +9,8 @@
+ #define WEBCAMCONTROL_H
+ 
+ #include <QObject>
++#include <QProcess>
++#include <optional>
+ #include <QUrl>
+ #include <QQuickItem>
+ 
+@@ -44,6 +46,7 @@ class WebcamControl : public QObject
+         bool readyForCapture() const { return m_readyForCapture && !m_flash.busy(); }
+ 
+     public Q_SLOTS:
++        bool focusAt(const QPointF &tap);
+         bool play();
+         bool playDevice(Device* device);
+         void stop();
+@@ -55,6 +58,7 @@ class WebcamControl : public QObject
+         void setExtraFilters(const QString &extraFilters);
+ 
+     Q_SIGNALS:
++        void focusTargetCleared();
+         void photoTaken(const QString &photoUrl);
+         void mirroredChanged(bool mirrored);
+         void currentDeviceChanged();
+@@ -67,6 +71,10 @@ class WebcamControl : public QObject
+         void savePhoto(const QUrl &url, bool emitTaken, bool fire);
+         void updateSourceFilter();
+         void setVideoSettings();
++        void clearFocusTarget();
++        void sendPendingFocus();
++        QProcess m_focusProcess;
++        std::optional<QPointF> m_pendingFocus;
+ 
+         QString m_extraFilters;
+         QString m_tmpVideoPath;

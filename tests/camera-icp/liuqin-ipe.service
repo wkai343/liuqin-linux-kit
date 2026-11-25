@@ -1,0 +1,15 @@
+[Unit]
+Description=Verified local Liuqin IPE processing bundle
+After=local-fs.target liuqin-front-calibration.service liuqin-rear-calibration.service
+Before=systemd-user-sessions.service display-manager.service
+ConditionPathExists=/usr/local/lib/liuqin-ipe/manifest.json
+
+[Service]
+Type=oneshot
+Environment=PATH=/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/local/libexec/liuqin-ipe-load /usr/local/lib/liuqin-ipe
+RemainAfterExit=yes
+TimeoutStartSec=20
+
+[Install]
+WantedBy=multi-user.target

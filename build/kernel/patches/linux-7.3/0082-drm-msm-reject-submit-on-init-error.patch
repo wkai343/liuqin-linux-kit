@@ -1,0 +1,124 @@
+From: Liuqin Linux contributors
+Subject: [PATCH] drm/msm: stop submission when runtime resume or GPU init fails
+
+Do not write ring commands after a failed GMU GPU_SET handshake. Return
+the initialization error through the scheduler fence without acquiring
+ring/active-submit references, and balance the runtime PM reference.
+Include the OOB caller in timeout diagnostics to distinguish hw_init
+from the no-submit suspend handshake without reading a live GPU dump.
+Initialize the hardware fence only after hardware init succeeds, so a
+rejected job does not leave last_fence ahead of the last submitted work.
+
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_gmu.c b/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
+index 467d155f4..ba5940928 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
+@@ -449,9 +449,10 @@ int a6xx_gmu_set_oob(struct a6xx_gmu *gmu, enum a6xx_gmu_oob_state state)
+ 
+ 	if (ret)
+ 		DRM_DEV_ERROR(gmu->dev,
+-			"Timeout waiting for GMU OOB set %s: 0x%x\n",
++			"Timeout waiting for GMU OOB set %s: 0x%x caller=%pS\n",
+ 				a6xx_gmu_oob_bits[state].name,
+-				gmu_read(gmu, REG_A6XX_GMU_GMU2HOST_INTR_INFO));
++				gmu_read(gmu, REG_A6XX_GMU_GMU2HOST_INTR_INFO),
++				__builtin_return_address(0));
+ 
+ 	/* Clear the acknowledge interrupt */
+ 	gmu_write(gmu, REG_A6XX_GMU_GMU2HOST_INTR_CLR, 1 << ack);
+diff --git a/drivers/gpu/drm/msm/msm_gpu.c b/drivers/gpu/drm/msm/msm_gpu.c
+index fb4cc0dd2..7958e7b7a 100644
+--- a/drivers/gpu/drm/msm/msm_gpu.c
++++ b/drivers/gpu/drm/msm/msm_gpu.c
+@@ -790,17 +790,29 @@ void msm_gpu_retire(struct msm_gpu *gpu)
+ }
+ 
+ /* add bo's to gpu's ring, and kick gpu: */
+-void msm_gpu_submit(struct msm_gpu *gpu, struct msm_gem_submit *submit)
++int msm_gpu_submit(struct msm_gpu *gpu, struct msm_gem_submit *submit)
+ {
+ 	struct msm_ringbuffer *ring = submit->ring;
+ 	unsigned long flags;
++	int ret;
+ 
+ 	WARN_ON(!mutex_is_locked(&gpu->lock));
+ 
+-	pm_runtime_get_sync(&gpu->pdev->dev);
++	ret = pm_runtime_resume_and_get(&gpu->pdev->dev);
++	if (ret < 0)
++		return ret;
+ 
+-	msm_gpu_hw_init(gpu);
++	ret = msm_gpu_hw_init(gpu);
++	if (ret) {
++		DRM_DEV_ERROR(gpu->dev->dev,
++			      "GPU initialization failed before submit: %d\n", ret);
++		/* No ring or active-submit reference has been acquired yet. */
++		pm_runtime_put_sync(&gpu->pdev->dev);
++		return ret;
++	}
+ 
++	/* Failed initialization must not leave an unsubmitted active fence. */
++	msm_fence_init(submit->hw_fence, ring->fctx);
+ 	submit->seqno = submit->hw_fence->seqno;
+ 
+ 	/*
+@@ -827,6 +839,8 @@ void msm_gpu_submit(struct msm_gpu *gpu, struct msm_gem_submit *submit)
+ 
+ 	pm_runtime_put(&gpu->pdev->dev);
+ 	hangcheck_timer_reset(gpu);
++
++	return 0;
+ }
+ 
+ /*
+diff --git a/drivers/gpu/drm/msm/msm_gpu.h b/drivers/gpu/drm/msm/msm_gpu.h
+index 9e5217b85..27c275bf7 100644
+--- a/drivers/gpu/drm/msm/msm_gpu.h
++++ b/drivers/gpu/drm/msm/msm_gpu.h
+@@ -754,7 +754,7 @@ void msm_devfreq_idle(struct msm_gpu *gpu);
+ int msm_gpu_hw_init(struct msm_gpu *gpu);
+ 
+ void msm_gpu_retire(struct msm_gpu *gpu);
+-void msm_gpu_submit(struct msm_gpu *gpu, struct msm_gem_submit *submit);
++int msm_gpu_submit(struct msm_gpu *gpu, struct msm_gem_submit *submit);
+ 
+ int msm_gpu_init(struct drm_device *drm, struct platform_device *pdev,
+ 		struct msm_gpu *gpu, const struct msm_gpu_funcs *funcs,
+diff --git a/drivers/gpu/drm/msm/msm_ringbuffer.c b/drivers/gpu/drm/msm/msm_ringbuffer.c
+index 38e1e6866..318c74797 100644
+--- a/drivers/gpu/drm/msm/msm_ringbuffer.c
++++ b/drivers/gpu/drm/msm/msm_ringbuffer.c
+@@ -14,13 +14,10 @@ module_param(num_hw_submissions, uint, 0600);
+ static struct dma_fence *msm_job_run(struct drm_sched_job *job)
+ {
+ 	struct msm_gem_submit *submit = to_msm_submit(job);
+-	struct msm_fence_context *fctx = submit->ring->fctx;
+ 	struct msm_gpu *gpu = submit->gpu;
+ 	struct drm_device *dev = gpu->dev;
+ 	unsigned nr_cmds = submit->nr_cmds;
+-	int i;
+-
+-	msm_fence_init(submit->hw_fence, fctx);
++	int i, ret;
+ 
+ 	mutex_lock(&dev->gem_lru_mutex);
+ 
+@@ -40,12 +37,16 @@ static struct dma_fence *msm_job_run(struct drm_sched_job *job)
+ 	if (submit->queue->ctx->closed)
+ 		submit->nr_cmds = 0;
+ 
+-	msm_gpu_submit(gpu, submit);
++	ret = msm_gpu_submit(gpu, submit);
+ 
+ 	submit->nr_cmds = nr_cmds;
+ 
+ 	mutex_unlock(&gpu->lock);
+ 
++	/* The scheduler signals the userspace fence with this error. */
++	if (ret)
++		return ERR_PTR(ret);
++
+ 	return dma_fence_get(submit->hw_fence);
+ }
+ 

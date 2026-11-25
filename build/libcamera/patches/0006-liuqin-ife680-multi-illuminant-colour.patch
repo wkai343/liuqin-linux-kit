@@ -1,0 +1,274 @@
+diff --git a/src/libcamera/pipeline/simple/liuqin_colour.h b/src/libcamera/pipeline/simple/liuqin_colour.h
+new file mode 100644
+index 00000000..f906d5e1
+--- /dev/null
++++ b/src/libcamera/pipeline/simple/liuqin_colour.h
+@@ -0,0 +1,82 @@
++/* SPDX-License-Identifier: LGPL-2.1-or-later */
++#pragma once
++#include <algorithm>
++#include <array>
++#include <cmath>
++#include <limits>
++#include <utility>
++
++namespace libcamera::liuqinColour {
++/* Shipping IMX596 IPE CC13, same DRC/custom/LED/lux branch as the D50
++ * baseline. Kelvin intervals and matrices come from the five CCT leaves.
++ * Selection and interpolation here are local algorithms, not the OEM AWB.
++ */
++struct MatrixAnchor { double start, end; std::array<float, 9> matrix; };
++inline constexpr MatrixAnchor matrices[] = {
++ {2000, 2450, {1.4726f, -.60985f, .13725f, -.27053f, 1.21319f, .05734f, -.16336f, -.49502f, 1.65838f}},
++ {2650, 3250, {1.37475f, -.44368f, .06893f, -.21636f, 1.20229f, .01407f, -.09141f, -.49107f, 1.58248f}},
++ {3500, 4300, {1.2229f, -.365f, .1421f, -.1435f, 1.2306f, -.0871f, -.0098f, -.362f, 1.3718f}},
++ {4500, 5500, {1.2678f, -.2751f, .0073f, -.1373f, 1.2508f, -.1135f, -.0101f, -.3168f, 1.3269f}},
++ {5800, 8500, {1.24929f, -.21534f, -.03395f, -.10731f, 1.30871f, -.2014f, -.00383f, -.27879f, 1.28262f}},
++};
++inline std::array<float, 9> matrix(double kelvin)
++{
++ if (!std::isfinite(kelvin)) kelvin = 5000;
++ for (unsigned int i = 0; i < std::size(matrices); ++i) {
++  if (kelvin <= matrices[i].end || i + 1 == std::size(matrices))
++   return matrices[i].matrix;
++  if (kelvin < matrices[i + 1].start) {
++   double t = (kelvin - matrices[i].end) / (matrices[i + 1].start - matrices[i].end);
++   auto result = matrices[i].matrix;
++   for (unsigned int j = 0; j < result.size(); ++j)
++    result[j] += t * (matrices[i + 1].matrix[j] - result[j]);
++   return result;
++  }
++ }
++ return matrices[3].matrix;
++}
++/* refPtV1 (module 197) indexes 7, 6, 3, 2, 1: A, TL84, D50, D65, D75.
++ * Kelvin values are nominal illuminant temperatures used by our estimator;
++ * the stock reference-point array does not encode a CCT transfer function.
++ * Normalize to D50 before applying this unit's EEPROM D50 ratios. This keeps
++ * the already validated unit white point and uses the OEM relative locus.
++ */
++struct WhiteAnchor { double kelvin, rg, bg; };
++inline constexpr WhiteAnchor whites[] = {
++ {2856, .83547, .35374}, {4000, .59795, .4458},
++ {5000, .53362, .54795}, {6500, .45391, .6851}, {7500, .42896, .73227},
++};
++inline std::pair<double, double> gains(double kelvin, double unitRG, double unitBG)
++{
++ kelvin = std::isfinite(kelvin) ? std::clamp(kelvin, whites[0].kelvin, whites[4].kelvin) : 5000;
++ for (unsigned int i = 0; i + 1 < std::size(whites); ++i) {
++  if (kelvin > whites[i + 1].kelvin) continue;
++  double t = (1 / kelvin - 1 / whites[i].kelvin) / (1 / whites[i + 1].kelvin - 1 / whites[i].kelvin);
++  double rg = std::exp((1 - t) * std::log(whites[i].rg) + t * std::log(whites[i + 1].rg));
++  double bg = std::exp((1 - t) * std::log(whites[i].bg) + t * std::log(whites[i + 1].bg));
++  return {std::clamp(whites[2].rg / (rg * unitRG), 1.0, 16.0),
++          std::clamp(whites[2].bg / (bg * unitBG), 1.0, 16.0)};
++ }
++ return {1, 1};
++}
++struct Estimate { double kelvin = 5000, distance = std::numeric_limits<double>::infinity(); };
++inline Estimate estimate(double rg, double bg, double unitRG, double unitBG)
++{
++ Estimate result;
++ if (!(rg > 0 && bg > 0 && unitRG > 0 && unitBG > 0) ||
++     !std::isfinite(rg + bg + unitRG + unitBG)) return result;
++ double x = std::log(rg / unitRG * whites[2].rg);
++ double y = std::log(bg / unitBG * whites[2].bg);
++ for (unsigned int i = 0; i + 1 < std::size(whites); ++i) {
++  double ax = std::log(whites[i].rg), ay = std::log(whites[i].bg);
++  double dx = std::log(whites[i + 1].rg) - ax, dy = std::log(whites[i + 1].bg) - ay;
++  double t = std::clamp(((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy), 0.0, 1.0);
++  double distance = std::hypot(x - ax - t * dx, y - ay - t * dy);
++  if (distance < result.distance) {
++   result.distance = distance;
++   result.kelvin = 1 / ((1 - t) / whites[i].kelvin + t / whites[i + 1].kelvin);
++  }
++ }
++ return result;
++}
++} /* namespace libcamera::liuqinColour */
+diff --git a/src/libcamera/pipeline/simple/liuqin_isp.cpp b/src/libcamera/pipeline/simple/liuqin_isp.cpp
+index d6bc5a66..ca726afb 100644
+--- a/src/libcamera/pipeline/simple/liuqin_isp.cpp
++++ b/src/libcamera/pipeline/simple/liuqin_isp.cpp
+@@ -1,8 +1,10 @@
+ /* SPDX-License-Identifier: LGPL-2.1-or-later */
+ #include "liuqin_isp.h"
++#include "liuqin_colour.h"
+ #include "libcamera/internal/request.h"
+ 
+ #include <algorithm>
++#include <tuple>
+ #include <cmath>
+ #include <numeric>
+ #include <libcamera/control_ids.h>
+@@ -11,16 +13,6 @@
+ namespace libcamera {
+ LOG_DEFINE_CATEGORY(LiuqinIsp)
+ 
+-/* Stock IMX596 IPE CC13, selected baseline branch, 4500--5500 K.
+- * Executed here by IFE CC131 before gamma. This is a D50 baseline, not the
+- * closed-source scene/CCT trigger algorithm. Neutral rows sum to unity.
+- */
+-static constexpr std::array<float, 9> imx596D50 = {
+-	1.2678f, -0.2751f, 0.0073f,
+-	-0.1373f, 1.2508f, -0.1135f,
+-	-0.0101f, -0.3168f, 1.3269f,
+-};
+-
+ bool LiuqinIsp::supported(V4L2Subdevice *isp)
+ {
+ 	const uint32_t types[] = { V4L2_CTRL_TYPE_INTEGER, V4L2_CTRL_TYPE_U32,
+@@ -91,10 +83,12 @@ int LiuqinIsp::configure(Transform transform, ControlInfoMap *controlsInfo)
+ 	const auto *cc = isp_->controlInfo(LiuqinIspBase + 4);
+ 	colourMatrix_ = cc && cc->type == V4L2_CTRL_TYPE_U16 && cc->elems == 9 &&
+ 		cc->minimum == 0 && cc->maximum == 4095;
+-	ccm_ = imx596D50;
++	ccm_ = liuqinColour::matrix(temperature_);
+ 	ControlInfoMap::Map map;
+-	if (colourMatrix_)
++	if (colourMatrix_) {
+ 		map[&controls::ColourCorrectionMatrix] = ControlInfo(-2.0f, 2047.0f / 1024, 1.0f);
++		map[&controls::ColourTemperature] = ControlInfo(2856, 7500, 5000);
++	}
+ 	map[&controls::AeEnable] = ControlInfo(false, true, true);
+ 	map[&controls::AwbEnable] = ControlInfo(false, true, true);
+ 	map[&controls::ExposureTime] = ControlInfo(int(std::ceil(4 * lineUs_)), int((info_.maxFrameLength - 24) * lineUs_), 10000);
+@@ -104,7 +98,7 @@ int LiuqinIsp::configure(Transform transform, ControlInfoMap *controlsInfo)
+ 	int64_t maximum = info_.maxFrameLength * lineUs_;
+ 	map[&controls::FrameDurationLimits] = ControlInfo(minimum, maximum, minimum);
+ 	*controlsInfo = ControlInfoMap(std::move(map), controls::controls);
+-	LOG(LiuqinIsp, Info) << "IFE680 NV12, hardware Bayer statistics and calibrated LSC, " << info_.outputSize << (colourMatrix_ ? ", stock D50 CC131" : "");
++	LOG(LiuqinIsp, Info) << "IFE680 NV12, hardware Bayer statistics and calibrated LSC, " << info_.outputSize << (colourMatrix_ ? ", stock multi-illuminant CC131" : "");
+ 	return 0;
+ }
+ 
+@@ -114,14 +108,6 @@ void LiuqinIsp::update(const ControlList &controls)
+ 		ae_ = *value;
+ 	if (auto value = controls.get(controls::AwbEnable))
+ 		awb_ = *value;
+-	if (awb_)
+-		ccm_ = imx596D50;
+-	else if (auto value = controls.get(controls::ColourCorrectionMatrix)) {
+-		if (std::all_of(value->begin(), value->end(), [](float v) {
+-			return std::isfinite(v) && v >= -2 && v <= 2047.0f / 1024;
+-		}))
+-			std::copy(value->begin(), value->end(), ccm_.begin());
+-	}
+ 	if (auto value = controls.get(controls::FrameDurationLimits)) {
+ 		/* Fixed frame period chosen within the requested interval. */
+ 		frameLines_ = std::clamp<unsigned int>(std::ceil((*value)[0] / lineUs_), info_.minFrameLength, info_.maxFrameLength);
+@@ -133,10 +119,29 @@ void LiuqinIsp::update(const ControlList &controls)
+ 			gain_ = *value;
+ 	}
+ 	if (!awb_) {
++		if (auto value = controls.get(controls::ColourTemperature)) {
++			temperature_ = std::clamp<int>(*value, 2856, 7500);
++			if (!controls.contains(controls::ColourGains.id()))
++				std::tie(red_, blue_) = liuqinColour::gains(temperature_, calibration_.rg, calibration_.bg);
++			ccm_ = liuqinColour::matrix(temperature_);
++		}
+ 		if (auto value = controls.get(controls::ColourGains)) {
+-			red_ = (*value)[0];
+-			blue_ = (*value)[1];
++			if (std::isfinite((*value)[0]) && std::isfinite((*value)[1])) {
++				red_ = std::clamp<double>((*value)[0], 1, 16);
++				blue_ = std::clamp<double>((*value)[1], 1, 16);
++				if (!controls.contains(controls::ColourTemperature.id()))
++					temperature_ = liuqinColour::estimate(1 / red_, 1 / blue_, calibration_.rg, calibration_.bg).kelvin;
++				ccm_ = liuqinColour::matrix(temperature_);
++			}
++		}
++		if (auto value = controls.get(controls::ColourCorrectionMatrix)) {
++			if (std::all_of(value->begin(), value->end(), [](float v) {
++				return std::isfinite(v) && v >= -2 && v <= 2047.0f / 1024;
++			}))
++				std::copy(value->begin(), value->end(), ccm_.begin());
+ 		}
++	} else {
++		ccm_ = liuqinColour::matrix(temperature_);
+ 	}
+ }
+ 
+@@ -180,7 +185,8 @@ int LiuqinIsp::apply()
+ int LiuqinIsp::start(const ControlList &controls)
+ {
+ 	ae_ = awb_ = true;
+-	ccm_ = imx596D50;
++	temperature_ = 5000;
++	ccm_ = liuqinColour::matrix(temperature_);
+ 	red_ = 1.0 / calibration_.rg;
+ 	blue_ = 1.0 / calibration_.bg;
+ 	nextUpdate_ = 0;
+@@ -193,7 +199,7 @@ int LiuqinIsp::start(const ControlList &controls)
+ 	}
+ 	update(controls);
+ 	int ret = apply();
+-	effective_ = { 0, int(exposure_), float(gain_), float(red_), float(blue_), int64_t(frameLines_ * lineUs_), ccm_ };
++	effective_ = { 0, int(exposure_), float(gain_), float(red_), float(blue_), int64_t(frameLines_ * lineUs_), ccm_, int(std::lround(temperature_)) };
+ 	return ret;
+ }
+ 
+@@ -208,8 +214,10 @@ void LiuqinIsp::process(FrameBuffer *buffer, Request *request)
+ 	request->_d()->metadata().set(controls::AnalogueGain, effective_.gain);
+ 	request->_d()->metadata().set(controls::ColourGains, { effective_.red, effective_.blue });
+ 	request->_d()->metadata().set(controls::FrameDuration, effective_.duration);
+-	if (colourMatrix_)
++	if (colourMatrix_) {
+ 		request->_d()->metadata().set(controls::ColourCorrectionMatrix, effective_.ccm);
++		request->_d()->metadata().set(controls::ColourTemperature, effective_.temperature);
++	}
+ 	update(request->controls());
+ 	if (sequence < nextUpdate_ && request->controls().empty())
+ 		return;
+@@ -240,10 +248,10 @@ void LiuqinIsp::process(FrameBuffer *buffer, Request *request)
+ 			double weight = (x >= 8 && x < 24 && y >= 6 && y < 18) ? 4 : 1;
+ 			luminance += weight * (0.299 * r * red_ + 0.587 * green + 0.114 * b * blue_);
+ 			weights += weight;
+-			if (green < 0.01 || green > 0.75 || r < 0.003 || b < 0.003)
++			if (green < 0.01 || green > 0.75 || r < 0.003 || b < 0.003 || r > 0.95 || b > 0.95)
+ 				continue;
+-			double nr = r / (green * calibration_.rg), nb = b / (green * calibration_.bg);
+-			if (nr > 0.55 && nr < 1.8 && nb > 0.55 && nb < 1.8) {
++			auto white = liuqinColour::estimate(r / green, b / green, calibration_.rg, calibration_.bg);
++			if (white.distance < 0.10) {
+ 				reds.push_back(green / r);
+ 				blues.push_back(green / b);
+ 			}
+@@ -267,15 +275,17 @@ void LiuqinIsp::process(FrameBuffer *buffer, Request *request)
+ 		std::sort(blues.begin(), blues.end());
+ 		red_ = red_ * 0.8 + std::clamp(reds[reds.size() / 2], 1.0, 4.0) * 0.2;
+ 		blue_ = blue_ * 0.8 + std::clamp(blues[blues.size() / 2], 1.0, 4.0) * 0.2;
++		temperature_ = liuqinColour::estimate(1 / red_, 1 / blue_, calibration_.rg, calibration_.bg).kelvin;
++		ccm_ = liuqinColour::matrix(temperature_);
+ 	}
+ 	int ret = apply();
+ 	if (!ret)
+-		pending_.push_back({ sequence + 3, int(exposure_), float(gain_), float(red_), float(blue_), int64_t(frameLines_ * lineUs_), ccm_ });
++		pending_.push_back({ sequence + 3, int(exposure_), float(gain_), float(red_), float(blue_), int64_t(frameLines_ * lineUs_), ccm_, int(std::lround(temperature_)) });
+ 	else
+ 		LOG(LiuqinIsp, Error) << "Failed to apply automatic controls: " << ret;
+ 	nextUpdate_ = sequence + 6;
+ 	LOG(LiuqinIsp, Debug) << "frame=" << sequence << " mean=" << (weights ? luminance / weights : 0)
+ 		<< " neutral=" << reds.size() << " exposure=" << exposure_ << " gain=" << gain_
+-		<< " WB=" << red_ << ',' << blue_;
++		<< " CCT=" << temperature_ << " WB=" << red_ << ',' << blue_;
+ }
+ } /* namespace libcamera */
+diff --git a/src/libcamera/pipeline/simple/liuqin_isp.h b/src/libcamera/pipeline/simple/liuqin_isp.h
+index 4571c33f..f637070c 100644
+--- a/src/libcamera/pipeline/simple/liuqin_isp.h
++++ b/src/libcamera/pipeline/simple/liuqin_isp.h
+@@ -30,11 +30,12 @@ private:
+ 	IPACameraSensorInfo info_;
+ 	Transform transform_;
+ 	double lineUs_ = 0, exposure_ = 10000, gain_ = 1, red_ = 1, blue_ = 1;
++	double temperature_ = 5000;
+ 	unsigned int frameLines_ = 0;
+ 	bool ae_ = true, awb_ = true, colourMatrix_ = false;
+ 	std::array<float, 9> ccm_;
+ 	uint32_t nextUpdate_ = 0;
+-	struct Applied { uint32_t sequence; int exposure; float gain, red, blue; int64_t duration; std::array<float, 9> ccm; };
++	struct Applied { uint32_t sequence; int exposure; float gain, red, blue; int64_t duration; std::array<float, 9> ccm; int temperature; };
+ 	std::deque<Applied> pending_;
+ 	Applied effective_{};
+ };

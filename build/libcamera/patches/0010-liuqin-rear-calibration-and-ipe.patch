@@ -1,0 +1,158 @@
+diff --git a/src/libcamera/pipeline/simple/liuqin_calibration.h b/src/libcamera/pipeline/simple/liuqin_calibration.h
+index 03440254..6b6c5af5 100644
+--- a/src/libcamera/pipeline/simple/liuqin_calibration.h
++++ b/src/libcamera/pipeline/simple/liuqin_calibration.h
+@@ -11,14 +11,17 @@ namespace libcamera {
+ struct LiuqinCalibration {
+ 	float rg = 1.0f, bg = 1.0f, grgb = 1.0f;
+ 	std::vector<float> lsc;
+-	bool load()
++	int afMin = 0, afMax = 1023;
++	bool load(const std::string &model = "imx596")
+ 	{
+-		File file("/run/libcamera/liuqin-imx596.json");
++		if (model != "imx596" && model != "s5kjn1")
++			return false;
++		File file("/run/libcamera/liuqin-" + model + ".json");
+ 		if (!file.open(File::OpenModeFlag::ReadOnly))
+ 			return false;
+ 		auto data = YamlParser::parse(file);
+ 		if (!data || (*data)["schema"].get<unsigned int>(0) != 1 ||
+-		    (*data)["model"].get<std::string>("") != "imx596" ||
++		    (*data)["model"].get<std::string>("") != model ||
+ 		    (*data)["mesh_width"].get<unsigned int>(0) != 17 ||
+ 		    (*data)["mesh_height"].get<unsigned int>(0) != 13)
+ 			return false;
+@@ -37,6 +40,12 @@ struct LiuqinCalibration {
+ 		}
+ 		if (mesh.size() != 884)
+ 			return false;
++		if (model == "s5kjn1") {
++			afMin = (*data)["af_min"].get<int>(-1);
++			afMax = (*data)["af_max"].get<int>(-1);
++			if (afMin < 0 || afMax > 1023 || afMin >= afMax)
++				return false;
++		}
+ 		lsc = std::move(mesh);
+ 		return true;
+ 	}
+diff --git a/src/libcamera/pipeline/simple/liuqin_isp.cpp b/src/libcamera/pipeline/simple/liuqin_isp.cpp
+index 27fd3087..14783bc9 100644
+--- a/src/libcamera/pipeline/simple/liuqin_isp.cpp
++++ b/src/libcamera/pipeline/simple/liuqin_isp.cpp
+@@ -54,15 +54,18 @@ float LiuqinIsp::shading(unsigned int channel, float x, float y) const
+ 
+ int LiuqinIsp::configure(Transform transform, ControlInfoMap *controlsInfo, unsigned int stride)
+ {
+-	if (!rear_ && !calibration_.load()) {
++	calibration_ = {};
++	bool calibrated = calibration_.load(rear_ ? "s5kjn1" : "imx596");
++	if (!rear_ && !calibrated) {
+ 		LOG(LiuqinIsp, Error) << "Valid per-module IMX596 calibration is required";
+ 		return -ENODATA;
+ 	}
+ 	if (rear_) {
+-		calibration_.rg = liuqinRearColour::whites[2].rg;
+-		calibration_.bg = liuqinRearColour::whites[2].bg;
+-		calibration_.grgb = 1;
+-		calibration_.lsc.clear();
++		if (!calibrated) {
++			calibration_ = {};
++			calibration_.rg = liuqinRearColour::whites[2].rg;
++			calibration_.bg = liuqinRearColour::whites[2].bg;
++		}
+ 		margin_ = 22; minimumLines_ = 8; maxGain_ = 64;
+ 	}
+ 	int ret = sensor_->sensorInfo(&info_);
+@@ -74,17 +77,25 @@ int LiuqinIsp::configure(Transform transform, ControlInfoMap *controlsInfo, unsi
+ 	transform_ = transform;
+ 	lineUs_ = info_.minLineLength * 1000000.0 / info_.pixelRate;
+ 	frameLines_ = info_.minFrameLength;
+-	if (!rear_) {
++	const auto *rearLscInfo = isp_->controlInfo(LiuqinIspBase + 6);
++	bool rearLsc = rearLscInfo && rearLscInfo->type == V4L2_CTRL_TYPE_INTEGER &&
++		rearLscInfo->elems == 1 && rearLscInfo->minimum == 1 && rearLscInfo->maximum == 1;
++	bool shadingEnabled = calibrated && (!rear_ || rearLsc);
++	if (shadingEnabled) {
+ 		unsigned int h = info_.outputSize.height;
+-		unsigned int level = h == 1952 ? 1 : 2;
+-		unsigned int sx = h == 1952 ? 41 : 21, sy = h == 1952 ? 41 : 16;
+-		unsigned int dx = h == 1952 ? 8 : 24, dy = h == 1952 ? 4 : 16;
++		unsigned int level = rear_ ? 3 : h == 1952 ? 1 : 2;
++		unsigned int sx = rear_ ? 16 : h == 1952 ? 41 : 21;
++		unsigned int sy = rear_ ? 16 : h == 1952 ? 41 : 16;
++		unsigned int dx = rear_ ? 4 : h == 1952 ? 8 : 24;
++		unsigned int dy = rear_ ? 3 : h == 1952 ? 4 : 16;
++		if (rear_ && info_.outputSize != Size(4080, 3060))
++			return -EINVAL;
+ 		std::array<uint16_t, 884> mesh;
+ 		for (unsigned int c = 0; c < 4; c++) {
+ 			for (unsigned int y = 0; y < 13; y++) {
+ 				for (unsigned int x = 0; x < 17; x++) {
+-					float px = (int(x * (sx << level)) - int(dx)) / 1295.0f;
+-					float py = (int(y * (sy << level)) - int(dy) + (1952 - h) / 4) / 975.0f;
++					float px = (int(x * (sx << level)) - int(dx)) / (rear_ ? 2039.0f : 1295.0f);
++					float py = (int(y * (sy << level)) - int(dy) + (rear_ ? 0 : (1952 - h) / 4)) / (rear_ ? 1529.0f : 975.0f);
+ 					float balance = c == 1 ? std::sqrt(calibration_.grgb) :
+ 							c == 2 ? 1 / std::sqrt(calibration_.grgb) : 1;
+ 					mesh[c * 221 + y * 17 + x] = std::clamp<int>(
+@@ -98,6 +109,16 @@ int LiuqinIsp::configure(Transform transform, ControlInfoMap *controlsInfo, unsi
+ 		if (ret)
+ 			return ret;
+ 	}
++	if (rear_ && rearLsc && !calibrated) {
++		/* A missing/rejected file must not leave an earlier module's mesh active. */
++		std::array<uint16_t, 884> unity;
++		unity.fill(1024);
++		ControlList ispControls(isp_->controls());
++		ispControls.set(LiuqinIspBase + 3, Span<const uint16_t>(unity));
++		ret = isp_->setControls(&ispControls);
++		if (ret)
++			return ret;
++	}
+ 	const auto *wide = isp_->controlInfo(LiuqinIspBase + 5);
+ 	wideMatrix_ = wide && wide->type == V4L2_CTRL_TYPE_U16 && wide->elems == 9 && wide->minimum == 0 && wide->maximum == 8191;
+ 	const auto *cc = isp_->controlInfo(LiuqinIspBase + 4);
+@@ -120,13 +141,21 @@ int LiuqinIsp::configure(Transform transform, ControlInfoMap *controlsInfo, unsi
+ 	hasAf_ = rear_ && sensor_->focusLens() && sensor_->focusLens()->controls().count(V4L2_CID_FOCUS_ABSOLUTE);
+ 	if (hasAf_) {
+ 		const auto &f = sensor_->focusLens()->controls().at(V4L2_CID_FOCUS_ABSOLUTE);
+-		af_.configure(f.min().get<int32_t>(), f.max().get<int32_t>());
++		int low = std::max(f.min().get<int32_t>(), calibration_.afMin);
++		int high = std::min(f.max().get<int32_t>(), calibration_.afMax);
++		if (low >= high)
++			return -EINVAL;
++		af_.configure(low, high);
++		LOG(LiuqinIsp, Info) << "AF DAC range " << low << ".." << high << (calibrated ? " (EEPROM)" : " (driver)");
+ 		map[&controls::AfMode] = ControlInfo(controls::AfModeAuto, controls::AfModeContinuous, controls::AfModeContinuous);
+ 		map[&controls::AfTrigger] = ControlInfo(controls::AfTriggerValues);
+ 		map[&controls::AfState] = ControlInfo(controls::AfStateValues);
+ 	}
+ 	*controlsInfo = ControlInfoMap(std::move(map), controls::controls);
+-	LOG(LiuqinIsp, Info) << "IFE680 NV12, hardware Bayer statistics, " << (rear_ ? "stock S5KJN1 model white point (no per-unit LSC), " : "calibrated LSC, ") << info_.outputSize << (colourMatrix_ ? ", stock multi-illuminant CC131" : "");
++	LOG(LiuqinIsp, Info) << "IFE680 NV12, hardware Bayer statistics, "
++		<< (calibrated ? "per-unit WB, " : "model WB, ")
++		<< (shadingEnabled ? "calibrated LSC, " : "LSC unavailable, ")
++		<< info_.outputSize << (colourMatrix_ ? ", stock multi-illuminant CC131" : "");
+ 	return 0;
+ }
+ 
+diff --git a/src/libcamera/pipeline/simple/simple.cpp b/src/libcamera/pipeline/simple/simple.cpp
+index be6171b9..efb4a204 100644
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -636,8 +636,13 @@ int SimpleCameraData::init()
+ 
+ 	/* Open the converter, if any. */
+ 	std::shared_ptr<MediaDevice> converter = pipe->converter();
+-	if (converter && (converter->driver() != "qcom-ipe" || (hwEntity_ && sensor_->model() == "imx596"))) {
++	if (converter && (converter->driver() != "qcom-ipe" ||
++		(hwEntity_ && (sensor_->model() == "imx596" || sensor_->model() == "s5kjn1")))) {
+ 		converter_ = ConverterFactoryBase::create(converter);
++		/* Older bridge fixtures only contain the front camera geometries. */
++		if (converter_ && converter->driver() == "qcom-ipe" && sensor_->model() == "s5kjn1" &&
++		    converter_->sizes(Size(4080, 3060)).min != Size(4080, 3060))
++			converter_.reset();
+ 		if (!converter_) {
+ 			LOG(SimplePipeline, Warning)
+ 				<< "Failed to create converter, disabling format conversion";

@@ -1,0 +1,83 @@
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -338,6 +338,7 @@
+ 		Size captureSize;
+ 		std::vector<PixelFormat> outputFormats;
+ 		SizeRange outputSizes;
++		bool directIfe = false;
+ 	};
+ 
+ 	std::vector<Stream> streams_;
+@@ -803,6 +804,13 @@
+ 		if (converter_) {
+ 			config.outputFormats = converter_->formats(pixelFormat);
+ 			config.outputSizes = converter_->sizes(format.size);
++			/* The board IPE only accepts exact fixture geometries. Keep
++			 * other native NV12 modes on the IFE capture queue. */
++			if (hwIsp_ && !config.outputSizes.contains(format.size)) {
++				config.outputFormats = { pixelFormat };
++				config.outputSizes = format.size;
++				config.directIfe = true;
++			}
+ 		} else if (swIsp_) {
+ 			config.outputFormats = swIsp_->formats(pixelFormat);
+ 			config.outputSizes = swIsp_->sizes(pixelFormat, format.size);
+@@ -1361,7 +1369,7 @@
+ 	 * require any conversion, similar to raw capture use cases). This is
+ 	 * left as a future improvement.
+ 	 */
+-	needConversion_ = config_.size() > 1 + rawCount || (data_->hwIsp_ && data_->converter_);
++	needConversion_ = config_.size() > 1 + rawCount || (data_->hwIsp_ && data_->converter_ && !pipeConfig_->directIfe);
+ 
+ 	for (unsigned int i = 0; i < config_.size(); ++i) {
+ 		StreamConfiguration &cfg = config_[i];
+@@ -1815,7 +1823,7 @@
+ 	}
+ 
+ 	/* Authenticate and initialise ICP before starting the live IFE path. */
+-	if (data->hwIsp_ && data->converter_) {
++	if (data->hwIsp_ && data->useConversion_ && data->converter_) {
+ 		ret = data->converter_->start();
+ 		if (ret < 0) {
+ 			stop(camera);
+--- a/src/libcamera/pipeline/simple/liuqin_isp.cpp
++++ b/src/libcamera/pipeline/simple/liuqin_isp.cpp
+@@ -89,14 +89,16 @@
+ 		unsigned int dx = rear_ ? 4 : h == 1952 ? 8 : 24;
+ 		unsigned int dy = rear_ ? 3 : h == 1952 ? 4 : 16;
+ 		/* The first mesh row precedes the image: keep every offset signed. */
+-		int cropY = rear_ ? 0 : (1952 - static_cast<int>(h)) / 4;
+-		if (rear_ && info_.outputSize != Size(4080, 3060))
++		int cropX = rear_ ? (4080 - static_cast<int>(info_.outputSize.width)) / 4 : 0;
++		int cropY = ((rear_ ? 3060 : 1952) - static_cast<int>(h)) / 4;
++		if (rear_ && info_.outputSize != Size(4080, 3060) &&
++		    info_.outputSize != Size(4080, 2296) && info_.outputSize != Size(3840, 2160))
+ 			return -EINVAL;
+ 		std::array<uint16_t, 884> mesh;
+ 		for (unsigned int c = 0; c < 4; c++) {
+ 			for (unsigned int y = 0; y < 13; y++) {
+ 				for (unsigned int x = 0; x < 17; x++) {
+-					float px = (int(x * (sx << level)) - int(dx)) / (rear_ ? 2039.0f : 1295.0f);
++					float px = (int(x * (sx << level)) - int(dx) + cropX) / (rear_ ? 2039.0f : 1295.0f);
+ 					float py = (int(y * (sy << level)) - int(dy) + cropY) / (rear_ ? 1529.0f : 975.0f);
+ 					float balance = c == 1 ? std::sqrt(calibration_.grgb) :
+ 							c == 2 ? 1 / std::sqrt(calibration_.grgb) : 1;
+--- a/src/libcamera/sensor/camera_sensor_properties.cpp
++++ b/src/libcamera/sensor/camera_sensor_properties.cpp
+@@ -515,6 +515,16 @@
+ 			},
+ 			.sensorDelays = { },
+ 		} },
++		{ "s5kjn1", {
++			/* Q-Tech module delayInfo lists two frames for integration,
++			 * gain and frame length. Horizontal blanking is read-only. */
++			.unitCellSize = { 640, 640 },
++			.testPatternModes = {},
++			.sensorDelays = {
++				.exposureDelay = 2, .gainDelay = 2,
++				.vblankDelay = 2, .hblankDelay = 2
++			},
++		} },
+ 		{ "vd55g1", {
+ 			.unitCellSize = { 2160, 2160 },
+ 			.testPatternModes = {

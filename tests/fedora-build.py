@@ -236,6 +236,37 @@ class FedoraTests(unittest.TestCase):
         self.assertEqual(script.stat().st_mode&0o777,0o755)
         subprocess.run(['sh',str(script)],env=dict(os.environ,XDG_SESSION_TYPE='wayland'),check=True)
 
+    def test_default_camera_apps_and_snapshot_menu_entry(self):
+        recipe = root_builder.common.recipe(PROJECT/'build/rootfs/fedora-plasma.json')
+        packages = set(recipe['packages'])
+        self.assertTrue({'kamoso', 'snapshot', 'libcamera-gstreamer', 'pipewire-plugin-libcamera',
+                         'gstreamer1-plugin-openh264'} <= packages)
+        self.assertTrue(packages.isdisjoint({'plasma-camera', 'plasma-camera-liuqin-test', 'qrca'}))
+
+        desktop = 'share/applications/org.gnome.Snapshot.desktop'
+        source = self.work/'usr'/desktop
+        launcher = self.work/'usr/local'/desktop
+        root_builder.configure_snapshot(self.work)
+        self.assertFalse(launcher.exists())
+        source.parent.mkdir(parents=True)
+        original = '[Desktop Entry]\nName[zh_CN]=相机\nExec=snapshot %U\nDBusActivatable=true\n'
+        source.write_text(original)
+        schemas = Path('usr/share/glib-2.0/schemas')
+        override = schemas/'90-liuqin-snapshot.gschema.override'
+        (self.work/schemas).mkdir(parents=True)
+        shutil.copyfile(PROJECT/recipe['overlay']/override, self.work/override)
+        self.assertEqual((self.work/override).read_text().splitlines(),
+                         ['[org.gnome.Snapshot]', 'enable-hardware-encoding=true'])
+        with patch.object(root_builder, 'chroot') as chroot:
+            root_builder.configure_snapshot(self.work)
+        chroot.assert_called_once_with(self.work, ['glib-compile-schemas', '/' + str(schemas)])
+        entry = launcher.read_text().splitlines()
+        self.assertIn('Name[zh_CN]=相机', entry)
+        self.assertIn('Exec=/usr/bin/env GDK_DISABLE=vulkan GSK_RENDERER=gl snapshot %U', entry)
+        self.assertIn('DBusActivatable=false', entry)
+        self.assertIn('TryExec=/usr/bin/snapshot', entry)
+        self.assertEqual(source.read_text(), original)
+
     def test_firefox_chinese_registration_uses_local_packs_and_preserves_existing_files(self):
         root=self.work/'root';base=root/'usr/lib64/firefox';(base/'langpacks').mkdir(parents=True)
         (base/'firefox').touch()
@@ -361,6 +392,11 @@ class FedoraTests(unittest.TestCase):
         obs=self.work/'obs';obs.mkdir()
         (obs/'manifest.json').write_text('{}')
         (obs/root_builder.fedora_obs.filename()).write_bytes(b'obs plugin')
+        camera=self.work/'libcamera';(camera/'rpms').mkdir(parents=True)
+        (camera/'manifest.json').write_text('{}')
+        kamoso=self.work/'kamoso';kamoso.mkdir()
+        for suffix in ('.aarch64.rpm','.src.rpm'):
+            (kamoso/(root_builder.fedora_kamoso.nvr()+suffix)).write_bytes(b'kamoso')
         def stage(_name,_inputs,build,_artifacts):
             output=self.work/'stage';output.mkdir();build(output);return output
         with patch.object(flow,'target_runtime_root',return_value=archive), \
@@ -370,11 +406,14 @@ class FedoraTests(unittest.TestCase):
              patch.object(flow,'libclc_rpm',return_value=libclc), \
              patch.object(flow,'ffmpeg_rpms',return_value=ffmpeg), \
              patch.object(flow,'obs_v4l2_rpm',return_value=obs), \
+             patch.object(flow,'libcamera_rpms',return_value=camera), \
+             patch.object(flow,'kamoso_bundle',return_value=kamoso), \
              patch.object(flow,'stage',side_effect=stage),patch.object(flow,'target_action') as action:
             flow.apps()
         self.assertEqual(action.call_args.args[0],'apps')
         self.assertEqual(action.call_args.kwargs['ffmpeg_bundle'],ffmpeg)
         self.assertEqual(action.call_args.kwargs['obs_bundle'],obs)
+        self.assertEqual(action.call_args.kwargs['kamoso_bundle'],kamoso)
         rpms=action.call_args.kwargs['rpms']
         self.assertEqual(sorted(p.name for p in rpms.iterdir()),['libclc22-spirv.rpm','liuqin-device.rpm','liuqin-fingerprint.rpm','liuqin-ksystemstats-gpu.rpm'])
         self.assertIn('Fedora 官方 plasma-setup 软件包',flow.plan()['steps'])

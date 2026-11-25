@@ -1,0 +1,203 @@
+--- a/src/video/rearflash.h
++++ b/src/video/rearflash.h
+@@ -19,10 +19,12 @@
+ public:
+     RearFlash();
+     ~RearFlash() override;
+-    bool busy() const { return m_watcher != nullptr || !m_meterDestination.isEmpty() || bool(m_pendingCapture); }
++    bool busy() const { return !m_ambientPath.isEmpty() || m_watcher != nullptr || !m_meterDestination.isEmpty() || bool(m_pendingCapture); }
+     void capture(GstPipeline *pipeline, GstElement *filter, const QUrl &destination);
+     void cancel();
+     void resetMeter();
++    void expectAmbientFile(const QString &path);
++    void finishAmbientCapture(const QString &path);
+     void meter(GstElement *cameraSource, const QUrl &destination);
+ 
+ Q_SIGNALS:
+@@ -32,6 +34,8 @@
+     void saved(const QString &path);
+ 
+ private:
++    void queueShutter(std::function<void()> operation);
++    void meterLocked(GstElement *cameraSource, const QUrl &destination);
+     void tryCapture();
+     void captureLocked(GstPipeline *pipeline, GstElement *filter, const QUrl &destination);
+     QLockFile m_shutterLock;
+@@ -47,6 +51,7 @@
+     QFile m_sensor;
+     int m_samples = 0;
+     int m_agree = 0;
++    QString m_ambientPath;
+     bool m_candidate = false;
+     bool m_lastAutoFlash = false;
+     QFile m_led;
+--- a/src/video/rearflash.cpp
++++ b/src/video/rearflash.cpp
+@@ -174,6 +174,38 @@
+ }
+ }
+ 
++namespace {
++QString recoveryPath()
++{
++    return QDir(QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation))
++        .filePath(QStringLiteral("kamoso-rear-flash.recovery"));
++}
++
++// All accesses are serialized by the per-user shutter lock. An interrupted
++// strobe has an unknown completion time, so the next meter waits a full interval.
++bool recordRecovery(qint64 deadline)
++{
++    QSaveFile marker(recoveryPath());
++    const QByteArray value = QByteArray::number(deadline);
++    return marker.open(QIODevice::WriteOnly) && marker.write(value) == value.size() && marker.commit();
++}
++
++int recoveryWait()
++{
++    QFile marker(recoveryPath());
++    if (!marker.exists())
++        return 0;
++    if (!marker.open(QIODevice::ReadOnly))
++        return 1200;
++    bool ok;
++    const qint64 end = marker.read(32).toLongLong(&ok);
++    const qint64 now = QDeadlineTimer::current(Qt::PreciseTimer).deadline();
++    if (!ok || end < 0 || end > now + 1200)
++        return 1200;
++    return int(std::max<qint64>(0, end - now));
++}
++}
++
+ RearFlash::RearFlash()
+     : m_shutterLock(QDir(QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation))
+                         .filePath(QStringLiteral("kamoso-rear-flash.lock")))
+@@ -196,8 +228,14 @@
+ {
+     if (busy())
+         return;
++    queueShutter([this, cameraSource, destination] { meterLocked(cameraSource, destination); });
++}
++
++void RearFlash::meterLocked(GstElement *cameraSource, const QUrl &destination)
++{
+     m_sensor.setFileName(rearSensorNode());
+     if (!m_sensor.open(QIODevice::ReadOnly | QIODevice::Unbuffered)) {
++        cancel();
+         Q_EMIT failed(i18n("Could not meter the rear camera. Try again or select a flash mode."));
+         return;
+     }
+@@ -211,14 +249,14 @@
+                                     new FrameLuma(m_frameLuma), [](gpointer p) { delete static_cast<FrameLuma *>(p); });
+     if (!m_probe) {
+         m_sensor.close();
+-        clearProbe();
++        cancel();
+         Q_EMIT failed(i18n("Could not meter the rear camera. Try again or select a flash mode."));
+         return;
+     }
+     m_meterDestination = destination;
+     m_samples = 0;
+     m_agree = 0;
+-    m_meterTimer.start(int(m_meterAfter.remainingTime()));
++    m_meterTimer.start(std::max(int(m_meterAfter.remainingTime()), recoveryWait()));
+     Q_EMIT busyChanged();
+ }
+ 
+@@ -274,9 +312,22 @@
+     m_frameLuma.reset();
+ }
+ 
++void RearFlash::expectAmbientFile(const QString &path)
++{
++    if (m_shutterLock.isLocked())
++        m_ambientPath = path;
++}
++
++void RearFlash::finishAmbientCapture(const QString &path)
++{
++    if (!m_ambientPath.isEmpty() && m_ambientPath == path)
++        cancel();
++}
++
+ void RearFlash::cancel()
+ {
+-    const bool waiting = bool(m_pendingCapture);
++    const bool waiting = !m_ambientPath.isEmpty() || bool(m_pendingCapture);
++    m_ambientPath.clear();
+     m_retry.stop();
+     m_pendingCapture = nullptr;
+     if (!m_meterDestination.isEmpty()) {
+@@ -311,7 +362,12 @@
+         return;
+     // stop() and source reconfiguration cancel pending captures before releasing
+     // the pipeline or replacing its filter. Never block the UI waiting for the LED.
+-    m_pendingCapture = [this, pipeline, filter, destination] { captureLocked(pipeline, filter, destination); };
++    queueShutter([this, pipeline, filter, destination] { captureLocked(pipeline, filter, destination); });
++}
++
++void RearFlash::queueShutter(std::function<void()> operation)
++{
++    m_pendingCapture = std::move(operation);
+     m_queueDeadline = QDeadlineTimer(5000);
+     tryCapture();
+     if (m_pendingCapture)
+@@ -322,7 +378,7 @@
+ {
+     if (!m_pendingCapture)
+         return;
+-    if (m_shutterLock.tryLock(0)) {
++    if (m_shutterLock.isLocked() || m_shutterLock.tryLock(0)) {
+         auto start = std::exchange(m_pendingCapture, nullptr);
+         start();
+         Q_EMIT busyChanged();
+@@ -347,11 +403,13 @@
+         int fd = m_led.handle();
+         if (control(fd, V4L2_CID_FLASH_LED_MODE, V4L2_FLASH_LED_MODE_FLASH)
+             && control(fd, V4L2_CID_FLASH_TIMEOUT, pulseUs)
+-            && control(fd, V4L2_CID_FLASH_INTENSITY, 250000)) {
++            && control(fd, V4L2_CID_FLASH_INTENSITY, 250000) && recordRecovery(-1)) {
+             fired = arm(window, m_pad, m_probe, [clock] { return gst_clock_get_time(clock); },
+                         [fd] { return control(fd, V4L2_CID_FLASH_STROBE, 0); }, [fd] { return strobing(fd); });
+-            if (fired)
++            if (fired) {
+                 m_meterAfter = QDeadlineTimer(1200, Qt::PreciseTimer);
++                recordRecovery(m_meterAfter.deadline());
++            }
+         }
+     }
+     gst_clear_object(&clock);
+--- a/src/video/webcamcontrol.cpp
++++ b/src/video/webcamcontrol.cpp
+@@ -358,6 +358,7 @@
+         stop();
+         break;
+     case GST_MESSAGE_ERROR: {//Some error occurred.
++        m_flash.cancel();
+         static int error = 0;
+         qCritical() << "error:" << debugMessage(message);
+         stop();
+@@ -372,6 +373,7 @@
+             if (gst_structure_get_name (structure) == QByteArray("image-done")) {
+                 const gchar *filename = gst_structure_get_string (structure, "filename");
+                 const QString file = QString::fromUtf8(filename);
++                m_flash.finishAmbientCapture(file);
+                 if (m_emitTaken)
+                     Q_EMIT photoTaken(file);
+                 else {
+@@ -437,6 +439,7 @@
+ {
+     if (fire) {
+         if (!m_extraFilters.isEmpty() && m_extraFilters != QStringLiteral("identity")) {
++            m_flash.cancel();
+             Q_EMIT m_kamoso->error(i18n("Turn off photo effects to use flash."));
+             return;
+         }
+@@ -448,6 +451,7 @@
+     g_object_set(m_pipeline.data(), "mode", 1, nullptr);
+ 
+     const QString path = url.isLocalFile() ? url.toLocalFile() : QStandardPaths::writableLocation(QStandardPaths::TempLocation) + u"/kamoso_photo.jpg";
++    m_flash.expectAmbientFile(path);
+     g_object_set(m_pipeline.data(), "location", path.toUtf8().constData(), nullptr);
+ 
+     g_signal_emit_by_name (m_pipeline.data(), "start-capture", 0);

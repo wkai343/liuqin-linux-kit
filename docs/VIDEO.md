@@ -60,6 +60,14 @@ Iris2 的编码参考帧按图像分别分配，数量包含当前重建帧，�
 编码裁剪只发往码流端口，COMV 数量属性只用于解码；会话明确设置为非安全会话。
 这些配置与安全 ARP 配合使用，不能把其他平台关闭 ARP 的方法直接用于本机固件。
 
+### 桌面录像的 H.264 级别
+
+GStreamer 可在设置输入尺寸之前选择 H.264 级别。SM8450 的 Iris 编码器在协商尺寸和帧率时更新
+V4L2 级别下限，保留应用显式请求的较高级别。计算使用编码画面的宏块数量和每秒宏块数。
+在平板上运行 `python3 tests/iris-recording-levels.py` 可用测试图直接检查码流 SPS、
+图像尺寸和帧数。应用配置见[桌面相机硬件录像](LIBCAMERA.md#桌面相机硬件录像)。
+级别约束见 [ITU-T H.264 附录 A](https://www.itu.int/rec/T-REC-H.264)。
+
 ### 编码结束时的最后一帧
 
 Iris2 编码固件的 `DRAIN` 确认可能返回零标志，不包含 `HFI_FW_FLAGS_SUCCESS`。
@@ -204,7 +212,7 @@ liuqin-qt-video PROGRAM [ARGUMENT ...]
 入口设置 `QT_MEDIA_BACKEND=gstreamer`、`QSG_RHI_BACKEND=opengl` 和
 `QT_GSTREAMER_DISABLE_PIXEL_ASPECT_RATIO=1`。最后一项移除 Qt 默认的普通内存、
 固定像素比例 caps 过滤器，否则 DMA-BUF 会被排除；视频仍保留自身的像素比例元数据。
-这三个设置仅作用于该进程及子进程，不作为桌面全局环境，也不替换 QRCA 的专用摄像头设置。
+这三个设置仅作用于该播放器及其子进程。
 Qt 的这些环境接口属于私有配置点，升级 Qt 后应复测。
 
 可用以下命令核对真实显示路径；不要加入 `--vo=null` 或 `--untimed`：

@@ -1,0 +1,61 @@
+diff --git a/drivers/media/platform/qcom/camss/camss-video.c b/drivers/media/platform/qcom/camss/camss-video.c
+index 0a6da1a83..e32779b57 100644
+--- a/drivers/media/platform/qcom/camss/camss-video.c
++++ b/drivers/media/platform/qcom/camss/camss-video.c
+@@ -249,11 +249,40 @@ static int video_prepare_streaming(struct vb2_queue *q)
+ 	return ret;
+ }
+ 
++/*
++ * Undo only the subdevices that accepted s_stream(1). The failing subdevice
++ * owns its own rollback; stopping it again may unbalance its runtime PM.
++ */
++static void video_stop_started_subdevs(struct camss_video *video,
++				       struct media_entity *last)
++{
++	struct media_entity *entity = &video->vdev.entity;
++	struct v4l2_subdev *subdev;
++	struct media_pad *pad;
++	int ret;
++
++	while (entity != last) {
++		pad = &entity->pads[0];
++		if (!(pad->flags & MEDIA_PAD_FL_SINK))
++			break;
++		pad = media_pad_remote_pad_first(pad);
++		if (!pad || !is_media_entity_v4l2_subdev(pad->entity))
++			break;
++		entity = pad->entity;
++		subdev = media_entity_to_v4l2_subdev(entity);
++		ret = v4l2_subdev_call(subdev, video, s_stream, 0);
++		if (ret < 0 && ret != -ENOIOCTLCMD)
++			dev_err(video->camss->dev,
++				"Failed to unwind %s stream: %d\n", subdev->name, ret);
++	}
++}
++
+ static int video_start_streaming(struct vb2_queue *q, unsigned int count)
+ {
+ 	struct camss_video *video = vb2_get_drv_priv(q);
+ 	struct video_device *vdev = &video->vdev;
+ 	struct media_entity *entity;
++	struct media_entity *started = &vdev->entity;
+ 	struct media_pad *pad;
+ 	struct v4l2_subdev *subdev;
+ 	int ret;
+@@ -283,11 +312,14 @@ static int video_start_streaming(struct vb2_queue *q, unsigned int count)
+ 
+ 		ret = v4l2_subdev_call(subdev, video, s_stream, 1);
+ 		if (ret < 0 && ret != -ENOIOCTLCMD)
+-			goto error;
++			goto stop_subdevs;
++		started = entity;
+ 	}
+ 
+ 	return 0;
+ 
++stop_subdevs:
++	video_stop_started_subdevs(video, started);
+ error:
+ 	video_device_pipeline_stop(vdev);
+ 

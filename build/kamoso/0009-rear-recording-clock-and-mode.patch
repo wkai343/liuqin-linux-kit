@@ -1,0 +1,350 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 0a5a816..9345a97 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -12,6 +12,7 @@ add_executable(kamoso
+     kamoso.cpp
+     previewfetcher.cpp
+     video/tapfocus.cpp
++    video/rearrecording.cpp
+     video/rearflash.cpp
+     video/webcamcontrol.cpp
+ 
+diff --git a/src/device.cpp b/src/device.cpp
+index 3263acb..b379471 100644
+--- a/src/device.cpp
++++ b/src/device.cpp
+@@ -6,6 +6,7 @@
+ */
+ 
+ #include "device.h"
++#include "video/rearrecording.h"
+ #include <KConfigGroup>
+ #include <QDebug>
+ 
+@@ -81,5 +82,8 @@ void Device::setFilters(const QString &newFilters)
+ 
+ GstElement* Device::createElement()
+ {
+-    return gst_device_create_element(m_device, m_description.toUtf8().constData());
++    const QByteArray name = m_description.toUtf8();
++    if (m_rearFlash)
++        return createRearCameraSource(m_device, name.constData());
++    return gst_device_create_element(m_device, name.constData());
+ }
+diff --git a/src/kamoso.cpp b/src/kamoso.cpp
+index 982c66c..1143924 100644
+--- a/src/kamoso.cpp
++++ b/src/kamoso.cpp
+@@ -95,7 +95,9 @@ void Kamoso::setRecording(bool recording)
+         return;
+ 
+     if (recording) {
+-        m_webcamControl->startRecording(fileNameSuggestion(Settings::saveVideos(), QStringLiteral("video"), QStringLiteral("mkv")));
++        const auto destination = fileNameSuggestion(Settings::saveVideos(), QStringLiteral("video"), QStringLiteral("mkv"));
++        if (!m_webcamControl->startRecording(destination))
++            return;
+         m_recordingTime.restart();
+         m_recordingTimer.start();
+         auto job = KIO::mkpath(Settings::saveVideos());
+diff --git a/src/video/rearrecording.cpp b/src/video/rearrecording.cpp
+new file mode 100644
+index 0000000..9a9f2b9
+--- /dev/null
++++ b/src/video/rearrecording.cpp
+@@ -0,0 +1,171 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include "rearrecording.h"
++#include <algorithm>
++#include <gst/base/gstbasesrc.h>
++
++namespace {
++using Shutter = std::shared_ptr<std::atomic<GstClockTime>>;
++
++void cameraTimes(GstBaseSrc *src, GstBuffer *buffer, GstClockTime *start, GstClockTime *end)
++{
++    // The board's libcamera SPA node puts the monotonic V4L2 capture time
++    // in the header. The push source already waits for the captured frame.
++    // BaseSrc's pseudo-live scheduling would instead shift every PTS by
++    // the delivery latency of the first preview frame.
++    const auto base = gst_element_get_base_time(GST_ELEMENT(src));
++    const auto pts = GST_BUFFER_PTS(buffer);
++    GstPointer<GstClock> clock(gst_element_get_clock(GST_ELEMENT(src)));
++    if (clock && GST_CLOCK_TIME_IS_VALID(base) && GST_CLOCK_TIME_IS_VALID(pts) &&
++        pts >= base && pts <= gst_clock_get_time(clock.data())) {
++        GST_BUFFER_PTS(buffer) = pts - base;
++        const auto dts = GST_BUFFER_DTS(buffer);
++        GST_BUFFER_DTS(buffer) = GST_CLOCK_TIME_IS_VALID(dts) && dts >= base ? dts - base : GST_CLOCK_TIME_NONE;
++        *start = *end = GST_CLOCK_TIME_NONE;
++        return;
++    }
++    auto *parent = GST_BASE_SRC_CLASS(g_type_class_peek_parent(G_OBJECT_GET_CLASS(src)));
++    parent->get_times(src, buffer, start, end);
++}
++
++GType captureSourceType(GType parent)
++{
++    // PipeWire registers its source type at runtime. Use its GType sizes
++    // and only override the public GstBaseSrc scheduling virtual method.
++    GTypeQuery query{};
++    g_type_query(parent, &query);
++    if (!g_type_is_a(parent, GST_TYPE_BASE_SRC) || G_TYPE_IS_FINAL(parent) || !query.instance_size)
++        return G_TYPE_INVALID;
++    return g_type_register_static_simple(parent, "KamosoLiuqinCaptureSrc", query.class_size,
++        [](gpointer klass, gpointer) { GST_BASE_SRC_CLASS(klass)->get_times = cameraTimes; },
++        query.instance_size, nullptr, GTypeFlags(0));
++}
++
++GstPadProbeReturn recordingSegment(GstPad *, GstPadProbeInfo *info, gpointer data)
++{
++    GstEvent *event = GST_PAD_PROBE_INFO_EVENT(info);
++    if (GST_EVENT_TYPE(event) != GST_EVENT_SEGMENT)
++        return GST_PAD_PROBE_OK;
++
++    const GstSegment *input = nullptr;
++    gst_event_parse_segment(event, &input);
++    const auto shutter = (*static_cast<Shutter *>(data))->load();
++    if (!GST_CLOCK_TIME_IS_VALID(shutter) || input->format != GST_FORMAT_TIME ||
++        input->rate != 1.0 || input->applied_rate != 1.0)
++        return GST_PAD_PROBE_OK;
++
++    // camerabin starts each live TIME segment at that source's first PTS.
++    // Both sources use pipeline running time. Keep their relative start and
++    // let downstream clip any preview buffer that predates this shutter.
++    GstSegment segment = *input;
++    segment.start = std::max(input->start, shutter);
++    segment.base = segment.start - shutter;
++    segment.time = segment.base;
++    segment.position = std::max(input->position, segment.start);
++    GstEvent *replacement = gst_event_new_segment(&segment);
++    gst_event_set_seqnum(replacement, gst_event_get_seqnum(event));
++    gst_event_set_running_time_offset(replacement, gst_event_get_running_time_offset(event));
++    GST_PAD_PROBE_INFO_DATA(info) = replacement;
++    gst_event_unref(event);
++    return GST_PAD_PROBE_OK;
++}
++
++GstElement *timedBranch(const Shutter &shutter)
++{
++    auto *filter = gst_element_factory_make("identity", nullptr);
++    gst_object_ref_sink(filter);
++    GstPointer<GstPad> pad(gst_element_get_static_pad(filter, "src"));
++    gst_pad_add_probe(pad.data(), GST_PAD_PROBE_TYPE_EVENT_DOWNSTREAM, recordingSegment,
++                      new Shutter(shutter), [](gpointer p) { delete static_cast<Shutter *>(p); });
++    return filter;
++}
++}
++
++GstElement *createRearCameraSource(GstDevice *device, const char *name)
++{
++    g_autoptr(GstElement) original = gst_device_create_element(device, name);
++    GstElementFactory *factory = original ? gst_element_get_factory(original) : nullptr;
++    if (factory && g_strcmp0(gst_plugin_feature_get_name(factory), "pipewiresrc") == 0) {
++        static const GType type = captureSourceType(G_OBJECT_TYPE(original));
++        if (type) {
++            g_autoptr(GstElement) source = GST_ELEMENT(g_object_new(type, "name", name, nullptr));
++            // Let the provider set its own node serial and portal fd.
++            if (gst_device_reconfigure_element(device, source))
++                return g_steal_pointer(&source);
++        }
++    }
++    return g_steal_pointer(&original);
++}
++
++GstElement *RearRecording::cameraSource(GstElement *device, bool rear)
++{
++    m_modeFilter.reset();
++    if (!rear)
++        return GST_ELEMENT(gst_object_ref(device));
++
++    g_autoptr(GstElement) bin = GST_ELEMENT(gst_object_ref_sink(gst_bin_new(nullptr)));
++    GstElement *filter = gst_element_factory_make("capsfilter", nullptr);
++    if (!filter)
++        return nullptr;
++    gst_bin_add_many(GST_BIN(bin), device, filter, nullptr);
++    if (!gst_element_link(device, filter))
++        return nullptr;
++    GstPointer<GstPad> src(gst_element_get_static_pad(filter, "src"));
++    GstPad *output = gst_ghost_pad_new("src", src.data());
++    if (!gst_element_add_pad(bin, output)) {
++        gst_object_unref(output);
++        return nullptr;
++    }
++    m_modeFilter.reset(GST_ELEMENT(gst_object_ref(filter)));
++    return g_steal_pointer(&bin);
++}
++
++void RearRecording::configure(GstPipeline *pipeline, bool rear)
++{
++    m_shutter->store(GST_CLOCK_TIME_NONE);
++    if (!rear) {
++        gst_pipeline_auto_clock(pipeline);
++        g_object_set(pipeline, "audio-filter", nullptr, "video-filter", nullptr, nullptr);
++        return;
++    }
++    GstPointer<GstClock> clock(gst_system_clock_obtain());
++    gst_pipeline_use_clock(pipeline, clock.data());
++    GstPointer<GstElement> audio(timedBranch(m_shutter));
++    GstPointer<GstElement> video(timedBranch(m_shutter));
++    g_object_set(pipeline, "audio-filter", audio.data(), "video-filter", video.data(), nullptr);
++}
++
++bool RearRecording::begin(GstPipeline *pipeline)
++{
++    if (!m_modeFilter)
++        return true;
++    const auto shutter = gst_element_get_current_running_time(GST_ELEMENT(pipeline));
++    GstPointer<GstPad> input(gst_element_get_static_pad(m_modeFilter.data(), "sink"));
++    g_autoptr(GstCaps) caps = gst_pad_get_current_caps(input.data());
++    if (!GST_CLOCK_TIME_IS_VALID(shutter) || !caps || !gst_caps_is_fixed(caps))
++        return false;
++    m_shutter->store(shutter);
++    const GstStructure *s = gst_caps_get_structure(caps, 0);
++    int width, height;
++    if (gst_structure_has_name(s, "video/x-raw") &&
++        g_strcmp0(gst_structure_get_string(s, "format"), "NV12") == 0 &&
++        gst_structure_get_int(s, "width", &width) && width == 4080 &&
++        gst_structure_get_int(s, "height", &height) && height == 3060) {
++        // Keep the exact live format, including memory features, variable
++        // input framerate and colorimetry, through the valve/tee change.
++        g_autoptr(GstCaps) previous = nullptr;
++        g_object_get(m_modeFilter.data(), "caps", &previous, nullptr);
++        if (!previous || !gst_caps_is_equal(previous, caps))
++            g_object_set(m_modeFilter.data(), "caps", caps, nullptr);
++    }
++    return true;
++}
++
++void RearRecording::releaseMode()
++{
++    if (!m_modeFilter)
++        return;
++    g_autoptr(GstCaps) caps = nullptr;
++    g_object_get(m_modeFilter.data(), "caps", &caps, nullptr);
++    if (caps && !gst_caps_is_any(caps))
++        g_object_set(m_modeFilter.data(), "caps", nullptr, nullptr);
++}
+diff --git a/src/video/rearrecording.h b/src/video/rearrecording.h
+new file mode 100644
+index 0000000..3775eda
+--- /dev/null
++++ b/src/video/rearrecording.h
+@@ -0,0 +1,26 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++
++#include "gstpointer.h"
++#include <gst/gst.h>
++#include <atomic>
++#include <memory>
++
++// Keep the board camera's monotonic capture timestamps when its provider
++// exposes a PipeWire source. Other providers retain their normal source.
++GstElement *createRearCameraSource(GstDevice *device, const char *name);
++
++class RearRecording
++{
++public:
++    // The caller keeps its device reference and owns the returned source.
++    GstElement *cameraSource(GstElement *device, bool rear);
++    void configure(GstPipeline *pipeline, bool rear);
++    bool begin(GstPipeline *pipeline);
++    void releaseMode();
++
++private:
++    std::shared_ptr<std::atomic<GstClockTime>> m_shutter =
++        std::make_shared<std::atomic<GstClockTime>>(GST_CLOCK_TIME_NONE);
++    GstPointer<GstElement> m_modeFilter;
++};
+diff --git a/src/video/webcamcontrol.cpp b/src/video/webcamcontrol.cpp
+index dfcc819..e0df9a3 100644
+--- a/src/video/webcamcontrol.cpp
++++ b/src/video/webcamcontrol.cpp
+@@ -412,10 +412,17 @@ bool WebcamControl::playDevice(Device *device)
+         gst_object_unref(sink_pad);
+     }
+ 
+-    GstElement* source;
++    g_autoptr(GstElement) source = nullptr;
+     g_object_get(m_cameraSource.data(), "video-source", &source, nullptr);
+     if (m_currentDevice != device->objectId() || !source) {
+-        source = device->createElement();
++        g_autoptr(GstElement) camera = device->createElement();
++        if (!camera)
++            return false;
++        gst_object_ref_sink(camera);
++        g_clear_object(&source);
++        source = m_rearRecording.cameraSource(camera, device->rearFlash());
++        if (!source)
++            return false;
+         g_object_set(m_cameraSource.data(), "video-source", source, nullptr);
+     }
+ 
+@@ -427,6 +434,8 @@ bool WebcamControl::playDevice(Device *device)
+         g_object_set(m_pipeline.data(), "viewfinder-sink", m_viewfinder.data(), nullptr);
+     }
+ 
++    m_rearRecording.configure(m_pipeline.data(), device->rearFlash());
++
+     // The preview sink may discard late frames locally. Its QoS events must
+     // not drop a full-resolution rear frame before the flash shutter sees it.
+     auto *previewSink = gst_bin_get_by_name(GST_BIN(m_viewfinder.data()), "videosink");
+@@ -506,6 +515,7 @@ void WebcamControl::takePhoto(const QUrl &url, bool emitTaken)
+     }
+     if (!readyForCapture())
+         return;
++    m_rearRecording.releaseMode();
+     auto device = DeviceManager::self()->playingDevice();
+     if (emitTaken && device && device->rearFlash() && Settings::rearFlashMode() != Settings::FlashOff) {
+         if (device->objectId() != m_currentDevice || m_kamoso->isRecording())
+@@ -562,8 +572,12 @@ static QString temporaryVideoFile()
+     return QDir::tempPath() + QStringLiteral("/kamoso_%1.mkv").arg(date);
+ }
+ 
+-void WebcamControl::startRecording(const QUrl &destination)
++bool WebcamControl::startRecording(const QUrl &destination)
+ {
++    if (!m_pipeline || !m_rearRecording.begin(m_pipeline.data())) {
++        Q_EMIT m_kamoso->error(i18n("Wait for the camera preview, then try again."));
++        return false;
++    }
+     m_videoDestination = destination;
+     m_tmpVideoPath = destination.isLocalFile() ? destination.toLocalFile() : temporaryVideoFile();
+ 
+@@ -572,6 +586,7 @@ void WebcamControl::startRecording(const QUrl &destination)
+                                     nullptr);
+ 
+     g_signal_emit_by_name (m_pipeline.data(), "start-capture", 0);
++    return true;
+ }
+ 
+ void WebcamControl::stopRecording()
+diff --git a/src/video/webcamcontrol.h b/src/video/webcamcontrol.h
+index faead4e..06a23f1 100644
+--- a/src/video/webcamcontrol.h
++++ b/src/video/webcamcontrol.h
+@@ -16,6 +16,7 @@
+ 
+ #include "gstpointer.h"
+ #include "rearflash.h"
++#include "rearrecording.h"
+ #include <gst/gstpipeline.h>
+ #include <gst/gstmessage.h>
+ #include <kamoso.h>
+@@ -51,7 +52,7 @@ class WebcamControl : public QObject
+         bool playDevice(Device* device);
+         void stop();
+         void takePhoto(const QUrl& url, bool emitTaken);
+-        void startRecording(const QUrl &destination);
++        bool startRecording(const QUrl &destination);
+         void stopRecording();
+ 
+     private Q_SLOTS:
+@@ -87,6 +88,7 @@ class WebcamControl : public QObject
+         Kamoso* m_kamoso;
+         QQuickItem* m_surface = nullptr;
+         RearFlash m_flash;
++        RearRecording m_rearRecording;
+         bool m_emitTaken = true;
+         bool m_mirror = true;
+         bool m_readyForCapture = true;

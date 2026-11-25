@@ -1,0 +1,26 @@
+From: Liuqin Linux contributors <liuqin@localhost>
+Subject: [PATCH] simple: allow direct IFE capture for the HDR recorder
+
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -24,6 +24,7 @@
+ #include <linux/media-bus-format.h>
+ 
+ #include <libcamera/base/log.h>
++#include <libcamera/base/utils.h>
+ 
+ #include <libcamera/camera.h>
+ #include <libcamera/color_space.h>
+@@ -636,7 +637,11 @@
+ 
+ 	/* Open the converter, if any. */
+ 	std::shared_ptr<MediaDevice> converter = pipe->converter();
+-	if (converter && (converter->driver() != "qcom-ipe" ||
++	/* A bracketed recorder feeds unfiltered IFE frames to its own MFHDR
++	 * session. TF history across unlike exposures would mix the inputs. */
++	const char *direct = utils::secure_getenv("LIBCAMERA_LIUQIN_IFE_ONLY");
++	if (converter && !(converter->driver() == "qcom-ipe" && direct && !strcmp(direct, "1")) &&
++	    (converter->driver() != "qcom-ipe" ||
+ 		(hwEntity_ && (sensor_->model() == "imx596" || sensor_->model() == "s5kjn1")))) {
+ 		converter_ = ConverterFactoryBase::create(converter);
+ 		/* Older bridge fixtures only contain the front camera geometries. */

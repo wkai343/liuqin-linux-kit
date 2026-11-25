@@ -1,0 +1,267 @@
+diff --git a/drivers/media/i2c/s5kjn1.c b/drivers/media/i2c/s5kjn1.c
+index e9af300f1..cc48c73b7 100644
+--- a/drivers/media/i2c/s5kjn1.c
++++ b/drivers/media/i2c/s5kjn1.c
+@@ -6,6 +6,8 @@
+ #include <linux/gpio/consumer.h>
+ #include <linux/i2c.h>
+ #include <linux/module.h>
++#include <linux/nvmem-provider.h>
++#include <linux/platform_data/liuqin.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/regulator/consumer.h>
+ #include <linux/units.h>
+@@ -91,6 +93,8 @@ static const char * const s5kjn1_test_pattern_menu[] = {
+ };
+ 
+ struct s5kjn1 {
++	struct i2c_client *eeprom;
++	struct nvmem_device *nvmem;
+ 	struct device *dev;
+ 	struct regmap *regmap;
+ 	struct clk *mclk;
+@@ -1609,6 +1613,81 @@ static int s5kjn1_power_off(struct device *dev)
+ 	return 0;
+ }
+ 
++/* Stock Qtech map reads 0x0000..0x47ff at 7-bit address 0x51.
++ * Hold sensor power and its state lock; never access during capture. */
++static int s5kjn1_eeprom_read(void *priv, unsigned int offset, void *val,
++			      size_t bytes)
++{
++	struct s5kjn1 *sensor = priv;
++	u8 address[2];
++	u8 *data = val;
++	struct i2c_msg msgs[2] = {
++		{ .addr = 0x51, .len = 2, .buf = address },
++		{ .addr = 0x51, .flags = I2C_M_RD },
++	};
++	int ret;
++
++	if (offset > 18432 || bytes > 18432 - offset)
++		return -EINVAL;
++	mutex_lock(sensor->ctrl_handler.lock);
++	if (v4l2_subdev_is_streaming(&sensor->sd)) {
++		ret = -EBUSY;
++		goto unlock;
++	}
++	ret = pm_runtime_resume_and_get(sensor->dev);
++	if (ret < 0)
++		goto unlock;
++	while (bytes) {
++		unsigned int count = min_t(size_t, bytes, 12);
++
++		address[0] = offset >> 8;
++		address[1] = offset;
++		msgs[1].len = count;
++		msgs[1].buf = data;
++		ret = i2c_transfer(sensor->eeprom->adapter, msgs, 2);
++		if (ret != 2) {
++			ret = ret < 0 ? ret : -EIO;
++			goto put_pm;
++		}
++		offset += count;
++		data += count;
++		bytes -= count;
++	}
++	ret = 0;
++put_pm:
++	pm_runtime_mark_last_busy(sensor->dev);
++	pm_runtime_put_autosuspend(sensor->dev);
++unlock:
++	mutex_unlock(sensor->ctrl_handler.lock);
++	return ret;
++}
++
++static int s5kjn1_register_eeprom(struct s5kjn1 *sensor, struct i2c_client *client)
++{
++	struct nvmem_config config = {
++		.dev = sensor->dev,
++		.name = "s5kjn1-qtech-eeprom",
++		.id = NVMEM_DEVID_AUTO,
++		.type = NVMEM_TYPE_EEPROM,
++		.owner = THIS_MODULE,
++		.read_only = true,
++		.root_only = true,
++		.size = 18432,
++		.word_size = 1,
++		.stride = 1,
++		.reg_read = s5kjn1_eeprom_read,
++		.priv = sensor,
++	};
++
++	if (!liuqin_board_quirks())
++		return 0;
++	sensor->eeprom = devm_i2c_new_dummy_device(sensor->dev, client->adapter, 0x51);
++	if (IS_ERR(sensor->eeprom))
++		return PTR_ERR(sensor->eeprom);
++	sensor->nvmem = nvmem_register(&config);
++	return PTR_ERR_OR_ZERO(sensor->nvmem);
++}
++
+ static int s5kjn1_probe(struct i2c_client *client)
+ {
+ 	struct s5kjn1 *s5kjn1;
+@@ -1746,10 +1825,16 @@ static int s5kjn1_probe(struct i2c_client *client)
+ 	pm_runtime_set_active(s5kjn1->dev);
+ 	pm_runtime_enable(s5kjn1->dev);
+ 
++	ret = s5kjn1_register_eeprom(s5kjn1, client);
++	if (ret)
++		goto subdev_cleanup;
++
+ 	ret = v4l2_async_register_subdev_sensor(&s5kjn1->sd);
+ 	if (ret < 0) {
+ 		dev_err_probe(s5kjn1->dev, ret,
+ 			      "failed to register V4L2 subdev\n");
++		if (s5kjn1->nvmem)
++			nvmem_unregister(s5kjn1->nvmem);
+ 		goto subdev_cleanup;
+ 	}
+ 
+@@ -1781,6 +1866,8 @@ static void s5kjn1_remove(struct i2c_client *client)
+ 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
+ 	struct s5kjn1 *s5kjn1 = to_s5kjn1(sd);
+ 
++	if (s5kjn1->nvmem)
++		nvmem_unregister(s5kjn1->nvmem);
+ 	v4l2_async_unregister_subdev(sd);
+ 	v4l2_subdev_cleanup(sd);
+ 	media_entity_cleanup(&sd->entity);
+diff --git a/drivers/media/platform/qcom/camss/camss-vfe-680-iq.h b/drivers/media/platform/qcom/camss/camss-vfe-680-iq.h
+index 895905d85..e1f0f3c6c 100644
+--- a/drivers/media/platform/qcom/camss/camss-vfe-680-iq.h
++++ b/drivers/media/platform/qcom/camss/camss-vfe-680-iq.h
+@@ -23,6 +23,7 @@ struct vfe680_iq {
+ 	u16 cc[9];
+ 	bool cc_dirty, cc_wide;
+ 	bool lsc;
++	u32 mesh_width, mesh_height;
+ 	u32 stats[VFE680_STATS_WORDS + 2];
+ };
+ 
+@@ -40,6 +41,8 @@ static int vfe680_iq_set(struct v4l2_ctrl *ctrl)
+ 			return -EBUSY;
+ 		}
+ 		memcpy(iq->mesh, ctrl->p_new.p_u16, sizeof(iq->mesh));
++		iq->mesh_width = iq->line->fmt[0].width;
++		iq->mesh_height = iq->line->fmt[0].height;
+ 		iq->lsc = true;
+ 	}
+ 	if (ctrl->id == VFE680_CID_BASE + 4 || ctrl->id == VFE680_CID_BASE + 5) {
+@@ -111,7 +114,8 @@ int vfe680_iq_init(struct vfe_line *line)
+ 		  .max = 16383,
+ 		  .step = 1,
+ 		  .def = 1024,
+-		  .dims = { 884 } },
++		  .dims = { 884 },
++		  .flags = V4L2_CTRL_FLAG_EXECUTE_ON_WRITE },
+ 		{ .ops = &vfe680_iq_ops,
+ 		  .id = VFE680_CID_BASE + 4,
+ 		  .name = "IFE680 RGB colour matrix",
+@@ -131,6 +135,11 @@ int vfe680_iq_init(struct vfe_line *line)
+ 		  .step = 1,
+ 		  .def = 4096,
+ 		  .dims = { 9 } },
++		{ .id = VFE680_CID_BASE + 6,
++		  .name = "IFE680 rear LSC geometry",
++		  .type = V4L2_CTRL_TYPE_INTEGER,
++		  .min = 1, .max = 1, .step = 1, .def = 1,
++		  .flags = V4L2_CTRL_FLAG_READ_ONLY },
+ 	};
+ 	unsigned int i;
+ 
+@@ -165,10 +174,13 @@ static void vfe680_lsc_start(struct vfe_device *vfe, struct vfe_line *line)
+ {
+ 	struct vfe680_iq *iq = line->iq;
+ 	u32 h = line->fmt[0].height;
+-	/* Validated OEM grid optimisation for the two supported binned modes. */
+-	u32 level = h == 1952 ? 1 : 2;
+-	u32 sx = h == 1952 ? 41 : 21, sy = h == 1952 ? 41 : 16;
+-	u32 dx = h == 1952 ? 8 : 24, dy = h == 1952 ? 4 : 16;
++	bool rear = line->fmt[0].width == 4080 && h == 3060;
++	/* Rear geometry matches the shipping LSC411Setting grid calculation. */
++	u32 level = rear ? 3 : h == 1952 ? 1 : 2;
++	u32 sx = rear ? 16 : h == 1952 ? 41 : 21;
++	u32 sy = rear ? 16 : h == 1952 ? 41 : 16;
++	u32 dx = rear ? 4 : h == 1952 ? 8 : 24;
++	u32 dy = rear ? 3 : h == 1952 ? 4 : 16;
+ 	u32 bx = dx / sx, by = dy / sy;
+ 	u32 cfg[] = {
+ 		0xbf,
+@@ -187,9 +199,12 @@ static void vfe680_lsc_start(struct vfe_device *vfe, struct vfe_line *line)
+ 	};
+ 	unsigned int i, bank;
+ 
+-	/* Front calibration must never leak into the rear camera. Rear per-unit
+-	 * shading and its grid geometry are not part of this baseline. */
+-	if (!iq->lsc || line->fmt[0].width != 2592) {
++	/* A mesh is bound to the active input geometry at the time it is set.
++	 * Switching sensors must never reuse the other camera's correction. */
++	if (!iq->lsc || iq->mesh_width != line->fmt[0].width ||
++	    iq->mesh_height != h ||
++	    (!rear && (line->fmt[0].width != 2592 ||
++		       (h != 1952 && h != 1472)))) {
+ 		writel(0, vfe->base + 0x4360);
+ 		return;
+ 	}
+diff --git a/drivers/media/platform/qcom/camss/camss-vfe.c b/drivers/media/platform/qcom/camss/camss-vfe.c
+index 6a5d9cea0..45b53dc5b 100644
+--- a/drivers/media/platform/qcom/camss/camss-vfe.c
++++ b/drivers/media/platform/qcom/camss/camss-vfe.c
+@@ -478,7 +478,7 @@ u32 vfe_hw_version(struct vfe_device *vfe)
+  */
+ void vfe_buf_done(struct vfe_device *vfe, int wm)
+ {
+-	struct vfe_line *line = &vfe->line[vfe->wm_output_map[wm]];
++	struct vfe_line *line;
+ 	const struct vfe_hw_ops *ops = vfe->res->hw_ops;
+ 	struct camss_buffer *ready_buf;
+ 	struct vfe_output *output;
+@@ -493,7 +493,13 @@ void vfe_buf_done(struct vfe_device *vfe, int wm)
+ 				    "Received wm done for unmapped index\n");
+ 		goto out_unlock;
+ 	}
+-	output = &vfe->line[vfe->wm_output_map[wm]].output;
++	line = &vfe->line[vfe->wm_output_map[wm]];
++	output = &line->output;
++	/* STREAMOFF can race a pending image/stats completion. The write
++	 * master remains mapped until vfe_put_output(), but no buffer is active
++	 * once disable_output has stopped it. Never decrement below zero. */
++	if (output->state != VFE_OUTPUT_ON || output->gen2.active_num <= 0)
++		goto out_unlock;
+ 
+ 	ready_buf = output->buf[0];
+ 	if (!ready_buf) {
+@@ -564,7 +570,10 @@ int vfe_enable_output_v2(struct vfe_line *line)
+ 		return -EINVAL;
+ 	}
+ 
+-	WARN_ON(output->gen2.active_num);
++	if (WARN_ON_ONCE(output->gen2.active_num)) {
++		spin_unlock_irqrestore(&vfe->output_lock, flags);
++		return -EINVAL;
++	}
+ 
+ 	output->state = VFE_OUTPUT_ON;
+ 
+@@ -613,7 +622,8 @@ int vfe_queue_buffer_v2(struct camss_video *vid,
+ 	spin_lock_irqsave(&vfe->output_lock, flags);
+ 
+ 	if (output->state == VFE_OUTPUT_ON &&
+-	    output->gen2.active_num < 2) {
++	    output->gen2.active_num >= 0 &&
++	    output->gen2.active_num < CAMSS_INIT_BUF_COUNT) {
+ 		output->buf[output->gen2.active_num++] = buf;
+ 		ops->vfe_wm_update(vfe, output->wm_idx[0],
+ 				   buf->addr[0], line);
+@@ -871,6 +881,9 @@ static void vfe_disable_output(struct vfe_line *line)
+ 	unsigned int i;
+ 
+ 	spin_lock_irqsave(&vfe->output_lock, flags);
++	/* Close the completion/queueing gate in the same critical section as
++	 * resetting active_num; vfe_put_output() drops the WM map separately. */
++	output->state = VFE_OUTPUT_OFF;
+ 	for (i = 0; i < output->wm_num; i++)
+ 		vfe->res->hw_ops->vfe_wm_stop(vfe, output->wm_idx[i]);
+ 	output->gen2.active_num = 0;

@@ -1,0 +1,38 @@
+--- a/src/libcamera/pipeline/simple/simple.cpp
++++ b/src/libcamera/pipeline/simple/simple.cpp
+@@ -822,6 +822,12 @@
+ 
+ int SimpleCameraData::setupLinks()
+ {
++	/* A second CameraManager can probe the shared CAMSS receiver while
++	 * this camera is idle. Its link changes are invisible to our cache.
++	 * Reconcile mutable routes with the kernel, which treats a request
++	 * for the existing state as a no-op and rejects a busy route.
++	 */
++	const bool reconcile = hwEntity_ != nullptr;
+ 	int ret;
+ 
+ 	/*
+@@ -854,10 +860,10 @@
+ 				continue;
+ 
+ 			for (MediaLink *link : pad->links()) {
+-				if (link == sinkLink)
++				if (link == sinkLink || (reconcile && link == e.sourceLink))
+ 					continue;
+ 
+-				if ((link->flags() & MEDIA_LNK_FL_ENABLED) &&
++				if ((reconcile || (link->flags() & MEDIA_LNK_FL_ENABLED)) &&
+ 				    !(link->flags() & MEDIA_LNK_FL_IMMUTABLE)) {
+ 					ret = link->setEnabled(false);
+ 					if (ret < 0)
+@@ -866,7 +872,8 @@
+ 			}
+ 		}
+ 
+-		if (!(sinkLink->flags() & MEDIA_LNK_FL_ENABLED)) {
++		if (!(sinkLink->flags() & MEDIA_LNK_FL_IMMUTABLE) &&
++		    (reconcile || !(sinkLink->flags() & MEDIA_LNK_FL_ENABLED))) {
+ 			ret = sinkLink->setEnabled(true);
+ 			if (ret < 0)
+ 				return ret;

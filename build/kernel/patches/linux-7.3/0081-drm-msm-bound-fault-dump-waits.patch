@@ -1,0 +1,114 @@
+From: Liuqin Linux contributors
+Subject: [PATCH] drm/msm: bound GMU fault dump waits and force off during recovery
+
+A stalled SMMU fault dump can wait for gpu->lock while recovery holds
+that lock and waits for fault_coredump_done in a GMU transaction.
+Bound both OOB and HFI dump waits to one second and retry only once.
+This also covers non-recovery callers and repeated fault completions.
+
+Use the forced power-off path for a hung GPU, without requiring the GMU
+watchdog to have set its separate hung flag first.
+
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_gmu.c b/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
+index 1de052a26..467d155f4 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
+@@ -394,7 +394,7 @@ int a6xx_gmu_set_oob(struct a6xx_gmu *gmu, enum a6xx_gmu_oob_state state)
+ {
+ 	struct a6xx_gpu *a6xx_gpu = container_of(gmu, struct a6xx_gpu, gmu);
+ 	struct adreno_gpu *adreno_gpu = &a6xx_gpu->base;
+-	int ret;
++	int ret, attempt;
+ 	u32 val;
+ 	int request, ack;
+ 
+@@ -424,7 +424,7 @@ int a6xx_gmu_set_oob(struct a6xx_gmu *gmu, enum a6xx_gmu_oob_state state)
+ 	/* Trigger the equested OOB operation */
+ 	gmu_write(gmu, REG_A6XX_GMU_HOST2GMU_INTR_SET, 1 << request);
+ 
+-	do {
++	for (attempt = 0; attempt < 2; attempt++) {
+ 		/* Wait for the acknowledge interrupt */
+ 		ret = gmu_poll_timeout(gmu, REG_A6XX_GMU_GMU2HOST_INTR_INFO, val,
+ 			val & (1 << ack), 100, 10000);
+@@ -432,15 +432,20 @@ int a6xx_gmu_set_oob(struct a6xx_gmu *gmu, enum a6xx_gmu_oob_state state)
+ 		if (!ret)
+ 			break;
+ 
+-		if (completion_done(&a6xx_gpu->base.fault_coredump_done))
++		if (attempt || completion_done(&a6xx_gpu->base.fault_coredump_done))
+ 			break;
+ 
+-		/* We may timeout because the GMU is temporarily wedged from
+-		 * pending faults from the GPU and we are taking a devcoredump.
+-		 * Wait until the MMU is resumed and try again.
++		/*
++		 * A stalled SMMU fault can block the GMU while its dump runs.
++		 * The dump may itself need gpu->lock or runtime PM locks held
++		 * by this caller. Never wait indefinitely in that lock cycle.
++		 * Retry once if the dump finishes; otherwise let the caller's
++		 * timeout/recovery path release those locks.
+ 		 */
+-		wait_for_completion(&a6xx_gpu->base.fault_coredump_done);
+-	} while (true);
++		if (!wait_for_completion_timeout(&a6xx_gpu->base.fault_coredump_done,
++						 msecs_to_jiffies(1000)))
++			break;
++	}
+ 
+ 	if (ret)
+ 		DRM_DEV_ERROR(gmu->dev,
+@@ -1507,7 +1512,7 @@ int a6xx_gmu_stop(struct a6xx_gpu *a6xx_gpu)
+ 	 * Force the GMU off if we detected a hang, otherwise try to shut it
+ 	 * down gracefully
+ 	 */
+-	if (gmu->hung)
++	if (gmu->hung || a6xx_gpu->hung)
+ 		a6xx_gmu_force_off(gmu);
+ 	else
+ 		a6xx_gmu_shutdown(gmu);
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_hfi.c b/drivers/gpu/drm/msm/adreno/a6xx_hfi.c
+index 5c54a1ffd..7c583c5fc 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_hfi.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_hfi.c
+@@ -110,11 +110,11 @@ static int a6xx_hfi_queue_write(struct a6xx_gmu *gmu,
+ 
+ static int a6xx_hfi_wait_for_msg_interrupt(struct a6xx_gmu *gmu, u32 id, u32 seqnum)
+ {
+-	int ret;
++	int ret, attempt;
+ 	u32 val;
+ 	struct a6xx_gpu *a6xx_gpu = container_of(gmu, struct a6xx_gpu, gmu);
+ 
+-	do {
++	for (attempt = 0; attempt < 2; attempt++) {
+ 		/* Wait for a response */
+ 		ret = gmu_poll_timeout(gmu, REG_A6XX_GMU_GMU2HOST_INTR_INFO, val,
+ 			val & A6XX_GMU_GMU2HOST_INTR_INFO_MSGQ, 100, 1000000);
+@@ -122,15 +122,20 @@ static int a6xx_hfi_wait_for_msg_interrupt(struct a6xx_gmu *gmu, u32 id, u32 seq
+ 		if (!ret)
+ 			break;
+ 
+-		if (completion_done(&a6xx_gpu->base.fault_coredump_done))
++		if (attempt || completion_done(&a6xx_gpu->base.fault_coredump_done))
+ 			break;
+ 
+-		/* We may timeout because the GMU is temporarily wedged from
+-		 * pending faults from the GPU and we are taking a devcoredump.
+-		 * Wait until the MMU is resumed and try again.
++		/*
++		 * A stalled SMMU fault can block the GMU while its dump runs.
++		 * The dump may itself need gpu->lock or runtime PM locks held
++		 * by this caller. Never wait indefinitely in that lock cycle.
++		 * Retry once if the dump finishes; otherwise let the caller's
++		 * timeout/recovery path release those locks.
+ 		 */
+-		wait_for_completion(&a6xx_gpu->base.fault_coredump_done);
+-	} while (true);
++		if (!wait_for_completion_timeout(&a6xx_gpu->base.fault_coredump_done,
++						 msecs_to_jiffies(1000)))
++			break;
++	}
+ 
+ 	if (ret) {
+ 		DRM_DEV_ERROR(gmu->dev,

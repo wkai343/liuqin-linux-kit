@@ -1,0 +1,47 @@
+From a397d005780845b58690e008be63676dca01a351 Mon Sep 17 00:00:00 2001
+From: wk <58632380+wkai343@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 23:50:20 +0800
+Subject: [PATCH] drm/msm: preserve polled HFI reply notifications in the fault
+ IRQ
+
+---
+ drivers/gpu/drm/msm/adreno/a6xx_gmu.c | 6 +++++-
+ drivers/gpu/drm/msm/adreno/a6xx_hfi.c | 3 +++
+ 2 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_gmu.c b/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
+index d61b509d5..3f0340d8e 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
+@@ -66,9 +66,13 @@ static irqreturn_t a6xx_hfi_irq(int irq, void *data)
+ 
+ 	status = gmu_read(gmu, REG_A6XX_GMU_GMU2HOST_INTR_INFO);
+ 	a6xx_hfi_trace(gmu, 2, 0, 0, 0, 0, status);
+-	gmu_write(gmu, REG_A6XX_GMU_GMU2HOST_INTR_CLR, status);
+ 
++	/* MSGQ is polled by the HFI sender, not owned by this IRQ handler.
++	 * A spurious IRQ must not consume a concurrently arriving reply signal.
++	 */
+ 	if (status & A6XX_GMU_GMU2HOST_INTR_INFO_CM3_FAULT) {
++		gmu_write(gmu, REG_A6XX_GMU_GMU2HOST_INTR_CLR,
++			  A6XX_GMU_GMU2HOST_INTR_INFO_CM3_FAULT);
+ 		dev_err_ratelimited(gmu->dev, "GMU firmware fault\n");
+ 
+ 		a6xx_gmu_fault(gmu);
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_hfi.c b/drivers/gpu/drm/msm/adreno/a6xx_hfi.c
+index becf8d65a..b8254faff 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_hfi.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_hfi.c
+@@ -40,6 +40,9 @@ static int a6xx_hfi_queue_read(struct a6xx_gmu *gmu,
+ 		return 0;
+ 	}
+ 
++	/* Pair the firmware producer index with its packet payload writes. */
++	dma_rmb();
++
+ 	hdr = queue->data[index];
+ 
+ 	queue->history[(queue->history_idx++) % HFI_HISTORY_SZ] = index;
+-- 
+2.56.0
+

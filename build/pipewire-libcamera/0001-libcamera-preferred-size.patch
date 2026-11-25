@@ -1,0 +1,43 @@
+--- a/spa/plugins/libcamera/libcamera-source.cpp
++++ b/spa/plugins/libcamera/libcamera-source.cpp
+@@ -9,6 +9,7 @@
+ #include <limits>
+ #include <optional>
+ #include <span>
++#include <string>
+ #include <type_traits>
+ #include <utility>
+ 
+@@ -140,6 +141,7 @@
+ 	struct spa_callbacks callbacks = {};
+ 
+ 	std::array<port, 1> out_ports;
++	std::string preferredSize;
+ 
+ 	struct spa_io_position *position = nullptr;
+ 	struct spa_io_clock *clock = nullptr;
+@@ -572,6 +574,11 @@
+ 			int best = std::numeric_limits<int>::max();
+ 
+ 			for (const auto& test : sizes) {
++				/* A preference only changes the first enumerated choice. */
++				if (!impl->preferredSize.empty() && test.toString() == impl->preferredSize) {
++					frameSize = test;
++					break;
++				}
+ 				int score = score_size(wanted, test);
+ 				if (score < best) {
+ 					best = score;
+@@ -2232,9 +2239,11 @@
+ 		return -EINVAL;
+ 	}
+ 
+-	new (handle) impl(log, data_loop, system,
++	auto *source = new (handle) impl(log, data_loop, system,
+ 			  std::move(manager), std::move(camera),
+ 			  std::move(config));
++	if (const char *size = spa_dict_lookup(info, "api.libcamera.preferred-size"))
++		source->preferredSize = size;
+ 
+ 	return 0;
+ }

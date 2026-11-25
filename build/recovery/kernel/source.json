@@ -5,10 +5,10 @@
   "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
   "tag": "v7.3.4",
   "commit": "7595a62d45ee1a2297eafa5f2ef5d0a45142d84d",
-  "expected_source_tree": "cbe28f5d3c34ab9ea55d96c780e624e19660c4dc",
+  "expected_source_tree": "47fc6002486c95358d5422c1c6e1054d9ff8d264",
   "config": {
     "path": "build/recovery/kernel/7.3.4.config",
-    "sha256": "84e4eeb8b0004d8f73c7cb956efe53e13bf9a6d580918a1214892bda95469f39"
+    "sha256": "2ef7c5627d56a5b0e7d552f6bd50e5621746708523084b1fca1f036d0232596c"
   },
   "patches": [
     {
@@ -245,15 +245,11 @@
     },
     {
       "path": "build/kernel/patches/linux-7.3/0072-liuqin-usb-cc-orientation.patch",
-      "sha256": "f1b888a89355e0cf578227d3d68c77d07680b33c86824c46d8636256cfc62c74"
+      "sha256": "b8136f10aa3c98d4d34e320b30b3d2d20f6ec0270adef659499c0831b27f8995"
     },
     {
       "path": "build/kernel/patches/linux-7.3/0073-liuqin-usb-wait-initial-cc.patch",
       "sha256": "b0cf6855e329d06198300d7b708ae8c16ac59a64ff04446742771638a212adc1"
-    },
-    {
-      "path": "build/kernel/patches/linux-7.3/0074-liuqin-usb-initial-mux.patch",
-      "sha256": "2577907d39fdcc92d4e92d07bd90b6f922bc2a4fa2ced2436befe396061bd238"
     },
     {
       "path": "build/kernel/patches/linux-7.3/0075-liuqin-usb-complete-serdes-init.patch",
@@ -274,6 +270,66 @@
     {
       "path": "build/kernel/patches/linux-7.3/0079-liuqin-retain-charger-log-transport.patch",
       "sha256": "8e0309f2eb505339405d7053b765a572d61a6a66effd7cf5afadeb2e8bd82a28"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0080-liuqin-front-camera-and-lens.patch",
+      "sha256": "2d40b8f8707852b94857bc6e35a1924b93ea9305608940f77072aade85da6a84"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0081-drm-msm-bound-fault-dump-waits.patch",
+      "sha256": "aa720da2c3a9aead18a7ee708db48d18bbc5eab2c3c82efd5e84f96a3a1aac86"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0082-drm-msm-reject-submit-on-init-error.patch",
+      "sha256": "621c0cb9f14fb935aa3bdfb834e6319c3481d55f49512e5dd681e0cbb047882c"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0084-drm-msm-trace-oob-and-unwind-errors.patch",
+      "sha256": "c22ea0b5bdd7fc66932d7d28becf354e1f72c6c1e18e84a0186d4d21118c4f42"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0085-camss-680-experimental-nv12.patch",
+      "sha256": "a50a7f21669f099983882a5777838e539110e811e2a3c9a24e3ef79c8435f58f"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0086-camss-680-iq-and-sensor-calibration.patch",
+      "sha256": "cc90bca6bc853cd00d190ef99539505e2b5393b804b2593dba6e664333645e4f"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0088-camss-680-rear-nv12-and-wide-colour.patch",
+      "sha256": "fc506d70b657027e56d01f1a768b80347f030d7a661b1edc284d98087b8a6fcf"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0089-camss-stop-race-and-rear-calibration.patch",
+      "sha256": "ed05977f1aba9814d8ea277e91a8df494c03c67adbfaee53ec4e5a24013d886e"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0090-camss-unwind-failed-stream-start.patch",
+      "sha256": "79c7a8af4792aa6f30bdb5b3a9a0696a333bfe4c03d19a9e5b47e3ad4e94740f"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0091-drm-msm-trace-hfi-queues.patch",
+      "sha256": "4f3dea06035228e33d76dcc56bfef11dec20a63c7d1a95012aad46bda44737c7"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0092-drm-msm-preserve-hfi-response-notification.patch",
+      "sha256": "1ef624afefa318190d11583965222ac82d6b0862952d13214e4eb13fc3593e76"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0093-liuqin-rear-camera-flash.patch",
+      "sha256": "56a401c0bf89d5e990e11f8c1de6f1aaa8caf4f5b7e209f01e0cf99d6d16f098"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0094-camcc-sm8475-ipe-shared-roots.patch",
+      "sha256": "d5efbc90059a9818c61f7a228cd9508f98550ce778bfd19d4e7280ecec5cefb4"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0095-liuqin-rear-native-sensor-and-ife-modes.patch",
+      "sha256": "260e47556ef7c990464a02e3158955f8b82abaa52bb4d36a68ee533dca67af27"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0096-media-iris-h264-level-for-capture-format.patch",
+      "sha256": "3cdc160181000ab17badcc1aac2ee0b701a142471042bc25084b5693f0ff78d5"
     },
     {
       "path": "build/recovery/kernel/patches/linux-7.3/0001-recovery-peripheral-handoff.patch",
@@ -315,7 +371,7 @@
   "build_timestamp": "2026-11-11T00:00:00+00:00",
   "shared_kernel": {
     "path": "build/kernel/source.json",
-    "sha256": "ce38fec51c2bd5901d4fc2404cc00a05253831ecb9fced43bf0d0c07f9db2e04"
+    "sha256": "ac6cf97546a962f72ffb4765e6ff8a512b24742f13e6bf34d72a812316281c76"
   },
   "touch_patches": [
     {

@@ -1,0 +1,737 @@
+From: Liuqin Linux contributors <liuqin@localhost>
+Subject: [PATCH] media: camss: add local IFE680 IQ controls and sensor-owned calibration
+
+Expose fixed-shape Bayer statistics, white balance, lens shading and CC131
+colour matrix controls for the opt-in IFE680 NV12 path. Queue the RGB
+matrix with the white balance update. Preserve the RAW black pedestal
+through LSC/WB before BLS and carry the flipped CFA through CSID CAMIF.
+
+Own the front module EEPROM through IMX596 runtime PM, serialize reads with
+sensor controls and reject them during streaming. No independent at24 probe
+or EEPROM write is introduced.
+
+This is a local experimental ABI, not a general-purpose register interface.
+
+diff --git a/drivers/media/i2c/Kconfig b/drivers/media/i2c/Kconfig
+index df7fc3424..d0ca54c5d 100644
+--- a/drivers/media/i2c/Kconfig
++++ b/drivers/media/i2c/Kconfig
+@@ -172,6 +172,7 @@ config VIDEO_IMX214
+ config VIDEO_IMX596
+ 	tristate "Sony IMX596 sensor support"
+ 	depends on I2C && VIDEO_DEV
++	select NVMEM
+ 	select V4L2_CCI_I2C
+ 	help
+ 	  Support the Sony IMX596 four-lane RAW10 sensor at 19.2 MHz.
+diff --git a/drivers/media/i2c/imx596.c b/drivers/media/i2c/imx596.c
+index 490e83dee..c0b776991 100644
+--- a/drivers/media/i2c/imx596.c
++++ b/drivers/media/i2c/imx596.c
+@@ -9,6 +9,8 @@
+ #include <linux/gpio/consumer.h>
+ #include <linux/i2c.h>
+ #include <linux/module.h>
++#include <linux/nvmem-provider.h>
++#include <linux/platform_data/liuqin.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/regulator/consumer.h>
+ #include <media/v4l2-cci.h>
+@@ -35,6 +37,8 @@ struct imx596_mode {
+ };
+ 
+ struct imx596 {
++	struct i2c_client *eeprom;
++	struct nvmem_device *nvmem;
+ 	struct device *dev;
+ 	struct regmap *regmap;
+ 	struct clk *xclk;
+@@ -1000,6 +1004,84 @@ static int imx596_check_endpoint(struct device *dev)
+ 	return ret;
+ }
+ 
++/*
++ * The AAC EEPROM shares IOVDD with the sensor. Do not power it independently
++ * during asynchronous probe: keep the module's complete rail sequence under
++ * the sensor runtime-PM owner. Registration performs no bus transactions.
++ */
++static int imx596_eeprom_read(void *priv, unsigned int offset, void *val,
++			      size_t bytes)
++{
++	struct imx596 *sensor = priv;
++	u8 address[2];
++	u8 *data = val;
++	struct i2c_msg msgs[2] = {
++		{ .addr = 0x51, .len = 2, .buf = address },
++		{ .addr = 0x51, .flags = I2C_M_RD },
++	};
++	int ret;
++
++	if (offset > 8192 || bytes > 8192 - offset)
++		return -EINVAL;
++	mutex_lock(sensor->ctrls.lock);
++	if (v4l2_subdev_is_streaming(&sensor->sd)) {
++		ret = -EBUSY;
++		goto unlock;
++	}
++	ret = pm_runtime_resume_and_get(sensor->dev);
++	if (ret < 0)
++		goto unlock;
++	while (bytes) {
++		unsigned int count = min_t(size_t, bytes, 12);
++
++		address[0] = offset >> 8;
++		address[1] = offset;
++		msgs[1].len = count;
++		msgs[1].buf = data;
++		ret = i2c_transfer(sensor->eeprom->adapter, msgs, 2);
++		if (ret != 2) {
++			ret = ret < 0 ? ret : -EIO;
++			goto put_pm;
++		}
++		offset += count;
++		data += count;
++		bytes -= count;
++	}
++	ret = 0;
++put_pm:
++	pm_runtime_mark_last_busy(sensor->dev);
++	pm_runtime_put_autosuspend(sensor->dev);
++unlock:
++	mutex_unlock(sensor->ctrls.lock);
++	return ret;
++}
++
++static int imx596_register_eeprom(struct imx596 *sensor, struct i2c_client *client)
++{
++	struct nvmem_config config = {
++		.dev = sensor->dev,
++		.name = "imx596-aac-eeprom",
++		.id = NVMEM_DEVID_AUTO,
++		.type = NVMEM_TYPE_EEPROM,
++		.owner = THIS_MODULE,
++		.read_only = true,
++		.root_only = true,
++		.size = 8192,
++		.word_size = 1,
++		.stride = 1,
++		.reg_read = imx596_eeprom_read,
++		.priv = sensor,
++	};
++
++	if (!liuqin_board_quirks())
++		return 0;
++	sensor->eeprom = devm_i2c_new_dummy_device(sensor->dev, client->adapter, 0x51);
++	if (IS_ERR(sensor->eeprom))
++		return PTR_ERR(sensor->eeprom);
++	sensor->nvmem = nvmem_register(&config);
++	return PTR_ERR_OR_ZERO(sensor->nvmem);
++}
++
+ static int imx596_probe(struct i2c_client *client)
+ {
+ 	struct device *dev = &client->dev;
+@@ -1064,9 +1146,15 @@ static int imx596_probe(struct i2c_client *client)
+ 	pm_runtime_set_active(dev);
+ 	pm_runtime_get_noresume(dev);
+ 	pm_runtime_enable(dev);
+-	ret = v4l2_async_register_subdev_sensor(&sensor->sd);
++	ret = imx596_register_eeprom(sensor, client);
+ 	if (ret)
+ 		goto disable_pm;
++	ret = v4l2_async_register_subdev_sensor(&sensor->sd);
++	if (ret) {
++		if (sensor->nvmem)
++			nvmem_unregister(sensor->nvmem);
++		goto disable_pm;
++	}
+ 	pm_runtime_set_autosuspend_delay(dev, 1000);
+ 	pm_runtime_use_autosuspend(dev);
+ 	pm_runtime_put_autosuspend(dev);
+@@ -1090,7 +1178,10 @@ static int imx596_probe(struct i2c_client *client)
+ static void imx596_remove(struct i2c_client *client)
+ {
+ 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct imx596 *sensor = to_imx596(sd);
+ 
++	if (sensor->nvmem)
++		nvmem_unregister(sensor->nvmem);
+ 	v4l2_async_unregister_subdev(sd);
+ 	v4l2_subdev_cleanup(sd);
+ 	media_entity_cleanup(&sd->entity);
+diff --git a/drivers/media/platform/qcom/camss/camss-csid-680.c b/drivers/media/platform/qcom/camss/camss-csid-680.c
+index c16fc54b3..c4a65e481 100644
+--- a/drivers/media/platform/qcom/camss/camss-csid-680.c
++++ b/drivers/media/platform/qcom/camss/camss-csid-680.c
+@@ -339,7 +339,22 @@ static void csid680_ipp(struct csid_device *csid, bool enable)
+ 	writel((in->width - 1) << 16, csid->base + CSID_IPP_HCROP);
+ 	writel((in->height - 1) << 16, csid->base + CSID_IPP_VCROP);
+ 	writel(9, csid->base + CSID_IPP_ERR_RECOVERY_CFG0);
+-	writel(0, csid->base + CSID_IPP_CAMIF_FRAME_CFG);
++	/* CSIDCAMIFIPPTitan680 pixel pattern is carried with the pixel stream. */
++	switch (in->code) {
++	case MEDIA_BUS_FMT_SGRBG10_1X10:
++		i = 1;
++		break;
++	case MEDIA_BUS_FMT_SBGGR10_1X10:
++		i = 2;
++		break;
++	case MEDIA_BUS_FMT_SGBRG10_1X10:
++		i = 3;
++		break;
++	default:
++		i = 0;
++		break;
++	}
++	writel(i << 24, csid->base + CSID_IPP_CAMIF_FRAME_CFG);
+ 	writel((in->height / 2) << 16, csid->base + CSID_IPP_EPOCH_IRQ_CFG);
+ 	for (i = CSID_IPP_PIX_DROP_PATTERN; i <= CSID_IPP_IRQ_SUBSAMPLE_PERIOD;
+ 	     i += 4)
+@@ -455,6 +470,8 @@ static irqreturn_t csid_isr(int irq, void *dev)
+ 		writel(val, csid->base + CSID_IPP_IRQ_CLEAR);
+ 		if (val & BIT(23))
+ 			csid_rup_complete(csid, VFE_LINE_PIX);
++		if (buf_done_val & BIT(6))
++			camss_buf_done(csid->camss, csid->id, 4);
+ 		if (buf_done_val & BIT(0))
+ 			camss_buf_done(csid->camss, csid->id, VFE_LINE_PIX);
+ 	}
+diff --git a/drivers/media/platform/qcom/camss/camss-vfe-680-iq.h b/drivers/media/platform/qcom/camss/camss-vfe-680-iq.h
+new file mode 100644
+index 000000000..07f5538f4
+--- /dev/null
++++ b/drivers/media/platform/qcom/camss/camss-vfe-680-iq.h
+@@ -0,0 +1,323 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Experimental local ABI; paired with the Liuqin libcamera pipeline. */
++#include <linux/dma-mapping.h>
++#include <media/v4l2-ctrls.h>
++
++#define VFE680_CID_BASE (V4L2_CID_USER_BASE + 0x3000)
++#define VFE680_STATS_WORDS (32 * 24 * 20)
++#define VFE680_STATS_ALLOC SZ_64K
++
++/* U16 payload stores signed Q10 coefficients biased by 2048, RGB row-major. */
++static const u16 vfe680_cc_identity[9] = {
++	3072, 2048, 2048, 2048, 3072, 2048, 2048, 2048, 3072,
++};
++
++struct vfe680_iq {
++	struct v4l2_ctrl_handler handler;
++	struct vfe_line *line;
++	void *dma;
++	dma_addr_t dma_addr;
++	u32 queued, completed, done;
++	u32 gains[2];
++	u16 mesh[884];
++	u16 cc[9];
++	bool cc_dirty;
++	bool lsc;
++	u32 stats[VFE680_STATS_WORDS + 2];
++};
++
++static int vfe680_iq_set(struct v4l2_ctrl *ctrl)
++{
++	struct vfe680_iq *iq =
++		container_of(ctrl->handler, struct vfe680_iq, handler);
++	struct vfe_device *vfe = to_vfe(iq->line);
++	unsigned long flags;
++
++	spin_lock_irqsave(&vfe->output_lock, flags);
++	if (ctrl->id == VFE680_CID_BASE + 3) {
++		if (iq->line->output.state != VFE_OUTPUT_OFF) {
++			spin_unlock_irqrestore(&vfe->output_lock, flags);
++			return -EBUSY;
++		}
++		memcpy(iq->mesh, ctrl->p_new.p_u16, sizeof(iq->mesh));
++		iq->lsc = true;
++	}
++	if (ctrl->id == VFE680_CID_BASE + 4) {
++		memcpy(iq->cc, ctrl->p_new.p_u16, sizeof(iq->cc));
++		iq->cc_dirty = true;
++	}
++	if (ctrl->id == VFE680_CID_BASE + 1)
++		memcpy(iq->gains, ctrl->p_new.p_u32, sizeof(iq->gains));
++	spin_unlock_irqrestore(&vfe->output_lock, flags);
++	return 0;
++}
++
++static int vfe680_iq_get(struct v4l2_ctrl *ctrl)
++{
++	struct vfe680_iq *iq =
++		container_of(ctrl->handler, struct vfe680_iq, handler);
++	struct vfe_device *vfe = to_vfe(iq->line);
++	unsigned long flags;
++
++	spin_lock_irqsave(&vfe->output_lock, flags);
++	memcpy(ctrl->p_new.p_u32, iq->stats, sizeof(iq->stats));
++	spin_unlock_irqrestore(&vfe->output_lock, flags);
++	return 0;
++}
++
++static const struct v4l2_ctrl_ops vfe680_iq_ops = {
++	.s_ctrl = vfe680_iq_set,
++	.g_volatile_ctrl = vfe680_iq_get,
++};
++
++int vfe680_iq_init(struct vfe_line *line)
++{
++	struct vfe_device *vfe = to_vfe(line);
++	struct device *dev = vfe->camss->dev;
++	struct vfe680_iq *iq;
++	const struct v4l2_ctrl_config configs[] = {
++		{ .id = VFE680_CID_BASE,
++		  .name = "IFE680 IQ ABI",
++		  .type = V4L2_CTRL_TYPE_INTEGER,
++		  .min = 1,
++		  .max = 1,
++		  .step = 1,
++		  .def = 1,
++		  .flags = V4L2_CTRL_FLAG_READ_ONLY },
++		{ .ops = &vfe680_iq_ops,
++		  .id = VFE680_CID_BASE + 1,
++		  .name = "IFE680 red blue gains",
++		  .type = V4L2_CTRL_TYPE_U32,
++		  .min = 1024,
++		  .max = 16384,
++		  .step = 1,
++		  .def = 1024,
++		  .dims = { 2 } },
++		{ .ops = &vfe680_iq_ops,
++		  .id = VFE680_CID_BASE + 2,
++		  .name = "IFE680 Bayer grid",
++		  .type = V4L2_CTRL_TYPE_U32,
++		  .min = 0,
++		  .max = U32_MAX,
++		  .step = 1,
++		  .dims = { VFE680_STATS_WORDS + 2 },
++		  .flags = V4L2_CTRL_FLAG_READ_ONLY | V4L2_CTRL_FLAG_VOLATILE },
++		{ .ops = &vfe680_iq_ops,
++		  .id = VFE680_CID_BASE + 3,
++		  .name = "IFE680 calibrated lens shading",
++		  .type = V4L2_CTRL_TYPE_U16,
++		  .min = 512,
++		  .max = 16383,
++		  .step = 1,
++		  .def = 1024,
++		  .dims = { 884 } },
++		{ .ops = &vfe680_iq_ops,
++		  .id = VFE680_CID_BASE + 4,
++		  .name = "IFE680 RGB colour matrix",
++		  .type = V4L2_CTRL_TYPE_U16,
++		  .min = 0,
++		  .max = 4095,
++		  .step = 1,
++		  .def = 2048,
++		  .p_def.p_const = vfe680_cc_identity,
++		  .dims = { 9 } },
++	};
++	unsigned int i;
++
++	iq = devm_kzalloc(dev, sizeof(*iq), GFP_KERNEL);
++	if (!iq)
++		return -ENOMEM;
++	iq->line = line;
++	iq->gains[0] = iq->gains[1] = 1024;
++	memcpy(iq->cc, vfe680_cc_identity, sizeof(iq->cc));
++	iq->dma = dmam_alloc_coherent(dev, 2 * VFE680_STATS_ALLOC,
++				      &iq->dma_addr, GFP_KERNEL);
++	if (!iq->dma)
++		return -ENOMEM;
++	line->iq = iq;
++	v4l2_ctrl_handler_init(&iq->handler, ARRAY_SIZE(configs));
++	for (i = 0; i < ARRAY_SIZE(configs); i++)
++		v4l2_ctrl_new_custom(&iq->handler, &configs[i], NULL);
++	line->subdev.ctrl_handler = &iq->handler;
++	return iq->handler.error;
++}
++
++void vfe680_iq_cleanup(struct vfe_line *line)
++{
++	if (line->iq) {
++		v4l2_ctrl_handler_free(&line->iq->handler);
++		line->subdev.ctrl_handler = NULL;
++		line->iq = NULL;
++	}
++}
++
++static void vfe680_lsc_start(struct vfe_device *vfe, struct vfe_line *line)
++{
++	struct vfe680_iq *iq = line->iq;
++	u32 h = line->fmt[0].height;
++	/* Validated OEM grid optimisation for the two supported binned modes. */
++	u32 level = h == 1952 ? 1 : 2;
++	u32 sx = h == 1952 ? 41 : 21, sy = h == 1952 ? 41 : 16;
++	u32 dx = h == 1952 ? 8 : 24, dy = h == 1952 ? 4 : 16;
++	u32 bx = dx / sx, by = dy / sy;
++	u32 cfg[] = {
++		0xbf,
++		((sx << level) - 1) | (((sy << level) - 1) << 16),
++		(sx - 1) | (((1 << 20) / sx) << 12),
++		(sy - 1) | (((1 << 20) / sy) << 12),
++		(dx % sx) | ((dy % sy) << 16),
++		16384 << 14,
++		(dy % sy) * ((1 << 20) / sy),
++		0,
++		0,
++		0,
++		0,
++		16384 << 14,
++		0,
++	};
++	unsigned int i, bank;
++
++	if (!iq->lsc) {
++		writel(0, vfe->base + 0x4360);
++		return;
++	}
++	writel(0, vfe->base + 0x4358);
++	writel(0, vfe->base + 0x435c);
++	for (i = 0; i < ARRAY_SIZE(cfg); i++)
++		writel(cfg[i], vfe->base + 0x4368 + i * 4);
++	for (bank = 1; bank <= 3; bank++) {
++		writel(0, vfe->base + 0x4308);
++		writel(bank, vfe->base + 0x430c);
++		for (i = 0; i < 221; i++) {
++			u32 value = 0;
++
++			if (bank == 1)
++				value = iq->mesh[i] | (iq->mesh[221 + i] << 14);
++			if (bank == 2)
++				value = iq->mesh[663 + i] |
++					(iq->mesh[442 + i] << 14);
++			writel(value, vfe->base + 0x4310);
++		}
++	}
++	writel(0, vfe->base + 0x430c);
++	writel(1 | (level << 12) | ((bx >> level) << 16) |
++		       ((by >> level) << 20) |
++		       ((bx & ((1 << level) - 1)) << 24) |
++		       ((by & ((1 << level) - 1)) << 28),
++	       vfe->base + 0x4360);
++}
++
++static void vfe680_iq_start(struct vfe_device *vfe, struct vfe_line *line)
++{
++	struct vfe680_iq *iq = line->iq;
++	u32 w = line->fmt[0].width, h = line->fmt[0].height;
++	u32 rw = (w / 32) & ~1, rh = (h / 24) & ~1;
++	u32 x = ((w - rw * 32) / 2) & ~1, y = ((h - rh * 24) / 2) & ~1;
++	unsigned int i;
++
++	vfe680_lsc_start(vfe, line);
++	iq->cc_dirty = true;
++	iq->queued = iq->completed = iq->done = 0;
++	memset(iq->stats, 0, sizeof(iq->stats));
++	memset(iq->dma, 0, 2 * VFE680_STATS_ALLOC);
++	/* BLS121, RAW10 black 64 expanded to the 18-bit IFE domain; Q11 scale. */
++	writel(16384 << 14, vfe->base + 0x4b68);
++	writel(2184, vfe->base + 0x4b6c);
++	for (i = 0; i < 4; i++)
++		writel(0, vfe->base + 0x4b70 + 4 * i);
++	writel(1, vfe->base + 0x4b60);
++	/* AWBBG17, 32 x 24 regions, all pixels, unsaturated RGB sums. */
++	writel(31 << 16 | x, vfe->base + 0xb86c);
++	writel(rw - 1, vfe->base + 0xb870);
++	writel(23 << 16 | y, vfe->base + 0xb874);
++	writel(rh - 1, vfe->base + 0xb878);
++	writel(0, vfe->base + 0xb87c);
++	for (i = 0; i < 5; i++) {
++		writel(250000U << 14, vfe->base + 0xb880 + 4 * i);
++		writel(0, vfe->base + 0xb894 + 4 * i);
++	}
++	writel(0x04120a00, vfe->base + 0xb868);
++	writel(0, vfe->base + 0xb864);
++	writel(0xffff0001, vfe->base + 0xb860);
++	/* Statistics use frame-based WM14, fixed composite group 6. */
++	writel(0, vfe->base + VFE_BUS_IMAGE_CFG0(vfe, 14));
++	writel(0, vfe->base + VFE_BUS_IMAGE_CFG1(vfe, 14));
++	writel(1, vfe->base + VFE_BUS_IMAGE_CFG2(vfe, 14));
++	writel(10, vfe->base + VFE_BUS_PACKER_CFG(vfe, 14));
++	writel(VFE680_STATS_ALLOC, vfe->base + VFE_BUS_FRAME_INCR(vfe, 14));
++	writel(0, vfe->base + VFE_BUS_MMU_PREFETCH_CFG(vfe, 14));
++	writel(1, vfe->base + VFE_BUS_FRAMEDROP_PATTERN(vfe, 14));
++	writel(0, vfe->base + VFE_BUS_FRAMEDROP_PERIOD(vfe, 14));
++	writel(1, vfe->base + VFE_BUS_IRQ_SUBSAMPLE_PATTERN(vfe, 14));
++	writel(0, vfe->base + VFE_BUS_IRQ_SUBSAMPLE_PERIOD(vfe, 14));
++	writel(0x10001, vfe->base + VFE_BUS_WRITE_CLIENT_CFG(vfe, 14));
++}
++
++/* CC131: G/B/R input/output, signed 12-bit coefficients, Q7 + qfactor 3.
++ * Verified against the shipping Titan680 packer. Public payload stays RGB.
++ * Called under output_lock, alongside WB and the next register update.
++ */
++static void vfe680_cc_queue(struct vfe_device *vfe, struct vfe680_iq *iq)
++{
++	static const u8 order[] = { 4, 7, 1, 5, 8, 2, 3, 6, 0 };
++	u32 c[9];
++	unsigned int i;
++
++	if (!iq->cc_dirty)
++		return;
++	for (i = 0; i < ARRAY_SIZE(c); i++)
++		c[i] = (iq->cc[order[i]] - 2048) & 0xfff;
++	for (i = 0; i < 3; i++) {
++		writel(c[3 * i] | (c[3 * i + 1] << 16),
++		       vfe->base + 0x5868 + 8 * i);
++		writel(c[3 * i + 2], vfe->base + 0x586c + 8 * i);
++		writel(0, vfe->base + 0x5880 + 4 * i);
++	}
++	writel(3, vfe->base + 0x588c);
++	writel(1, vfe->base + 0x5860);
++	iq->cc_dirty = false;
++}
++
++static void vfe680_iq_queue(struct vfe_device *vfe, struct vfe_line *line)
++{
++	struct vfe680_iq *iq = line->iq;
++
++	writel(iq->dma_addr + (iq->queued++ % 2) * VFE680_STATS_ALLOC,
++	       vfe->base + VFE_BUS_IMAGE_ADDR(vfe, 14));
++	vfe680_cc_queue(vfe, iq);
++	writel(iq->gains[0] << 17, vfe->base + 0x4570);
++	writel(iq->gains[1] << 17, vfe->base + 0x456c);
++}
++
++static void vfe680_iq_done(struct vfe_device *vfe, int port)
++{
++	struct vfe_line *line = &vfe->line[VFE_LINE_PIX];
++	struct vfe680_iq *iq = line->iq;
++	unsigned long flags;
++
++	if (port == 4 && !iq)
++		return;
++	if (!iq || (port != VFE_LINE_PIX && port != 4)) {
++		vfe_buf_done(vfe, port);
++		return;
++	}
++	spin_lock_irqsave(&vfe->output_lock, flags);
++	if (line->output.state == VFE_OUTPUT_OFF) {
++		spin_unlock_irqrestore(&vfe->output_lock, flags);
++		return;
++	}
++	iq->done |= port == 4 ? 2 : 1;
++	if (iq->done != 3) {
++		spin_unlock_irqrestore(&vfe->output_lock, flags);
++		return;
++	}
++	iq->done = 0;
++	dma_rmb();
++	memcpy(iq->stats + 2,
++	       iq->dma + (iq->completed % 2) * VFE680_STATS_ALLOC,
++	       VFE680_STATS_WORDS * sizeof(u32));
++	iq->stats[0] = iq->completed++;
++	iq->stats[1] = 1;
++	spin_unlock_irqrestore(&vfe->output_lock, flags);
++	vfe_buf_done(vfe, VFE_LINE_PIX);
++}
+diff --git a/drivers/media/platform/qcom/camss/camss-vfe-680-pix.h b/drivers/media/platform/qcom/camss/camss-vfe-680-pix.h
+index d1c5d6e38..b6fb72a0a 100644
+--- a/drivers/media/platform/qcom/camss/camss-vfe-680-pix.h
++++ b/drivers/media/platform/qcom/camss/camss-vfe-680-pix.h
+@@ -3,16 +3,8 @@
+  * Experimental IFE680 single-IFE NV12 pipeline. Register addresses/packing
+  * checked against the shipping Liuqin Titan680 IQ implementation; this is
+  * deliberately not the older Titan480 register layout.
+- * No statistics, per-frame tuning, LSC, black subtraction or HDR yet.
++ * IQ parameters, calibrated LSC and Bayer statistics are in the paired IQ file.
+  */
+-static unsigned int ife680_red_gain = 1024;
+-static unsigned int ife680_blue_gain = 1024;
+-module_param(ife680_red_gain, uint, 0444);
+-module_param(ife680_blue_gain, uint, 0444);
+-MODULE_PARM_DESC(ife680_red_gain, "Manual red gain, Q10, clamped to 1..32767");
+-MODULE_PARM_DESC(ife680_blue_gain,
+-		 "Manual blue gain, Q10, clamped to 1..32767");
+-
+ /* sRGB OETF sampled at i / 256, rounded to the Gamma151 12-bit domain. */
+ static const u16 vfe680_srgb[257] = {
+ 	0,    203,  347,  452,	538,  613,  679,  739,	794,  845,  894,  939,
+@@ -105,14 +97,15 @@ static void vfe680_pix_configure(struct vfe_device *vfe, struct vfe_line *line)
+ 	writel(1, vfe->base + 0x2300);
+ 	writel(1, vfe->base + 0x2600);
+ 
+-	/* WB201: Q10 gains in G/B/R order, zero offsets, no channel reduction. */
++	/* WB201: Q10 G/B/R gains; preserve the RAW10 black pedestal across WB. */
+ 	writel(1024 << 17, vfe->base + VFE680_WB_GAIN_G);
+-	writel(clamp_t(u32, ife680_blue_gain, 1, 32767) << 17,
++	writel(1024 << 17,
+ 	       vfe->base + VFE680_WB_GAIN_B);
+-	writel(clamp_t(u32, ife680_red_gain, 1, 32767) << 17,
++	writel(1024 << 17,
+ 	       vfe->base + VFE680_WB_GAIN_R);
+ 	for (i = 0; i < 8; i++)
+-		writel(0, vfe->base + VFE680_WB_OFFSETS + 4 * i);
++		writel(i < 6 ? 16384 << 14 : 0,
++		       vfe->base + VFE680_WB_OFFSETS + 4 * i);
+ 	writel(3 << 8, vfe->base + VFE680_WB_CHANNEL_CFG);
+ 	writel(1, vfe->base + VFE680_WB_MODULE_CFG);
+ 
+@@ -158,6 +151,7 @@ static void vfe680_pix_start(struct vfe_device *vfe, struct vfe_line *line)
+ 	unsigned int wm;
+ 
+ 	vfe680_pix_configure(vfe, line);
++	vfe680_iq_start(vfe, line);
+ 	for (wm = 0; wm < 2; wm++) {
+ 		u32 height = p->height >> wm;
+ 
+diff --git a/drivers/media/platform/qcom/camss/camss-vfe-680.c b/drivers/media/platform/qcom/camss/camss-vfe-680.c
+index e433c7fc1..9ef93b8e9 100644
+--- a/drivers/media/platform/qcom/camss/camss-vfe-680.c
++++ b/drivers/media/platform/qcom/camss/camss-vfe-680.c
+@@ -144,6 +144,7 @@ static void vfe_disable_irq(struct vfe_device *vfe)
+ 	writel(0u, vfe->base + VFE_BUS_IRQn_MASK(vfe, 1));
+ }
+ 
++#include "camss-vfe-680-iq.h"
+ #include "camss-vfe-680-pix.h"
+ 
+ static void vfe_wm_update(struct vfe_device *vfe, u8 rdi, u32 addr,
+@@ -154,6 +155,7 @@ static void vfe_wm_update(struct vfe_device *vfe, u8 rdi, u32 addr,
+ 	if (camss_680_pix && !vfe_is_lite(vfe) && rdi == VFE_LINE_PIX) {
+ 		struct v4l2_pix_format_mplane *p =
+ 			&line->video_out.active_fmt.fmt.pix_mp;
++		vfe680_iq_queue(vfe, line);
+ 		writel(addr, vfe->base + VFE_BUS_IMAGE_ADDR(vfe, 0));
+ 		writel(addr + p->plane_fmt[0].bytesperline * p->height,
+ 		       vfe->base + VFE_BUS_IMAGE_ADDR(vfe, 1));
+@@ -225,6 +227,7 @@ static void vfe_wm_stop(struct vfe_device *vfe, u8 rdi)
+ 				vfe->camss->dev,
+ 				"IFE680 PIX image violation %#x overflow %#x\n",
+ 				violation, overflow);
++		writel(0, vfe->base + VFE_BUS_WRITE_CLIENT_CFG(vfe, 14));
+ 		writel(0, vfe->base + VFE_BUS_WRITE_CLIENT_CFG(vfe, 0));
+ 		writel(0, vfe->base + VFE_BUS_WRITE_CLIENT_CFG(vfe, 1));
+ 		return;
+@@ -270,7 +273,7 @@ const struct vfe_hw_ops vfe_ops_680 = {
+ 	.vfe_halt = vfe_halt,
+ 	.vfe_wm_start = vfe_wm_start,
+ 	.vfe_wm_stop = vfe_wm_stop,
+-	.vfe_buf_done = vfe_buf_done,
++	.vfe_buf_done = vfe680_iq_done,
+ 	.vfe_wm_update = vfe_wm_update,
+ 	.reg_update = vfe_reg_update,
+ 	.reg_update_clear = vfe_reg_update_clear,
+diff --git a/drivers/media/platform/qcom/camss/camss-vfe.c b/drivers/media/platform/qcom/camss/camss-vfe.c
+index a18718d89..be311003c 100644
+--- a/drivers/media/platform/qcom/camss/camss-vfe.c
++++ b/drivers/media/platform/qcom/camss/camss-vfe.c
+@@ -288,6 +288,11 @@ bool camss_680_pix;
+ module_param_named(ife680_pix, camss_680_pix, bool, 0444);
+ MODULE_PARM_DESC(ife680_pix, "Experimental IFE680 RAW10 to NV12 path");
+ 
++static const u32 vfe680_bayer_codes[] = {
++	MEDIA_BUS_FMT_SRGGB10_1X10, MEDIA_BUS_FMT_SGRBG10_1X10,
++	MEDIA_BUS_FMT_SGBRG10_1X10, MEDIA_BUS_FMT_SBGGR10_1X10,
++};
++
+ static const struct camss_format_info formats_pix_680[] = {
+ 	{ MEDIA_BUS_FMT_SRGGB10_1X10, 10, V4L2_PIX_FMT_SRGGB10P, 1,
+ 	  PER_PLANE_DATA(0, 1, 1, 1, 1, 10) },
+@@ -641,7 +646,10 @@ int vfe_enable_v2(struct vfe_line *line)
+ 
+ 		/* Only the two IMX596 binned modes have validated register geometry. */
+ 		if (p->pixelformat != V4L2_PIX_FMT_NV12 ||
+-		    sink->code != MEDIA_BUS_FMT_SRGGB10_1X10 ||
++		    (sink->code != MEDIA_BUS_FMT_SRGGB10_1X10 &&
++		     sink->code != MEDIA_BUS_FMT_SGRBG10_1X10 &&
++		     sink->code != MEDIA_BUS_FMT_SGBRG10_1X10 &&
++		     sink->code != MEDIA_BUS_FMT_SBGGR10_1X10) ||
+ 		    p->width != 2592 ||
+ 		    (p->height != 1952 && p->height != 1472) ||
+ 		    p->width != sink->width || p->height != sink->height)
+@@ -1390,7 +1398,11 @@ static void vfe_try_format(struct vfe_line *line,
+ 
+ 	if (vfe680_pix_enabled(line)) {
+ 		if (pad == MSM_VFE_PAD_SINK) {
+-			fmt->code = MEDIA_BUS_FMT_SRGGB10_1X10;
++			for (i = 0; i < ARRAY_SIZE(vfe680_bayer_codes); i++)
++				if (fmt->code == vfe680_bayer_codes[i])
++					break;
++			if (i == ARRAY_SIZE(vfe680_bayer_codes))
++				fmt->code = MEDIA_BUS_FMT_SRGGB10_1X10;
+ 			fmt->width = 2592;
+ 			fmt->height = fmt->height <= 1472 ? 1472 : 1952;
+ 		} else {
+@@ -1547,11 +1559,15 @@ static int vfe_enum_mbus_code(struct v4l2_subdev *sd,
+ 	struct vfe_line *line = v4l2_get_subdevdata(sd);
+ 
+ 	if (vfe680_pix_enabled(line)) {
+-		if (code->index)
+-			return -EINVAL;
+-		code->code = code->pad == MSM_VFE_PAD_SINK ?
+-				     MEDIA_BUS_FMT_SRGGB10_1X10 :
+-				     MEDIA_BUS_FMT_YUYV8_1_5X8;
++		if (code->pad == MSM_VFE_PAD_SINK) {
++			if (code->index >= ARRAY_SIZE(vfe680_bayer_codes))
++				return -EINVAL;
++			code->code = vfe680_bayer_codes[code->index];
++		} else {
++			if (code->index)
++				return -EINVAL;
++			code->code = MEDIA_BUS_FMT_YUYV8_1_5X8;
++		}
+ 		return 0;
+ 	}
+ 
+@@ -2197,6 +2213,12 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
+ 			goto error_init;
+ 		}
+ 
++		if (vfe680_pix_enabled(&vfe->line[i])) {
++			ret = vfe680_iq_init(&vfe->line[i]);
++			if (ret)
++				goto error_reg_subdev;
++		}
++
+ 		ret = v4l2_device_register_subdev(v4l2_dev, sd);
+ 		if (ret < 0) {
+ 			dev_err(dev, "Failed to register subdev: %d\n", ret);
+@@ -2249,6 +2271,7 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
+ 	v4l2_device_unregister_subdev(sd);
+ 
+ error_reg_subdev:
++	vfe680_iq_cleanup(&vfe->line[i]);
+ 	media_entity_cleanup(&sd->entity);
+ 
+ error_init:
+@@ -2259,6 +2282,7 @@ int msm_vfe_register_entities(struct vfe_device *vfe,
+ 		msm_video_unregister(video_out);
+ 		v4l2_device_unregister_subdev(sd);
+ 		media_entity_cleanup(&sd->entity);
++		vfe680_iq_cleanup(&vfe->line[i]);
+ 	}
+ 
+ 	return ret;
+@@ -2282,6 +2306,7 @@ void msm_vfe_unregister_entities(struct vfe_device *vfe)
+ 		msm_video_unregister(video_out);
+ 		v4l2_device_unregister_subdev(sd);
+ 		media_entity_cleanup(&sd->entity);
++		vfe680_iq_cleanup(&vfe->line[i]);
+ 	}
+ }
+ 
+diff --git a/drivers/media/platform/qcom/camss/camss-vfe.h b/drivers/media/platform/qcom/camss/camss-vfe.h
+index 1ad582df9..6d86238d5 100644
+--- a/drivers/media/platform/qcom/camss/camss-vfe.h
++++ b/drivers/media/platform/qcom/camss/camss-vfe.h
+@@ -83,7 +83,10 @@ struct vfe_output {
+ 	struct completion reg_update;
+ };
+ 
++struct vfe680_iq;
++
+ struct vfe_line {
++	struct vfe680_iq *iq;
+ 	enum vfe_line_id id;
+ 	struct v4l2_subdev subdev;
+ 	struct media_pad pads[MSM_VFE_PADS_NUM];
+@@ -248,6 +251,8 @@ extern const struct vfe_hw_ops vfe_ops_170;
+ extern const struct vfe_hw_ops vfe_ops_340;
+ extern const struct vfe_hw_ops vfe_ops_480;
+ extern const struct vfe_hw_ops vfe_ops_680;
++int vfe680_iq_init(struct vfe_line *line);
++void vfe680_iq_cleanup(struct vfe_line *line);
+ extern const struct vfe_hw_ops vfe_ops_gen3;
+ 
+ int vfe_get(struct vfe_device *vfe);

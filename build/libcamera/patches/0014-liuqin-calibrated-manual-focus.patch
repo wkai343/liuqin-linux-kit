@@ -1,0 +1,249 @@
+diff --git a/include/libcamera/internal/camera_lens.h b/include/libcamera/internal/camera_lens.h
+index f347c5e..dc6603a 100644
+--- a/include/libcamera/internal/camera_lens.h
++++ b/include/libcamera/internal/camera_lens.h
+@@ -8,6 +8,7 @@
+ 
+ #include <memory>
+ #include <stdint.h>
++#include <optional>
+ #include <string>
+ 
+ #include <libcamera/base/class.h>
+@@ -28,6 +29,7 @@ public:
+ 
+ 	int init();
+ 	int setFocusPosition(int32_t position);
++	std::optional<int32_t> focusPosition();
+ 
+ 	const std::string &model() const { return model_; }
+ 
+diff --git a/src/libcamera/camera_lens.cpp b/src/libcamera/camera_lens.cpp
+index ccc2a6a..ea87a9d 100644
+--- a/src/libcamera/camera_lens.cpp
++++ b/src/libcamera/camera_lens.cpp
+@@ -95,6 +95,16 @@ int CameraLens::setFocusPosition(int32_t position)
+ 	return 0;
+ }
+ 
++/** \brief Read the last accepted actuator setting in driver units. */
++std::optional<int32_t> CameraLens::focusPosition()
++{
++	const uint32_t ids[] = { V4L2_CID_FOCUS_ABSOLUTE };
++	auto values = subdev_->getControls(ids);
++	if (!values.contains(ids[0]))
++		return {};
++	return values.get(ids[0]).get<int32_t>();
++}
++
+ int CameraLens::validateLensDriver()
+ {
+ 	int ret = 0;
+diff --git a/src/libcamera/pipeline/simple/liuqin_calibration.h b/src/libcamera/pipeline/simple/liuqin_calibration.h
+index 6b6c5af..55a3249 100644
+--- a/src/libcamera/pipeline/simple/liuqin_calibration.h
++++ b/src/libcamera/pipeline/simple/liuqin_calibration.h
+@@ -1,17 +1,60 @@
+ /* SPDX-License-Identifier: LGPL-2.1-or-later */
+ #pragma once
+ 
++#include <algorithm>
+ #include <cmath>
++#include <optional>
+ #include <vector>
+ #include <libcamera/base/file.h>
+ #include "libcamera/internal/yaml_parser.h"
+ 
+ namespace libcamera {
+ 
++/* Optical chart measurements for this actuator, ordered far to near. */
++struct LiuqinFocusMap {
++	struct Point { float dioptres; int dac; };
++	std::vector<Point> points;
++
++	void load(const ValueNode &table, int low, int high)
++	{
++		points.clear();
++		if (!table.isList() || table.size() < 2 || table.size() > 32)
++			return;
++		std::vector<Point> valid;
++		for (const auto &row : table.asList()) {
++			Point p{row["dioptres"].get<float>(-1), row["dac"].get<int>(-1)};
++			if (!std::isfinite(p.dioptres) || p.dioptres < 0 ||
++			    p.dac < low || p.dac > high ||
++			    (!valid.empty() && (p.dioptres <= valid.back().dioptres || p.dac <= valid.back().dac)))
++				return;
++			valid.push_back(p);
++		}
++		points = std::move(valid);
++	}
++
++	int dac(float value) const
++	{
++		value = std::clamp(value, points.front().dioptres, points.back().dioptres);
++		auto b = std::find_if(points.begin() + 1, points.end(), [value](const Point &p) { return p.dioptres >= value; });
++		const Point &a = *(b - 1);
++		return a.dac + std::lround((value - a.dioptres) / (b->dioptres - a.dioptres) * (b->dac - a.dac));
++	}
++
++	std::optional<float> dioptres(int value) const
++	{
++		if (points.empty() || value < points.front().dac || value > points.back().dac)
++			return {};
++		auto b = std::find_if(points.begin() + 1, points.end(), [value](const Point &p) { return p.dac >= value; });
++		const Point &a = *(b - 1);
++		return a.dioptres + (value - a.dac) * (b->dioptres - a.dioptres) / (b->dac - a.dac);
++	}
++};
++
+ struct LiuqinCalibration {
+ 	float rg = 1.0f, bg = 1.0f, grgb = 1.0f;
+ 	std::vector<float> lsc;
+ 	int afMin = 0, afMax = 1023;
++	LiuqinFocusMap focus;
+ 	bool load(const std::string &model = "imx596")
+ 	{
+ 		if (model != "imx596" && model != "s5kjn1")
+@@ -45,6 +88,7 @@ struct LiuqinCalibration {
+ 			afMax = (*data)["af_max"].get<int>(-1);
+ 			if (afMin < 0 || afMax > 1023 || afMin >= afMax)
+ 				return false;
++			focus.load((*data)["focus_points"], afMin, afMax);
+ 		}
+ 		lsc = std::move(mesh);
+ 		return true;
+diff --git a/src/libcamera/pipeline/simple/liuqin_isp.cpp b/src/libcamera/pipeline/simple/liuqin_isp.cpp
+index fd84e69..12743fc 100644
+--- a/src/libcamera/pipeline/simple/liuqin_isp.cpp
++++ b/src/libcamera/pipeline/simple/liuqin_isp.cpp
+@@ -149,7 +149,15 @@ int LiuqinIsp::configure(Transform transform, ControlInfoMap *controlsInfo, unsi
+ 			return -EINVAL;
+ 		af_.configure(low, high);
+ 		LOG(LiuqinIsp, Info) << "AF DAC range " << low << ".." << high << (calibrated ? " (EEPROM)" : " (driver)");
+-		map[&controls::AfMode] = ControlInfo(controls::AfModeAuto, controls::AfModeContinuous, controls::AfModeContinuous);
++		const auto &points = calibration_.focus.points;
++		const bool manual = !points.empty() && points.front().dac >= low && points.back().dac <= high;
++		if (manual)
++			map[&controls::LensPosition] = ControlInfo(points.front().dioptres, points.back().dioptres,
++			                                         std::clamp(1.0f, points.front().dioptres, points.back().dioptres));
++		else
++			calibration_.focus.points.clear();
++		map[&controls::AfMode] = ControlInfo(manual ? controls::AfModeManual : controls::AfModeAuto,
++		                                    controls::AfModeContinuous, controls::AfModeContinuous);
+ 		map[&controls::AfTrigger] = ControlInfo(controls::AfTriggerValues);
+ 		map[&controls::AfState] = ControlInfo(controls::AfStateValues);
+ 	}
+@@ -249,12 +257,55 @@ int LiuqinIsp::apply()
+ 	return isp_->setControls(&ispControls);
+ }
+ 
++static uint64_t focusNow()
++{
++	return std::chrono::duration_cast<std::chrono::nanoseconds>(
++		std::chrono::steady_clock::now().time_since_epoch()).count();
++}
++
++int LiuqinIsp::moveLens(int dac)
++{
++	uint64_t issued = focusNow();
++	int ret = sensor_->focusLens()->setFocusPosition(dac);
++	// A failed I2C transfer leaves the physical position uncertain.
++	lensHistory_.push_back({ issued, focusNow() + 100000000ULL, ret ? -1 : dac });
++	return ret;
++}
++
++int LiuqinIsp::setManualFocus(const ControlList &controls, bool starting)
++{
++	auto requested = controls.get(controls::LensPosition);
++	if ((!starting && !requested) || calibration_.focus.points.empty())
++		return 0;
++	float value = requested.value_or(1.0f);
++	if (!std::isfinite(value))
++		return -EINVAL;
++	int dac = calibration_.focus.dac(value);
++	if (!lensHistory_.empty() && lensHistory_.back().dac == dac)
++		return 0;
++	return moveLens(dac);
++}
++
+ int LiuqinIsp::start(const ControlList &controls)
+ {
+ 	ae_ = awb_ = true;
+ 	if (hasAf_) {
+ 		af_.reset();
+-		if (auto mode = controls.get(controls::AfMode)) af_.setMode(*mode);
++		lensHistory_.clear();
++		if (!calibration_.focus.points.empty()) {
++			auto current = sensor_->focusLens()->focusPosition();
++			if (current)
++				lensHistory_.push_back({ 0, focusNow() + 100000000ULL, *current });
++		}
++		if (auto mode = controls.get(controls::AfMode)) {
++			if (*mode != controls::AfModeManual || !calibration_.focus.points.empty())
++				af_.setMode(*mode);
++		}
++		if (af_.mode() == ipa::soft::ContrastAf::Manual) {
++			int ret = setManualFocus(controls, true);
++			if (ret)
++				return ret;
++		}
+ 		if (auto trigger = controls.get(controls::AfTrigger)) af_.trigger(*trigger == controls::AfTriggerStart);
+ 	}
+ 	temperature_ = 5000;
+@@ -278,7 +329,24 @@ int LiuqinIsp::start(const ControlList &controls)
+ 
+ void LiuqinIsp::focus(FrameBuffer *buffer, Request *request)
+ {
+-	if (auto mode = request->controls().get(controls::AfMode)) af_.setMode(*mode);
++	const uint64_t ts = buffer->metadata().timestamp;
++	while (lensHistory_.size() >= 2 && lensHistory_[1].issued <= ts)
++		lensHistory_.pop_front();
++	if (!lensHistory_.empty() && ts >= lensHistory_.front().settled) {
++		if (auto pos = calibration_.focus.dioptres(lensHistory_.front().dac))
++			request->_d()->metadata().set(controls::LensPosition, *pos);
++	}
++	if (auto mode = request->controls().get(controls::AfMode)) {
++		if (*mode != controls::AfModeManual || !calibration_.focus.points.empty())
++			af_.setMode(*mode);
++	}
++	if (af_.mode() == ipa::soft::ContrastAf::Manual) {
++		if (int ret = setManualFocus(request->controls(), false))
++			LOG(LiuqinIsp, Error) << "Manual lens control failed: " << ret;
++		request->_d()->metadata().set(controls::AfMode, int32_t(controls::AfModeManual));
++		request->_d()->metadata().set(controls::AfState, int32_t(controls::AfStateIdle));
++		return;
++	}
+ 	if (auto trigger = request->controls().get(controls::AfTrigger)) af_.trigger(*trigger == controls::AfTriggerStart);
+ 	if (buffer->metadata().sequence % 4 == 0 && !buffer->planes().empty()) {
+ 		DmaSyncer sync(buffer->planes()[0].fd, DmaSyncer::SyncType::Read);
+@@ -298,7 +366,7 @@ void LiuqinIsp::focus(FrameBuffer *buffer, Request *request)
+ 			double score = ipa::soft::ContrastAf::contrast(gradient, sum, samples, 0);
+ 			auto position = af_.process(buffer->metadata().timestamp, score, true);
+ 			if (position) {
+-				int ret = sensor_->focusLens()->setFocusPosition(*position);
++				int ret = moveLens(*position);
+ 				uint64_t ready = std::chrono::duration_cast<std::chrono::nanoseconds>(
+ 					std::chrono::steady_clock::now().time_since_epoch()).count() + 100000000ULL;
+ 				af_.applied(*position, ready, ret);
+diff --git a/src/libcamera/pipeline/simple/liuqin_isp.h b/src/libcamera/pipeline/simple/liuqin_isp.h
+index 468bc73..0d4a239 100644
+--- a/src/libcamera/pipeline/simple/liuqin_isp.h
++++ b/src/libcamera/pipeline/simple/liuqin_isp.h
+@@ -28,6 +28,8 @@ private:
+ 	std::pair<double, double> gains(double t) const { return liuqinColour::gains(t, calibration_.rg, calibration_.bg, rear_ ? liuqinRearColour::whites : liuqinColour::whites); }
+ 	liuqinColour::Estimate estimate(double r, double b) const { return liuqinColour::estimate(r, b, calibration_.rg, calibration_.bg, rear_ ? liuqinRearColour::whites : liuqinColour::whites); }
+ 	void focus(FrameBuffer *buffer, Request *request);
++	int moveLens(int dac);
++	int setManualFocus(const ControlList &controls, bool starting);
+ 	void update(const ControlList &controls);
+ 	int apply();
+ 	float shading(unsigned int channel, float x, float y) const;
+@@ -44,6 +46,8 @@ private:
+ 	unsigned int margin_ = 24, minimumLines_ = 4;
+ 	double maxGain_ = 16, appliedGain_ = 1;
+ 	ipa::soft::ContrastAf af_;
++	struct LensMove { uint64_t issued, settled; int dac; };
++	std::deque<LensMove> lensHistory_;
+ 	std::array<float, 9> ccm_;
+ 	uint32_t nextUpdate_ = 0;
+ 	struct Applied { uint32_t sequence; int exposure; float gain, red, blue; int64_t duration; std::array<float, 9> ccm; int temperature; };

@@ -1,0 +1,67 @@
+#!/usr/bin/python3
+"""Control focus on the open Liuqin rear camera through its PipeWire source."""
+import argparse
+import json
+import math
+import subprocess
+import sys
+
+
+CAMERA_PATH = '/base/soc@0/cci@ac15000/i2c-bus@1/camera@10'
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest='action', required=True)
+    sub.add_parser('lock', help='hold the current lens setting')
+    sub.add_parser('auto', help='resume continuous autofocus')
+    manual = sub.add_parser('set', help='set and hold a calibrated position')
+    manual.add_argument('dioptres', type=float, help='reciprocal metres')
+    tap = sub.add_parser('tap', help='autofocus on a point in the current rear image')
+    tap.add_argument('x', type=float, help='horizontal position from 0 (left) to 1')
+    tap.add_argument('y', type=float, help='vertical position from 0 (top) to 1')
+    args = parser.parse_args()
+    if args.action == 'tap' and not (0 <= args.x <= 1 and 0 <= args.y <= 1):
+        parser.error('both coordinates must be finite and within [0, 1]')
+
+    graph = json.loads(subprocess.check_output(['pw-dump'], timeout=5))
+    sources = [obj['info'] for obj in graph if obj['type'] == 'PipeWire:Interface:Node'
+               and obj['info']['props'].get('media.class') == 'Video/Source'
+               and obj['info']['props'].get('api.libcamera.path') == CAMERA_PATH]
+    if len(sources) != 1 or sources[0]['state'] != 'running':
+        parser.exit(1, 'Open the rear camera preview first.\n')
+    node = sources[0]
+    controls = {row.get('description'): row for row in node['params'].get('PropInfo', [])}
+    required = {'AfMode'}
+    if args.action == 'tap':
+        required.update(('AfTrigger', 'AfPointX', 'AfPointY'))
+    elif args.action == 'set':
+        required.add('LensPosition')
+    missing = required.difference(controls)
+    if missing:
+        parser.exit(1, 'Rear camera controls unavailable: ' + ', '.join(sorted(missing)) + '\n')
+
+    def prop_id(name):
+        # pw-dump represents libcamera controls without predefined SPA IDs as id-XXXXXXXX.
+        return hex(int(controls[name]['id'].removeprefix('id-'), 16))
+
+    settings = {prop_id('AfMode'): 2 if args.action == 'auto' else 0}
+    if args.action == 'tap':
+        settings = {prop_id('AfMode'): 1, prop_id('AfTrigger'): 0,
+                    prop_id('AfPointX'): args.x, prop_id('AfPointY'): args.y}
+    elif args.action == 'set':
+        span = controls['LensPosition']['type']
+        if not math.isfinite(args.dioptres) or not span['min'] <= args.dioptres <= span['max']:
+            parser.error(f"position must be within [{span['min']}, {span['max']}] dioptres")
+        settings[prop_id('LensPosition')] = args.dioptres
+
+    # The camera device and its source share object.path. Only the streaming
+    # node accepts focus controls. Keep mode (Int) and position (Float) together.
+    result = subprocess.run(['pw-cli', 'set-param', node['props']['node.name'],
+                             'Props', json.dumps(settings)], capture_output=True, text=True, timeout=5)
+    if result.returncode or result.stderr.strip():
+        sys.exit(result.stderr.strip() or 'PipeWire rejected the focus request.')
+
+
+if __name__ == '__main__':
+    main()

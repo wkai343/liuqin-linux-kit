@@ -1,0 +1,46 @@
+From: Liuqin Linux contributors <liuqin@localhost>
+Subject: [PATCH] simple: keep fixed manual streams free of automatic rewrites
+
+Apply AF mode at stream start and keep focus-only requests from scheduling
+identical imaging controls. Stopped-stream brackets program exposure before
+sensor stream-on; live changes still use estimated metadata delays.
+
+diff --git a/src/libcamera/pipeline/simple/liuqin_isp.cpp b/src/libcamera/pipeline/simple/liuqin_isp.cpp
+index f4e6ff05..fd84e692 100644
+--- a/src/libcamera/pipeline/simple/liuqin_isp.cpp
++++ b/src/libcamera/pipeline/simple/liuqin_isp.cpp
+@@ -252,7 +252,11 @@ int LiuqinIsp::apply()
+ int LiuqinIsp::start(const ControlList &controls)
+ {
+ 	ae_ = awb_ = true;
+-	if (hasAf_) af_.reset();
++	if (hasAf_) {
++		af_.reset();
++		if (auto mode = controls.get(controls::AfMode)) af_.setMode(*mode);
++		if (auto trigger = controls.get(controls::AfTrigger)) af_.trigger(*trigger == controls::AfTriggerStart);
++	}
+ 	temperature_ = 5000;
+ 	ccm_ = matrix(temperature_);
+ 	red_ = 1.0 / calibration_.rg;
+@@ -322,7 +326,21 @@ void LiuqinIsp::process(FrameBuffer *buffer, Request *request)
+ 		request->_d()->metadata().set(controls::ColourCorrectionMatrix, effective_.ccm);
+ 		request->_d()->metadata().set(controls::ColourTemperature, effective_.temperature);
+ 	}
++	/* A stopped-stream manual bracket has no delayed exposure transitions.
++	 * Focus-only requests must not rewrite imaging controls from every frame
++	 * or manufacture sequence+3 updates. Live changes retain the asynchronous
++	 * path and must not be used as an exact HDR capture contract. */
++	bool imagingControls = false;
++	for (const auto &[id, value] : request->controls()) {
++		if (id == controls::AeEnable.id() || id == controls::AwbEnable.id() ||
++		    id == controls::ExposureTime.id() || id == controls::AnalogueGain.id() ||
++		    id == controls::FrameDurationLimits.id() || id == controls::ColourGains.id() ||
++		    id == controls::ColourTemperature.id() || id == controls::ColourCorrectionMatrix.id())
++			imagingControls = true;
++	}
+ 	update(request->controls());
++	if (!ae_ && !awb_ && !imagingControls)
++		return;
+ 	if (sequence < nextUpdate_ && request->controls().empty())
+ 		return;
+ 	const uint32_t ids[] = { LiuqinIspBase + 2 };

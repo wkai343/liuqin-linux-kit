@@ -17,6 +17,8 @@ Mesa libclc SPIR-V 包；这几项分别处理不同问题，不能相互替代�
 | 宽向量跨步复制结果错误 | `IR3_SHADER_DEBUG=noearlypreamble` 与独立缓存目录 | 继承环境的 IR3 图形和计算应用；Mesa 更新后需复测再决定是否移除 |
 | Mesa libclc 兼容性警告 | 打包固定的 Mesa libclc 正式 SPIR-V 发布文件 | 替换 `libclc22-spirv`；需随 Fedora LLVM/libclc 基线维护 |
 | 长计算被误判为 GPU 挂起 | `0063` 将 `hangcheck_period` 设为 5000 ms | Liuqin A730 的整个 GPU；真正挂起时的软件恢复会变慢 |
+| GPU 故障恢复与 SMMU 转储互相等待 | `0081` 限制 GMU 等待并在 GPU 挂起时强制关停 | 防止 OOB/HFI 持锁无限等待；不替代触发 GPU 故障本身的修复 |
+| 初始化失败后仍提交命令 | `0082` 检查运行时上电和硬件初始化结果 | 失败时不写命令环，通过调度器 fence 返回错误；OOB 日志记录调用位置 |
 
 图像、矩形复制和双向跨步复制的定向 CTS 已通过。长计算的完整
 `full_3d_explicit_local` 单项在 5000 ms 运行时策略下通过；含 `0063` 的内核另经
@@ -82,6 +84,104 @@ GMU 的 200 MHz / LOW_SVS（64）和 500 MHz / SVS（128）与原厂一致，继
 GPU 图像复制，以及其他图形负载和空闲后的重复运行。内核修复不需要关闭图像平铺或
 UBWC；它也不能替代下面的共享内存计算规避。已有系统使用配套内核 RPM，按
 [内核更新流程](KERNEL-UPDATES.md)完成临时启动、返回默认内核和正式更新。
+
+## GPU 故障转储与恢复
+
+[`0081`](../build/kernel/patches/linux-7.3/0081-drm-msm-bound-fault-dump-waits.patch)
+处理故障恢复与 SMMU 转储之间的锁依赖：恢复线程持有 `gpu->lock`，其 GMU
+事务可能等待 `fault_coredump_done`；转储线程完成该事件前也需要 `gpu->lock`。
+其他持有运行时 PM 或 GMU 锁的调用者也可能进入同类循环，单独检查“正在恢复”标志
+不能覆盖所有竞态。
+
+OOB 和 HFI 事务至多等待转储 1000 ms；转储完成后只重试一次，避免连续故障
+使等待再次无限延长。超时沿原有错误路径返回并释放锁。正常 ACK 不增加等待，
+正常完成的转储仍允许事务重试。GPU 恢复的关停阶段使用强制关停路径，
+不必等独立的 GMU 看门狗标记挂起后才停止发送正常休眠握手。
+这限制的是故障后的等待；一次成功恢复不证明原始命令流、固件或电源故障已消除。
+
+离线回归直接编译执行两个驱动函数，模拟正常 ACK、无转储的超时、转储无法完成、
+转储后 GMU 仍无响应，以及重试时又出现故障：
+
+```sh
+devbox run -- python3 tests/gpu-fault-recovery.py --kernel /path/to/patched-kernel
+```
+
+真机复测应包含正常图形/计算回读、负载和空闲切换、相机枚举服务重启，
+以及 IGT `msm_recovery` 的 `gpu-fault` / `iova-fault` 后再次执行回读。
+故障注入只在已绑定当前启动目标的临时内核上进行，并保存故障前后内核日志。
+受控错误命令和独立 SMMU 故障转储后，GLES 图形/计算及 OpenCL 回读已通过，
+并覆盖 WirePlumber 反复重启与睡眠后的回读。不能以 SSH 仍可连接或 fence 已完成
+替代恢复后的结果正确性检查；原始偶发故障的长期复现与压力覆盖仍需继续。
+相关锁循环也见[上游讨论](https://lists.openwall.net/linux-kernel/2026/11/01/730)。
+
+### 首次 GMU 超时与后续故障
+
+配方中的 GMU 与 SQE 固件来自固定原厂 ROM，SHA256 分别为
+`b2d3f0e2a98fd6259ab9ffef16df63265542e6cc9a970d53d476e823d432042a`
+和 `e67d1829f57fc8326d806234b932dc3b78e28a9940df34c70752f17d5f38b7aa`。
+核对运行系统的 `/usr/lib/firmware/updates/qcom/gmu_gen70000.bin` 与
+`a730_sqe.fw`，同时检查 initramfs 中的副本；相同固件并不保证主线驱动的
+初始化和休眠顺序与 Android 驱动完全一致。
+
+`GPU_SET` 用于 GPU 硬件初始化；只唤醒 GMU、没有实际提交命令时，休眠前也会补做
+这次握手。单独的 OOB 超时日志不能区分这两条路径，更不能凭随后记录的应用名称
+断定该应用提交了坏指令。`0082` 在超时消息中加入 `caller` 符号，供下一次异常定位。
+诊断时使用独立 tracefs instance 的 `rpm_resume`、`rpm_suspend`、`rpm_status`
+事件并按 `3d00000.gpu`、`3d6a000.gmu` 过滤；不要读取会暂停 SQE 的 debugfs
+实时 GPU 状态文件来观察正常负载。
+
+`HFI_H2F_MSG_GX_BW_PERF_VOTE` 的应答超时属于带宽/性能请求通路，需与上述
+`GPU_SET` OOB 握手分开记录。若下一条请求读到相同序号的 `Unexpected message`，
+只能确认旧应答后来仍在队列中，不能据此判断它是在超时前还是超时后到达。
+可同时记录 HFI IRQ 的进入/退出时间；要区分固件迟答与通知丢失，还需在超时点
+取得响应队列读写索引和中断状态。单纯延长等待或清空旧应答不能证明根因已修复。
+
+原提交路径没有检查 `pm_runtime_get_sync()` 和 `msm_gpu_hw_init()` 的失败，
+初始化未完成也会继续写命令环。`0082` 改用 `pm_runtime_resume_and_get()`，
+初始化失败后释放电源引用，在取得提交引用、增加活动计数和写环之前返回。
+硬件 fence 也在初始化成功后才分配序号，避免失败请求让 `last_fence`
+超前于实际已提交命令，干扰空闲和挂起判断。
+调度器将错误写入应用的完成 fence，避免把初始化失败继续扩大为命令处理故障。
+这修复了确定的错误处理缺口，**没有证明首次握手超时的电源或固件触发原因已消除**。
+
+离线检查覆盖上电失败、初始化超时、其他初始化错误和正常空闲/活动提交：
+
+```sh
+devbox run -- python3 tests/gpu-submit-error.py --kernel /path/to/patched-kernel
+```
+
+实机复测需分别覆盖纯时间戳查询（唤醒但不提交）、正常命令、二者并发，以及
+跨越 autosuspend 间隔的反复调用。增加 autosuspend 延迟只能降低握手次数，
+不能作为根因修复或验收依据。
+
+`0084` 增加 `drm_msm_gpu:msm_gmu_oob` 静态 tracepoint，记录握手结果、耗时、
+ACK、电源/忙状态、`hung`、`needs_hw_init` 和调用位置，不需要 kprobe，也不延长超时。
+只在事件开启时读取附加诊断寄存器。失败的 GPU 初始化会撤销已发出的 OOB 请求；
+时间戳查询检查运行时恢复结果，失败后不再读取 GPU 时间戳。
+用 tracefs 独立 instance 开启该事件，结合前述 PM 事件区分首次握手和故障恢复。
+反复查询时间戳与 GLES 启停的有限检查尚未复现首次超时，因此这些改动属于诊断和
+错误路径修复，不能作为首次超时根因已解决的依据。
+
+
+`0091` 增加 `drm_msm_gpu:msm_gmu_hfi`，记录发出命令、等待结束和故障 IRQ
+入口时的消息类型、序号、返回值、耗时、INFO 状态及命令/响应队列索引。
+它不消费消息，也不改变等待时间。超时点响应队列是否已有数据、MSGQ 状态是否
+曾被故障 IRQ 读取，是区分固件迟答和通知竞争的关键证据。
+
+`0092` 修复两处确定的同步缺口：故障 IRQ 仅确认其负责的 `CM3_FAULT` 位，
+保留由同步发送者轮询的 MSGQ 位；读取固件响应时，在观察到生产者索引更新后
+执行 `dma_rmb()`，再读取消息内容。原 IRQ 将整个 INFO 状态写回 W1C 清除寄存器，
+在意外 IRQ 或故障与响应同时出现时可能清掉正常应答通知。单独出现晚到的应答
+不能证明历史超时由此触发，仍需保留追踪确认；这些修复没有放宽超时。
+
+```sh
+devbox run python3 tests/gpu-hfi-notification.py --kernel /path/to/patched-kernel
+devbox run python3 tests/gpu-fault-recovery.py --kernel /path/to/patched-kernel
+```
+
+前一检查提取实际 IRQ 处理函数，覆盖八种状态组合，确保只清除故障位并保留
+MSGQ 和其他通知；旧实现应失败。后一检查覆盖有界等待和失败后的撤销路径。
+实机还应覆盖运行时唤醒、时间戳查询、GLES 提交及频率切换，并记录 HFI 事件。
 
 ## OpenCL
 

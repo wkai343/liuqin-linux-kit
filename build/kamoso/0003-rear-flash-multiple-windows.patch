@@ -1,0 +1,186 @@
+diff --git a/po/zh_CN/kamoso.po b/po/zh_CN/kamoso.po
+index 80f2b85..7904789 100644
+--- a/po/zh_CN/kamoso.po
++++ b/po/zh_CN/kamoso.po
+@@ -265,3 +265,6 @@ msgstr "后摄测光失败，请重试或选择关闭、强制闪光。"
+ 
+ msgid "Wait for the camera preview, then try again."
+ msgstr "请等到相机预览出现后再拍照。"
++
++msgid "Could not acquire the rear flash. Try again."
++msgstr "未能取得后摄闪光灯，请稍后重试。"
+diff --git a/src/kamoso.cpp b/src/kamoso.cpp
+index dff7b98..982c66c 100644
+--- a/src/kamoso.cpp
++++ b/src/kamoso.cpp
+@@ -21,6 +21,7 @@
+ #include <KFormat>
+ #include <KFileUtils>
+ #include <KLocalizedString>
++#include <QCoreApplication>
+ #include <QFile>
+ #include <QJsonArray>
+ #include <QDir>
+@@ -46,7 +47,11 @@ Kamoso::~Kamoso() = default;
+ 
+ QUrl Kamoso::fileNameSuggestion(const QUrl &saveUrl, const QString &name, const QString& extension) const
+ {
+-    const QString date = QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd_hh-mm-ss"));
++    const auto now = QDateTime::currentDateTime();
++    // Two windows can choose a name before either asynchronous JPEG is saved.
++    const QString date = name == QStringLiteral("picture")
++        ? now.toString(QStringLiteral("yyyy-MM-dd_hh-mm-ss-zzz")) + u'_' + QString::number(QCoreApplication::applicationPid())
++        : now.toString(QStringLiteral("yyyy-MM-dd_hh-mm-ss"));
+     const QString initialName =  QStringLiteral("%1_%2.%3").arg(name, date, extension);
+ 
+     QUrl url(saveUrl.toString() + u'/' + initialName);
+diff --git a/src/video/rearflash.cpp b/src/video/rearflash.cpp
+index 2713724..87d0b74 100644
+--- a/src/video/rearflash.cpp
++++ b/src/video/rearflash.cpp
+@@ -6,6 +6,7 @@
+ #include <QDir>
+ #include <QLoggingCategory>
+ #include <QSaveFile>
++#include <QStandardPaths>
+ #include <QTemporaryFile>
+ #include <QtConcurrent/qtconcurrentrun.h>
+ #include <gst/video/video.h>
+@@ -20,6 +21,7 @@
+ #include <optional>
+ #include <memory>
+ #include <mutex>
++#include <utility>
+ 
+ Q_LOGGING_CATEGORY(flashLog, "kamoso.rearflash", QtWarningMsg)
+ 
+@@ -221,7 +223,11 @@ QByteArray encode(const WindowPtr &window)
+ }
+ 
+ RearFlash::RearFlash()
++    : m_shutterLock(QDir(QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation))
++                        .filePath(QStringLiteral("kamoso-rear-flash.lock")))
+ {
++    m_retry.setSingleShot(true);
++    connect(&m_retry, &QTimer::timeout, this, &RearFlash::tryCapture);
+     m_meterTimer.setSingleShot(true);
+     m_meterTimer.setTimerType(Qt::PreciseTimer);
+     connect(&m_meterTimer, &QTimer::timeout, this, &RearFlash::sampleExposure);
+@@ -318,6 +324,9 @@ void RearFlash::clearProbe()
+ 
+ void RearFlash::cancel()
+ {
++    const bool waiting = bool(m_pendingCapture);
++    m_retry.stop();
++    m_pendingCapture = nullptr;
+     if (!m_meterDestination.isEmpty()) {
+         m_meterTimer.stop();
+         m_meterDestination.clear();
+@@ -330,6 +339,10 @@ void RearFlash::cancel()
+         control(m_led.handle(), V4L2_CID_FLASH_LED_MODE, V4L2_FLASH_LED_MODE_NONE);
+         m_led.close();
+     }
++    if (m_shutterLock.isLocked())
++        m_shutterLock.unlock();
++    if (waiting)
++        Q_EMIT busyChanged();
+     if (m_watcher) {
+         disconnect(m_watcher, nullptr, this, nullptr);
+         m_watcher->deleteLater();
+@@ -342,6 +355,33 @@ void RearFlash::capture(GstPipeline *pipeline, GstElement *filter, const QUrl &d
+ {
+     if (busy())
+         return;
++    // stop() and source reconfiguration cancel pending captures before releasing
++    // the pipeline or replacing its filter. Never block the UI waiting for the LED.
++    m_pendingCapture = [this, pipeline, filter, destination] { captureLocked(pipeline, filter, destination); };
++    m_queueDeadline = QDeadlineTimer(5000);
++    tryCapture();
++    if (m_pendingCapture)
++        Q_EMIT busyChanged();
++}
++
++void RearFlash::tryCapture()
++{
++    if (!m_pendingCapture)
++        return;
++    if (m_shutterLock.tryLock(0)) {
++        auto start = std::exchange(m_pendingCapture, nullptr);
++        start();
++        Q_EMIT busyChanged();
++    } else if (m_shutterLock.error() == QLockFile::LockFailedError && !m_queueDeadline.hasExpired()) {
++        m_retry.start(50);
++    } else {
++        cancel();
++        Q_EMIT failed(i18n("Could not acquire the rear flash. Try again."));
++    }
++}
++
++void RearFlash::captureLocked(GstPipeline *pipeline, GstElement *filter, const QUrl &destination)
++{
+     auto window = std::make_shared<Window>();
+     GstClock *clock = gst_element_get_clock(GST_ELEMENT(pipeline));
+     m_pad = filter ? gst_element_get_static_pad(filter, "src") : nullptr;
+@@ -403,5 +443,4 @@ void RearFlash::capture(GstPipeline *pipeline, GstElement *filter, const QUrl &d
+         }
+     });
+     m_watcher->setFuture(QtConcurrent::run(encode, window));
+-    Q_EMIT busyChanged();
+ }
+diff --git a/src/video/rearflash.h b/src/video/rearflash.h
+index fa787cf..01daff1 100644
+--- a/src/video/rearflash.h
++++ b/src/video/rearflash.h
+@@ -3,12 +3,14 @@
+ 
+ #include <QDeadlineTimer>
+ #include <QFile>
++#include <QLockFile>
+ #include <QTimer>
+ #include <QFutureWatcher>
+ #include <QObject>
+ #include <QUrl>
+ #include <gst/gst.h>
+ #include <atomic>
++#include <functional>
+ #include <memory>
+ 
+ class RearFlash : public QObject
+@@ -17,7 +19,7 @@ class RearFlash : public QObject
+ public:
+     RearFlash();
+     ~RearFlash() override;
+-    bool busy() const { return m_watcher != nullptr || !m_meterDestination.isEmpty(); }
++    bool busy() const { return m_watcher != nullptr || !m_meterDestination.isEmpty() || bool(m_pendingCapture); }
+     void capture(GstPipeline *pipeline, GstElement *filter, const QUrl &destination);
+     void cancel();
+     void resetMeter();
+@@ -30,6 +32,12 @@ Q_SIGNALS:
+     void saved(const QString &path);
+ 
+ private:
++    void tryCapture();
++    void captureLocked(GstPipeline *pipeline, GstElement *filter, const QUrl &destination);
++    QLockFile m_shutterLock;
++    QTimer m_retry;
++    QDeadlineTimer m_queueDeadline;
++    std::function<void()> m_pendingCapture;
+     void sampleExposure();
+     void clearProbe();
+     std::shared_ptr<std::atomic<int>> m_frameLuma;
+diff --git a/src/video/webcamcontrol.cpp b/src/video/webcamcontrol.cpp
+index 7757b1b..c66bb6c 100644
+--- a/src/video/webcamcontrol.cpp
++++ b/src/video/webcamcontrol.cpp
+@@ -336,6 +336,11 @@ bool WebcamControl::playDevice(Device *device)
+         g_object_set(m_pipeline.data(), "viewfinder-sink", m_viewfinder.data(), nullptr);
+     }
+ 
++    // The preview sink may discard late frames locally. Its QoS events must
++    // not drop a full-resolution rear frame before the flash shutter sees it.
++    auto *previewSink = gst_bin_get_by_name(GST_BIN(m_viewfinder.data()), "videosink");
++    g_object_set(previewSink, "qos", !device->rearFlash(), nullptr);
++    gst_object_unref(previewSink);
+     setVideoSettings();
+ 
+     gst_element_set_state(GST_ELEMENT(m_pipeline.data()), GST_STATE_PLAYING);

@@ -35,6 +35,17 @@ class BuildTests(unittest.TestCase):
         self.project.stop()
         self.temporary.cleanup()
 
+    def test_kernel_common_regressions_run_once_with_the_configured_source(self):
+        script = 'tests/kernel-common-fixes.py'
+        source = str(self.root / 'kernel source')
+        for value, expected_args in (('', []), (source, ['--source', source])):
+            with self.subTest(source=value), patch.dict(os.environ, LIUQIN_KERNEL_SOURCE=value), \
+                    patch.object(builder, 'run') as run, contextlib.redirect_stdout(io.StringIO()):
+                builder.test()
+                commands = [call.args[0][1:] for call in run.call_args_list
+                            if script in call.args[0]]
+                self.assertEqual(commands, [[script, *expected_args]])
+
     @unittest.skipUnless(os.name == 'posix', 'Devbox builds use a Linux shell')
     def test_named_scripts_forward_custom_arguments_without_shell_expansion(self):
         bin = self.root / 'bin'

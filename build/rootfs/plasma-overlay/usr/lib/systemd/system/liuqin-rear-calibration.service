@@ -1,0 +1,22 @@
+[Unit]
+Description=Decode read-only rear camera calibration
+After=systemd-udev-trigger.service
+Before=display-manager.service
+ConditionPathExists=/usr/share/libcamera/liuqin/s5kjn1-reference.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/liuqin-front-calibrate --sensor s5kjn1 --wait-device 5
+ExecStopPost=/usr/bin/rm -f /run/libcamera/liuqin-s5kjn1.json
+TimeoutStartSec=8
+RemainAfterExit=yes
+RuntimeDirectory=libcamera
+RuntimeDirectoryPreserve=yes
+RuntimeDirectoryMode=0755
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

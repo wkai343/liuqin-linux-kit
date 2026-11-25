@@ -49,8 +49,9 @@ def execute(code, expected_null_failure=False):
                         str(source),'-o',str(binary)],check=True)
         result=subprocess.run([str(binary)],check=not expected_null_failure,timeout=15,
                               capture_output=expected_null_failure,text=expected_null_failure)
-        if expected_null_failure and (not result.returncode or 'null pointer' not in result.stderr):
-            raise AssertionError('The clock fixture did not reproduce the expected NULL access: '+str(result))
+        if expected_null_failure:
+            if not result.returncode or not re.search(r'null pointer[^\n]*\bq6dsp_cc\b', result.stderr):
+                raise AssertionError('Expected a NULL clock-controller access during registration: '+str(result))
 
 
 class BoardIdentificationTests(unittest.TestCase):
@@ -147,13 +148,18 @@ struct delayed_work {struct work_struct work;};
 struct device {int unused;};
 struct qcom_battmgr {struct device *dev;int variant;bool service_up;struct delayed_work refresh_work;};
 static struct qcom_battmgr b;
-static int queue,requests,retries,immediate,result;
+static int queue,requests,restores,retries,immediate,result;
 static void *system_freezable_wq=&queue;
 #define container_of(p,t,m) (&b)
 #define to_delayed_work(p) (&b.refresh_work)
 #define dev_dbg(...) ((void)0)
 static void *dev_get_drvdata(struct device *dev){return &b;}
+static void qcom_battmgr_controls_restore(struct qcom_battmgr *p){
+ assert(p == &b && p->service_up);
+ restores++;
+}
 static int qcom_battmgr_xm_get(struct qcom_battmgr *p,u32 property,u32 *value){
+ assert(restores == requests + 1);
  assert(p==&b && p->service_up && property==86);requests++;*value=260;return result;
 }
 static bool queue_delayed_work(void *q,struct delayed_work *w,unsigned long delay){
@@ -165,11 +171,12 @@ static bool mod_delayed_work(void *q,struct delayed_work *w,unsigned long delay)
 '''+function(source,'qcom_battmgr_sm8475_refresh_worker')+function(source,'qcom_battmgr_resume')+r'''
 int main(void){
  struct work_struct work;struct device dev;
- qcom_battmgr_sm8475_refresh_worker(&work);assert(!requests && retries==1);
+ qcom_battmgr_sm8475_refresh_worker(&work);assert(!restores && !requests && retries==1);
  b.service_up=true;qcom_battmgr_sm8475_refresh_worker(&work);assert(requests==1 && retries==2);
  result=-ETIMEDOUT;qcom_battmgr_sm8475_refresh_worker(&work);assert(requests==2 && retries==3);
- b.service_up=false;qcom_battmgr_sm8475_refresh_worker(&work);assert(requests==2 && retries==4);
- b.service_up=true;result=0;qcom_battmgr_sm8475_refresh_worker(&work);assert(requests==3 && retries==5);
+ b.service_up=false;qcom_battmgr_sm8475_refresh_worker(&work);assert(restores==2 && requests==2 && retries==4);
+ b.service_up=true;result=0;qcom_battmgr_sm8475_refresh_worker(&work);
+ assert(requests==3 && restores==requests && retries==5);
  for(int variant=0;variant<5;variant++){
   b.variant=variant;immediate=0;assert(!qcom_battmgr_resume(&dev));
   assert(immediate==(variant==QCOM_BATTMGR_SM8475));
@@ -459,36 +466,52 @@ class AudioTests(unittest.TestCase):
         code=COMMON+r"""
 #define APM_CMD_GET_SPF_STATE 0x01001021
 #define ADSP_EFAILED 1
-#define HZ 100
+#define HZ 1000
+#define msecs_to_jiffies(ms) (ms)
+#define time_before(a,b) ((long)((a)-(b))<0)
 struct device {int unused;};
-struct mutex {int unused;};
-typedef int gpr_device_t;
-typedef int gpr_port_t;
+struct mutex {bool held;};
+struct pkt_router_svc {bool online;};
+typedef struct {struct pkt_router_svc svc;} gpr_device_t;
+typedef struct pkt_router_svc gpr_port_t;
 typedef int wait_queue_head_t;
 struct gpr_hdr {u32 opcode;};
 struct gpr_pkt {struct gpr_hdr hdr;};
 struct gpr_ibasic_rsp_result_t {u32 opcode,status;};
 static struct gpr_ibasic_rsp_result_t response;
 static unsigned int status=ADSP_EFAILED,errors;
-static bool liuqin=true;
-#define mutex_lock(m) ((void)(m))
-#define mutex_unlock(m) ((void)(m))
+static bool liuqin=true,deliver_reply=true;
+static unsigned long jiffies;
+static void mutex_lock(struct mutex *m){assert(!m->held);m->held=true;}
+static void mutex_unlock(struct mutex *m){assert(m->held);m->held=false;}
 #define dev_err(...) do{errors++;}while(0)
-#define wait_event_timeout(wait,condition,timeout) (condition)
+static int wait_for_reply(bool ready,unsigned long ticks){
+ if(ready)return 1;
+ jiffies+=ticks;
+ return 0;
+}
+#define wait_event_timeout(wait,condition,ticks) wait_for_reply(condition,ticks)
 static bool liuqin_board_quirks(void){return liuqin;}
+static bool gpr_service_up(struct pkt_router_svc *svc){return svc->online;}
 static int gpr_send_pkt(gpr_device_t *gdev,const struct gpr_pkt *pkt){
- response.opcode=pkt->hdr.opcode;response.status=status;return 0;
+ if(deliver_reply){response.opcode=pkt->hdr.opcode;response.status=status;}
+ return 0;
 }
 static int gpr_send_port_pkt(gpr_port_t *port,const struct gpr_pkt *pkt){return gpr_send_pkt(NULL,pkt);}
-"""+function(text,'audioreach_send_cmd_sync')+r"""
+"""+function(text,'audioreach_wait_cmd')+'\n'+function(text,'audioreach_send_cmd_sync')+r"""
 int main(void){
- gpr_device_t dev=0;struct gpr_pkt pkt={{APM_CMD_GET_SPF_STATE}};
-#define SEND() audioreach_send_cmd_sync(NULL,&dev,&response,NULL,NULL,NULL,&pkt,0)
+ gpr_device_t dev={.svc={.online=true}};struct gpr_pkt pkt={{APM_CMD_GET_SPF_STATE}};
+ struct mutex lock={0};wait_queue_head_t wait=0;
+#define SEND() audioreach_send_cmd_sync(NULL,&dev,&response,&lock,NULL,&wait,&pkt,0)
  assert(SEND()==-EAGAIN&&!errors);
  liuqin=false;assert(SEND()==-EINVAL&&errors==1);
  liuqin=true;pkt.hdr.opcode++;assert(SEND()==-EINVAL&&errors==2);
  pkt.hdr.opcode=APM_CMD_GET_SPF_STATE;status=2;assert(SEND()==-EINVAL&&errors==3);
- status=0;assert(!SEND()&&errors==3);return 0;
+ status=0;assert(!SEND()&&errors==3);
+ dev.svc.online=false;assert(SEND()==-ENETRESET&&errors==3);
+ dev.svc.online=true;deliver_reply=false;
+ assert(SEND()==-ETIMEDOUT&&errors==4&&!lock.held);
+ return 0;
 }
 """
         execute(code)
@@ -517,12 +540,19 @@ struct gpr_hdr {u32 opcode;};
 struct gpr_pkt {struct gpr_hdr hdr;int payload_size;};
 struct gpr_resp_pkt {struct gpr_hdr hdr;void *payload;int payload_size;};
 struct gpr_ibasic_rsp_result_t {u32 opcode,status;};
-typedef struct {struct device dev;struct {void *callback;} svc;} gpr_device_t;
+typedef struct {struct device dev;struct {void (*callback)(void);} svc;} gpr_device_t;
+struct work_struct {
+ void (*run)(struct work_struct *);
+ bool pending;
+};
 struct q6apm {struct device *dev;gpr_device_t *gdev;int lock,wait;u32 state;
- struct gpr_ibasic_rsp_result_t result;};
+ struct gpr_ibasic_rsp_result_t result;struct work_struct probe_work;
+ bool prm_ready,audio_registered;};
 static struct q6apm storage,*g_apm;
 static int apm_ready_lock,q6apm_audio_component;
 static int allocation_error,send_error,reply_state=1,queries,registration_error,populate_error,unregistered;
+static int callback_error,registration_calls;
+static const int system_unbound_wq=1;
 static void mutex_lock(int *p){assert(!*p);*p=1;}
 static void mutex_unlock(int *p){assert(*p);*p=0;}
 static bool liuqin_board_quirks(void){return retry_board;}
@@ -533,8 +563,36 @@ static void msleep(unsigned int delay){assert(delay==25);sleeps++;}
 #define idr_init(p) ((void)0)
 #define dev_set_drvdata(d,p) ((d)->driver_data=(p))
 #define dev_get_drvdata(d) ((d)->driver_data)
+#define container_of(p,type,member) ((type *)((char *)(p)-offsetof(type,member)))
+#define INIT_WORK(work,handler) (*(work)=(struct work_struct){.run=(handler)})
+static void queue_work(int queue,struct work_struct *work){
+ assert(queue == system_unbound_wq && work->run);
+ work->pending = true;
+}
+static void cancel_work_sync(struct work_struct *work){work->pending=false;}
+static void run_pending(struct work_struct *work){
+ assert(work->pending && !apm_ready_lock);
+ work->pending = false;
+ work->run(work);
+}
+static void liuqin_audio_set_ready(bool ready){}
+static int liuqin_audio_resume_devices(void){return 0;}
+static void reply_callback(void){}
+static int gpr_enable_callback(gpr_device_t *gdev){
+ struct q6apm *apm = dev_get_drvdata(&gdev->dev);
+ assert(apm && apm->gdev == gdev && apm->probe_work.run && !g_apm);
+ if (callback_error)
+  return callback_error;
+ gdev->svc.callback = reply_callback;
+ return 0;
+}
 static void *devm_kzalloc(struct device *d,int size,int flags){memset(&storage,0,sizeof(storage));return &storage;}
-static int snd_soc_register_component(struct device *d,void *c,void *dai,int n){return registration_error;}
+static int snd_soc_register_component(struct device *d,void *c,void *dai,int n){
+ struct q6apm *apm=dev_get_drvdata(d);
+ assert(apm->gdev->svc.callback && (!retry_board || apm->prm_ready));
+ registration_calls++;
+ return registration_error;
+}
 static void snd_soc_unregister_component(struct device *d){unregistered++;}
 static int of_platform_populate(void *a,void *b,void *c,struct device *d){return populate_error;}
 static void of_platform_depopulate(struct device *d){}
@@ -543,6 +601,7 @@ static struct gpr_pkt *audioreach_alloc_apm_cmd_pkt(int size,u32 opcode,u32 toke
  return allocation_error?(void*)(intptr_t)-ENOMEM:&pkt;
 }
 static int q6apm_send_cmd_sync(struct q6apm *a,const struct gpr_pkt *p,u32 response){
+ assert(a->gdev->svc.callback && apm_ready_lock);
  assert(p->hdr.opcode==APM_CMD_GET_SPF_STATE&&response==APM_CMD_RSP_GET_SPF_STATE&&p->payload_size==16);
  queries++;
  if(transient_failures){transient_failures--;return -EAGAIN;}
@@ -552,16 +611,37 @@ static int q6apm_send_cmd_sync(struct q6apm *a,const struct gpr_pkt *p,u32 respo
 static u32 get_unaligned_le32(const void *p){u32 v;memcpy(&v,p,4);return v;}
 static void wake_up(int *p){wakes++;}
 """
-        for name in ('q6apm_get_apm_state','q6apm_is_adsp_ready','apm_probe','apm_remove','q6apm_state_response'):
+        for name in ('q6apm_get_apm_state','q6apm_is_adsp_ready','q6apm_register_audio',
+                     'q6apm_probe_work','q6apm_set_prm_ready','apm_probe','apm_remove','q6apm_state_response'):
             code+=function(text,name)+'\n'
         code+=r"""
 int main(void){
- gpr_device_t dev={0};
- registration_error=-EIO;assert(apm_probe(&dev)==-EIO&&!g_apm&&!queries&&!unregistered);
- registration_error=0;populate_error=-ENODEV;assert(apm_probe(&dev)==-ENODEV&&!g_apm&&!queries&&unregistered==1);
- populate_error=0;assert(!apm_probe(&dev)&&g_apm==&storage&&!queries);
- assert(!q6apm_is_adsp_ready()&&!queries);dev.svc.callback=(void*)1;
+ gpr_device_t dev={0},no_component={0},no_children={0};
+ callback_error = -ENOMEM;
+ assert(apm_probe(&dev) == -ENOMEM && !g_apm && !dev.svc.callback);
+ assert(!q6apm_is_adsp_ready() && !queries);
+ callback_error = 0;
+
+ retry_board = false;
+ registration_error = -EIO;
+ assert(apm_probe(&no_component) == -EIO && !g_apm && !queries && !unregistered);
+ registration_error = 0;
+ populate_error = -ENODEV;
+ assert(apm_probe(&no_children) == -ENODEV && !g_apm && !queries && unregistered == 1);
+
+ populate_error = 0;
+ retry_board = true;
+ assert(!apm_probe(&dev) && g_apm == &storage && dev.svc.callback == reply_callback);
+ assert(!queries && !storage.audio_registered && !storage.probe_work.pending && registration_calls == 2);
+
+ dev.svc.callback=NULL;
+ assert(!q6apm_is_adsp_ready()&&!queries);
+ dev.svc.callback=reply_callback;
  assert(q6apm_is_adsp_ready()&&queries==1);
+ q6apm_set_prm_ready(true);
+ assert(storage.prm_ready && storage.probe_work.pending && !storage.audio_registered);
+ run_pending(&storage.probe_work);
+ assert(storage.audio_registered && registration_calls==3 && queries==1);
  transient_failures=1;assert(q6apm_is_adsp_ready()&&queries==3&&sleeps==1&&!retry_errors);
  transient_failures=4;assert(!q6apm_is_adsp_ready()&&queries==7&&sleeps==4&&retry_errors==1);
  retry_board=false;transient_failures=1;
@@ -582,7 +662,11 @@ int main(void){
  response.hdr.opcode=GPR_BASIC_RSP_RESULT;response.payload=basic;response.payload_size=8;
  assert(q6apm_state_response(&storage,&response)&&storage.state==1&&wakes==3);
  basic[0]=123;assert(!q6apm_state_response(&storage,&response)&&wakes==3);
- apm_remove(&dev);assert(!g_apm&&!apm_ready_lock&&!q6apm_is_adsp_ready());return 0;
+ q6apm_set_prm_ready(true);assert(storage.probe_work.pending);
+ apm_remove(&dev);
+ assert(!storage.probe_work.pending && unregistered==2 && !g_apm && !apm_ready_lock);
+ assert(!q6apm_is_adsp_ready());
+ return 0;
 }
 """
         execute(code)

@@ -1,0 +1,20 @@
+--- a/po/zh_CN/kamoso.po
++++ b/po/zh_CN/kamoso.po
+@@ -243,7 +243,7 @@
+ msgstr "已保存到 %1"
+ 
+ msgid "Flash: Forced"
+-msgstr "闪光灯：强制闪光"
++msgstr "闪光灯：打开"
+ 
+ msgid "Flash: Off"
+ msgstr "闪光灯：关闭"
+@@ -261,7 +261,7 @@
+ msgstr "闪光灯：自动"
+ 
+ msgid "Could not meter the rear camera. Try again or select a flash mode."
+-msgstr "后摄测光失败，请重试或选择关闭、强制闪光。"
++msgstr "后摄测光失败。请重试，或将闪光灯设为“打开”或“关闭”。"
+ 
+ msgid "Wait for the camera preview, then try again."
+ msgstr "请等到相机预览出现后再拍照。"

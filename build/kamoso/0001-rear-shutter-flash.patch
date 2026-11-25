@@ -1,0 +1,794 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 8b401fe..3576953 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -26,7 +26,7 @@ include(ECMSetupVersion)
+ 
+ option(BUILD_DOC "Whether to build the documentation" ON)
+ 
+-find_package(Qt6 NO_MODULE REQUIRED COMPONENTS Core Gui Widgets Quick)
++find_package(Qt6 NO_MODULE REQUIRED COMPONENTS Core Gui Widgets Quick Concurrent)
+ find_package(KF6 ${KF6_MIN_VERSION} REQUIRED COMPONENTS Config KIO I18n Purpose Notifications)
+ 
+ if (BUILD_DOC)
+diff --git a/po/zh_CN/kamoso.po b/po/zh_CN/kamoso.po
+index 085b592..1977388 100644
+--- a/po/zh_CN/kamoso.po
++++ b/po/zh_CN/kamoso.po
+@@ -241,3 +241,18 @@ msgstr "已拍摄照片"
+ #, kde-format
+ msgid "Saved in %1"
+ msgstr "已保存到 %1"
++
++msgid "Flash: Forced"
++msgstr "闪光灯：强制闪光"
++
++msgid "Flash: Off"
++msgstr "闪光灯：关闭"
++
++msgid "Could not fire the rear flash."
++msgstr "后摄闪光灯触发失败。"
++
++msgid "No complete flash frame was captured. Try again."
++msgstr "未捕获整幅受光的画面，请重拍。"
++
++msgid "Turn off photo effects to use forced flash."
++msgstr "请先关闭照片特效，再使用强制闪光。"
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index d3e3985..6a0e014 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -11,6 +11,7 @@ add_executable(kamoso
+     main.cpp
+     kamoso.cpp
+     previewfetcher.cpp
++    video/rearflash.cpp
+     video/webcamcontrol.cpp
+ 
+     resources.qrc
+@@ -18,7 +19,7 @@ add_executable(kamoso
+ 
+ kconfig_add_kcfg_files(kamoso kamosoSettings.kcfgc GENERATE_MOC)
+ target_link_libraries(kamoso
+-    Qt::Core Qt::Gui Qt::Widgets Qt::Quick
++    Qt::Concurrent Qt::Core Qt::Gui Qt::Widgets Qt::Quick
+     KF6::KIOFileWidgets KF6::ConfigGui KF6::I18n KF6::Notifications
+     PkgConfig::GStreamerVideo PkgConfig::GStreamer
+ )
+diff --git a/src/device.cpp b/src/device.cpp
+index 7c3f5ec..3263acb 100644
+--- a/src/device.cpp
++++ b/src/device.cpp
+@@ -21,6 +21,11 @@ QString objectIdFromProperties(GstStructure* st)
+ {
+     // The value returned here is later used to identify
+     // the camera device we are dealing with.
++    if (structureValue(st, "device.api") == QStringLiteral("libcamera")) {
++        const QString path = structureValue(st, "object.path");
++        if (!path.isEmpty())
++            return path;
++    }
+     QString objectId = structureValue(st, "object.id");
+     if (!objectId.isEmpty()) {
+         return objectId;
+@@ -35,16 +40,22 @@ QString objectIdFromProperties(GstStructure* st)
+ Device::Device(GstDevice *device, QObject* parent)
+     : QObject(parent)
+     , m_description(QString::fromUtf8(gst_device_get_display_name(device)))
+-    , m_device(device)
++    , m_device(GST_DEVICE(gst_object_ref(device)))
+ {
+     auto st = gst_device_get_properties(device);
+     m_objectId = objectIdFromProperties(st);
++    m_legacyId = structureValue(st, "object.id");
++    m_rearFlash = structureValue(st, "device.product.name") == QStringLiteral("s5kjn1")
++        && structureValue(st, "api.libcamera.location") == QStringLiteral("back")
++        && structureValue(st, "api.libcamera.path") == QStringLiteral("/base/soc@0/cci@ac15000/i2c-bus@1/camera@10");
+     gst_structure_free(st);
+     setObjectName(m_objectId);
+ }
+ 
+ Device::~Device()
+-{}
++{
++    gst_object_unref(m_device);
++}
+ 
+ void Device::reset()
+ {
+diff --git a/src/device.h b/src/device.h
+index edd3465..130a3fb 100644
+--- a/src/device.h
++++ b/src/device.h
+@@ -21,7 +21,11 @@ class Device : public QObject
+     Q_OBJECT
+     Q_PROPERTY(QString filters READ filters WRITE setFilters NOTIFY filtersChanged)
+ 
++    Q_PROPERTY(bool rearFlash READ rearFlash CONSTANT)
++
+     public:
++        bool rearFlash() const { return m_rearFlash; }
++        QString legacyId() const { return m_legacyId; }
+         Device(GstDevice* device, QObject* parent);
+         ~Device();
+         QString description() const { return m_description; }
+@@ -40,6 +44,8 @@ class Device : public QObject
+         const QString m_description;
+         GstDevice *const m_device;
+         QString m_objectId;
++        QString m_legacyId;
++        bool m_rearFlash = false;
+         QString m_filters;
+ };
+ 
+diff --git a/src/devicemanager.cpp b/src/devicemanager.cpp
+index 5d12d93..8cd2192 100644
+--- a/src/devicemanager.cpp
++++ b/src/devicemanager.cpp
+@@ -10,6 +10,8 @@
+ #include "device.h"
+ #include "kamosoSettings.h"
+ #include <QDebug>
++#include <QFileInfo>
++#include <gst/gstdeviceproviderfactory.h>
+ 
+ #include <gst/gststructure.h>
+ #include <gst/gstdevice.h>
+@@ -27,10 +29,12 @@ deviceMonitorWatch(GstBus     */*bus*/, GstMessage *message, gpointer /*user_dat
+         case GST_MESSAGE_DEVICE_ADDED:
+             gst_message_parse_device_added (message, &device);
+             DeviceManager::self()->deviceAdded(device);
++            gst_object_unref(device);
+             break;
+         case GST_MESSAGE_DEVICE_REMOVED:
+             gst_message_parse_device_removed (message, &device);
+             DeviceManager::self()->deviceRemoved(device);
++            gst_object_unref(device);
+             break;
+         default:
+             break;
+@@ -40,36 +44,43 @@ deviceMonitorWatch(GstBus     */*bus*/, GstMessage *message, gpointer /*user_dat
+ 
+ DeviceManager::DeviceManager() : m_playingDevice(0)
+ {
+-    m_monitor = gst_device_monitor_new();
+-
+-    GstBus *bus = gst_device_monitor_get_bus (m_monitor);
+-    gst_bus_add_watch (bus, deviceMonitorWatch, m_monitor);
+-    gst_object_unref (bus);
+-
+-    GstCaps *caps = gst_caps_new_empty_simple ("video/x-raw");
+-    gst_device_monitor_add_filter (m_monitor, "Video/Source", caps);
+-    gst_caps_unref (caps);
+-
+-    gst_device_monitor_start (m_monitor);
+-
+-    GList* devices = gst_device_monitor_get_devices (m_monitor);
++    GList *devices = nullptr;
++    // WirePlumber owns the tablet's shared CSID. Starting a second libcamera
++    // provider just to enumerate cameras can change the active media links.
++    if (QFileInfo::exists(QStringLiteral("/sys/firmware/devicetree/base/soc@0/cci@ac15000/i2c-bus@1/camera@10/flash-leds")))
++        m_pipewire = gst_device_provider_factory_get_by_name("pipewiredeviceprovider");
++    if (m_pipewire) {
++        auto bus = gst_device_provider_get_bus(m_pipewire);
++        m_watch = gst_bus_add_watch(bus, deviceMonitorWatch, nullptr);
++        gst_object_unref(bus);
++        gst_device_provider_start(m_pipewire);
++        devices = gst_device_provider_get_devices(m_pipewire);
++    } else {
++        m_monitor = gst_device_monitor_new();
++        auto bus = gst_device_monitor_get_bus(m_monitor);
++        m_watch = gst_bus_add_watch(bus, deviceMonitorWatch, nullptr);
++        gst_object_unref(bus);
++        GstCaps *caps = gst_caps_new_empty_simple("video/x-raw");
++        gst_device_monitor_add_filter(m_monitor, "Video/Source", caps);
++        gst_caps_unref(caps);
++        gst_device_monitor_start(m_monitor);
++        devices = gst_device_monitor_get_devices(m_monitor);
++    }
+     if (!devices) {
+         qWarning ("No device found");
+     }
+ 
+     /* Initialize camera structures */
+-    for(; devices; devices = devices->next) {
+-        auto device = new Device(GST_DEVICE(devices->data), this);
+-        m_deviceList.append(device);
+-    }
+-
+-    g_list_free (devices);
++    for (GList *it = devices; it; it = it->next)
++        deviceAdded(GST_DEVICE(it->data));
++    g_list_free_full(devices, gst_object_unref);
+ 
+     if (!m_deviceList.isEmpty()) {
+         setPlayingDevice(m_deviceList.constFirst());
+         // Override if set in configuration
+         for (auto d : m_deviceList){
+-            if (d->objectId() == Settings::self()->deviceObjectId()) {
++            if (d->objectId() == Settings::self()->deviceObjectId()
++                || (!d->legacyId().isEmpty() && d->legacyId() == Settings::self()->deviceObjectId())) {
+                 setPlayingDevice(d);
+             }
+         }
+@@ -78,8 +89,13 @@ DeviceManager::DeviceManager() : m_playingDevice(0)
+ 
+ DeviceManager::~DeviceManager()
+ {
+-    gst_device_monitor_stop(m_monitor);
+-    g_clear_object (&m_monitor);
++    g_source_remove(m_watch);
++    if (m_monitor)
++        gst_device_monitor_stop(m_monitor);
++    if (m_pipewire)
++        gst_device_provider_stop(m_pipewire);
++    gst_clear_object(&m_monitor);
++    gst_clear_object(&m_pipewire);
+ }
+ 
+ QHash<int, QByteArray> DeviceManager::roleNames() const
+@@ -142,6 +158,15 @@ QVariant DeviceManager::data(const QModelIndex& index, int role) const
+ 
+ void DeviceManager::deviceAdded(GstDevice* device)
+ {
++    if (!gst_device_has_classes(device, "Video/Source"))
++        return;
++    GstCaps *caps = gst_device_get_caps(device);
++    GstCaps *raw = gst_caps_new_empty_simple("video/x-raw");
++    const bool video = caps && gst_caps_can_intersect(caps, raw);
++    gst_clear_caps(&caps);
++    gst_caps_unref(raw);
++    if (!video)
++        return;
+     const int s = m_deviceList.size();
+     auto d = new Device(device, this);
+     for (auto device : qAsConst(m_deviceList)) {
+@@ -155,27 +180,29 @@ void DeviceManager::deviceAdded(GstDevice* device)
+     m_deviceList.append(d);
+     endInsertRows();
+ 
+-    if (!m_playingDevice) {
+-        setPlayingDevice(m_deviceList.constFirst());
+-    }
++    if (!m_playingDevice || d->objectId() == Settings::self()->deviceObjectId())
++        setPlayingDevice(d);
+ }
+ 
+ void DeviceManager::deviceRemoved(GstDevice* device)
+ {
+     auto st = gst_device_get_properties(device);
+     auto objectId = objectIdFromProperties(st);
++    gst_structure_free(st);
+ 
+     for(int i = 0, c = m_deviceList.size(); i<c; ++i) {
+         auto dev = m_deviceList.at(i);
+-        if (m_playingDevice == dev) {
+-            setPlayingDevice(nullptr);
+-        }
+-
+         if (dev->objectId() == objectId) {
++            const bool active = dev == m_playingDevice;
+             beginRemoveRows({}, i, i);
+             dev->deleteLater();
+             m_deviceList.removeAt(i);
+             endRemoveRows();
++            if (active) {
++                setPlayingDevice(m_deviceList.isEmpty() ? nullptr : m_deviceList.constFirst());
++                if (m_deviceList.isEmpty())
++                    Q_EMIT noDevices();
++            }
+             break;
+         }
+     }
+diff --git a/src/devicemanager.h b/src/devicemanager.h
+index acc65b6..4dc7aaf 100644
+--- a/src/devicemanager.h
++++ b/src/devicemanager.h
+@@ -10,6 +10,7 @@
+ 
+ #include <QObject>
+ #include <QAbstractListModel>
++#include <gst/gstdeviceprovider.h>
+ #include "device.h"
+ 
+ struct _GstDevice;
+@@ -54,7 +55,9 @@ class DeviceManager : public QAbstractListModel
+ 
+         QVector<Device*> m_deviceList;
+         Device *m_playingDevice;
+-        _GstDeviceMonitor *m_monitor;
++        _GstDeviceMonitor *m_monitor = nullptr;
++        GstDeviceProvider *m_pipewire = nullptr;
++        guint m_watch = 0;
+ };
+ 
+ #endif // DEVICEMANAGER_H
+diff --git a/src/kamoso.cpp b/src/kamoso.cpp
+index 96e7321..dff7b98 100644
+--- a/src/kamoso.cpp
++++ b/src/kamoso.cpp
+@@ -35,6 +35,10 @@ Kamoso::Kamoso(WebcamControl *webcamControl)
+ 
+     connect(m_webcamControl, &WebcamControl::mirroredChanged, this, &Kamoso::mirroredChanged);
+     connect(m_webcamControl, &WebcamControl::photoTaken, this, &Kamoso::photoTaken);
++    connect(m_webcamControl, &WebcamControl::photoTaken, this, [this](const QString &path) {
++        if (m_sampleImagePath.isEmpty() && QFile::exists(path))
++            setSampleImage(path);
++    });
+     connect(&m_recordingTimer, &QTimer::timeout, this, &Kamoso::recordingTimeChanged);
+ }
+ 
+@@ -65,11 +69,6 @@ const QString Kamoso::takePhoto()
+     const QUrl path = fileNameSuggestion(saveUrl, QStringLiteral("picture"), QStringLiteral("jpg"));
+     m_webcamControl->takePhoto(path, true);
+ 
+-    if (m_sampleImagePath.isEmpty() && path.isLocalFile()) {
+-        m_sampleImagePath = path.toLocalFile();
+-        Q_EMIT sampleImageChanged(m_sampleImagePath);
+-    }
+-
+     return path.toDisplayString();
+ }
+ 
+diff --git a/src/kamosoSettings.kcfg b/src/kamosoSettings.kcfg
+index 43b6980..ebe602f 100644
+--- a/src/kamosoSettings.kcfg
++++ b/src/kamosoSettings.kcfg
+@@ -17,6 +17,9 @@
+ 		</entry>
+ 	</group>
+     <group name="WebcamSettings">
++        <entry name="forceRearFlash" type="Bool">
++            <default>false</default>
++        </entry>
+         <entry name="mirrored" type="bool">
+             <default>true</default>
+             <label>Vertically mirror the camera view.</label>
+diff --git a/src/qml/Main.qml b/src/qml/Main.qml
+index b42dc31..5c6a3eb 100644
+--- a/src/qml/Main.qml
++++ b/src/qml/Main.qml
+@@ -92,7 +92,11 @@ Kirigami.ApplicationWindow
+ 
+         Connections {
+             target: Kamoso
+-            function onPhotoTaken(path) { awesomeAnimation(path) }
++            function onPhotoTaken(path) {
++                awesomeAnimation(path)
++                if (burstMode.checked)
++                    burstMode.photosTaken++
++            }
+         }
+     }
+ 
+@@ -125,8 +129,8 @@ Kirigami.ApplicationWindow
+             interval: 2500
+             repeat: true
+             onTriggered: {
+-                Kamoso.takePhoto()
+-                burstMode.photosTaken++;
++                if (WebcamControl.readyForCapture)
++                    Kamoso.takePhoto()
+             }
+         }
+     }
+@@ -207,7 +211,7 @@ Kirigami.ApplicationWindow
+ 
+     Shortcut {
+         sequence: "Return"
+-        onActivated: lastMode.triggered(null)
++        onActivated: if (lastMode.enabled) lastMode.triggered(null)
+     }
+ 
+     pageStack.initialPage: Kirigami.Page {
+@@ -217,7 +221,19 @@ Kirigami.ApplicationWindow
+         rightPadding: 0
+         leftPadding: 0
+ 
+-        actions: [ videoMode, photoMode, burstMode, about ]
++        actions: [ videoMode, photoMode, burstMode, flashMode, about ]
++
++        Kirigami.Action {
++            id: flashMode
++            visible: !!DeviceManager.playingDevice && DeviceManager.playingDevice.rearFlash && !videoMode.checked
++            enabled: WebcamControl.readyForCapture && !burstMode.checked
++            icon.name: Settings.forceRearFlash ? "flash" : "flashlight-off"
++            text: Settings.forceRearFlash ? i18n("Flash: Forced") : i18n("Flash: Off")
++            onTriggered: {
++                Settings.forceRearFlash = !Settings.forceRearFlash
++                Settings.save()
++            }
++        }
+ 
+         Kirigami.Action {
+             readonly property var p0: Component {
+diff --git a/src/resources.qrc b/src/resources.qrc
+index e3bc52b..fb6138d 100644
+--- a/src/resources.qrc
++++ b/src/resources.qrc
+@@ -1,6 +1,6 @@
+ <!DOCTYPE RCC><RCC version="1.0">
+  <qresource>
+-    <file>qml/Main.qml</file>
++    <file alias="qml/CameraWindow.qml">qml/Main.qml</file>
+     <file>qml/ImagesView.qml</file>
+     <file>qml/DirectoryView.qml</file>
+     <file>qml/OverlayFrame.qml</file>
+diff --git a/src/video/rearflash.cpp b/src/video/rearflash.cpp
+new file mode 100644
+index 0000000..895b23b
+--- /dev/null
++++ b/src/video/rearflash.cpp
+@@ -0,0 +1,222 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#include "rearflash.h"
++
++#include <KIO/CopyJob>
++#include <KLocalizedString>
++#include <QDir>
++#include <QLoggingCategory>
++#include <QSaveFile>
++#include <QTemporaryFile>
++#include <QtConcurrent/qtconcurrentrun.h>
++#include <gst/video/video.h>
++#include <linux/videodev2.h>
++#include <sys/ioctl.h>
++
++#include <chrono>
++#include <condition_variable>
++#include <memory>
++#include <mutex>
++
++Q_LOGGING_CATEGORY(flashLog, "kamoso.rearflash", QtWarningMsg)
++
++namespace {
++// PipeWire timestamps the processed S5KJN1 frame. Allow for sensor integration,
++// rolling readout and the IPE frame delay at 4080 x 3060, 30 fps.
++constexpr GstClockTime firstFrame = 130 * GST_MSECOND;
++constexpr GstClockTime lastFrame = 190 * GST_MSECOND;
++constexpr int pulseUs = 200000;
++using Sample = std::shared_ptr<GstSample>;
++
++struct Window {
++    GstClockTime triggerBefore;
++    GstClockTime triggerAfter;
++    GstClockTime base;
++    std::mutex mutex;
++    std::condition_variable ready;
++    Sample frame;
++    bool selected = false;
++};
++using WindowPtr = std::shared_ptr<Window>;
++
++bool control(int fd, __u32 id, int value)
++{
++    v4l2_control ctrl{};
++    ctrl.id = id;
++    ctrl.value = value;
++    return ioctl(fd, VIDIOC_S_CTRL, &ctrl) == 0;
++}
++
++bool strobing(int fd)
++{
++    v4l2_control ctrl{};
++    ctrl.id = V4L2_CID_FLASH_STROBE_STATUS;
++    return ioctl(fd, VIDIOC_G_CTRL, &ctrl) == 0 && ctrl.value;
++}
++
++QString flashNode()
++{
++    QDir sys(QStringLiteral("/sys/class/video4linux"));
++    for (const auto &node : sys.entryList({QStringLiteral("v4l-subdev*")}, QDir::Dirs)) {
++        QFile name(sys.filePath(node + QStringLiteral("/name")));
++        if (name.open(QIODevice::ReadOnly) && name.readAll().trimmed() == "white:flash")
++            return QStringLiteral("/dev/") + node;
++    }
++    return {};
++}
++
++GstPadProbeReturn selectFrame(GstPad *pad, GstPadProbeInfo *info, gpointer data)
++{
++    auto &window = **static_cast<WindowPtr *>(data);
++    auto *buffer = GST_PAD_PROBE_INFO_BUFFER(info);
++    if (!GST_BUFFER_PTS_IS_VALID(buffer) || GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DISCONT)
++        || GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_CORRUPTED))
++        return GST_PAD_PROBE_OK;
++    GstEvent *event = gst_pad_get_sticky_event(pad, GST_EVENT_SEGMENT, 0);
++    if (!event)
++        return GST_PAD_PROBE_OK;
++    const GstSegment *segment;
++    gst_event_parse_segment(event, &segment);
++    GstClockTime running = segment->format == GST_FORMAT_TIME
++        ? gst_segment_to_running_time(segment, GST_FORMAT_TIME, GST_BUFFER_PTS(buffer)) : GST_CLOCK_TIME_NONE;
++    gst_event_unref(event);
++    if (!GST_CLOCK_TIME_IS_VALID(running) || running > G_MAXUINT64 - window.base)
++        return GST_PAD_PROBE_OK;
++    const auto stamp = window.base + running;
++    if (stamp < window.triggerAfter || stamp - window.triggerAfter < firstFrame
++        || stamp - window.triggerBefore > lastFrame)
++        return GST_PAD_PROBE_OK;
++
++    std::lock_guard lock(window.mutex);
++    if (!window.selected) {
++        GstCaps *caps = gst_pad_get_current_caps(pad);
++        GstVideoInfo video;
++        if (caps && gst_video_info_from_caps(&video, caps) && video.width == 4080 && video.height == 3060) {
++            window.frame.reset(gst_sample_new(buffer, caps, nullptr, nullptr), gst_sample_unref);
++            qCDebug(flashLog) << "Selected" << video.width << video.height << "at"
++                              << (stamp - window.triggerAfter) / GST_MSECOND << "ms";
++            window.selected = true;
++            window.ready.notify_one();
++        }
++        gst_clear_caps(&caps);
++    }
++    return GST_PAD_PROBE_OK;
++}
++
++QByteArray encode(const WindowPtr &window)
++{
++    Sample frame;
++    {
++        std::unique_lock lock(window->mutex);
++        if (!window->ready.wait_for(lock, std::chrono::milliseconds(650), [&] { return window->selected; }))
++            return {};
++        frame = std::move(window->frame);
++    }
++    GstCaps *caps = gst_caps_new_empty_simple("image/jpeg");
++    GError *error = nullptr;
++    GstSample *converted = gst_video_convert_sample(frame.get(), caps, 3 * GST_SECOND, &error);
++    gst_caps_unref(caps);
++    if (!converted) {
++        qCWarning(flashLog) << "JPEG conversion failed" << (error ? error->message : "");
++        g_clear_error(&error);
++        return {};
++    }
++    Sample jpeg(converted, gst_sample_unref);
++    GstBuffer *buffer = gst_sample_get_buffer(jpeg.get());
++    GstMapInfo map;
++    if (!gst_buffer_map(buffer, &map, GST_MAP_READ))
++        return {};
++    QByteArray bytes(reinterpret_cast<const char *>(map.data), map.size);
++    gst_buffer_unmap(buffer, &map);
++    return bytes;
++}
++}
++
++RearFlash::~RearFlash()
++{
++    cancel();
++}
++
++void RearFlash::cancel()
++{
++    if (m_probe)
++        gst_pad_remove_probe(m_pad, m_probe);
++    m_probe = 0;
++    gst_clear_object(&m_pad);
++    if (m_led.isOpen()) {
++        control(m_led.handle(), V4L2_CID_FLASH_STROBE_STOP, 0);
++        control(m_led.handle(), V4L2_CID_FLASH_LED_MODE, V4L2_FLASH_LED_MODE_NONE);
++        m_led.close();
++    }
++    if (m_watcher) {
++        disconnect(m_watcher, nullptr, this, nullptr);
++        m_watcher->deleteLater();
++        m_watcher = nullptr;
++        Q_EMIT busyChanged();
++    }
++}
++
++void RearFlash::capture(GstPipeline *pipeline, GstElement *filter, const QUrl &destination)
++{
++    if (busy())
++        return;
++    auto window = std::make_shared<Window>();
++    GstClock *clock = gst_element_get_clock(GST_ELEMENT(pipeline));
++    m_pad = filter ? gst_element_get_static_pad(filter, "src") : nullptr;
++    m_led.setFileName(flashNode());
++    qCDebug(flashLog) << "Shutter" << GST_OBJECT_NAME(pipeline) << "clock" << (clock ? GST_OBJECT_NAME(clock) : "none")
++                      << "filter" << (filter ? GST_OBJECT_NAME(filter) : "none") << "pad" << bool(m_pad) << m_led.fileName();
++    if (clock && m_pad && m_led.open(QIODevice::ReadWrite | QIODevice::Unbuffered)) {
++        int fd = m_led.handle();
++        window->base = gst_element_get_base_time(GST_ELEMENT(pipeline));
++        if (control(fd, V4L2_CID_FLASH_LED_MODE, V4L2_FLASH_LED_MODE_FLASH)
++            && control(fd, V4L2_CID_FLASH_TIMEOUT, pulseUs)
++            && control(fd, V4L2_CID_FLASH_INTENSITY, 250000)) {
++            // Both bounds matter if the shutter thread is preempted during the ioctl.
++            window->triggerBefore = gst_clock_get_time(clock);
++            if (control(fd, V4L2_CID_FLASH_STROBE, 0) && strobing(fd)) {
++                window->triggerAfter = gst_clock_get_time(clock);
++                m_probe = gst_pad_add_probe(m_pad, GST_PAD_PROBE_TYPE_BUFFER, selectFrame,
++                                            new WindowPtr(window), [](gpointer p) { delete static_cast<WindowPtr *>(p); });
++            }
++        }
++    }
++    gst_clear_object(&clock);
++    if (!m_probe) {
++        cancel();
++        qCWarning(flashLog) << "Strobe setup failed" << m_led.errorString();
++        Q_EMIT failed(i18n("Could not fire the rear flash."));
++        return;
++    }
++    m_watcher = new QFutureWatcher<QByteArray>(this);
++    connect(m_watcher, &QFutureWatcher<QByteArray>::finished, this, [this, destination] {
++        QByteArray jpeg = m_watcher->result();
++        cancel();
++        if (jpeg.isEmpty()) {
++            Q_EMIT failed(i18n("No complete flash frame was captured. Try again."));
++            return;
++        }
++        if (destination.isLocalFile()) {
++            QSaveFile file(destination.toLocalFile());
++            if (!file.open(QIODevice::WriteOnly) || file.write(jpeg) != jpeg.size() || !file.commit()) {
++                Q_EMIT failed(file.errorString());
++                return;
++            }
++            Q_EMIT saved(destination.toLocalFile());
++        } else {
++            auto temp = std::make_shared<QTemporaryFile>();
++            if (!temp->open() || temp->write(jpeg) != jpeg.size() || !temp->flush()) {
++                Q_EMIT failed(temp->errorString());
++                return;
++            }
++            auto job = KIO::copy(QUrl::fromLocalFile(temp->fileName()), destination);
++            connect(job, &KJob::result, this, [this, job, destination, temp] {
++                if (job->error())
++                    Q_EMIT failed(job->errorString());
++                else
++                    Q_EMIT saved(destination.toDisplayString());
++            });
++        }
++    });
++    m_watcher->setFuture(QtConcurrent::run(encode, window));
++    Q_EMIT busyChanged();
++}
+diff --git a/src/video/rearflash.h b/src/video/rearflash.h
+new file mode 100644
+index 0000000..7acdd65
+--- /dev/null
++++ b/src/video/rearflash.h
+@@ -0,0 +1,29 @@
++// SPDX-License-Identifier: GPL-2.0-or-later
++#pragma once
++
++#include <QFile>
++#include <QFutureWatcher>
++#include <QObject>
++#include <QUrl>
++#include <gst/gst.h>
++
++class RearFlash : public QObject
++{
++    Q_OBJECT
++public:
++    ~RearFlash() override;
++    bool busy() const { return m_watcher != nullptr; }
++    void capture(GstPipeline *pipeline, GstElement *filter, const QUrl &destination);
++    void cancel();
++
++Q_SIGNALS:
++    void busyChanged();
++    void failed(const QString &message);
++    void saved(const QString &path);
++
++private:
++    QFile m_led;
++    GstPad *m_pad = nullptr;
++    gulong m_probe = 0;
++    QFutureWatcher<QByteArray> *m_watcher = nullptr;
++};
+diff --git a/src/video/webcamcontrol.cpp b/src/video/webcamcontrol.cpp
+index 7f4aa2b..a898b36 100644
+--- a/src/video/webcamcontrol.cpp
++++ b/src/video/webcamcontrol.cpp
+@@ -205,6 +205,12 @@ WebcamControl::WebcamControl()
+     QQmlApplicationEngine* engine = new QQmlApplicationEngine(this);
+     engine->rootContext()->setContextObject(new KLocalizedContext(engine));
+     m_kamoso = new Kamoso(this);
++    connect(&m_flash, &RearFlash::busyChanged, this, &WebcamControl::readyForCaptureChanged);
++    connect(&m_flash, &RearFlash::failed, m_kamoso, &Kamoso::error);
++    connect(&m_flash, &RearFlash::saved, this, [this](const QString &file) {
++        Q_EMIT photoTaken(file);
++        KNotification::event(QStringLiteral("photoTaken"), i18n("Photo taken"), i18n("Saved in %1", file));
++    });
+ 
+     qmlRegisterUncreatableType<Device>("org.kde.kamoso", 3, 0, "Device", QStringLiteral("You're not supposed to mess with this yo"));
+     qmlRegisterType<KamosoDirModel>("org.kde.kamoso", 3, 0, "DirModel");
+@@ -217,7 +223,7 @@ WebcamControl::WebcamControl()
+ 
+     qmlRegisterUncreatableType<KJob>("org.kde.kamoso", 3, 0, "KJob", QStringLiteral("you're not supposed to do that"));
+ 
+-    engine->load(QUrl(QStringLiteral("qrc:/qml/Main.qml")));
++    engine->load(QUrl(QStringLiteral("qrc:/qml/CameraWindow.qml")));
+     auto rootObject = qobject_cast<QQuickWindow *> (engine->rootObjects().constFirst());
+     m_surface = rootObject->findChild<QQuickItem *>("sink");
+     Q_ASSERT(m_surface);
+@@ -238,6 +244,7 @@ WebcamControl::~WebcamControl()
+ 
+ void WebcamControl::stop()
+ {
++    m_flash.cancel();
+     if(m_pipeline) {
+         gst_element_set_state(GST_ELEMENT(m_pipeline.data()), GST_STATE_NULL);
+         m_pipeline.reset(nullptr);
+@@ -277,6 +284,7 @@ bool WebcamControl::playDevice(Device *device)
+         return true;
+     }
+ 
++    m_flash.cancel();
+     if (m_pipeline)
+         gst_element_set_state(GST_ELEMENT(m_pipeline.data()), GST_STATE_NULL);
+ 
+@@ -395,6 +403,19 @@ void WebcamControl::takePhoto(const QUrl &url, bool emitTaken)
+         qWarning() << "couldn't take photo, no pipeline";
+         return;
+     }
++    if (!readyForCapture())
++        return;
++    auto device = DeviceManager::self()->playingDevice();
++    if (emitTaken && device && device->rearFlash() && Settings::forceRearFlash()) {
++        if (device->objectId() != m_currentDevice || m_kamoso->isRecording())
++            return;
++        if (!m_extraFilters.isEmpty() && m_extraFilters != QStringLiteral("identity")) {
++            Q_EMIT m_kamoso->error(i18n("Turn off photo effects to use forced flash."));
++            return;
++        }
++        m_flash.capture(m_pipeline.data(), m_sourceFilter.data(), url);
++        return;
++    }
+     m_emitTaken = emitTaken;
+ 
+     g_object_set(m_pipeline.data(), "mode", 1, nullptr);
+@@ -446,6 +467,7 @@ void WebcamControl::setExtraFilters(const QString& extraFilters)
+ 
+ void WebcamControl::updateSourceFilter()
+ {
++    m_flash.cancel();
+     if (!m_pipeline)
+         return;
+ 
+@@ -470,8 +492,10 @@ void WebcamControl::updateSourceFilter()
+             qDebug() << "error" << error->message;
+         }
+         Q_ASSERT(!error);
+-        g_object_set(m_cameraSource.data(), "video-source-filter", elem, nullptr);
++        m_sourceFilter.reset(GST_ELEMENT(gst_object_ref_sink(elem)));
++        g_object_set(m_cameraSource.data(), "video-source-filter", m_sourceFilter.data(), nullptr);
+     } else {
++        m_sourceFilter.reset();
+         g_object_set(m_cameraSource.data(), "video-source-filter", nullptr, nullptr);
+     }
+ 
+diff --git a/src/video/webcamcontrol.h b/src/video/webcamcontrol.h
+index 154551a..4ed1a69 100644
+--- a/src/video/webcamcontrol.h
++++ b/src/video/webcamcontrol.h
+@@ -13,6 +13,7 @@
+ #include <QQuickItem>
+ 
+ #include "gstpointer.h"
++#include "rearflash.h"
+ #include <gst/gstpipeline.h>
+ #include <gst/gstmessage.h>
+ #include <kamoso.h>
+@@ -40,7 +41,7 @@ class WebcamControl : public QObject
+ 
+         QString currentDevice() const { return m_currentDevice; }
+         bool mirrored() const { return m_mirror; }
+-        bool readyForCapture() const { return m_readyForCapture; }
++        bool readyForCapture() const { return m_readyForCapture && !m_flash.busy(); }
+ 
+     public Q_SLOTS:
+         bool play();
+@@ -72,9 +73,11 @@ class WebcamControl : public QObject
+         QString m_currentDevice;
+         GstPointer<GstPipeline> m_pipeline;
+         GstPointer<GstElement> m_cameraSource;
++        GstPointer<GstElement> m_sourceFilter;
+         GstPointer<GstElement> m_viewfinder;
+         Kamoso* m_kamoso;
+         QQuickItem* m_surface = nullptr;
++        RearFlash m_flash;
+         bool m_emitTaken = true;
+         bool m_mirror = true;
+         bool m_readyForCapture = true;

@@ -14,9 +14,10 @@ devbox run -- python3 tests/docs-links.py
 测试使用临时目录、合成镜像或模拟设备，不刷写平板；QML、源码阶段验证和真机验收另行执行。
 CI 的实际测试列表以 `.github/workflows/` 为准，不能把本地入口通过等同于全部 CI 作业通过。
 
-USB 内核回归需要完整适配源码；默认入口会明确报告未执行，而不将跳过视为验证成功。
-使用 `LIUQIN_KERNEL_SOURCE=/path/to/assembled/source devbox run test` 可执行四组 USB
-源码测试；Rec 会话故障注入不需要完整源码，已加入默认入口和 CI。
+使用 `LIUQIN_KERNEL_SOURCE=/path/to/assembled/source devbox run test` 可从完整适配源码
+编译执行 Q6 时钟注册、DSP 就绪与重试、M81 电量刷新等回归。同一入口还会执行四组 USB
+源码测试和 GLINK 充电日志生命周期测试。未提供源码时，输出会标明源码检查已跳过。
+Rec 会话故障注入使用内置夹具，默认在 Devbox 和 CI 中运行。
 
 `charger-mode.py` 使用模拟电源属性和单调时钟检查拔线关机、防抖、重插、初始化及
 读取失败处理，替换系统调用验证关机与重启分派；使用 ASan/UBSan 和模拟 DRM 设备

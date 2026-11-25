@@ -1,0 +1,22 @@
+[Unit]
+Description=Decode read-only front camera calibration
+After=systemd-udev-trigger.service
+Before=display-manager.service
+ConditionPathExists=/usr/share/libcamera/liuqin/imx596-reference.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/liuqin-front-calibrate --wait-device 5
+ExecStopPost=/usr/bin/rm -f /run/libcamera/liuqin-imx596.json
+TimeoutStartSec=8
+RemainAfterExit=yes
+RuntimeDirectory=libcamera
+RuntimeDirectoryPreserve=yes
+RuntimeDirectoryMode=0755
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

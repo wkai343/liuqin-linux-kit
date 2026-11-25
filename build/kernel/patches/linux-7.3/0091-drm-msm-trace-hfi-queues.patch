@@ -1,0 +1,146 @@
+From 04c6162a8d11f76b513bb4ebae6f9507143cbd9d Mon Sep 17 00:00:00 2001
+From: wk <58632380+wkai343@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 23:21:56 +0800
+Subject: [PATCH] drm/msm: trace HFI notification and response queue progress
+
+---
+ drivers/gpu/drm/msm/adreno/a6xx_gmu.c |  1 +
+ drivers/gpu/drm/msm/adreno/a6xx_gmu.h |  2 ++
+ drivers/gpu/drm/msm/adreno/a6xx_hfi.c | 24 ++++++++++++++++++
+ drivers/gpu/drm/msm/msm_gpu_trace.h   | 35 +++++++++++++++++++++++++++
+ 4 files changed, 62 insertions(+)
+
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_gmu.c b/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
+index 15e57f34c..d61b509d5 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
+@@ -65,6 +65,7 @@ static irqreturn_t a6xx_hfi_irq(int irq, void *data)
+ 	u32 status;
+ 
+ 	status = gmu_read(gmu, REG_A6XX_GMU_GMU2HOST_INTR_INFO);
++	a6xx_hfi_trace(gmu, 2, 0, 0, 0, 0, status);
+ 	gmu_write(gmu, REG_A6XX_GMU_GMU2HOST_INTR_CLR, status);
+ 
+ 	if (status & A6XX_GMU_GMU2HOST_INTR_INFO_CM3_FAULT) {
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_gmu.h b/drivers/gpu/drm/msm/adreno/a6xx_gmu.h
+index 4b44e4291..75f072c20 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_gmu.h
++++ b/drivers/gpu/drm/msm/adreno/a6xx_gmu.h
+@@ -229,6 +229,8 @@ enum a6xx_gmu_oob_state {
+ 	GMU_OOB_PERFCOUNTER_SET,
+ };
+ 
++void a6xx_hfi_trace(struct a6xx_gmu *gmu, u32 phase, u32 id, u32 seq,
++		   int ret, u64 elapsed_us, u32 info);
+ void a6xx_hfi_init(struct a6xx_gmu *gmu);
+ int a6xx_hfi_start(struct a6xx_gmu *gmu, int boot_state);
+ void a6xx_hfi_stop(struct a6xx_gmu *gmu);
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_hfi.c b/drivers/gpu/drm/msm/adreno/a6xx_hfi.c
+index 7c583c5fc..becf8d65a 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_hfi.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_hfi.c
+@@ -11,6 +11,7 @@
+ #include "a6xx_gmu.h"
+ #include "a6xx_gmu.xml.h"
+ #include "a6xx_gpu.h"
++#include "msm_gpu_trace.h"
+ 
+ #define HFI_MSG_ID(val) [val] = #val
+ 
+@@ -108,10 +109,26 @@ static int a6xx_hfi_queue_write(struct a6xx_gmu *gmu,
+ 	return 0;
+ }
+ 
++/* Queue indices are sampled only; tracing never consumes an HFI packet. */
++void a6xx_hfi_trace(struct a6xx_gmu *gmu, u32 phase, u32 id, u32 seq,
++		   int ret, u64 elapsed_us, u32 info)
++{
++	struct a6xx_hfi_queue_header *cmd = gmu->queues[HFI_COMMAND_QUEUE].header;
++	struct a6xx_hfi_queue_header *rsp = gmu->queues[HFI_RESPONSE_QUEUE].header;
++
++	if (!trace_msm_gmu_hfi_enabled() || !cmd || !rsp)
++		return;
++
++	trace_msm_gmu_hfi(phase, id, seq, ret, elapsed_us, info,
++		READ_ONCE(cmd->read_index), READ_ONCE(cmd->write_index),
++		READ_ONCE(rsp->read_index), READ_ONCE(rsp->write_index));
++}
++
+ static int a6xx_hfi_wait_for_msg_interrupt(struct a6xx_gmu *gmu, u32 id, u32 seqnum)
+ {
+ 	int ret, attempt;
+ 	u32 val;
++	ktime_t start = ktime_get();
+ 	struct a6xx_gpu *a6xx_gpu = container_of(gmu, struct a6xx_gpu, gmu);
+ 
+ 	for (attempt = 0; attempt < 2; attempt++) {
+@@ -137,6 +154,9 @@ static int a6xx_hfi_wait_for_msg_interrupt(struct a6xx_gmu *gmu, u32 id, u32 seq
+ 			break;
+ 	}
+ 
++	a6xx_hfi_trace(gmu, 1, id, seqnum, ret,
++		ktime_us_delta(ktime_get(), start), val);
++
+ 	if (ret) {
+ 		DRM_DEV_ERROR(gmu->dev,
+ 			"Message %s id %d timed out waiting for response\n",
+@@ -234,6 +254,10 @@ static int a6xx_hfi_send_msg(struct a6xx_gmu *gmu, int id,
+ 		return ret;
+ 	}
+ 
++	if (trace_msm_gmu_hfi_enabled())
++		a6xx_hfi_trace(gmu, 0, id, seqnum, 0, 0,
++			gmu_read(gmu, REG_A6XX_GMU_GMU2HOST_INTR_INFO));
++
+ 	return a6xx_hfi_wait_for_ack(gmu, id, seqnum, payload, payload_size);
+ }
+ 
+diff --git a/drivers/gpu/drm/msm/msm_gpu_trace.h b/drivers/gpu/drm/msm/msm_gpu_trace.h
+index 77e44ea8a..51d738261 100644
+--- a/drivers/gpu/drm/msm/msm_gpu_trace.h
++++ b/drivers/gpu/drm/msm/msm_gpu_trace.h
+@@ -8,6 +8,41 @@
+ #define TRACE_SYSTEM drm_msm_gpu
+ #define TRACE_INCLUDE_FILE msm_gpu_trace
+ 
++/* phase: 0 = command published, 1 = wait finished, 2 = IRQ before clear. */
++TRACE_EVENT(msm_gmu_hfi,
++	TP_PROTO(u32 phase, u32 id, u32 seq, int ret, u64 elapsed_us, u32 info,
++		 u32 cmd_r, u32 cmd_w, u32 rsp_r, u32 rsp_w),
++	TP_ARGS(phase, id, seq, ret, elapsed_us, info, cmd_r, cmd_w, rsp_r, rsp_w),
++	TP_STRUCT__entry(
++		__field(u32, phase)
++		__field(u32, id)
++		__field(u32, seq)
++		__field(int, ret)
++		__field(u64, elapsed_us)
++		__field(u32, info)
++		__field(u32, cmd_r)
++		__field(u32, cmd_w)
++		__field(u32, rsp_r)
++		__field(u32, rsp_w)
++	),
++	TP_fast_assign(
++		__entry->phase = phase;
++		__entry->id = id;
++		__entry->seq = seq;
++		__entry->ret = ret;
++		__entry->elapsed_us = elapsed_us;
++		__entry->info = info;
++		__entry->cmd_r = cmd_r;
++		__entry->cmd_w = cmd_w;
++		__entry->rsp_r = rsp_r;
++		__entry->rsp_w = rsp_w;
++	),
++	TP_printk("phase=%u id=%u seq=%u ret=%d elapsed_us=%llu info=%#x cmd=%u/%u rsp=%u/%u",
++		__entry->phase, __entry->id, __entry->seq, __entry->ret,
++		__entry->elapsed_us, __entry->info, __entry->cmd_r,
++		__entry->cmd_w, __entry->rsp_r, __entry->rsp_w)
++);
++
+ TRACE_EVENT(msm_gmu_oob,
+ 	TP_PROTO(u32 state, int ret, u64 elapsed_us, u32 info,
+ 		 u32 power, u32 busy, bool hung, bool needs_hw_init,
+-- 
+2.56.0
+

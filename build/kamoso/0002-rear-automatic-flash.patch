@@ -1,0 +1,455 @@
+diff --git a/po/zh_CN/kamoso.po b/po/zh_CN/kamoso.po
+index 1977388..80f2b85 100644
+--- a/po/zh_CN/kamoso.po
++++ b/po/zh_CN/kamoso.po
+@@ -254,5 +254,14 @@ msgstr "后摄闪光灯触发失败。"
+ msgid "No complete flash frame was captured. Try again."
+ msgstr "未捕获整幅受光的画面，请重拍。"
+ 
+-msgid "Turn off photo effects to use forced flash."
+-msgstr "请先关闭照片特效，再使用强制闪光。"
++msgid "Turn off photo effects to use flash."
++msgstr "请先关闭照片特效，再使用闪光灯。"
++
++msgid "Flash: Auto"
++msgstr "闪光灯：自动"
++
++msgid "Could not meter the rear camera. Try again or select a flash mode."
++msgstr "后摄测光失败，请重试或选择关闭、强制闪光。"
++
++msgid "Wait for the camera preview, then try again."
++msgstr "请等到相机预览出现后再拍照。"
+diff --git a/src/kamosoSettings.kcfg b/src/kamosoSettings.kcfg
+index ebe602f..565fa0a 100644
+--- a/src/kamosoSettings.kcfg
++++ b/src/kamosoSettings.kcfg
+@@ -17,8 +17,9 @@
+ 		</entry>
+ 	</group>
+     <group name="WebcamSettings">
+-        <entry name="forceRearFlash" type="Bool">
+-            <default>false</default>
++        <entry name="rearFlashMode" type="Enum">
++            <choices><choice name="FlashOff"/><choice name="FlashForced"/><choice name="FlashAuto"/></choices>
++            <default>FlashOff</default>
+         </entry>
+         <entry name="mirrored" type="bool">
+             <default>true</default>
+diff --git a/src/kamosoSettings.kcfgc b/src/kamosoSettings.kcfgc
+index b45f93d..7bf415c 100644
+--- a/src/kamosoSettings.kcfgc
++++ b/src/kamosoSettings.kcfgc
+@@ -3,3 +3,5 @@ ClassName=Settings
+ Singleton=true
+ Mutators=true
+ GenerateProperties=true
++UseEnumTypes=true
++GlobalEnums=true
+diff --git a/src/main.cpp b/src/main.cpp
+index 35fc481..6a1e7cc 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -6,6 +6,8 @@
+ */
+ 
+ #include <kaboutdata.h>
++#include <KConfigGroup>
++#include <KSharedConfig>
+ #include <QCommandLineParser>
+ #include <klocalizedstring.h>
+ #include "video/webcamcontrol.h"
+@@ -42,6 +44,16 @@ int main(int argc, char *argv[])
+         qmlglsink.reset(gst_element_factory_make("qml6glsink", ""));
+     }
+ 
++    // Older builds only stored the forced-flash toggle.
++    KConfigGroup webcam(KSharedConfig::openConfig(QStringLiteral("kamosorc")), QStringLiteral("WebcamSettings"));
++    if (webcam.hasKey("forceRearFlash")) {
++        if (!webcam.hasKey("rearFlashMode"))
++            webcam.writeEntry("rearFlashMode", webcam.readEntry("forceRearFlash", false)
++                                               ? QStringLiteral("FlashForced") : QStringLiteral("FlashOff"));
++        webcam.deleteEntry("forceRearFlash");
++        webcam.sync();
++    }
++
+     WebcamControl webcamControl;
+     QObject::connect(&app, &QCoreApplication::aboutToQuit, &webcamControl, &WebcamControl::stop);
+ 
+diff --git a/src/qml/Main.qml b/src/qml/Main.qml
+index 5c6a3eb..c343dbe 100644
+--- a/src/qml/Main.qml
++++ b/src/qml/Main.qml
+@@ -227,10 +227,17 @@ Kirigami.ApplicationWindow
+             id: flashMode
+             visible: !!DeviceManager.playingDevice && DeviceManager.playingDevice.rearFlash && !videoMode.checked
+             enabled: WebcamControl.readyForCapture && !burstMode.checked
+-            icon.name: Settings.forceRearFlash ? "flash" : "flashlight-off"
+-            text: Settings.forceRearFlash ? i18n("Flash: Forced") : i18n("Flash: Off")
++            readonly property var modes: [Settings.FlashOff, Settings.FlashForced, Settings.FlashAuto]
++            icon.name: Settings.rearFlashMode === Settings.FlashOff ? "flashlight-off" : "flash"
++            text: {
++                switch (Settings.rearFlashMode) {
++                case Settings.FlashAuto: return i18n("Flash: Auto")
++                case Settings.FlashForced: return i18n("Flash: Forced")
++                default: return i18n("Flash: Off")
++                }
++            }
+             onTriggered: {
+-                Settings.forceRearFlash = !Settings.forceRearFlash
++                Settings.rearFlashMode = modes[(modes.indexOf(Settings.rearFlashMode) + 1) % modes.length]
+                 Settings.save()
+             }
+         }
+diff --git a/src/video/rearflash.cpp b/src/video/rearflash.cpp
+index 895b23b..2713724 100644
+--- a/src/video/rearflash.cpp
++++ b/src/video/rearflash.cpp
+@@ -10,10 +10,14 @@
+ #include <QtConcurrent/qtconcurrentrun.h>
+ #include <gst/video/video.h>
+ #include <linux/videodev2.h>
++#include <linux/v4l2-subdev.h>
+ #include <sys/ioctl.h>
+ 
++#include <algorithm>
++#include <array>
+ #include <chrono>
+ #include <condition_variable>
++#include <optional>
+ #include <memory>
+ #include <mutex>
+ 
+@@ -64,6 +68,91 @@ QString flashNode()
+     return {};
+ }
+ 
++QString rearSensorNode()
++{
++    // Match the sensor backing the PipeWire camera, even when the minor changes.
++    const QDir sensors(QStringLiteral("/sys/class/video4linux"));
++    const QString rear = QFileInfo(QStringLiteral("/sys/firmware/devicetree/base/soc@0/cci@ac15000/i2c-bus@1/camera@10")).canonicalFilePath();
++    if (!rear.isEmpty()) {
++        for (const auto &node : sensors.entryList({QStringLiteral("v4l-subdev*")}, QDir::Dirs)) {
++            if (QFileInfo(sensors.filePath(node + QStringLiteral("/device/of_node"))).canonicalFilePath() == rear)
++                return QStringLiteral("/dev/") + node;
++        }
++    }
++    return {};
++}
++
++// The S5KJN1 driver exposes integration in lines and analogue gain in whole
++// multiples of unity. Read them together while WirePlumber owns the stream.
++std::optional<double> unityExposureMs(int fd)
++{
++    v4l2_subdev_format format{};
++    format.which = V4L2_SUBDEV_FORMAT_ACTIVE;
++    if (ioctl(fd, VIDIOC_SUBDEV_G_FMT, &format) < 0 ||
++        format.format.width != 4080 || format.format.height != 3060)
++        return std::nullopt;
++    v4l2_ext_control values[4]{};
++    values[0].id = V4L2_CID_EXPOSURE;
++    values[1].id = V4L2_CID_ANALOGUE_GAIN;
++    values[2].id = V4L2_CID_HBLANK;
++    values[3].id = V4L2_CID_PIXEL_RATE;
++    v4l2_ext_controls controls{};
++    controls.which = V4L2_CTRL_WHICH_CUR_VAL;
++    controls.count = 4;
++    controls.controls = values;
++    if (ioctl(fd, VIDIOC_G_EXT_CTRLS, &controls) < 0 || values[0].value <= 0 ||
++        values[1].value <= 0 || values[2].value < 0 || values[3].value64 <= 0)
++        return std::nullopt;
++    return 1000.0 * values[0].value * values[1].value *
++           (double(format.format.width) + values[2].value) / values[3].value64;
++}
++
++// Sample the unfiltered ISP output only on request. The streaming thread owns
++// the frame mapping, and only a scalar crosses into the Qt event loop.
++constexpr int lumaIdle = -2;
++constexpr int lumaRequested = -1;
++using FrameLuma = std::shared_ptr<std::atomic<int>>;
++
++GstPadProbeReturn meterFrame(GstPad *pad, GstPadProbeInfo *info, gpointer data)
++{
++    auto &reading = **static_cast<FrameLuma *>(data);
++    auto *buffer = GST_PAD_PROBE_INFO_BUFFER(info);
++    if (reading.load() != lumaRequested || !GST_BUFFER_PTS_IS_VALID(buffer) ||
++        GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_DISCONT) ||
++        GST_BUFFER_FLAG_IS_SET(buffer, GST_BUFFER_FLAG_CORRUPTED))
++        return GST_PAD_PROBE_OK;
++
++    GstVideoInfo video;
++    GstCaps *caps = gst_pad_get_current_caps(pad);
++    bool nv12 = caps && gst_video_info_from_caps(&video, caps) &&
++                GST_VIDEO_INFO_FORMAT(&video) == GST_VIDEO_FORMAT_NV12 &&
++                video.width == 4080 && video.height == 3060;
++    gst_clear_caps(&caps);
++    GstVideoFrame frame;
++    if (!nv12 || !gst_video_frame_map(&frame, &video, buffer, GST_MAP_READ))
++        return GST_PAD_PROBE_OK;
++
++    constexpr int columns = 32, rows = 24;
++    std::array<int, columns * rows> samples;
++    const auto *plane = GST_VIDEO_FRAME_COMP_DATA(&frame, 0);
++    const int stride = GST_VIDEO_FRAME_COMP_STRIDE(&frame, 0);
++    for (int j = 0; j < rows; ++j) {
++        const int y = (2 * j + 1) * video.height / (2 * rows);
++        for (int i = 0; i < columns; ++i) {
++            const int x = (2 * i + 1) * video.width / (2 * columns);
++            samples[j * columns + i] = plane[y * stride + x];
++        }
++    }
++    gst_video_frame_unmap(&frame);
++    auto quartile = samples.begin() + 3 * samples.size() / 4;
++    std::nth_element(samples.begin(), quartile, samples.end());
++    int luma = *quartile;
++    if (video.colorimetry.range == GST_VIDEO_COLOR_RANGE_16_235)
++        luma = std::clamp((luma - 16) * 255 / 219, 0, 255);
++    reading.store(luma);
++    return GST_PAD_PROBE_OK;
++}
++
+ GstPadProbeReturn selectFrame(GstPad *pad, GstPadProbeInfo *info, gpointer data)
+ {
+     auto &window = **static_cast<WindowPtr *>(data);
+@@ -131,17 +220,111 @@ QByteArray encode(const WindowPtr &window)
+ }
+ }
+ 
++RearFlash::RearFlash()
++{
++    m_meterTimer.setSingleShot(true);
++    m_meterTimer.setTimerType(Qt::PreciseTimer);
++    connect(&m_meterTimer, &QTimer::timeout, this, &RearFlash::sampleExposure);
++}
++
++void RearFlash::resetMeter()
++{
++    cancel();
++    m_lastAutoFlash = false;
++    m_meterAfter = std::max(m_meterAfter, QDeadlineTimer(800, Qt::PreciseTimer));
++}
++
++void RearFlash::meter(GstElement *cameraSource, const QUrl &destination)
++{
++    if (busy())
++        return;
++    m_sensor.setFileName(rearSensorNode());
++    if (!m_sensor.open(QIODevice::ReadOnly | QIODevice::Unbuffered)) {
++        Q_EMIT failed(i18n("Could not meter the rear camera. Try again or select a flash mode."));
++        return;
++    }
++    GstElement *source = nullptr;
++    g_object_get(cameraSource, "video-source", &source, nullptr);
++    m_pad = source ? gst_element_get_static_pad(source, "src") : nullptr;
++    gst_clear_object(&source);
++    m_frameLuma = std::make_shared<std::atomic<int>>(lumaIdle);
++    if (m_pad)
++        m_probe = gst_pad_add_probe(m_pad, GST_PAD_PROBE_TYPE_BUFFER, meterFrame,
++                                    new FrameLuma(m_frameLuma), [](gpointer p) { delete static_cast<FrameLuma *>(p); });
++    if (!m_probe) {
++        m_sensor.close();
++        clearProbe();
++        Q_EMIT failed(i18n("Could not meter the rear camera. Try again or select a flash mode."));
++        return;
++    }
++    m_meterDestination = destination;
++    m_samples = 0;
++    m_agree = 0;
++    m_meterTimer.start(int(m_meterAfter.remainingTime()));
++    Q_EMIT busyChanged();
++}
++
++void RearFlash::sampleExposure()
++{
++    // The first request is armed only after the preview / previous strobe settles.
++    const int luma = m_frameLuma->exchange(lumaRequested);
++    if (luma == lumaIdle) {
++        m_meterTimer.start(100);
++        return;
++    }
++    auto exposure = unityExposureMs(m_sensor.handle());
++    ++m_samples;
++    if (exposure && luma >= 0) {
++        // A dark object can need high gain while the finished image is well exposed.
++        const bool fire = m_lastAutoFlash ? (*exposure > 150.0 && luma < 96)
++                                          : (*exposure >= 240.0 && luma <= 80);
++        m_agree = (m_agree && fire == m_candidate) ? m_agree + 1 : 1;
++        m_candidate = fire;
++        if (m_agree == 3) {
++            qCDebug(flashLog) << "Auto flash: unity-gain exposure (ms)" << *exposure << "preview Y75" << luma << "fire" << fire;
++            m_lastAutoFlash = fire;
++            const QUrl destination = m_meterDestination;
++            m_meterDestination.clear();
++            m_sensor.close();
++            clearProbe();
++            Q_EMIT metered(destination, fire);
++            Q_EMIT busyChanged();
++            return;
++        }
++    } else {
++        m_agree = 0;
++    }
++    if (m_samples < 10) {
++        m_meterTimer.start(100);
++    } else {
++        cancel();
++        Q_EMIT failed(i18n("Could not meter the rear camera. Try again or select a flash mode."));
++    }
++}
++
+ RearFlash::~RearFlash()
+ {
+     cancel();
+ }
+ 
+-void RearFlash::cancel()
++void RearFlash::clearProbe()
+ {
+     if (m_probe)
+         gst_pad_remove_probe(m_pad, m_probe);
+     m_probe = 0;
+     gst_clear_object(&m_pad);
++    m_frameLuma.reset();
++}
++
++void RearFlash::cancel()
++{
++    if (!m_meterDestination.isEmpty()) {
++        m_meterTimer.stop();
++        m_meterDestination.clear();
++        m_sensor.close();
++        Q_EMIT busyChanged();
++    }
++    clearProbe();
+     if (m_led.isOpen()) {
+         control(m_led.handle(), V4L2_CID_FLASH_STROBE_STOP, 0);
+         control(m_led.handle(), V4L2_CID_FLASH_LED_MODE, V4L2_FLASH_LED_MODE_NONE);
+@@ -175,6 +358,8 @@ void RearFlash::capture(GstPipeline *pipeline, GstElement *filter, const QUrl &d
+             window->triggerBefore = gst_clock_get_time(clock);
+             if (control(fd, V4L2_CID_FLASH_STROBE, 0) && strobing(fd)) {
+                 window->triggerAfter = gst_clock_get_time(clock);
++                // A previous pulse changes the ISP's AE readings for several frames.
++                m_meterAfter = QDeadlineTimer(1200, Qt::PreciseTimer);
+                 m_probe = gst_pad_add_probe(m_pad, GST_PAD_PROBE_TYPE_BUFFER, selectFrame,
+                                             new WindowPtr(window), [](gpointer p) { delete static_cast<WindowPtr *>(p); });
+             }
+diff --git a/src/video/rearflash.h b/src/video/rearflash.h
+index 7acdd65..fa787cf 100644
+--- a/src/video/rearflash.h
++++ b/src/video/rearflash.h
+@@ -1,27 +1,46 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ #pragma once
+ 
++#include <QDeadlineTimer>
+ #include <QFile>
++#include <QTimer>
+ #include <QFutureWatcher>
+ #include <QObject>
+ #include <QUrl>
+ #include <gst/gst.h>
++#include <atomic>
++#include <memory>
+ 
+ class RearFlash : public QObject
+ {
+     Q_OBJECT
+ public:
++    RearFlash();
+     ~RearFlash() override;
+-    bool busy() const { return m_watcher != nullptr; }
++    bool busy() const { return m_watcher != nullptr || !m_meterDestination.isEmpty(); }
+     void capture(GstPipeline *pipeline, GstElement *filter, const QUrl &destination);
+     void cancel();
++    void resetMeter();
++    void meter(GstElement *cameraSource, const QUrl &destination);
+ 
+ Q_SIGNALS:
+     void busyChanged();
++    void metered(const QUrl &destination, bool fire);
+     void failed(const QString &message);
+     void saved(const QString &path);
+ 
+ private:
++    void sampleExposure();
++    void clearProbe();
++    std::shared_ptr<std::atomic<int>> m_frameLuma;
++    QTimer m_meterTimer;
++    QDeadlineTimer m_meterAfter;
++    QUrl m_meterDestination;
++    QFile m_sensor;
++    int m_samples = 0;
++    int m_agree = 0;
++    bool m_candidate = false;
++    bool m_lastAutoFlash = false;
+     QFile m_led;
+     GstPad *m_pad = nullptr;
+     gulong m_probe = 0;
+diff --git a/src/video/webcamcontrol.cpp b/src/video/webcamcontrol.cpp
+index a898b36..7757b1b 100644
+--- a/src/video/webcamcontrol.cpp
++++ b/src/video/webcamcontrol.cpp
+@@ -206,6 +206,9 @@ WebcamControl::WebcamControl()
+     engine->rootContext()->setContextObject(new KLocalizedContext(engine));
+     m_kamoso = new Kamoso(this);
+     connect(&m_flash, &RearFlash::busyChanged, this, &WebcamControl::readyForCaptureChanged);
++    connect(&m_flash, &RearFlash::metered, this, [this](const QUrl &url, bool fire) {
++        savePhoto(url, true, fire);
++    });
+     connect(&m_flash, &RearFlash::failed, m_kamoso, &Kamoso::error);
+     connect(&m_flash, &RearFlash::saved, this, [this](const QString &file) {
+         Q_EMIT photoTaken(file);
+@@ -406,11 +409,30 @@ void WebcamControl::takePhoto(const QUrl &url, bool emitTaken)
+     if (!readyForCapture())
+         return;
+     auto device = DeviceManager::self()->playingDevice();
+-    if (emitTaken && device && device->rearFlash() && Settings::forceRearFlash()) {
++    if (emitTaken && device && device->rearFlash() && Settings::rearFlashMode() != Settings::FlashOff) {
+         if (device->objectId() != m_currentDevice || m_kamoso->isRecording())
+             return;
++        if (Settings::rearFlashMode() == Settings::FlashAuto) {
++            GstState state;
++            gst_element_get_state(GST_ELEMENT(m_pipeline.data()), &state, nullptr, 0);
++            if (state != GST_STATE_PLAYING) {
++                Q_EMIT m_kamoso->error(i18n("Wait for the camera preview, then try again."));
++                return;
++            }
++            m_flash.meter(m_cameraSource.data(), url);
++        } else {
++            savePhoto(url, true, true);
++        }
++        return;
++    }
++    savePhoto(url, emitTaken, false);
++}
++
++void WebcamControl::savePhoto(const QUrl &url, bool emitTaken, bool fire)
++{
++    if (fire) {
+         if (!m_extraFilters.isEmpty() && m_extraFilters != QStringLiteral("identity")) {
+-            Q_EMIT m_kamoso->error(i18n("Turn off photo effects to use forced flash."));
++            Q_EMIT m_kamoso->error(i18n("Turn off photo effects to use flash."));
+             return;
+         }
+         m_flash.capture(m_pipeline.data(), m_sourceFilter.data(), url);
+@@ -467,7 +489,7 @@ void WebcamControl::setExtraFilters(const QString& extraFilters)
+ 
+ void WebcamControl::updateSourceFilter()
+ {
+-    m_flash.cancel();
++    m_flash.resetMeter();
+     if (!m_pipeline)
+         return;
+ 
+diff --git a/src/video/webcamcontrol.h b/src/video/webcamcontrol.h
+index 4ed1a69..4ea821c 100644
+--- a/src/video/webcamcontrol.h
++++ b/src/video/webcamcontrol.h
+@@ -64,6 +64,7 @@ class WebcamControl : public QObject
+         static void captureReadyChanged(GObject *object, GParamSpec *pspec, gpointer user_data);
+ 
+         void setReadyForCapture(bool b);
++        void savePhoto(const QUrl &url, bool emitTaken, bool fire);
+         void updateSourceFilter();
+         void setVideoSettings();
+ 

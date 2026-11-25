@@ -1,0 +1,126 @@
+diff --git a/src/libcamera/pipeline/simple/liuqin_isp.cpp b/src/libcamera/pipeline/simple/liuqin_isp.cpp
+index 1155fceb..d6bc5a66 100644
+--- a/src/libcamera/pipeline/simple/liuqin_isp.cpp
++++ b/src/libcamera/pipeline/simple/liuqin_isp.cpp
+@@ -11,6 +11,16 @@
+ namespace libcamera {
+ LOG_DEFINE_CATEGORY(LiuqinIsp)
+ 
++/* Stock IMX596 IPE CC13, selected baseline branch, 4500--5500 K.
++ * Executed here by IFE CC131 before gamma. This is a D50 baseline, not the
++ * closed-source scene/CCT trigger algorithm. Neutral rows sum to unity.
++ */
++static constexpr std::array<float, 9> imx596D50 = {
++	1.2678f, -0.2751f, 0.0073f,
++	-0.1373f, 1.2508f, -0.1135f,
++	-0.0101f, -0.3168f, 1.3269f,
++};
++
+ bool LiuqinIsp::supported(V4L2Subdevice *isp)
+ {
+ 	const uint32_t types[] = { V4L2_CTRL_TYPE_INTEGER, V4L2_CTRL_TYPE_U32,
+@@ -78,7 +88,13 @@ int LiuqinIsp::configure(Transform transform, ControlInfoMap *controlsInfo)
+ 	ret = isp_->setControls(&ispControls);
+ 	if (ret)
+ 		return ret;
++	const auto *cc = isp_->controlInfo(LiuqinIspBase + 4);
++	colourMatrix_ = cc && cc->type == V4L2_CTRL_TYPE_U16 && cc->elems == 9 &&
++		cc->minimum == 0 && cc->maximum == 4095;
++	ccm_ = imx596D50;
+ 	ControlInfoMap::Map map;
++	if (colourMatrix_)
++		map[&controls::ColourCorrectionMatrix] = ControlInfo(-2.0f, 2047.0f / 1024, 1.0f);
+ 	map[&controls::AeEnable] = ControlInfo(false, true, true);
+ 	map[&controls::AwbEnable] = ControlInfo(false, true, true);
+ 	map[&controls::ExposureTime] = ControlInfo(int(std::ceil(4 * lineUs_)), int((info_.maxFrameLength - 24) * lineUs_), 10000);
+@@ -88,7 +104,7 @@ int LiuqinIsp::configure(Transform transform, ControlInfoMap *controlsInfo)
+ 	int64_t maximum = info_.maxFrameLength * lineUs_;
+ 	map[&controls::FrameDurationLimits] = ControlInfo(minimum, maximum, minimum);
+ 	*controlsInfo = ControlInfoMap(std::move(map), controls::controls);
+-	LOG(LiuqinIsp, Info) << "IFE680 NV12, hardware Bayer statistics and calibrated LSC, " << info_.outputSize;
++	LOG(LiuqinIsp, Info) << "IFE680 NV12, hardware Bayer statistics and calibrated LSC, " << info_.outputSize << (colourMatrix_ ? ", stock D50 CC131" : "");
+ 	return 0;
+ }
+ 
+@@ -98,6 +114,14 @@ void LiuqinIsp::update(const ControlList &controls)
+ 		ae_ = *value;
+ 	if (auto value = controls.get(controls::AwbEnable))
+ 		awb_ = *value;
++	if (awb_)
++		ccm_ = imx596D50;
++	else if (auto value = controls.get(controls::ColourCorrectionMatrix)) {
++		if (std::all_of(value->begin(), value->end(), [](float v) {
++			return std::isfinite(v) && v >= -2 && v <= 2047.0f / 1024;
++		}))
++			std::copy(value->begin(), value->end(), ccm_.begin());
++	}
+ 	if (auto value = controls.get(controls::FrameDurationLimits)) {
+ 		/* Fixed frame period chosen within the requested interval. */
+ 		frameLines_ = std::clamp<unsigned int>(std::ceil((*value)[0] / lineUs_), info_.minFrameLength, info_.maxFrameLength);
+@@ -141,12 +165,22 @@ int LiuqinIsp::apply()
+ 	};
+ 	ControlList ispControls(isp_->controls());
+ 	ispControls.set(LiuqinIspBase + 1, Span<const uint32_t>(wb));
++	if (colourMatrix_) {
++		std::array<uint16_t, 9> matrix;
++		for (unsigned int i = 0; i < matrix.size(); i++) {
++			int q = std::clamp<int>(std::lround(ccm_[i] * 1024), -2048, 2047);
++			matrix[i] = q + 2048;
++			ccm_[i] = q / 1024.0f;
++		}
++		ispControls.set(LiuqinIspBase + 4, Span<const uint16_t>(matrix));
++	}
+ 	return isp_->setControls(&ispControls);
+ }
+ 
+ int LiuqinIsp::start(const ControlList &controls)
+ {
+ 	ae_ = awb_ = true;
++	ccm_ = imx596D50;
+ 	red_ = 1.0 / calibration_.rg;
+ 	blue_ = 1.0 / calibration_.bg;
+ 	nextUpdate_ = 0;
+@@ -159,7 +193,7 @@ int LiuqinIsp::start(const ControlList &controls)
+ 	}
+ 	update(controls);
+ 	int ret = apply();
+-	effective_ = { 0, int(exposure_), float(gain_), float(red_), float(blue_), int64_t(frameLines_ * lineUs_) };
++	effective_ = { 0, int(exposure_), float(gain_), float(red_), float(blue_), int64_t(frameLines_ * lineUs_), ccm_ };
+ 	return ret;
+ }
+ 
+@@ -174,6 +208,8 @@ void LiuqinIsp::process(FrameBuffer *buffer, Request *request)
+ 	request->_d()->metadata().set(controls::AnalogueGain, effective_.gain);
+ 	request->_d()->metadata().set(controls::ColourGains, { effective_.red, effective_.blue });
+ 	request->_d()->metadata().set(controls::FrameDuration, effective_.duration);
++	if (colourMatrix_)
++		request->_d()->metadata().set(controls::ColourCorrectionMatrix, effective_.ccm);
+ 	update(request->controls());
+ 	if (sequence < nextUpdate_ && request->controls().empty())
+ 		return;
+@@ -234,7 +270,7 @@ void LiuqinIsp::process(FrameBuffer *buffer, Request *request)
+ 	}
+ 	int ret = apply();
+ 	if (!ret)
+-		pending_.push_back({ sequence + 3, int(exposure_), float(gain_), float(red_), float(blue_), int64_t(frameLines_ * lineUs_) });
++		pending_.push_back({ sequence + 3, int(exposure_), float(gain_), float(red_), float(blue_), int64_t(frameLines_ * lineUs_), ccm_ });
+ 	else
+ 		LOG(LiuqinIsp, Error) << "Failed to apply automatic controls: " << ret;
+ 	nextUpdate_ = sequence + 6;
+diff --git a/src/libcamera/pipeline/simple/liuqin_isp.h b/src/libcamera/pipeline/simple/liuqin_isp.h
+index dc0fa4da..4571c33f 100644
+--- a/src/libcamera/pipeline/simple/liuqin_isp.h
++++ b/src/libcamera/pipeline/simple/liuqin_isp.h
+@@ -31,9 +31,10 @@ private:
+ 	Transform transform_;
+ 	double lineUs_ = 0, exposure_ = 10000, gain_ = 1, red_ = 1, blue_ = 1;
+ 	unsigned int frameLines_ = 0;
+-	bool ae_ = true, awb_ = true;
++	bool ae_ = true, awb_ = true, colourMatrix_ = false;
++	std::array<float, 9> ccm_;
+ 	uint32_t nextUpdate_ = 0;
+-	struct Applied { uint32_t sequence; int exposure; float gain, red, blue; int64_t duration; };
++	struct Applied { uint32_t sequence; int exposure; float gain, red, blue; int64_t duration; std::array<float, 9> ccm; };
+ 	std::deque<Applied> pending_;
+ 	Applied effective_{};
+ };

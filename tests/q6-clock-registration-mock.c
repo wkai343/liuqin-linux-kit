@@ -2,17 +2,36 @@
 #pragma GCC diagnostic ignored "-Wsign-compare"
 
 #include <assert.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <stdio.h>
 #define GFP_KERNEL 0
+#define EPROBE_DEFER 517
+#define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
+#define READ_ONCE(value) (value)
 #define LPASS_CLK_ATTRIBUTE_COUPLE_DIVISOR 4
 #define EXPORT_SYMBOL_GPL(x)
 #define container_of(ptr,type,member) ((type *)((char *)(ptr)-offsetof(type,member)))
 #define ERR_PTR(n) ((void *)(intptr_t)(n))
 #define dev_err(...) ((void)0)
+struct mutex { bool initialized, held; };
+static void mutex_init(struct mutex *lock) {
+ *lock = (struct mutex){ .initialized = true };
+}
+static struct mutex *lock_mutex(struct mutex *lock) {
+ assert(lock->initialized && !lock->held);
+ lock->held = true;
+ return lock;
+}
+static void unlock_mutex(struct mutex **lock) {
+ assert((*lock)->held);
+ (*lock)->held = false;
+}
+#define guard(type) struct type *scope __attribute__((cleanup(unlock_mutex))) = lock_mutex
+
 struct device { void *drvdata; const void *match; };
 struct platform_device { struct device dev; };
 struct clk_init_data;

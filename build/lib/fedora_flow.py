@@ -11,6 +11,8 @@ from storage_scope import inputs as storage_scope_inputs
 import mesa_libclc
 import fedora_ffmpeg
 import fedora_obs
+import fedora_libcamera
+import fedora_kamoso
 
 
 class FedoraFlow(Flow):
@@ -154,6 +156,23 @@ class FedoraFlow(Flow):
             build,['assembled/rpms','assembled/devel-rpms','assembled/manifest.json','assembled/build-packages.tsv',
                    'assembled/'+fedora_ffmpeg.source_filename(fedora_ffmpeg.record())])/'assembled'
 
+    def libcamera_archive(self, *, force=False):
+        if not force and not fedora_libcamera.selected(self.recipe):return None
+        record=fedora_libcamera.record()
+        return download(record['url'],PROJECT/'inputs/libcamera-rpm'/record['srpm'],record['sha256'])
+
+    def libcamera_rpms(self, *, force=False):
+        if not force and not fedora_libcamera.selected(self.recipe):return None
+        archive=self.target_runtime_root();source=self.libcamera_archive(force=force)
+        def build(out):
+            self.target_action('libcamera',archive,out/'assembled',
+                libcamera_source=source,jobs=self.data.get('jobs',12))
+        return self.stage('fedora-libcamera',dict(base=sha(archive),source=sha(source),
+            recipe=fedora_libcamera.inputs(),builder=sha(PROJECT/'build/lib/fedora_libcamera.py'),
+            root_builder=sha(PROJECT/'build/scripts/build-fedora-root.py'),refresh=self.refresh),
+            build,['assembled/rpms','assembled/extra-rpms','assembled/manifest.json','assembled/build-packages.tsv',
+                   'assembled/'+fedora_libcamera.source_filename(fedora_libcamera.record())])/'assembled'
+
     def obs_v4l2_rpm(self, *, force=False):
         if not force and not fedora_obs.selected(self.recipe):return None
         archive=self.target_runtime_root();ffmpeg=self.ffmpeg_rpms(force=force)
@@ -167,9 +186,31 @@ class FedoraFlow(Flow):
             build,['assembled/'+fedora_obs.filename(),'assembled/manifest.json',
                    'assembled/build-packages.tsv'])/'assembled'
 
+    def kamoso_archive(self):
+        if 'kamoso' not in self.recipe['packages']:
+            return None
+        info = fedora_kamoso.record()
+        return download(info['url'], PROJECT/'inputs/kamoso'/info['srpm'], info['sha256'])
+
+    def kamoso_bundle(self):
+        source = self.kamoso_archive()
+        if source is None:
+            return None
+        archive = self.target_runtime_root()
+        name = fedora_kamoso.nvr()
+        def build(out):
+            self.target_action('kamoso', archive, out/'assembled', kamoso_source=source,
+                               jobs=self.data.get('jobs', 12))
+        return self.stage('fedora-kamoso', dict(base=sha(archive), source=sha(source),
+            recipe=tree_identity(fedora_kamoso.RECIPE), builder=sha(PROJECT/'build/lib/fedora_kamoso.py'),
+            root_builder=sha(PROJECT/'build/scripts/build-fedora-root.py'), refresh=self.refresh),
+            build, ['assembled/'+name+'.aarch64.rpm', 'assembled/'+name+'.src.rpm'])/'assembled'
+
     def apps(self):
         archive=self.target_runtime_root();devices=self.device_debs();stats=self.stats_rpm();fingerprint=self.fingerprint_rpm()
         libclc=self.libclc_rpm();ffmpeg=self.ffmpeg_rpms();obs=self.obs_v4l2_rpm()
+        camera=self.libcamera_rpms()
+        kamoso=self.kamoso_bundle()
         inputs=dict(base=sha(archive),rpms=tree_identity(devices),recipe=self.recipe,
             builder=sha(PROJECT/'build/scripts/build-fedora-root.py'),
             input_env=sha(PROJECT/'build/rootfs/fedora-input-env.sh'),
@@ -179,6 +220,9 @@ class FedoraFlow(Flow):
             firefox_media_installer=sha(PROJECT/'build/lib/firefox_media.py'),
             splash_assets=sha(PROJECT/'build/lib/splash_assets.py'),
             theme=tree_identity(PROJECT/'device/boot/splash'),refresh=self.refresh)
+        if kamoso:
+            inputs['kamoso_rpm']=sha(kamoso/(fedora_kamoso.nvr()+'.aarch64.rpm'))
+            inputs['kamoso_source']=sha(kamoso/(fedora_kamoso.nvr()+'.src.rpm'))
         inputs['stats_rpm']=sha(stats)
         inputs['fingerprint_rpm']=sha(fingerprint)
         if libclc:inputs['libclc_rpm']=sha(libclc)
@@ -187,6 +231,10 @@ class FedoraFlow(Flow):
             inputs['ffmpeg_manifest']=sha(ffmpeg/'manifest.json')
             inputs['ffmpeg_source']=sha(ffmpeg/fedora_ffmpeg.source_filename(fedora_ffmpeg.record()))
             inputs['ffmpeg_installer']=sha(PROJECT/'build/lib/fedora_ffmpeg.py')
+        if camera:
+            inputs['libcamera_manifest']=sha(camera/'manifest.json')
+            inputs['libcamera_bundle']=tree_identity(camera/'rpms')
+            inputs['libcamera_installer']=sha(PROJECT/'build/lib/fedora_libcamera.py')
         if obs:
             inputs['obs_manifest']=sha(obs/'manifest.json')
             inputs['obs_rpm']=sha(obs/fedora_obs.filename())
@@ -212,6 +260,8 @@ class FedoraFlow(Flow):
             recipe=out/'recipe.json';recipe.write_text(json.dumps(snapshot)+'\n')
             options=dict(ffmpeg_bundle=ffmpeg) if ffmpeg else {}
             if obs:options['obs_bundle']=obs
+            if camera:options['libcamera_bundle']=camera
+            if kamoso:options['kamoso_bundle']=kamoso
             self.target_action('apps',archive,out/'assembled',recipe=recipe,rpms=rpms,**options)
         artifacts=['assembled/root.tar.gz','assembled/packages.tsv']
         if not self.recipe['first_boot_setup']:artifacts.append('assembled/login.txt')
@@ -234,7 +284,8 @@ class FedoraFlow(Flow):
         apps=self.apps();rpms=self.kernel_debs();source,kernel=self.kernel();modules=self.modules()
         def build(out):
             self.target_action('kernel-files',apps/'root.tar.gz',out/'assembled',rpms=rpms,
-                require_ffmpeg=fedora_ffmpeg.selected(self.recipe),require_obs=fedora_obs.selected(self.recipe))
+                require_ffmpeg=fedora_ffmpeg.selected(self.recipe),require_obs=fedora_obs.selected(self.recipe),
+                require_libcamera=fedora_libcamera.selected(self.recipe))
             self.run([sys.executable,'build/scripts/extract-liuqin-fingerprint-firmware.py',
                 '--image',str(firmware),'--root',str(out/'assembled/rootfs')],root=True)
             self.run([sys.executable,'build/scripts/build-liuqin-custom-root.py','--root',str(out/'assembled/rootfs'),

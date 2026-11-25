@@ -1,0 +1,31 @@
+/dts-v1/;
+/plugin/;
+#include <dt-bindings/clock/qcom,sm8450-camcc.h>
+#include <dt-bindings/clock/qcom,gcc-sm8450.h>
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+#include <dt-bindings/interconnect/qcom,sm8450.h>
+#include <dt-bindings/interconnect/qcom,icc.h>
+&{/soc@0} {
+ icp@ac01000 {
+  compatible = "qcom,sm8475-icp-test";
+  reg = <0 0x0ac01000 0 0x400>, <0 0x0ac01800 0 0x400>, <0 0x0ac04000 0 0x1000>;
+  reg-names = "csr", "cirq", "wd";
+  interrupts-extended = <@GIC@ GIC_SPI 463 IRQ_TYPE_EDGE_RISING>;
+  clocks = <@CAMCC@ CAM_CC_CAMNOC_AXI_CLK>, <@CAMCC@ CAM_CC_CPAS_AHB_CLK>,
+    <@CAMCC@ CAM_CC_CPAS_FAST_AHB_CLK>, <@GCC@ GCC_CAMERA_SF_AXI_CLK>,
+    <@CAMCC@ CAM_CC_ICP_AHB_CLK>, <@CAMCC@ CAM_CC_ICP_CLK>,
+    <@CAMCC@ CAM_CC_BPS_AHB_CLK>, <@CAMCC@ CAM_CC_BPS_FAST_AHB_CLK>, <@CAMCC@ CAM_CC_BPS_CLK>, <@CAMCC@ CAM_CC_CPAS_BPS_CLK>,
+    <@CAMCC@ CAM_CC_IPE_NPS_AHB_CLK>, <@CAMCC@ CAM_CC_IPE_NPS_FAST_AHB_CLK>, <@CAMCC@ CAM_CC_IPE_PPS_FAST_AHB_CLK>,
+    <@CAMCC@ CAM_CC_IPE_NPS_CLK>, <@CAMCC@ CAM_CC_IPE_PPS_CLK>, <@CAMCC@ CAM_CC_CPAS_IPE_NPS_CLK>, <@CAMCC@ CAM_CC_QDSS_DEBUG_XO_CLK>;
+  clock-names = "camnoc", "cpas", "fast", "axi", "ahb", "core", "bps-ahb", "bps-fast", "bps-core", "cpas-bps", "ipe-ahb", "ipe-fast", "ipe-pps-fast", "ipe-core", "ipe-pps", "cpas-ipe", "debug-xo";
+  power-domains = <@CAMCC@ TITAN_TOP_GDSC>, <@CAMCC@ IPE_0_GDSC>, <@CAMCC@ BPS_GDSC>;
+  power-domain-names = "top", "ipe", "bps";
+  interconnects = <@GEM@ MASTER_APPSS_PROC QCOM_ICC_TAG_ACTIVE_ONLY 100 SLAVE_CAMERA_CFG QCOM_ICC_TAG_ACTIVE_ONLY>,
+    <@MMSS@ MASTER_CAMNOC_SF QCOM_ICC_TAG_ALWAYS 48 SLAVE_EBI1 QCOM_ICC_TAG_ALWAYS>;
+  interconnect-names = "ahb", "sf";
+  iommus = <@SMMU@ 0x2000 0x420>, <@SMMU@ 0x2040 0x420>,
+    <@SMMU@ 0x2080 0x400>, <@SMMU@ 0x2100 0x420>;
+  dma-coherent;
+  firmware-name = "liuqin-icp-test/CAMERA_ICP.mbn";
+ };
+};

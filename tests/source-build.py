@@ -92,6 +92,8 @@ class SourceTests(unittest.TestCase):
         pipeline=fedora_flow.FedoraFlow(data,lambda *_a,**_k:self.fail('unexpected command'))
         stats=json.loads((PROJECT/'build/rootfs/fedora-stats-source.json').read_text())
         ffmpeg=json.loads((PROJECT/'build/ffmpeg/source.json').read_text())
+        camera=json.loads((PROJECT/'build/libcamera/source.json').read_text())
+        kamoso=json.loads((PROJECT/'build/kamoso/source.json').read_text())
         with patch.object(flow,'PROJECT',self.project), \
              patch.object(fedora_flow,'FedoraFlow',return_value=pipeline), \
              patch.object(pipeline,'fingerprint_image'),patch.object(pipeline,'board'), \
@@ -99,7 +101,7 @@ class SourceTests(unittest.TestCase):
              patch.object(fedora_flow,'download',return_value=self.root/'download') as download:
             flow.execute(data,'prepare',lambda *_a,**_k:self.fail('unexpected command'))
         self.assertEqual([call.args[0] for call in download.call_args_list],
-                         [pipeline.source['url'],stats['url'],ffmpeg['url']])
+                         [pipeline.source['url'],stats['url'],ffmpeg['url'],camera['url'],kamoso['url']])
 
     def test_image_export_uses_results_from_this_flow_and_skips_failed_builds(self):
         from unittest.mock import Mock

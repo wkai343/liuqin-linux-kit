@@ -1,0 +1,18 @@
+--- a/src/libcamera/converter/converter_v4l2_m2m.cpp
++++ b/src/libcamera/converter/converter_v4l2_m2m.cpp
+@@ -415,6 +415,15 @@
+ 	V4L2DeviceFormat format;
+ 	format.fourcc = m2m_->capture()->toV4L2PixelFormat(pixelFormat);
+ 	format.size = size;
++
++	/* The fixed-profile IPE binds its capture queue to its input geometry.
++	 * Select that input on the probe fd before querying the plane layout.
++	 * Stream contexts use independent fds. */
++	if (media_->driver() == "qcom-ipe") {
++		V4L2DeviceFormat input = format;
++		if (m2m_->output()->setFormat(&input) < 0 || input.size != size)
++			return {};
++	}
+ 
+ 	int ret = m2m_->capture()->tryFormat(&format);
+ 	if (ret < 0)

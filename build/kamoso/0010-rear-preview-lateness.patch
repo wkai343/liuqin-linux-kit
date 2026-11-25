@@ -1,0 +1,41 @@
+diff --git a/src/video/webcamcontrol.cpp b/src/video/webcamcontrol.cpp
+index e0df9a3..83557c9 100644
+--- a/src/video/webcamcontrol.cpp
++++ b/src/video/webcamcontrol.cpp
+@@ -403,6 +403,7 @@ bool WebcamControl::playDevice(Device *device)
+                                                                     , "widget", m_surface
+                                                                     , "async", true
+                                                                     , nullptr);
++        g_object_get(sink, "max-lateness", &m_defaultPreviewMaxLateness, nullptr);
+         gst_bin_add_many(GST_BIN(m_viewfinder.data()), glupload, sink, nullptr);
+         gst_element_link(glupload, sink);
+ 
+@@ -436,10 +437,13 @@ bool WebcamControl::playDevice(Device *device)
+ 
+     m_rearRecording.configure(m_pipeline.data(), device->rearFlash());
+ 
+-    // The preview sink may discard late frames locally. Its QoS events must
+-    // not drop a full-resolution rear frame before the flash shutter sees it.
++    // Rear frames keep their sensor timestamps through PipeWire and GL upload.
++    // Allow for delivery jitter here and keep preview QoS events off the flash path.
++    constexpr gint64 rearPreviewMaxLateness = 120 * GST_MSECOND;
++    const bool rear = device->rearFlash();
+     auto *previewSink = gst_bin_get_by_name(GST_BIN(m_viewfinder.data()), "videosink");
+-    g_object_set(previewSink, "qos", !device->rearFlash(), nullptr);
++    g_object_set(previewSink, "qos", !rear,
++                 "max-lateness", rear ? rearPreviewMaxLateness : m_defaultPreviewMaxLateness, nullptr);
+     gst_object_unref(previewSink);
+     setVideoSettings();
+ 
+diff --git a/src/video/webcamcontrol.h b/src/video/webcamcontrol.h
+index 06a23f1..585342f 100644
+--- a/src/video/webcamcontrol.h
++++ b/src/video/webcamcontrol.h
+@@ -85,6 +85,7 @@ class WebcamControl : public QObject
+         GstPointer<GstElement> m_cameraSource;
+         GstPointer<GstElement> m_sourceFilter;
+         GstPointer<GstElement> m_viewfinder;
++        gint64 m_defaultPreviewMaxLateness = -1;
+         Kamoso* m_kamoso;
+         QQuickItem* m_surface = nullptr;
+         RearFlash m_flash;

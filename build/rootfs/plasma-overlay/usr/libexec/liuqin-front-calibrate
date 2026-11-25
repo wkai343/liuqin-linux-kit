@@ -1,0 +1,166 @@
+#!/usr/bin/python3
+"""Decode the sensor-owned EEPROM; never write it or publish its serial."""
+import argparse
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import struct
+import sys
+import tempfile
+import time
+
+NVMEM_DEVICES = Path('/sys/bus/nvmem/devices')
+
+
+def decode(data, reference, sensor='imx596'):
+    rear = sensor == 's5kjn1'
+    model = 'liuqin_qtech_s5kjn1_wide' if rear else 'liuqin_aac_imx596_front'
+    if sensor not in ('imx596', 's5kjn1') or len(data) != (18432 if rear else 8192) or reference.get('schema') != 1 or reference.get('model') != model:
+        raise ValueError('Invalid EEPROM size or reference schema')
+    # Ranges from each stock GT24P64E/GT24P128E GetChecksumStatus function.
+    ranges = [(0, 1, 0x24), (0x47, 0x48, 0x51), (0x60, 0x61, 0x74d)]
+    if rear:
+        ranges.append((0x27, 0x28, 0x43))
+    for flag, start, stop in ranges:
+        if data[flag] != 1 or sum(data[start:stop]) % 255 + 1 != data[stop]:
+            raise ValueError('EEPROM calibration checksum failed')
+    rg, bg, grgb = (v / 1024 for v in struct.unpack_from('>3H', data, 0x4b))
+    if not all(0.1 < v < 4 for v in (rg, bg, grgb)):
+        raise ValueError('Invalid white balance ratios')
+    if data[0x49] not in (0, 1) or data[0x4a] not in (0, 1):
+        raise ValueError('Invalid calibration orientation')
+    golden, baseline = reference['golden'], reference['baseline']
+    if len(golden) != 884 or len(baseline) != 884:
+        raise ValueError('Invalid reference mesh')
+    gains = []
+    for channel in range(4):
+        for point in range(221):
+            x, y = point % 17, point // 17
+            if data[0x49]:
+                x = 16 - x
+            if data[0x4a]:
+                y = 12 - y
+            measured = struct.unpack_from('>H', data, 0x65 + (y * 17 + x) * 8 + channel * 2)[0]
+            i = channel * 221 + point
+            if not 32 <= measured <= 2047:
+                raise ValueError('Invalid measured shading value')
+            ratio = golden[i] / measured
+            gain = baseline[i] * ratio
+            if not all(math.isfinite(v) for v in (ratio, gain)) or not 0.5 <= ratio <= 2 or not 0.5 <= gain <= 16:
+                raise ValueError('Implausible calibration/reference ratio')
+            gains.append(gain)
+    result = {'schema': 1, 'model': sensor, 'illuminant_kelvin': 5000,
+              'rg': rg, 'bg': bg,
+              # Rear CamX inverts Gr/Gb only for a horizontally mirrored module.
+              'grgb': 1 / grgb if not rear or data[0x49] else grgb,
+              'mesh_width': 17, 'mesh_height': 13, 'lsc': gains}
+    if rear:
+        macro = struct.unpack_from('>H', data, 0x2d)[0]
+        infinity = struct.unpack_from('>H', data, 0x31)[0]
+        if not 0 <= infinity < macro <= 1023:
+            raise ValueError('Invalid calibrated actuator range')
+        # Stock module margins: infinity -20%, macro +20% of the DAC span.
+        margin = (macro - infinity) * 0.2
+        result['af_min'] = max(0, int(infinity - margin))
+        result['af_max'] = min(1023, int(macro + margin))
+    return result
+
+
+def focus_points(profile, eeprom, calibration):
+    """Convert this module's measured chart distances to libcamera dioptres."""
+    if (profile.get('schema') != 1 or profile.get('model') != 's5kjn1' or
+            profile.get('eeprom_sha256') != hashlib.sha256(eeprom).hexdigest()):
+        raise ValueError('Focus profile does not match the installed rear module')
+    rows = profile.get('points')
+    if not isinstance(rows, list) or not 2 <= len(rows) <= 32:
+        raise ValueError('Expected 2 to 32 measured focus points')
+    points = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError('Invalid focus point')
+        cm, dac = row.get('distance_cm'), row.get('dac')
+        if (type(cm) not in (int, float) or not math.isfinite(cm) or cm <= 0 or
+                type(dac) is not int or not calibration['af_min'] <= dac <= calibration['af_max']):
+            raise ValueError('Invalid chart distance or actuator position')
+        dioptres = 100.0 / cm
+        if not math.isfinite(dioptres) or (points and
+                (points[-1]['dioptres'] >= dioptres or points[-1]['dac'] >= dac)):
+            raise ValueError('Focus points must increase in dioptres and actuator position')
+        points.append({'dioptres': dioptres, 'dac': dac})
+    return points
+
+
+def device(wait_seconds=0, sensor='imx596'):
+    if not math.isfinite(wait_seconds) or not 0 <= wait_seconds <= 5:
+        raise ValueError('Device wait must be between 0 and 5 seconds')
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        matches = []
+        prefix = 's5kjn1-qtech-eeprom*' if sensor == 's5kjn1' else 'imx596-aac-eeprom*'
+        for p in NVMEM_DEVICES.glob(prefix):
+            try:
+                parent = p.resolve().parent
+                if (parent / 'name').read_text().strip() == sensor and (p / 'nvmem').is_file():
+                    matches.append(p / 'nvmem')
+            except FileNotFoundError:
+                # The provider can still be registering, or was removed.
+                continue
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            raise ValueError('Sensor EEPROM device not uniquely available')
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError('Sensor EEPROM device not available before deadline')
+        time.sleep(min(0.05, remaining))
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--sensor', choices=('imx596', 's5kjn1'), default='imx596')
+    p.add_argument('--input', type=Path)
+    p.add_argument('--wait-device', type=float, default=0,
+                   help='wait up to 0..5 seconds for the sensor-owned EEPROM only')
+    p.add_argument('--reference', type=Path)
+    p.add_argument('--output', type=Path)
+    p.add_argument('--focus-profile', type=Path,
+                   default=Path('/var/lib/libcamera/liuqin/s5kjn1-focus.json'))
+    a = p.parse_args()
+    a.reference = a.reference or Path('/usr/share/libcamera/liuqin') / (a.sensor + '-reference.json')
+    a.output = a.output or Path('/run/libcamera') / ('liuqin-' + a.sensor + '.json')
+    a.output.parent.mkdir(parents=True, exist_ok=True)
+    # No stale calibration is allowed after replacement of a module or bad read.
+    a.output.unlink(missing_ok=True)
+    source = a.input or device(a.wait_device, a.sensor)
+    first = source.read_bytes()
+    if first != source.read_bytes():
+        raise ValueError('EEPROM changed between reads')
+    calibration = decode(first, json.loads(a.reference.read_text()), a.sensor)
+    if a.sensor == 's5kjn1':
+        try:
+            profile = json.loads(a.focus_profile.read_text())
+            if not isinstance(profile, dict):
+                raise ValueError('Focus profile must be an object')
+            calibration['focus_points'] = focus_points(profile, first, calibration)
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError, OverflowError) as exc:
+            print(f'Rear manual focus unavailable: {exc}', file=sys.stderr)
+    fd, name = tempfile.mkstemp(dir=a.output.parent)
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(calibration, f, separators=(',', ':'))
+            f.write('\n')
+            f.flush()
+            os.fsync(f.fileno())
+            os.fchmod(f.fileno(), 0o644)
+        os.replace(name, a.output)
+    finally:
+        Path(name).unlink(missing_ok=True)
+    print(a.sensor + ' calibration: module, WB, LSC' + (', AF' if a.sensor == 's5kjn1' else '') + ' checksums valid')
+
+
+if __name__ == '__main__':
+    main()

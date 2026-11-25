@@ -1,5 +1,5 @@
 From: Liuqin Linux Kit maintainers
-Subject: [PATCH] usb: typec: ucsi: read Liuqin CC orientation before USB roles
+Subject: [PATCH] usb: typec: ucsi: set Liuqin orientation and mux before the USB role
 
 Liuqin ordinary USB attach does not reliably generate a DP PAN event.
 Read Xiaomi XM_CC_ORIENTATION through the existing serialized battery
@@ -7,6 +7,11 @@ service and apply it in UCSI's pre-role connector-status hook. Retry a
 briefly stale detached value, validate the firmware encoding, and never
 use gpio91 as a CC input. Keep the ABL-aware board helper, existing role
 and alternate-mode policy, and shared SuperSpeed board ceiling.
+
+Initial port registration skips ucsi_partner_change(). For an ordinary USB
+connection, select USB mode after setting orientation and before xHCI
+starts link training. Existing partners and alternate-mode accessories
+keep their mux policy.
 
 diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
 --- a/drivers/power/supply/qcom_battmgr.c
@@ -127,7 +132,15 @@ diff --git a/drivers/usb/typec/ucsi/ucsi_glink.c b/drivers/usb/typec/ucsi/ucsi_g
  #include <linux/module.h>
  #include <linux/mutex.h>
  #include <linux/of_device.h>
-@@ -195,6 +197,10 @@
+@@ -11,6 +13,7 @@
+ #include <linux/property.h>
+ #include <linux/soc/qcom/pdr.h>
+ #include <linux/usb/typec_mux.h>
++#include <linux/usb/typec_altmode.h>
+ #include <linux/gpio/consumer.h>
+ #include <linux/soc/qcom/pmic_glink.h>
+ #include "ucsi.h"
+@@ -195,6 +198,10 @@ static void pmic_glink_ucsi_update_connector(struct ucsi_connector *con)
  {
  	struct pmic_glink_ucsi *ucsi = ucsi_get_drvdata(con->ucsi);
  
@@ -138,7 +151,7 @@ diff --git a/drivers/usb/typec/ucsi/ucsi_glink.c b/drivers/usb/typec/ucsi/ucsi_g
  	if (con->num > PMIC_GLINK_MAX_PORTS ||
  	    !ucsi->port_orientation[con->num - 1])
  		return;
-@@ -202,13 +208,51 @@
+@@ -202,16 +209,71 @@ static void pmic_glink_ucsi_update_connector(struct ucsi_connector *con)
  	con->typec_cap.orientation_aware = true;
  }
  
@@ -173,9 +186,9 @@ diff --git a/drivers/usb/typec/ucsi/ucsi_glink.c b/drivers/usb/typec/ucsi/ucsi_g
  
  	if (!UCSI_CONSTAT(con, CONNECTED)) {
  		typec_set_orientation(con->port, TYPEC_ORIENTATION_NONE);
-+		return;
-+	}
-+
+ 		return;
+ 	}
+ 
 +	if (liuqin_board_quirks() && con->num == 1) {
 +		ret = pmic_glink_ucsi_liuqin_orientation(ucsi, &cc);
 +		if (ret) {
@@ -184,10 +197,30 @@ diff --git a/drivers/usb/typec/ucsi/ucsi_glink.c b/drivers/usb/typec/ucsi/ucsi_g
 +		}
 +		orientation = cc == 1 ? TYPEC_ORIENTATION_NORMAL : TYPEC_ORIENTATION_REVERSE;
 +		ret = typec_set_orientation(con->port, orientation);
-+		if (ret)
++		if (ret) {
 +			dev_err(ucsi->dev, "CC%u lane switch failed: %d\n", cc, ret);
-+		else
-+			dev_dbg(ucsi->dev, "connector %u CC%u orientation applied\n", con->num, cc);
++			return;
++		}
++		dev_dbg(ucsi->dev, "connector %u CC%u orientation applied\n", con->num, cc);
++
++		/*
++		 * Initial port registration sets the role without calling
++		 * ucsi_partner_change(). Select ordinary USB before that role:
++		 * a later notification otherwise resets the QMP mux while xHCI
++		 * is already training. Existing partners and alternate-mode
++		 * accessories retain their current mux policy.
++		 */
++		if (!con->partner && UCSI_CONSTAT(con, PARTNER_FLAG_USB) &&
++		    !UCSI_CONSTAT(con, PARTNER_FLAG_ALT_MODE) &&
++		    UCSI_CONSTAT(con, PARTNER_TYPE) != UCSI_CONSTAT_PARTNER_TYPE_AUDIO &&
++		    UCSI_CONSTAT(con, PARTNER_TYPE) != UCSI_CONSTAT_PARTNER_TYPE_DEBUG) {
++			ret = typec_set_mode(con->port, TYPEC_STATE_USB);
++			if (ret)
++				dev_err(ucsi->dev, "initial USB mux switch failed: %d\n", ret);
++		}
++		return;
++	}
++
+ 	if (con->num > PMIC_GLINK_MAX_PORTS ||
+ 	    !ucsi->port_orientation[con->num - 1])
  		return;
- 	}
- 
