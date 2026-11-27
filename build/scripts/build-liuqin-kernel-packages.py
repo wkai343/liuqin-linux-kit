@@ -19,7 +19,7 @@ sys.path.insert(0, str(PROJECT / 'shared'))
 from liuqin_kernel import build_contract, parse_contract, digest, extract_modules
 from liuqin_artifacts import boot_interface
 
-TOOLS_VERSION = '0.1.7'
+TOOLS_VERSION = '0.1.8'
 
 
 def put(root, name, content, mode=0o644):
@@ -41,7 +41,7 @@ def control(root, name, version, depends, description, predepends=''):
 def build(kernel, modules, boot_image, output, version, kernel_source=None, package_format='deb'):
     kernel, modules, boot_image, output = map(lambda p: Path(p).resolve(), (kernel, modules, boot_image, output))
     if output.exists(): raise ValueError('输出已存在，请使用新目录。')
-    if not re.fullmatch(r'[0-9][a-zA-Z0-9.+:~\-]*', version): raise ValueError('无效 Debian 包版本。')
+    if not re.fullmatch(r'[0-9][a-zA-Z0-9.+:~\-]*', version): raise ValueError('无效的内核包版本。')
     content = build_contract(kernel, modules)
     source = Path(kernel_source or json.loads((kernel / 'build-inputs.json').read_text())['source']).resolve()
     recorded = json.loads((kernel / 'build-info.json').read_text())
@@ -57,10 +57,10 @@ def build(kernel, modules, boot_image, output, version, kernel_source=None, pack
     if boot['profile'] != b'native-updatable\n' or boot['contract'] != content:
         raise ValueError('boot.img 与内核/模块不是同一组内核产物。')
     output.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix='.kernel-debs-', dir=output.parent) as directory:
+    with tempfile.TemporaryDirectory(prefix='.kernel-packages-', dir=output.parent) as directory:
         work = Path(directory); packages = work / 'packages'; packages.mkdir()
         tools = work / 'tools'
-        control(tools, 'liuqin-boot-tools', TOOLS_VERSION, 'python3 (>= 3.11), python3-zstandard (>= 0.23), util-linux, mount',
+        control(tools, 'liuqin-boot-tools', TOOLS_VERSION, 'python3 (>= 3.11), python3-zstandard (>= 0.23), util-linux, mount, liuqin-storage-policy-ufs (>= 2)',
                 'Liuqin versioned kernel boot update and recovery tools')
         put(tools, 'usr/lib/liuqin/boot-update.py', (PROJECT / 'device/boot/boot-update.py').read_bytes(), 0o755)
         put(tools, 'usr/lib/liuqin/boot-target-v1.sh', (PROJECT / 'device/boot/boot-target-v1.sh').read_bytes())
@@ -77,8 +77,8 @@ def build(kernel, modules, boot_image, output, version, kernel_source=None, pack
             'APT::NeverAutoRemove { "^liuqin-kernel-image-.*$"; "^liuqin-kernel-modules-.*$"; };\n')
         put(tools, 'usr/lib/systemd/system/liuqin-kernel-confirm.service',
             '[Unit]\nDescription=Confirm the running Liuqin kernel update\n'
-            'After=local-fs.target liuqin-gnome-storage-guard.service\n'
-            'Requires=liuqin-gnome-storage-guard.service\n'
+            'After=local-fs.target liuqin-storage-guard.service\n'
+            'Requires=liuqin-storage-guard.service\n'
             'ConditionPathExists=/etc/liuqin/boot-updates.json\n'
             '[Service]\nType=oneshot\nExecStart=/usr/sbin/liuqin-boot-update confirm\n'
             '[Install]\nWantedBy=multi-user.target\n')
@@ -95,7 +95,7 @@ def build(kernel, modules, boot_image, output, version, kernel_source=None, pack
         manifest = extract_modules(modules, module, content)
         put(module, 'usr/share/liuqin/kernels/' + release + '/modules.manifest', manifest)
         put(module, 'usr/share/liuqin/kernels/' + release + '/modules.contract', content)
-        storage_dep = ', liuqin-storage-policy-ufs (>= 1)' if boot.get('storage_policy_version') else ''
+        storage_dep = ', liuqin-storage-policy-ufs (>= 2)' if boot.get('storage_policy_version') else ''
         control(image, image_name, version, f'{module_name} (= {version})'+storage_dep, 'Liuqin boot image for ' + release,
                 f'liuqin-boot-tools (>= {TOOLS_VERSION})')
         for root, name in ((image, image_name), (module, module_name)):
@@ -163,14 +163,14 @@ def build(kernel, modules, boot_image, output, version, kernel_source=None, pack
                 if root==tools:
                     shutil.rmtree(root/'etc/apt')
                     shutil.rmtree(root/'etc/kernel')
-                    dependencies=['python3 >= 3.11','python3-zstandard >= 0.23','util-linux-core'];pre=[]
+                    dependencies=['python3 >= 3.11','python3-zstandard >= 0.23','util-linux-core','liuqin-storage-policy-ufs >= 2'];pre=[]
                 elif root==module:
                     dependencies=['kmod'];pre=['liuqin-boot-tools >= '+TOOLS_VERSION]
                     directories = (f'usr/lib/modules/{release}', f'usr/share/liuqin/kernels/{release}',
                                    f'usr/share/doc/{module_name}')
                 elif root==image:
                     dependencies=[module_name+' = '+version+'-1.liuqin'];pre=['liuqin-boot-tools >= '+TOOLS_VERSION]
-                    if boot.get('storage_policy_version'):dependencies.append('liuqin-storage-policy-ufs >= 1')
+                    if boot.get('storage_policy_version'):dependencies.append('liuqin-storage-policy-ufs >= 2')
                     directories = (f'usr/lib/liuqin/boot-images/{release}', f'usr/share/doc/{image_name}')
                     boot_hook = '/usr/sbin/liuqin-boot-update hook ' + shlex.quote(release)
                 else:

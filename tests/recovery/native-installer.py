@@ -24,6 +24,17 @@ M=dict(interface='liuqin-native-recovery-v1',installer_version=1,inspection_only
 def part(name='boot_a',size=192*1024**2):return dict(name=name,parent='sde' if name=='boot_a' else 'sda',partuuid=str(uuid.uuid4()),start=4096,bytes=size)
 
 class GateTests(unittest.TestCase):
+    def test_linux_install_requires_matching_storage_guard_check_in_recovery(self):
+        root_check = 'usr/lib/liuqin/root-interface-v2.sh'
+        payload = {'usr/lib/liuqin/install-root.sh': digest_file(PROJECT/'device/installer/install-root.sh'),
+                   root_check: digest_file(PROJECT/'device/boot/root-interface-v2.sh')}
+        engine = SimpleNamespace(manifest={'native_recovery_manifest': {'payload_sha256': payload}})
+        transport = SimpleNamespace(engine=engine, installer_enabled=True)
+        NativeInstallerMixin.validate_linux_install(transport)
+        payload[root_check] = '0'*64
+        with self.assertRaisesRegex(InstallerError, 'root-interface-v2'):
+            NativeInstallerMixin.validate_linux_install(transport)
+
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup);self.root=Path(self.temp.name);self.boot=str(uuid.uuid4());self.token=uuid.uuid4().hex
         self.put(gate.MARKER,M);self.put('proc/sys/kernel/random/boot_id',self.boot);self.p=part()

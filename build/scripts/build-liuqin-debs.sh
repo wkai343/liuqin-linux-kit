@@ -84,7 +84,7 @@ pack() { # pack <pkg> <arch> <depends> <description> [extra DEBIAN files...]
 	{
 		printf 'Package: %s\nVersion: %s\nArchitecture: %s\n' "$pkg" "$version" "$arch"
 		printf 'Maintainer: %s\n' "$maintainer"
-		if [ "$pkg" = liuqin-device-support ]; then printf 'Provides: liuqin-storage-policy-ufs (= 1)\n'; fi
+		if [ "$pkg" = liuqin-device-support ]; then printf 'Provides: liuqin-storage-policy-ufs (= 2)\n'; fi
 		[ -z "$depends" ] || printf 'Depends: %s\n' "$depends"
 		printf 'Section: misc\nPriority: optional\n'
 		printf 'Description: %s\n' "$desc"
@@ -97,6 +97,13 @@ pack() { # pack <pkg> <arch> <depends> <description> [extra DEBIAN files...]
 			grep -vxF -f "$work/$pkg.noconffiles" "$root/DEBIAN/conffiles" >"$work/conffiles.filtered" ||
 				[ ! -s "$work/conffiles.filtered" ]
 			mv "$work/conffiles.filtered" "$root/DEBIAN/conffiles"
+		fi
+		# Retire the former Ubuntu override on upgrades of the generic board package.
+		if [ "$pkg" = liuqin-device-support ]; then
+			chrony_conf=/etc/chrony/conf.d/90-liuqin-no-rtc-bootstrap.conf
+			if [ ! -e "$root$chrony_conf" ] && [ ! -L "$root$chrony_conf" ]; then
+				printf 'remove-on-upgrade %s\n' "$chrony_conf" >>"$root/DEBIAN/conffiles"
+			fi
 		fi
 		[ -s "$root/DEBIAN/conffiles" ] || rm -f "$root/DEBIAN/conffiles"
 	fi
@@ -167,14 +174,18 @@ build_device_support() {
 	root=$work/$pkg/root
 	mkdir -p "$root"
 	stage_device_overlay
-	guard=$root/usr/local/sbin/liuqin-gnome-storage-guard
-	grep -qx 'marker=${LIUQIN_GNOME_GUARD_TEST_MARKER:-/etc/liuqin-native-root}' "$guard" || die 'storage guard marker drifted'
+	guard=$root/usr/local/sbin/liuqin-storage-guard
+	grep -qx 'marker=${LIUQIN_STORAGE_GUARD_TEST_MARKER:-/etc/liuqin-native-root}' "$guard" || die 'storage guard marker drifted'
 	sed -i \
-		-e 's|^marker=${LIUQIN_GNOME_GUARD_TEST_MARKER:-/etc/liuqin-native-root}$|marker=/etc/liuqin-native-root|' "$guard"
+		-e 's|^marker=${LIUQIN_STORAGE_GUARD_TEST_MARKER:-/etc/liuqin-native-root}$|marker=/etc/liuqin-native-root|' "$guard"
+	units=$root/etc/systemd/system
+	[ -f "$units/liuqin-storage-guard.service" ] || die 'storage guard unit is missing'
+	mkdir -p "$units/basic.target.requires"
+	ln -s ../liuqin-storage-guard.service "$units/basic.target.requires/liuqin-storage-guard.service"
 	install -D -m 0755 "$busybox" "$root/usr/local/bin/busybox"
 	python3 "$project_root/build/lib/storage_scope.py" --out "$root/usr/libexec/liuqin-storage-seal" \
 		--compiler "${STORAGE_SCOPE_CC:-${CROSS_COMPILE:-aarch64-unknown-linux-musl-}gcc}"
-	for required in usr/local/sbin/liuqin-gnome-storage-guard \
+	for required in usr/local/sbin/liuqin-storage-guard \
 		usr/local/sbin/liuqin-wlan-mac usr/local/sbin/liuqin-bt-public-addr usr/local/libexec/liuqin-backlight-default; do
 		[ -x "$root/$required" ] || die "generic device package misses $required"
 	done
@@ -196,6 +207,7 @@ build_sensors() {
 	root=$work/$pkg/root
 	mkdir -p "$root"
 	tar --extract --file "$sensor_stack" --directory "$root" --no-same-owner
+	python3 "$project_root/build/lib/device_overlay.py" --sensor-policy --out "$root"
 	for required in \
 		usr/bin/hexagonrpcd \
 		usr/bin/ssccli \

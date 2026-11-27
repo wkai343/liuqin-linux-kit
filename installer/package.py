@@ -65,13 +65,13 @@ def package(output, runtime_image=None, recovery_image=None, recovery_variants=(
     embedded = {}
     paired=False
     native_connection='USB ADB';contains_adbd=False;default_installer=False
-    if native_installer is not None and native_recovery is None:raise RuntimeError('安装候选必须与默认只读原生 Rec 分开打包。')
+    if native_installer is not None and native_recovery is None:raise RuntimeError('附加临时安装版需要同时提供默认原生 Recovery 镜像。')
     if universal_candidate is not None and native_recovery is None:raise RuntimeError('通用候选只作为原生维护包的独立附加产物。')
     if native_variants and native_recovery is None:raise RuntimeError('额外原生镜像需要原生 Recovery 主包。')
-    if fixed_installer is not None and native_recovery is None:raise RuntimeError('固定安装版需要同时打包默认临时安装环境。')
+    if fixed_installer is not None and native_recovery is None:raise RuntimeError('固定安装版需要同时提供默认的临时启动镜像。')
     if native_recovery is not None:
         if runtime_image is not None or recovery_image is not None or recovery_variants:
-            raise RuntimeError('原生 Recovery 测试包与其他默认安装环境分开打包。')
+            raise RuntimeError('原生 Recovery 与其他默认安装环境分开打包。')
         from liuqin_artifacts import boot_interface
         native_recovery=Path(native_recovery).resolve()
         native_info=boot_interface(native_recovery,installer=True)
@@ -130,9 +130,9 @@ def package(output, runtime_image=None, recovery_image=None, recovery_variants=(
         from liuqin_artifacts import boot_interface
         from liuqin_native_install import capable
         candidate=Path(native_installer).resolve();info=boot_interface(candidate,installer=True)
-        if not capable(info.get('native_recovery_manifest',{})):raise RuntimeError('这不是具备完整受控写入能力的原生安装候选。')
+        if not capable(info.get('native_recovery_manifest',{})):raise RuntimeError('所选原生 Recovery 缺少安装所需的受控写入能力。')
         if info['native_recovery_manifest'].get('fixed_installer_version')==1:raise RuntimeError('固定安装版请使用 --fixed-installer 打包。')
-        if info['native_recovery_manifest'].get('native_adb_version')!=1:raise RuntimeError('安装候选必须使用 ADB。')
+        if info['native_recovery_manifest'].get('native_adb_version')!=1:raise RuntimeError('临时安装版必须使用 ADB。')
         contains_adbd=True
         prefix='installer/runtime/native-installers/'+hashlib.sha256(candidate.read_bytes()).hexdigest()+'/'
         sources[prefix+'recovery.img']=candidate
@@ -175,8 +175,8 @@ def package(output, runtime_image=None, recovery_image=None, recovery_variants=(
         import hashlib
         for variant in native_variants:
             variant=Path(variant).resolve();info=boot_interface(variant,installer=True)
-            if info.get('native_recovery_manifest',{}).get('native_adb_version')!=1:raise RuntimeError('额外原生镜像必须提供 ADB 安装通道。')
-            if info['native_recovery_manifest'].get('inspection_only') is not True:raise RuntimeError('安装候选不能进入只读原生镜像目录。')
+            if info.get('native_recovery_manifest',{}).get('native_adb_version')!=1:raise RuntimeError('附加的只读维护版必须支持 ADB。')
+            if info['native_recovery_manifest'].get('inspection_only') is not True:raise RuntimeError('只读维护版目录仅接收只读镜像。')
             digest=hashlib.sha256(variant.read_bytes()).hexdigest()
             if digest==hashlib.sha256(Path(native_recovery).read_bytes()).hexdigest():continue
             sources['installer/runtime/native-recoveries/'+digest+'/recovery.img']=variant
@@ -224,7 +224,8 @@ def package(output, runtime_image=None, recovery_image=None, recovery_variants=(
     for name in ('install-gui.py', 'install-liuqin.py', 'package.py', 'README.md', 'STATUS.txt',
                  'pyproject.toml', 'uv.lock', '.python-version', 'start-windows.cmd'):
         sources['installer/' + name] = PROJECT / 'installer' / name
-    for name in ('device/boot/boot-target-v1.sh', 'LICENSE', 'NOTICE', 'CREDITS.md', 'installer/requirements.txt'):
+    for name in ('device/boot/boot-target-v1.sh', 'device/boot/root-interface-v2.sh',
+                 'LICENSE', 'NOTICE', 'CREDITS.md', 'installer/requirements.txt'):
         sources[name] = PROJECT / name
     # Bundle maintained guides and images once; rewrite links to omitted source files.
     for path in sorted((PROJECT/'docs').glob('*.md')):
@@ -234,10 +235,10 @@ def package(output, runtime_image=None, recovery_image=None, recovery_variants=(
     if native_recovery is not None:sources['installer/STATUS.txt']=PROJECT/'build/recovery/NATIVE-STATUS.txt'
     if native_recovery is not None and native_info['native_recovery_manifest'].get('native_adb_version')==1:
         status=Path(native_recovery).parent/'STATUS.txt'
-        if not status.is_file():raise RuntimeError('ADB 原生 Rec 缺少候选状态说明。')
+        if not status.is_file():raise RuntimeError('原生 ADB Recovery 缺少镜像状态说明 STATUS.txt。')
         sources['installer/STATUS.txt']=status
     if native_installer is not None:
-        embedded['installer/STATUS.txt']=sources.pop('installer/STATUS.txt').read_bytes()+('\n本文件上述只读限制对应默认镜像。另附原生安装候选位于 installer/runtime/native-installers/。启动安装器时可用 --recovery-image 指定镜像，再临时启动。能力与验收范围见 docs/NATIVE-RECOVERY-INSTALLER.md。\n').encode()
+        embedded['installer/STATUS.txt']=sources.pop('installer/STATUS.txt').read_bytes()+('\n上述状态说明对应默认镜像。另附的临时安装版位于 installer/runtime/native-installers/。启动安装器时可用 --recovery-image 指定镜像，再临时启动。能力与验收范围见 docs/NATIVE-RECOVERY-INSTALLER.md。\n').encode()
     required = ('installer/install-gui.py', 'installer/install-liuqin.py', 'installer/liuqin_gui/worker.py',
                 'installer/liuqin_gui/qml/Main.qml', 'shared/liuqin_artifacts.py', 'shared/liuqin_layout.py',
                 'shared/liuqin-rom-images.json', 'shared/liuqin_multiboot.py', 'shared/liuqin_boot_target.py',
@@ -276,12 +277,12 @@ def package(output, runtime_image=None, recovery_image=None, recovery_variants=(
             ('原生 Recovery 以自带启动资源提供分区管理和系统安装。具体镜像的实测范围和 SHA256 见 installer/STATUS.txt，不代表所有固件兼容。\n\n' if native_recovery is not None else
              '使用配套原生 ADB Rec，或连接已有且能核验本地镜像的安装环境。ROM 名称不提供兼容资格，实际角色、固件、运行载荷与备份按流程检查。\n\n') +
             '分区名最多 16 个 ASCII 字符，Linux rootfs 使用 lqr_ 加 12 位十六进制标识。\n\n' +
-            ('本包内置完整 ROM 安装环境，通过 ADB 连接。连接和读取分区保持只读，备份并确认完整方案后才刷写。选择 ROM 即按包处理系统、固件和 Recovery；分区及 Linux 功能保留。默认启动镜像通过 Fastboot 临时加载。说明见 docs/FULL-ROM-FLASH.md。\n\n' if default_installer else
-             '本包主镜像为只读原生 Rec，通过 '+native_connection+' 连接，提供维护菜单和日志导出。写入需要实际运行具有对应能力的安装版；固定版另看自身角色与资格，不能直接刷入本临时主镜像。见 installer/STATUS.txt 和 docs/NATIVE-RECOVERY-INSTALLER.md。\n\n' if native_recovery is not None else
+            ('本包主镜像为临时安装版 Recovery，通过 ADB 连接，支持完整 ROM 安装。连接和读取分区保持只读，备份并确认完整方案后才刷写。选择 ROM 即按包处理系统、固件和 Recovery；分区及 Linux 功能保留。默认启动镜像通过 Fastboot 临时加载。说明见 docs/FULL-ROM-FLASH.md。\n\n' if default_installer else
+             '本包主镜像为只读维护版 Recovery，通过 '+native_connection+' 连接，提供维护菜单和日志导出。写入需要实际运行具有对应能力的安装版；固定版另看自身角色与资格，不能直接刷入本临时主镜像。见 installer/STATUS.txt 和 docs/NATIVE-RECOVERY-INSTALLER.md。\n\n' if native_recovery is not None else
              '本包为历史 TWRP 配套后端的临时镜像与 ADB 服务；不能把该镜像作为已验收的原生固定版。当前日常使用原生 ADB 包，见 docs/NATIVE-RECOVERY.md。\n\n' if paired else
              '本包已内置 RAM 安装环境；OS 材料另行选择。\n\n' if runtime_image else '源码包未内置运行环境，请先构建配套 Recovery，或使用内置 Recovery 的分发包。\n\n') +
             ('连接正在运行的原生 Recovery 后，可进入 ROM 内容与安装后 Rec 条件预览。完整 OTA v2 与历史基线分析分开，预览不授予写入权限。见 docs/FULL-ROM-FLASH.md。\n\n' if native_recovery is not None else '') +
-            ('本包另含独立的原生安装版。可用 --recovery-image 指定，再从 Fastboot 临时启动；实际范围以该镜像状态和对应验收为准。见 docs/NATIVE-RECOVERY-INSTALLER.md。\n\n' if native_installer is not None else '') +
+            ('本包另附临时安装版 Recovery。可用 --recovery-image 指定，再从 Fastboot 临时启动；实际范围以该镜像状态和对应验收为准。见 docs/NATIVE-RECOVERY-INSTALLER.md。\n\n' if native_installer is not None else '') +
             ('本包附带固定安装版的校验镜像。平板进入对应固定 Rec 后，GUI 自动识别并连接；安装与默认引导切换沿用确认流程。固定镜像位于 installer/runtime/fixed-installers/。\n\n' if fixed_installer is not None else '') +
             ('从 Bootloader Fastboot 临时启动本包内的新版 Rec。在平板点「系统列表」，选择目标并确认切换；「启动默认系统」退出并开机。维护工具提供信息、只读分区、日志和亮度。固定版资格以其对应记录为准，不继承临时版验收。\n\n' if native_recovery is not None and native_info['native_recovery_manifest'].get('tablet_boot_switch_version')==1 else '') +
             ('新版 Rec 在完整确认 UFS 枚举后提前结束启动等待。存储验证通过后再启动触控与 ADB。启动耗时可在 Recovery 日志中复核。\n\n' if native_recovery is not None and native_info['native_recovery_manifest'].get('recovery_fast_start_version')==1 else '') +

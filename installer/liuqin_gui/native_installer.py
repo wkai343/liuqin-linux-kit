@@ -10,7 +10,7 @@ class NativeInstallerMixin:
     def installer_enabled(self):return capable(self.engine.manifest.get('native_recovery_manifest',{}))
 
     def native_rpc(self,action,request,image=None):
-        if not self.installer_enabled:raise InstallerError('当前 Rec 没有安装能力，请使用独立安装候选。')
+        if not self.installer_enabled:raise InstallerError('当前 Recovery 仅支持只读维护。安装请使用临时安装版或固定安装版。')
         token=uuid.uuid4().hex;payload={};peer=self.http_peer
         class Handler(http.server.BaseHTTPRequestHandler):
             def log_message(self,*args):pass
@@ -48,8 +48,10 @@ class NativeInstallerMixin:
 
     def validate_linux_install(self):
         if not self.installer_enabled:raise InstallerError('只读 Rec 不能安装 rootfs。')
-        expected=self.engine.manifest['native_recovery_manifest']['payload_sha256']['usr/lib/liuqin/install-root.sh']
-        if digest_file(DEVICE_SCRIPTS/'install-root.sh')!=expected:raise InstallerError('电脑 rootfs 安装脚本与 Rec 中绑定的版本不同。')
+        payload=self.engine.manifest['native_recovery_manifest']['payload_sha256']
+        for script in (DEVICE_SCRIPTS/'install-root.sh', DEVICE_SCRIPTS.parent/'boot/root-interface-v2.sh'):
+            if digest_file(script)!=payload.get('usr/lib/liuqin/'+script.name):
+                raise InstallerError(f'电脑与 Rec 的 {script.name} 版本不同，请使用配套 Recovery。')
 
     def install_root(self,*args,**kwargs):
         self.validate_linux_install()

@@ -12,6 +12,14 @@ from .engine import InstallerError
 
 PROJECT=Path(__file__).resolve().parents[2]
 
+def native_recovery_label(probe):
+    if probe.get('fixed_installer_version') == 1:
+        return '原生 ADB Recovery（固定安装版）'
+    if probe.get('installer_version') == 1:
+        return '原生 ADB Recovery（临时安装版）'
+    return '原生 ADB Recovery（只读维护版）'
+
+
 def catalog():
     try:return load_catalog()
     except (ValueError,OSError) as error:raise InstallerError('原生 Recovery 适配表无效：'+str(error)) from error
@@ -55,7 +63,7 @@ def installer_status(snapshot,manifest):
     from liuqin_universal_recovery import load_catalog as universal_catalog
     validate_snapshot(snapshot);slot=snapshot['slots']['a'];match=slot.get('match',{})
     result=dict(native_installer_candidate=True,install_allowed=False,inspection_only=True,automatic_boot_allowed=False,auto_selected=False,
-        build_id=manifest.get('build_id'),reason='安装候选仅通过离线验证；当前固件或布局未匹配，保持只读。')
+        build_id=manifest.get('build_id'),reason='当前 Recovery、固件或分区布局未满足安装条件，保持只读。')
     if not capable(manifest) or snapshot['active_slot']!='a' or slot['status']!='complete':return result
     bases=universal_catalog()['policy']['baselines']
     known_abl=any(match.get('abl',{}).get('sha256')==b['abl_partition_sha256'] and match['abl']['partition_bytes']==b['abl_partition_bytes'] for b in bases)
@@ -64,12 +72,12 @@ def installer_status(snapshot,manifest):
         match.get('dtbo')==p['projected']['dtbo']['measurement'] for p in roms() if p.get('current_firmware_admitted',True))
     known_dtbo=any(match.get('dtbo')==p['projected']['dtbo']['measurement'] for p in roms() if p.get('current_firmware_admitted',True))
     if known_abl and (known_rom or (manifest.get('generic_ota_version',0)>=1 and known_dtbo)) and match.get('layout')==dict(boot=201326592,vendor_boot=100663296,recovery=104857600):
-        result.update(install_allowed=True,inspection_only=False,reason='安装候选：当前固件条件匹配。默认存储只读；备份并确认完整计划后才允许受控写入。安装写入尚未真机验收，不会自动重启。')
+        result.update(install_allowed=True,inspection_only=False,reason='当前固件条件匹配。存储默认只读，备份并确认完整计划后才允许受控写入。完成后留在 Recovery。')
     elif manifest.get('generic_ota_version',0)>=2 and match.get('layout')==dict(boot=201326592,vendor_boot=100663296,recovery=104857600):
         result.update(install_allowed=True,inspection_only=False,reason='原生 Rec 已运行，按实际分区检查和完整 ROM 清单准备安装。固件版本不同会列入更新计划。')
     elif manifest.get('generic_ota_version',0)>=1 and match.get('layout')==dict(boot=201326592,vendor_boot=100663296,recovery=104857600):
         result.update(install_allowed=True,inspection_only=False,ota_only=True,reason='当前固件未收录。仅开放通用 OTA 的准备检查；必须逐项证明固件与 DTBO 无需改变，禁止 GPT 编辑和 Linux 写入。')
-    if result['install_allowed'] and manifest.get('fixed_installer_version')==1:
+    if result['install_allowed'] and not result.get('ota_only') and manifest.get('fixed_installer_version')==1:
         result['reason']='固定版安装环境已连接。备份并确认方案后可管理分区、安装 Android/Linux 和切换默认系统。'
     return result
 
@@ -126,7 +134,7 @@ def selection(snapshot,selected,records=None,profiles=None):
         if candidate['manifest'].get('fixed_installer_version')==1:
             status.update(fixed_installer=True,universal_candidate=None)
         if candidate['build_id']!=snapshot['runtime_build_id']:
-            status.update(ready=False,install_allowed=False,reason='所选安装候选尚未运行。请手动回到 Bootloader Fastboot，再点击读取分区临时启动；当前 Rec 保持不变。')
+            status.update(ready=False,install_allowed=False,reason='所选临时安装版尚未运行。请手动回到 Bootloader Fastboot，再点击读取分区临时启动；当前 Rec 保持不变。')
             if candidate['manifest'].get('fixed_installer_version')==1:
                 status['reason']='请在平板进入与所选镜像一致的固定 Recovery，再读取分区。'
         return candidate['path'],status
@@ -134,7 +142,7 @@ def selection(snapshot,selected,records=None,profiles=None):
     if adb:
         ready=adb['build_id']==snapshot['runtime_build_id']
         status.update(native_adb_candidate=True,ready=ready,auto_selected=False,automatic_boot_allowed=False,install_allowed=False,inspection_only=True,
-            build_id=adb['build_id'],image_sha256=adb['image_sha256'],reason='当前是 ADB 只读候选，可读取分区和分析 ROM；没有安装写入权限。' if ready else '所选 ADB Rec 尚未运行，请手动回到 Fastboot 后明确临时启动。')
+            build_id=adb['build_id'],image_sha256=adb['image_sha256'],reason='当前是 ADB 只读维护版，可读取分区和分析 ROM；没有安装写入权限。' if ready else '所选 ADB Rec 尚未运行，请手动回到 Fastboot 后明确临时启动。')
         return adb['path'],status
     if profile is None:
         reasons={'unknown':'固件指纹尚未收录','mismatch':'已识别 ABL，但其他固件或启动分区布局不匹配','incomplete':'固件指纹不完整'}
@@ -199,6 +207,6 @@ def assess_connected_transport(transport,probe):
         status['ready']=True;status['reason']+=' 当前会话保持只读检查。'
     engine.receipt['firmware_fingerprint']=snapshot
     engine.receipt['native_recovery_selection']=status;engine.save_receipt()
-    label='固定 Recovery（安装环境）' if probe.get('fixed_installer_version')==1 else '原生 Recovery（安装候选）' if probe.get('installer_version')==1 else '原生 Recovery（只读维护）'
+    label=native_recovery_label(probe)
     engine.emit('firmware',firmware=snapshot,compatibility=status,runtime_path=path,environment=dict(serial=probe['serial'],kind='native-recovery',label=label,transport='adb-native',properties=probe,firmware=snapshot))
     return snapshot

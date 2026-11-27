@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 # SPDX-License-Identifier: MIT
-"""查看、切换或保存 Liuqin 原厂 CABC 策略；不调整电压、频率或亮度。"""
+"""查看、切换或保存 Liuqin 面板的内容自适应背光控制（CABC）模式。"""
 import argparse
 import json
 import os
@@ -39,7 +39,7 @@ def select(node, mode):
 def read_config(path=CONFIG):
     data = json.loads(path.read_text())
     if not isinstance(data, dict) or set(data) != {'cabc'} or data['cabc'] not in MODES:
-        raise ValueError('显示策略配置无效；格式应为 {"cabc": "off|ui|still|movie"}。')
+        raise ValueError('面板 CABC 配置无效，应为 {"cabc": "off|ui|still|movie"}。')
     return data['cabc']
 
 
@@ -65,18 +65,18 @@ def save(mode, path=CONFIG):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest='action', required=True)
-    sub.add_parser('status', help='查看请求与发送状态')
-    switch = sub.add_parser('set', help='切换模式；不加 --save 时仅本次启动有效')
+    sub.add_parser('status', help='查看面板请求的 CABC 模式及命令发送状态')
+    switch = sub.add_parser('set', help='切换本次启动的 CABC 模式')
     switch.add_argument('mode', choices=MODES)
-    switch.add_argument('--save', action='store_true', help='同时保存为之后的开机策略')
-    sub.add_parser('apply', help='应用保存的策略，供启动服务调用')
+    switch.add_argument('--save', action='store_true', help='保存此 CABC 模式，供以后开机时恢复')
+    sub.add_parser('apply', help='恢复保存的 CABC 模式')
     args = ap.parse_args()
     try:
         if args.action == 'status':
             result = status(panel())
         else:
             if os.geteuid() != 0:
-                raise ValueError('修改显示策略需要 sudo。')
+                raise ValueError('修改面板 CABC 模式需要 sudo。')
             if args.action == 'apply':
                 if not CONFIG.exists():
                     return
@@ -98,7 +98,7 @@ def main():
                 result['saved'] = str(CONFIG)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except (OSError, ValueError) as e:
-        ap.exit(1, '显示策略：'+str(e)+'\n')
+        ap.exit(1, '面板 CABC：'+str(e)+'\n')
 
 
 if __name__ == '__main__':

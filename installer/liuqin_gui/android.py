@@ -28,7 +28,7 @@ def select_profile(engine,path):
     elif source and source.is_dir() and (source/native_ota.PROFILE).is_file():
         profile=native_ota.read_profile(source,engine.check_cancel)
     elif source and source.suffix.lower()=='.zip':
-        if engine.manifest.get('native_recovery_manifest',{}).get('generic_ota_version',0)<2:raise InstallerError('请临时启动新版完整 ROM 安装候选；旧 Rec 可继续只读检查。')
+        if engine.manifest.get('native_recovery_manifest',{}).get('generic_ota_version',0)<2:raise InstallerError('请使用支持完整 ROM 安装的 Recovery。当前版本可继续只读检查。')
         engine.phase('android_plan',detail='导入完整 ROM')
         profile,directory=native_ota.import_profile(source,engine.state_dir/'rom-cache',engine.check_cancel)
     else:profile=load_profile(identify_profile(path))

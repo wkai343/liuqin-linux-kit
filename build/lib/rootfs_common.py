@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 """Shared Fedora rootfs assembly helpers (no distribution/tool-runtime CLI)."""
 import json
@@ -9,11 +8,10 @@ import secrets
 import shutil
 import stat
 import subprocess
-import sys
+
+from source_build import sha
 
 PROJECT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(PROJECT / 'build/lib'))
-from source_build import sha
 
 
 def recipe(path, distribution='fedora'):
@@ -26,9 +24,8 @@ def recipe(path, distribution='fedora'):
             raise ValueError(field + ' 必须是软件包名称列表。')
     if set(data.get('remove',[])) & {'systemd','systemd-sysv','systemd-udev','udev','sudo','python3','kmod','network-manager','NetworkManager'}:
         raise ValueError('不能移除必要的启动或管理组件。')
-    # Explicit old account recipes retain their preconfigured-account behavior.
-    data.setdefault('first_boot_setup', 'user' not in data)
-    if not isinstance(data['first_boot_setup'],bool):raise ValueError('first_boot_setup 必须是 true 或 false。')
+    if not isinstance(data.get('first_boot_setup'), bool):
+        raise ValueError('配方必须显式设置 first_boot_setup 为 true 或 false。')
     data.setdefault('hostname','liuqin')
     if data['first_boot_setup']:
         if data.get('user') is not None or data.get('password_file') is not None:

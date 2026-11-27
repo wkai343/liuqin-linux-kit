@@ -24,7 +24,7 @@ class NativeRecoveryTransport(NativeAdbMixin,NativeInstallerMixin,Transport):
         if args and args[0]=='boot' and self.engine.manifest['native_recovery_manifest'].get('usage')==FIXED_USAGE:
             raise InstallerError('固定安装版需要从 Recovery 分区启动；临时启动请使用配套临时镜像。')
         if not args or args[0] not in ('getvar','boot'):
-            raise InstallerError('原生 Recovery 测试版仅开放检查，禁止引导刷写、切槽和自动重启。')
+            raise InstallerError('原生 Recovery 的 Fastboot 入口仅支持查询和临时启动。')
         return super().fastboot(*args,**kwargs)
 
     def validate_probe(self,value):
@@ -40,7 +40,7 @@ class NativeRecoveryTransport(NativeAdbMixin,NativeInstallerMixin,Transport):
         operation=self.engine.receipt.get('operation')
         maintenance = operation == 'boot-store' and self.engine.manifest['native_recovery_manifest'].get('boot_store_version') == 1
         if operation!='scan-partitions' and (not self.installer_enabled or (operation not in ('backup','wizard','linux-managed','android','scan-layout') and not maintenance)):
-            raise InstallerError('原生 Recovery 当前仅供启动与只读分区检查；安装、格式化和系统切换尚未开放。')
+            raise InstallerError('当前 Recovery 不支持所请求的操作。')
         try:value=self.probe_current()
         except (OSError,RuntimeError,ValueError,KeyError,subprocess.SubprocessError):value=None
         if value and value.get('serial')==self.serial:
@@ -58,7 +58,7 @@ class NativeRecoveryTransport(NativeAdbMixin,NativeInstallerMixin,Transport):
             props=environment['properties']
             if 'liuqin' not in (props.get('device'),props.get('vendor_device')):
                 raise InstallerError('当前 Android 设备不是 liuqin。')
-            self.engine.emit('notice',message='将临时启动原生 Recovery 工程镜像，只检查分区，不安装或修改系统。')
+            self.engine.emit('notice',message='即将进入 Bootloader 并临时启动所选原生 Recovery，读取分区。')
             host.run_process([host.adb_path(),'-s',self.serial,'reboot','bootloader'],capture_output=True,timeout=15,check=True)
             from .recovery_transport import RecoveryTransport
             RecoveryTransport.wait_bootloader(self)
@@ -126,7 +126,7 @@ class NativeRecoveryTransport(NativeAdbMixin,NativeInstallerMixin,Transport):
 
     def android_rpc(self,action,request):
         from liuqin_native_install import READ_ACTIONS,WRITE_ACTIONS
-        if not self.installer_enabled and action!='partition-inspect':raise InstallerError('原生 Recovery 测试版拒绝修改分区或系统。')
+        if not self.installer_enabled and action!='partition-inspect':raise InstallerError('只读维护版 Recovery 拒绝修改分区或系统。')
         if self.installer_enabled:
             if action in WRITE_ACTIONS:request=dict(request,native_token=self.require_native_write().token)
             elif action not in READ_ACTIONS:raise InstallerError('不支持该原生安装操作。')
@@ -137,7 +137,7 @@ class NativeRecoveryTransport(NativeAdbMixin,NativeInstallerMixin,Transport):
             self.status('error');raise
 
     def return_fastboot(self):
-        raise InstallerError('原生 Recovery 测试版保留当前检查环境，不自动重启。')
+        raise InstallerError('原生 Recovery 会保留当前会话，不自动重启。')
 
     def cancel_cleanup(self):
         if not self.boot_id:return

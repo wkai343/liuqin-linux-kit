@@ -1,26 +1,7 @@
-// liuqin: do not gate accelerometer/light claims on logind session-active
-// timing.  gnome-shell's first claim at login races session registration:
-// upstream's allow_active default then denies net.hadess.SensorProxy.claim-sensor
-// for the whole boot and auto-rotation stays dead until a later screen cycle.
-// The orientation and ambient-light readings are not a security boundary on
-// this single-user tablet; any local process may claim them.
+// Allow local accelerometer and ambient-light claims during login, even
+// before logind marks the display session active.
 polkit.addRule(function(action, subject) {
     if (action.id == "net.hadess.SensorProxy.claim-sensor" && subject.local) {
-        return polkit.Result.YES;
-    }
-});
-
-// The login-time proxy refresh runs inside the desktop session (a systemd
-// --user unit, see liuqin-sensor-proxy-session-refresh.service), so the
-// restart request reaches systemd as an unprivileged, session-less user
-// process (user@UID.service is not a logind session; subject.local and
-// subject.active are both false for it).  Do not scope by subject at all:
-// the grant is bounded by unit and verb, and the worst case of a proxy
-// restart is a sub-second gap in orientation/ALS samples.
-polkit.addRule(function(action, subject) {
-    if (action.id == "org.freedesktop.systemd1.manage-units" &&
-        action.lookup("unit") == "iio-sensor-proxy.service" &&
-        action.lookup("verb") == "restart") {
         return polkit.Result.YES;
     }
 });

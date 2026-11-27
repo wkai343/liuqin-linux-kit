@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import tempfile
 import uuid
+from liuqin_artifacts import DEVICE_TEST_LABELS, bundle_test_status
 from liuqin_partition_names import is_root_name
 from liuqin_boot_target import bind
 from .engine import InstallerError,canonical,digest_file
@@ -37,7 +38,7 @@ def connection_payload(engine,payload):
         interface=boot_interface(Path(path),installer=True)
         if 'native_recovery_manifest' in interface:
             from .native_recovery_transport import probe_native
-            from .native_profiles import inspect_running
+            from .native_profiles import inspect_running, native_recovery_label
             if interface['native_recovery_manifest'].get('usb_transport')!='adb':raise InstallerError('旧 USB 网络 Rec 已停用，请选择新版 ADB Rec。')
             try:probe=probe_native(payload['serial'])
             except (OSError,RuntimeError,ValueError,KeyError):probe=None
@@ -46,7 +47,7 @@ def connection_payload(engine,payload):
                 acquired=engine.device_lock is None
                 if acquired:engine.lock_device(payload['serial'])
                 try:
-                    label='固定 Recovery（安装环境）' if probe.get('fixed_installer_version')==1 else '原生 Recovery（安装候选）' if probe.get('installer_version')==1 else '原生 Recovery（只读维护）'
+                    label=native_recovery_label(probe)
                     env=dict(serial=probe['serial'],kind='native-recovery',label=label,transport='adb-native',properties=probe)
                     environment,path,status=inspect_running(engine,env,path)
                     engine.emit('environment',environment=environment,compatibility=status,runtime_path=path)
@@ -69,8 +70,8 @@ def scan(engine,payload):
     inspection_only=bool(native and (native.get('inspection_only') or not engine.device.get('native_install_allowed',False)))
     rows=capabilities(state,engine.device['serial'])
     if inspection_only:
-        summary=dict(summary,can_create=False,reason='原生 Recovery 测试版仅开放读取。')
-        rows=[dict(row,can_install=False,can_delete=False,can_format=False,reason='此测试版仅开放读取。') for row in rows]
+        summary=dict(summary,can_create=False,reason='当前 Recovery 会话仅开放读取。')
+        rows=[dict(row,can_install=False,can_delete=False,can_format=False,reason='当前 Recovery 会话仅开放读取。') for row in rows]
     if engine.device.get('native_ota_only'):
         summary=dict(summary,can_create=False,reason='当前固件仅允许保留分区的通用 OTA。')
         rows=[dict(row,can_install=row['name']=='userdata',can_delete=False,can_format=False,reason='仅支持保留原分区的 Android 通用 OTA。') for row in rows]
@@ -204,6 +205,7 @@ def prepare(engine,payload):
             descriptor=Path(next(iter(source.values()))).parent/PROFILE
             materials[str(descriptor)]=digest_file(descriptor)
             materials[str(descriptor.parent/ARCHIVE)]=profile['archive']['sha256']
+    runtime_hash = engine.manifest['files'][engine.manifest.get('runtime_file', 'installer.img')]
     for name in roots:
         slot=next((s for s in (projected.get('registry') or {}).get('rootfs_slots',[]) if s['partition']['name']==name),None)
         if not slot or slot['status']!='reserved':raise InstallerError('请选择 rootfs，不能把固件或引导存储作为 Linux 安装目标。')
@@ -223,8 +225,14 @@ def prepare(engine,payload):
             except (OSError,ValueError) as error:
                 raise InstallerError(f'{slot["name"]} 引导镜像无法绑定到 {name}：{error}') from error
             bound_size=bound.stat().st_size
-        installations.append(dict(kind='linux',target=name,name=slot['name'],rootfs_id=slot['id'],source=linux_source,
-            set_default=default==name,boot_generation=generation,bound_boot_bytes=bound_size,bound_boot_sha256=bound_sha))
+        test_status = bundle_test_status(linux_source['bundle'], {
+            'boot.img': linux_source['boot_sha256'],
+            'rootfs.tar.gz': linux_source['archive_sha256'],
+            'installer.img': runtime_hash,
+        }, linux_source['kernel_release'])
+        installations.append(dict(kind='linux', target=name, name=slot['name'], rootfs_id=slot['id'],
+            source=linux_source, device_test_status=test_status, set_default=default==name,
+            boot_generation=generation, bound_boot_bytes=bound_size, bound_boot_sha256=bound_sha))
         if engine.manifest.get('native_recovery_manifest',{}).get('sparse_boot_store_version')==1:
             from liuqin_android import sparse_boot_file_bytes
             installations[-1]['store_boot_bytes']=(bound_size+4095)//4096*4096+sparse_boot_file_bytes(previous_boot)
@@ -239,7 +247,7 @@ def prepare(engine,payload):
         materials[rec['path']]=rec['sha256']
     if target_name=='__recovery__' and rec is None:raise InstallerError('请选择 Recovery 镜像和使用方式。')
     if kind=='partitions' and not edit['changes'] and rec is None:raise InstallerError('请选择安装目标或分区操作。')
-    materials[request['installer_path']]=engine.manifest['files'][engine.manifest.get('runtime_file','installer.img')]
+    materials[request['installer_path']]=runtime_hash
     materials[str(previous_boot)]=previous
     snapshot=dict(request=old,connection=request,edit=edit,materials=materials,kind=kind,source=source,
         target=target_name,recovery=rec,recovery_mode=rec_mode,backup_dir=backup,backup_id=record['backup_id'],
@@ -291,11 +299,18 @@ def prepare(engine,payload):
     engine.save_receipt();engine.set_state('prepared')
     destructive=[dict(name=p['name'],action='删除',bytes=p['bytes']) for p in edit['deletes']]
     destructive += [dict(name=p['partition']['name'],action='格式化 '+p['filesystem'],bytes=p['partition']['bytes']) for p in edit['formats']]
-    for job in installations:destructive.append(dict(name=job['target'],action='安装 '+('Android' if job['kind']=='android' else 'Linux'),bytes=projected['inventory'][job['target']]['bytes']))
+    plan_jobs = []
+    for job in installations:
+        row = {k:v for k,v in job.items() if k != 'source'}
+        if job['kind'] == 'linux':
+            row.update(bundle=job['source']['bundle'], device_test_label=DEVICE_TEST_LABELS[job['device_test_status']])
+        plan_jobs.append(row)
+        destructive.append(dict(name=job['target'], action='安装 '+('Android' if job['kind']=='android' else 'Linux'),
+                                bytes=projected['inventory'][job['target']]['bytes']))
     if android_selected or any(p['role']=='android' for p in edit['formats']):destructive.append(dict(name='metadata',action='初始化 Android 加密元数据',bytes=state['inventory']['metadata']['bytes']))
     engine.emit('wizard_plan',plan=dict(plan_id=engine.plan_id,serial=payload['serial'],kind=kind,target=target_name,
         additions=edit['partitions'],destructive=destructive,recovery=rec,recovery_mode=rec_mode,
-        set_default=bool(default),default_target=default,installations=[{k:v for k,v in j.items() if k!='source'} for j in installations],
+        set_default=bool(default),default_target=default,installations=plan_jobs,
         preserved_roots=[n for n in projected['inventory'] if is_root_name(n) and n not in roots and n not in {p['partition']['name'] for p in edit['formats']}],
         backup_dir=backup,backup_reused=backup_reused,rom_backup_dir=snapshot.get('rom_backup_dir',''),
         rom_backups_reused=snapshot.get('rom_backups_reused',0),experimental=True,rom=snapshot.get('rom',''),

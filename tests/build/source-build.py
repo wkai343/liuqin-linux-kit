@@ -24,13 +24,13 @@ import android_images as android
 import source_build as helpers
 import source_flow as flow
 import fedora_flow
+import rootfs_common as root_builder
 import speaker_firmware as speaker
 
 
 def load(name,path):
     spec=importlib.util.spec_from_file_location(name,path);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
 
-root_builder=load('official_root_test',PROJECT/'build/scripts/build-official-root.py')
 builder=load('devbox_test',PROJECT/'build/devbox/build.py')
 
 
@@ -156,18 +156,20 @@ class SourceTests(unittest.TestCase):
         pipeline.data={'kernel_source':str(source)};pipeline.code={};pipeline.memo={}
         pipeline.cache=helpers.Cache(project/'cache',None)
         cases=(
-            ({'expected_source_tree':expected_tree,'tested_source_tree':tested_tree},True),
-            ({'expected_source_tree':tested_tree,'tested_source_tree':expected_tree},False),
-            ({'tested_source_tree':expected_tree},True),
-            ({'tested_source_tree':tested_tree},False),
-            ({'expected_source_tree':'','tested_source_tree':tested_tree},False),
+            ({'expected_source_tree':expected_tree},None),
+            ({'expected_source_tree':expected_tree,'tested_source_tree':tested_tree},None),
+            ({'expected_source_tree':tested_tree,'tested_source_tree':expected_tree},'源码树与核验记录不同'),
+            ({'tested_source_tree':expected_tree},'expected_source_tree'),
+            ({},'expected_source_tree'),
+            ({'expected_source_tree':'','tested_source_tree':expected_tree},'expected_source_tree'),
+            ({'expected_source_tree':'g'*40},'expected_source_tree'),
         )
         with patch.object(flow,'PROJECT',project),patch.object(pipeline,'kernel_source_lock',return_value=lock):
-            for fields,accepted in cases:
+            for fields,error in cases:
                 with self.subTest(fields=fields):
                     current={k:v for k,v in record.items() if k not in ('expected_source_tree','tested_source_tree')}
                     current.update(fields);lock.write_text(json.dumps(current))
-                    if accepted:
+                    if error is None:
                         result,commit=pipeline.kernel_source()
                         self.assertEqual((result/'driver.c').read_text(),'fixed\n')
                         tree=subprocess.check_output(['git','-C',str(result),'rev-parse','HEAD^{tree}'],text=True).strip()
@@ -175,7 +177,7 @@ class SourceTests(unittest.TestCase):
                         self.assertNotEqual(commit,base)
                         self.assertEqual(json.loads(lock.read_text()),current)
                     else:
-                        with self.assertRaisesRegex(ValueError,'源码树与核验记录不同'):
+                        with self.assertRaisesRegex(ValueError,error):
                             pipeline.kernel_source()
         self.assertEqual(git('rev-parse','HEAD'),base)
         self.assertEqual(git('status','--porcelain'),'')
@@ -407,7 +409,7 @@ class SourceTests(unittest.TestCase):
             with self.assertRaises(ValueError):root_builder.recipe(path)
 
 
-    def test_first_boot_recipe_has_no_account_and_preserves_explicit_old_accounts(self):
+    def test_rootfs_recipe_requires_explicit_account_mode(self):
         data=json.loads((PROJECT/'build/rootfs/fedora-plasma.json').read_text());path=self.root/'recipe.json'
         path.write_text(json.dumps(data));normalized=root_builder.recipe(path)
         self.assertTrue(normalized['first_boot_setup']);self.assertNotIn('user',normalized)
@@ -415,7 +417,11 @@ class SourceTests(unittest.TestCase):
         for changes in ({'password_file':'private.txt'},{'user':'pad'},{'first_boot_setup':'true'},{'remove':['plasma-login-manager']}):
             path.write_text(json.dumps(dict(data,**changes)))
             with self.assertRaises(ValueError):root_builder.recipe(path)
-        data.pop('first_boot_setup');data.update(user='pad',password_file=None)
+        data.pop('first_boot_setup')
+        for account in ({}, {'user':'pad'}):
+            path.write_text(json.dumps(dict(data,**account)))
+            with self.assertRaisesRegex(ValueError,'first_boot_setup'):root_builder.recipe(path)
+        data.update(first_boot_setup=False,user='pad',password_file=None)
         path.write_text(json.dumps(data));self.assertFalse(root_builder.recipe(path)['first_boot_setup'])
 
 
@@ -710,15 +716,15 @@ class DevicePackageTests(unittest.TestCase):
                          patch.object(pipeline,'board',return_value=project/'rom'), \
                          patch.object(pipeline,'tools',return_value={'BUSYBOX':str(project/'busybox')}), \
                          patch.object(pipeline,'stage',side_effect=capture):
-                        pipeline.device_debs()
+                        pipeline.device_rpms()
                         (gnome/'policy').write_text((gnome/'policy').read_text()+' changed')
-                        pipeline.device_debs()
+                        pipeline.device_rpms()
                         (board/'policy').write_text((board/'policy').read_text()+' changed')
-                        pipeline.device_debs()
+                        pipeline.device_rpms()
                         composer.write_text(composer.read_text()+' changed')
-                        pipeline.device_debs()
+                        pipeline.device_rpms()
                         speaker_builder.write_text('changed install layout')
-                        pipeline.device_debs()
+                        pipeline.device_rpms()
                     self.assertEqual(records[0],records[1])
                     self.assertNotEqual(records[1],records[2])
                     self.assertNotEqual(records[2],records[3])
@@ -744,6 +750,16 @@ class DevicePackageTests(unittest.TestCase):
                 path=layer/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text('fixture\n');path.chmod(0o755)
             dropin=layer/'etc/systemd/system/iio-sensor-proxy.service.d/90-liuqin-ssc.conf';dropin.parent.mkdir(parents=True)
             dropin.write_text('[Service]\nExecStart=\nExecStart=/usr/local/libexec/liuqin-iio-sensor-proxy\n')
+            rule = Path('etc/polkit-1/rules.d/49-liuqin-sensorproxy.rules')
+            (layer/rule).parent.mkdir(parents=True)
+            (layer/rule).write_text('// obsolete manage-units grant\n')
+            mock = layer/'usr/lib/python3/dist-packages/ssc_server'
+            mock.mkdir(parents=True)
+            (mock/'ssc.py').touch()
+            (layer/'etc/systemd/system/liuqin-sensor-proxy-refresh.service').touch()
+            wants = layer/'etc/systemd/system/graphical.target.wants'
+            wants.mkdir()
+            (wants/'liuqin-sensor-proxy-refresh.service').symlink_to('../liuqin-sensor-proxy-refresh.service')
             archive=root/'sensors.tar'
             subprocess.run(['tar','-C',str(layer),'-cf',str(archive),'.'],check=True)
             out=root/'debs'
@@ -752,6 +768,9 @@ class DevicePackageTests(unittest.TestCase):
                          SENSOR_STACK_SHA256=helpers.sha(archive),OUT_DIR=str(out)))
             package=next(out.glob('liuqin-sensors_*.deb'));extracted=root/'extracted'
             subprocess.run(['dpkg-deb','-x',str(package),str(extracted)],check=True)
+            self.assertEqual(list(extracted.rglob('*refresh*')), [])
+            self.assertFalse((extracted/mock.relative_to(layer)).exists())
+            self.assertEqual((extracted/rule).read_bytes(), (PROJECT/'device/sensors-overlay'/rule).read_bytes())
             actual={path.name for path in (extracted/'usr/lib/aarch64-linux-gnu').iterdir()}
             self.assertEqual(actual,{'libhexagonrpc.so.0.5','libssc.so.2'})
             dependencies=subprocess.check_output(['dpkg-deb','-f',str(package),'Depends'],text=True)
@@ -770,9 +789,16 @@ class DevicePackageTests(unittest.TestCase):
             subprocess.run(['dpkg-deb','-x',str(package),str(extracted)],check=True)
             depends=subprocess.check_output(['dpkg-deb','-f',str(package),'Depends'],text=True)
             provides=subprocess.check_output(['dpkg-deb','-f',str(package),'Provides'],text=True)
-            self.assertIn('liuqin-storage-policy-ufs (= 1)',provides)
+            self.assertIn('liuqin-storage-policy-ufs (= 2)',provides)
             self.assertNotIn('gnome-control-center',depends)
-            self.assertTrue((extracted/'usr/local/sbin/liuqin-gnome-storage-guard').is_file())
+            self.assertTrue((extracted/'usr/local/sbin/liuqin-storage-guard').is_file())
+            activation = extracted/'etc/systemd/system/basic.target.requires/liuqin-storage-guard.service'
+            self.assertEqual(activation.readlink(), Path('../liuqin-storage-guard.service'))
+            self.assertIn('ExecStart=/usr/local/sbin/liuqin-storage-guard', activation.read_text().splitlines())
+            retired = '/etc/chrony/conf.d/90-liuqin-no-rtc-bootstrap.conf'
+            self.assertFalse((extracted/retired.lstrip('/')).exists())
+            conffiles = subprocess.check_output(['dpkg-deb','-I',str(package),'conffiles'],text=True)
+            self.assertIn('remove-on-upgrade ' + retired, conffiles.splitlines())
             self.assertFalse((extracted/'usr/local/libexec/liuqin-power-key-action').exists())
             self.assertFalse((extracted/'usr/local/bin/liuqin-camera').exists())
             self.assertTrue((extracted/'usr/lib/systemd/sleep.conf.d/30-liuqin-suspend.conf').is_file())

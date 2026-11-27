@@ -46,7 +46,9 @@ devbox run build -- --target packages
 | `liuqin-kernel-updates` | 指向推荐版本的元包 |
 | `liuqin-boot-tools` | 计划、升级、确认与恢复工具 |
 
-设备支持包与启动镜像须一起升级。UFS 保护要求 `liuqin-storage-policy-ufs >= 1`，由 `liuqin-device-support` 提供；安装器和引导更新器会检查配套文件。`liuqin-boot-tools` 依赖 `python3-zstandard` 以读取 Zstd 镜像。
+`liuqin-device-support` 提供 `liuqin-storage-policy-ufs = 2`，安装并启用 `liuqin-storage-guard.service`。V2 标识新的脚本和服务路径，内置 UFS 的读写规则沿用原设计。引导工具从 `0.1.8` 起检查新路径，读取 Zstd 镜像需要 `python3-zstandard`。
+
+以下系统内更新步骤适用于已使用 V2 的根系统。从 V1 迁移须配套更换 boot、根系统的设备支持包和引导工具，安装 Linux 根系统还需使用含新路径检查的 Recovery。旧 boot 依赖旧服务名，单独更换设备包会使它在下次启动时拒绝进入根系统。
 
 迁移脚本会停用已移除的 USB 服务，只清理与已发布载荷一致的文件；管理员修改过的文件和符号链接保留并提示检查。旧 boot 若依赖这些文件，回退时须恢复对应设备包。回退时使用与目标内核同批的模块和设备包。
 

@@ -524,16 +524,6 @@ class Engine:
     def validate_bundle(self, directory):
         self.phase('validate_bundle')
         bundle = Path(directory).expanduser().resolve()
-        manifest_path = bundle / 'bundle.json'
-        # Metadata is optional. The three actual artifacts define the package.
-        metadata = {}
-        if manifest_path.is_file() and not manifest_path.is_symlink() and manifest_path.stat().st_size <= 1024 * 1024:
-            try:
-                value = json.loads(manifest_path.read_text(encoding='utf-8'))
-                if isinstance(value, dict):
-                    metadata = value
-            except (ValueError, UnicodeError):
-                pass
         total = 0
         def artifact_path(name):
             return Path(self.runtime_path) if name=='installer.img' and getattr(self,'runtime_path',None) else bundle/name
@@ -567,14 +557,11 @@ class Engine:
             except (artifacts.ArtifactError, ValueError, OSError, EOFError) as error:
                 raise InstallerError(str(error)) from error
             self._artifact_cache = (hashes, interface)
-        tested = (metadata.get('device') == 'liuqin' and metadata.get('files') == hashes
-                  and metadata.get('kernel_release') == interface['kernel_release']
-                  and metadata.get('status') == 'DEVICE_TESTED')
         runtime_name='native-recovery.img' if 'native_recovery_manifest' in interface else 'recovery.img' if 'recovery_manifest' in interface else 'installer.img'
         actual_hashes={runtime_name if name=='installer.img' else name:digest for name,digest in hashes.items()}
         manifest = dict(device='liuqin', files=actual_hashes, runtime_file=runtime_name, **interface,
                         installer_layouts=['linux-single'], single_root_boot_slot='a',
-                        status='DEVICE_TESTED' if tested else 'CUSTOM_UNVERIFIED')
+                        status=artifacts.bundle_test_status(bundle, hashes, interface['kernel_release']))
         self.bundle, self.manifest = bundle, manifest
         self.manifest_digest = hashlib.sha256(canonical(manifest)).hexdigest()
         self.rootfs_bytes = (bundle / 'rootfs.tar.gz').stat().st_size
@@ -611,7 +598,7 @@ class Engine:
             installer_kernel_release=interface['kernel_release'], installer_kernel_sha256=interface['kernel_sha256'],
             kernel_release=interface['kernel_release'], installer_android_version=interface['android_version'],
             installer_multiboot_version=interface['multiboot_version'],
-            filesystems=interface['filesystems'], status='CUSTOM_UNVERIFIED',
+            filesystems=interface['filesystems'], status='RUNTIME_ONLY',
             **({key:interface[key] for key in ('recovery_manifest','native_recovery_manifest') if key in interface}))
         self.bundle, self.manifest = bundle, manifest
         self.manifest_digest = hashlib.sha256(canonical(manifest)).hexdigest()
@@ -619,7 +606,7 @@ class Engine:
         self.emit('bundle', valid=True, path=str(bundle), kernel=manifest['kernel_release'],
             filesystems=manifest['filesystems'], layouts=(['android-manage', 'partition-only', 'partition-reset'] if interface['android_version']==1 and interface['multiboot_version']==1 else []),
             host_compatible=not host.IS_WINDOWS or self.simulation or interface['usb_network'] in ('adb-native','adb'),
-            status='CUSTOM_UNVERIFIED', experimental=True)
+            status='RUNTIME_ONLY', experimental=True)
 
     def guard_operation(self):
         if self.state in ('preparing', 'backing_up', 'prepared', 'installing','rom_analyzing'):
@@ -952,7 +939,7 @@ class Engine:
                 consent.get('erase_userdata') is not True):
             raise InstallerError('确认必须绑定当前设备及方案，并明确确认数据备份和清除。')
         if self.manifest.get('status') != 'DEVICE_TESTED' and consent.get('allow_experimental') is not True:
-            raise InstallerError('此安装包仍为实验状态，需要在确认页明确接受。')
+            raise InstallerError('该安装包缺少匹配的实机验收记录，需要在确认页明确接受。')
         self.committing = True
         self.set_state('installing')
         self.phase('revalidate')

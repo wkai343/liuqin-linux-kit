@@ -11,7 +11,7 @@ Before=basic.target network-pre.target display-manager.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/sbin/liuqin-gnome-storage-guard
+ExecStart=/usr/local/sbin/liuqin-storage-guard
 RemainAfterExit=yes
 
 [Install]

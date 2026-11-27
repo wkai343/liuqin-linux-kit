@@ -193,7 +193,7 @@ HFP 为完整双路图像宽度；DSC 只压缩有效像素，表中的 DRM 时�
 
 三个 `liuqin_live_*` 开关在驱动未收到参数时默认为关闭。旧镜像不会随仓库配置更新而改变。
 桌面还启用 `msm.liuqin_oem_video_order=1`、`msm.liuqin_oem_shutdown_order=1` 和
-`msm.liuqin_cmd_dma_schedule=1`，保持 `msm.liuqin_oem_clk_gating=0`。
+`msm.liuqin_cmd_dma_schedule=1`。DSI 驱动默认关闭像素时钟和主 PHY 的原厂门控。
 未知面板或缺少双 DSI 能力接口时使用完整模式切换。
 
 DPU 关闭链路时，先清空软件缓存中的上一帧刷新请求，再构造本次关闭所需的更新。
@@ -326,7 +326,8 @@ Plasma 会话、未合盖且未接外屏时，等待真实内屏就绪后补发�
 它以独立 RPM 安装，不替换或锁定 Fedora PowerDevil/KWin/Mesa；
 源码、启用、移除与定向验收方法见该服务说明。普通熄屏及后台/未知唤醒不补偿。
 
-内核校准恢复与面板告警会话服务独立。后者只操作当前活动 Wayland 会话，核对 GPIO 电平后关闭、重新开启输出，
+内核校准恢复与面板告警会话服务独立。后者通过当前活动 Wayland 会话的 `kscreen-doctor --dpms off/on` 恢复内屏。
+这两个命令作用于所有输出。每次发送前，服务都检查 KWin 输出和 DRM 物理接口，仅在内屏启用且外屏全部断开时发送。
 每用户每 10 分钟最多两次、间隔至少 60 秒；关屏时不触发，也不把 CABC 下 PWM 为零单独视为故障。
 
 ```sh

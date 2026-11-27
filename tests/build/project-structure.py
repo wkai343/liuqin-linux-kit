@@ -79,9 +79,9 @@ class StructureTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / 'build/scripts').mkdir(parents=True)
-            shutil.copyfile(PROJECT / 'build/scripts/build-liuqin-custom-root.py', root / 'build/scripts/build-liuqin-custom-root.py')
+            shutil.copyfile(PROJECT / 'build/scripts/pack-liuqin-rootfs.py', root / 'build/scripts/pack-liuqin-rootfs.py')
             shutil.copytree(PROJECT / 'shared', root / 'shared', ignore=shutil.ignore_patterns('__pycache__'))
-            result = subprocess.run([sys.executable, root / 'build/scripts/build-liuqin-custom-root.py', '--help'], capture_output=True, text=True)
+            result = subprocess.run([sys.executable, root / 'build/scripts/pack-liuqin-rootfs.py', '--help'], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertFalse((root / 'installer').exists())
 

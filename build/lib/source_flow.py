@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 
+import rootfs_common
 from source_build import PROJECT, Cache, key, sha, tree_identity
 from usb_identity import settings as usb_settings, environment as usb_environment
 
@@ -37,12 +38,11 @@ class Flow:
         if distribution != 'fedora':raise ValueError('目标系统只支持 Fedora + Plasma。')
         self.data, self.run = data, run
         self.usb = usb_settings(data)
-        self.root_builder=load_module('official_root',PROJECT/'build/scripts/build-official-root.py')
         self.board_builder=load_module('source_board',PROJECT/'build/scripts/prepare-source-board.py')
         self.distribution=distribution
         self.source=json.loads((PROJECT/('build/rootfs/'+distribution+'-source.json')).read_text())
         self.recipe_path=self.path('rootfs_config')
-        self.recipe=self.root_builder.recipe(self.recipe_path,distribution)
+        self.recipe=rootfs_common.recipe(self.recipe_path,distribution)
         self.cache=Cache(PROJECT/'out/build/from-source',run)
         self.memo={}
         self.refresh=str(__import__('time').time_ns()) if refresh else None
@@ -84,6 +84,9 @@ class Flow:
         # Adapt the pinned base in a separate clean snapshot.
         if commit==record['commit'] and record.get('target_patches'):
             from kernel_adaptation import assemble
+            expected_tree = record.get('expected_source_tree')
+            if not isinstance(expected_tree, str) or not re.fullmatch(r'[0-9a-f]{40}', expected_tree):
+                raise ValueError('内核补丁清单必须用 expected_source_tree 指定 40 位小写十六进制源码树 ID。')
             patches=[self.resolve(name) for name in record['target_patches']]
             for patch in patches:
                 if not patch.is_relative_to(PROJECT/'build/kernel/patches') or patch.is_symlink():
@@ -96,11 +99,9 @@ class Flow:
             path=cached/'source';commit=(cached/'source.commit').read_text().strip()
             if subprocess.check_output(['git','-C',str(path),'rev-parse','HEAD'],text=True).strip()!=commit:
                 raise ValueError('内核适配快照的 Git 身份与完成记录不同。')
-            expected_tree=record.get('expected_source_tree') or record.get('tested_source_tree')
-            if expected_tree:
-                tree=subprocess.check_output(['git','-C',str(path),'rev-parse','HEAD^{tree}'],text=True).strip()
-                if tree!=expected_tree:
-                    raise ValueError('目标内核补丁生成的源码树与核验记录不同。')
+            tree=subprocess.check_output(['git','-C',str(path),'rev-parse','HEAD^{tree}'],text=True).strip()
+            if tree!=expected_tree:
+                raise ValueError('目标内核补丁生成的源码树与核验记录不同。')
         return path,commit
 
     def kernel(self):
@@ -235,7 +236,7 @@ def execute(data,action,run,*,refresh=False,configure_only=False,export_dir=None
         if not export_dir.is_absolute():export_dir=PROJECT/export_dir
         if export_dir.exists() or export_dir.is_symlink():
             raise ValueError('导出目录已存在，未覆盖：'+str(export_dir))
-    if action not in ('plan','prepare','check-inputs','kernel','modules','boot','kernel-debs','rootfs','obs-v4l2','libcamera'):
+    if action not in ('plan','prepare','check-inputs','kernel','modules','boot','kernel-rpms','rootfs','obs-v4l2','libcamera'):
         raise ValueError('该构建阶段已退役；使用 devbox run build -- --target 选择目标，原生 Rec 独立构建。')
     distribution=json.loads(recipe_path.read_text()).get('distribution')
     if distribution!='fedora':raise ValueError('目标系统只支持 Fedora + Plasma。')
@@ -250,7 +251,7 @@ def execute(data,action,run,*,refresh=False,configure_only=False,export_dir=None
     root=PROJECT/'out/build/from-source';root.mkdir(parents=True,exist_ok=True)
     with (root/'lock').open('a') as owner:
         fcntl.flock(owner,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        if action in ('prepare','boot','kernel-debs','rootfs'):
+        if action in ('prepare','boot','kernel-rpms','rootfs'):
             # Check model-specific input availability before downloads or compilation.
             if action in ('prepare','rootfs'):
                 flow.fingerprint_image()
@@ -275,7 +276,7 @@ def execute(data,action,run,*,refresh=False,configure_only=False,export_dir=None
             run(argv,env={'NIX_HARDENING_ENABLE_aarch64_unknown_linux_musl':''})
             print('内核配置预览：'+str(out/'.config'));return
         methods={'kernel':flow.kernel,'modules':flow.modules,'boot':flow.boot,
-                 'kernel-debs':flow.kernel_debs,'rootfs':flow.rootfs,
+                 'kernel-rpms':flow.kernel_rpms,'rootfs':flow.rootfs,
                  'libcamera':lambda:flow.libcamera_rpms(force=True),
                  'obs-v4l2':lambda:flow.obs_v4l2_rpm(force=True)}
         if action not in methods:raise ValueError('官方系统工作流不支持此阶段：'+action)

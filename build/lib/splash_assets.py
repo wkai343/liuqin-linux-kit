@@ -36,15 +36,19 @@ def install_themes(root):
         path.chmod(0o644)
 
 
+def read_runtime_manifest(runtime):
+    manifest = json.loads((Path(runtime)/'runtime.json').read_text())
+    if not isinstance(manifest, dict) or not isinstance(manifest.get('firmware_splash'), bool):
+        raise ValueError('runtime.json must explicitly set firmware_splash to true or false')
+    return manifest
+
+
 def supports_firmware(runtime, kernel_config):
     if runtime is None:
         return False
-    manifest = json.loads((Path(runtime)/'runtime.json').read_text())
-    value = manifest.get('firmware_splash', False)
-    if type(value) is not bool:
-        raise ValueError('invalid firmware splash capability')
+    manifest = read_runtime_manifest(runtime)
     config = Path(kernel_config).read_text().splitlines()
-    return value and 'CONFIG_BACKLIGHT_KTZ8866=m' in config
+    return manifest['firmware_splash'] and 'CONFIG_BACKLIGHT_KTZ8866=m' in config
 
 
 def bootargs(text, enabled):

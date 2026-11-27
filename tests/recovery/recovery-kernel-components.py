@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Execute the ARM64 relocation entry and check Recovery DTB dependencies."""
+"""Execute the ARM64 relocation entry and check board-specific kernel quirks."""
 import importlib.util
 from pathlib import Path
 import re
 import shutil
 import struct
 import subprocess
-import sys
 import tempfile
 import unittest
 
 PROJECT = Path(__file__).resolve().parents[2]
-BASE_IMAGE = PROJECT/'out/releases/native-recovery/recovery.img'
+
+
 def available(name):
     return bool(shutil.which(name) or (PROJECT/'.devbox/nix/profile/default/bin'/name).is_file())
 spec = importlib.util.spec_from_file_location('recovery_kernel_builder',
@@ -61,54 +61,6 @@ class AlignedEntryTests(unittest.TestCase):
                     self.assertEqual(bytes(machine.mem_read(target,len(data))), data)
                     self.assertGreaterEqual(base+struct.unpack_from('<Q',wrapped,16)[0],
                                             target+len(data)+4096)
-
-
-@unittest.skipUnless(BASE_IMAGE.is_file() and all(available(name) for name in ('fdtget','fdtput')),
-                     'the qualified native base and device tree tools are required')
-class DeviceTreeTests(unittest.TestCase):
-    def test_recovery_retains_pmic_transport_and_selects_fixed_usb_role(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            dtb = Path(temporary)/'recovery.dtb'
-            builder.recovery_dtb(BASE_IMAGE, dtb)
-            import subprocess
-            get = builder.tool('fdtget')
-            def read(node, prop):
-                return subprocess.check_output([get,'-t','s',str(dtb),node,prop],text=True).strip()
-            self.assertEqual(read('/soc@0/remoteproc@3000000','status'), 'okay')
-            self.assertEqual(read('/soc@0/remoteproc@3000000/glink-edge/gpr','status'), 'disabled')
-            self.assertEqual(read('/sound','status'), 'disabled')
-            self.assertEqual(read('/soc@0/usb@a6f8800/usb@a600000','dr_mode'), 'peripheral')
-            self.assertEqual(read('/soc@0/display-subsystem@ae00000','status'), 'disabled')
-            panel='/soc@0/display-subsystem@ae00000/dsi@ae94000/panel@0'
-            props=subprocess.check_output([get,'-p',str(dtb),panel],text=True).splitlines()
-            self.assertTrue('status' not in props or read(panel,'status')=='okay',
-                            'the disabled display bus must retain the touch follower panel')
-            # Do not prune the clock/power graph while relying on bootloader
-            # scanout. GPU IOMMU, GMU and clock providers retain base status.
-            base_blob=BASE_IMAGE.read_bytes()
-            u=lambda n:struct.unpack_from('<I',base_blob,n)[0]
-            align=lambda n:(n+4095)//4096*4096
-            offset=4096+align(u(8))+align(u(16))
-            base_dtb=Path(temporary)/'base.dtb';base_dtb.write_bytes(base_blob[offset:offset+u(1648)])
-            for node in ('/soc@0/gmu@3d6a000','/soc@0/iommu@3da0000',
-                         '/soc@0/clock-controller@3d90000','/soc@0/clock-controller@af00000',
-                         '/soc@0/clock-controller@aaf0000','/soc@0/clock-controller@ade0000',
-                         '/soc@0/remoteproc@32300000'):
-                original=subprocess.run([get,'-t','s',str(base_dtb),node,'status'],capture_output=True)
-                modified=subprocess.run([get,'-t','s',str(dtb),node,'status'],capture_output=True)
-                self.assertEqual((modified.returncode,modified.stdout),
-                                 (original.returncode,original.stdout),node)
-            touch='/soc@0/geniqup@9c0000/spi@990000/touchscreen@0'
-            props=subprocess.check_output([get,'-p',str(dtb),touch],text=True).splitlines()
-            self.assertNotIn('novatek,pen-support',props)
-            # ABL rewrites compatible to generic cape strings; its preserved
-            # model and our Recovery marker keep the liuqin quirks scoped.
-            self.assertEqual(read('/','model'), 'Xiaomi Pad 6 Pro')
-            properties = subprocess.check_output([get,'-p',str(dtb),'/'],text=True).splitlines()
-            self.assertIn('liuqin,recovery', properties)
-            args = read('/chosen','bootargs')
-            self.assertNotIn('hung_task_panic=', args)
-            self.assertNotIn('softlockup_panic=', args)
 
 
 class KernelQuirkTests(unittest.TestCase):

@@ -150,10 +150,10 @@ exit "${TEST_SWITCH_ROOT_STATUS:-1}"
 EOF
 	cat >"$test_root/bin/stat" <<'EOF'
 #!/bin/sh
-# Only the GNOME per-file authority check uses the bare owner format; host
-# fixtures cannot chown to root, so answer it from the fixture instead.
+# Supply the installed root file owner from the fixture so the checks can
+# exercise both root-owned and untrusted files without chown privileges.
 if [ "${2:-}" = '%u %g' ]; then
-	printf '%s\n' "${TEST_GNOME_OWNER:-0 0}"
+	printf '%s\n' "${TEST_ROOT_FILE_OWNER:-0 0}"
 	exit 0
 fi
 if [ "${2:-}" = '%a' ]; then
@@ -163,7 +163,7 @@ if [ "${3##*/}" = liuqin-root-profile ] && [ "${2:-}" = '%a %u %g' ]; then
     printf '%s\n' "$TEST_PROFILE_STAT"; exit 0
 fi
 if [ "${TEST_V2_OWNER_MODEL:-0}" = 1 ] && [ "${2:-}" = '%a %u %g' ]; then
-    printf '%s %s\n' "$(/usr/bin/stat -c %a "$3")" "${TEST_GNOME_OWNER:-0 0}"
+    printf '%s %s\n' "$(/usr/bin/stat -c %a "$3")" "${TEST_ROOT_FILE_OWNER:-0 0}"
     exit 0
 fi
 case ${3:-} in
@@ -279,7 +279,7 @@ reset_base_fixture() {
 	TEST_INITTAB_STAT='644 0 0' TEST_BUSYBOX_STAT='755 0 0'
 	TEST_SBIN_STAT='777 0 0' TEST_INIT_STAT='777 0 0'
 	TEST_PROFILE_STAT='644 0 0' TEST_GNOME_MARKER_STAT='644 0 0 21'
-	TEST_GNOME_OWNER='0 0' TEST_MUTATE_GNOME_ON_CHROOT=0 TEST_MUTATE_GNOME=none
+	TEST_ROOT_FILE_OWNER='0 0' TEST_MUTATE_GNOME_ON_CHROOT=0 TEST_MUTATE_GNOME=none
 	TEST_NATIVE_MARKER_STAT='644 0 0 22'
 	TEST_MUTATE_NATIVE_ON_CHROOT=0 TEST_MUTATE_NATIVE=none
 	LIUQIN_STORAGE_PROFILE_FILE= LIUQIN_STORAGE_GNOME_CONTRACT= LIUQIN_STORAGE_NATIVE_CONTRACT=
@@ -300,7 +300,7 @@ reset_base_fixture() {
 	export TEST_MUTATE_RCS_ON_CHROOT TEST_MUTATE_RCS TEST_MUTATE_PID1_ON_CHROOT TEST_MUTATE_PID1
 	export TEST_STORAGE_PHASE TEST_SWITCH_ROOT_STATUS
 	export TEST_ROOT_CONTRACT_STAT TEST_INITTAB_STAT TEST_BUSYBOX_STAT TEST_SBIN_STAT TEST_INIT_STAT
-	export TEST_PROFILE_STAT TEST_GNOME_MARKER_STAT TEST_GNOME_OWNER
+	export TEST_PROFILE_STAT TEST_GNOME_MARKER_STAT TEST_ROOT_FILE_OWNER
 	export TEST_MUTATE_GNOME_ON_CHROOT TEST_MUTATE_GNOME
 	export LIUQIN_STORAGE_PROFILE_FILE LIUQIN_STORAGE_GNOME_CONTRACT
 	export TEST_NATIVE_MARKER_STAT TEST_MUTATE_NATIVE_ON_CHROOT TEST_MUTATE_NATIVE
@@ -335,7 +335,7 @@ run_init() {
 		TEST_MUTATE_NATIVE="$TEST_MUTATE_NATIVE" \
 		TEST_PROFILE_STAT="$TEST_PROFILE_STAT" \
 		TEST_GNOME_MARKER_STAT="$TEST_GNOME_MARKER_STAT" \
-		TEST_GNOME_OWNER="$TEST_GNOME_OWNER" \
+		TEST_ROOT_FILE_OWNER="$TEST_ROOT_FILE_OWNER" \
 		TEST_MUTATE_GNOME_ON_CHROOT="$TEST_MUTATE_GNOME_ON_CHROOT" \
 		TEST_MUTATE_GNOME="$TEST_MUTATE_GNOME" \
 		TEST_LABEL_PATH="$TEST_LABEL_PATH" TEST_MARKER_STAT="$TEST_MARKER_STAT" \
@@ -423,13 +423,12 @@ expect_empty_sd_namespace_critical() {
 
 make_native_tree() {
 	tree=$1
-	mkdir -p "$tree/etc/dconf/db/local.d/locks" "$tree/etc/udev/rules.d" \
+	mkdir -p "$tree/etc/udev/rules.d" \
 		"$tree/etc/systemd/system/basic.target.requires" \
 		"$tree/etc/systemd/system/multi-user.target.wants" \
 		"$tree/etc/systemd/system/graphical.target.wants" \
 		"$tree/etc/systemd/system/bluetooth.service.d" \
 		"$tree/etc/systemd/system/NetworkManager.service.d" \
-		"$tree/etc/systemd/system/liuqin-power-keyd.service.d" \
 		"$tree/usr/bin" "$tree/usr/sbin" "$tree/usr/local/bin" \
 		"$tree/usr/local/libexec" "$tree/usr/local/sbin" \
 		"$tree/usr/libexec" "$tree/usr/lib/systemd/system" \
@@ -444,12 +443,10 @@ make_native_tree() {
 	printf 'hexagonrpcd\n' >"$tree/usr/bin/hexagonrpcd"
 	printf 'gdm3\n' >"$tree/usr/sbin/gdm3"
 	printf 'busybox\n' >"$tree/usr/local/bin/busybox"
-	printf 'policy_version=LIUQIN_DESKTOP_UFS_ONLY_V1\n' >"$tree/usr/local/sbin/liuqin-gnome-storage-guard"
-	printf 'LIUQIN_DESKTOP_UFS_ONLY_V1\n' >"$tree/etc/liuqin-storage-policy"
+	printf 'policy_version=LIUQIN_DESKTOP_UFS_ONLY_V2\n' >"$tree/usr/local/sbin/liuqin-storage-guard"
+	printf 'LIUQIN_DESKTOP_UFS_ONLY_V2\n' >"$tree/etc/liuqin-storage-policy"
 	printf 'scope-fixture\n' >"$tree/usr/libexec/liuqin-storage-seal"
 	chmod 0755 "$tree/usr/libexec/liuqin-storage-seal"
-	printf 'power-keyd\n' >"$tree/usr/local/libexec/liuqin-power-keyd"
-	printf 'power-key-action\n' >"$tree/usr/local/libexec/liuqin-power-key-action"
 	printf 'power-menu\n' >"$tree/usr/local/libexec/liuqin-power-menu"
 	printf 'iio-sensor-proxy\n' >"$tree/usr/libexec/iio-sensor-proxy"
 	printf 'snap-root-admission\n' >"$tree/usr/local/sbin/liuqin-snap-root-admission"
@@ -467,20 +464,16 @@ make_native_tree() {
 		>"$tree/usr/share/liuqin/kernel-modules.manifest"
 	printf 'gschema\n' >"$tree/usr/share/liuqin/power/io.github.liuqin.power.gschema.xml"
 	printf 'compiled\n' >"$tree/usr/share/liuqin/power/gschemas.compiled"
-	printf '/org/gnome/settings-daemon/plugins/power/power-button-action\n' \
-		>"$tree/etc/dconf/db/local.d/locks/00-liuqin-power"
-	printf '[Service]\nExecStart=/usr/local/sbin/liuqin-gnome-storage-guard\n' \
-		>"$tree/etc/systemd/system/liuqin-gnome-storage-guard.service"
+	printf '[Service]\nExecStart=/usr/local/sbin/liuqin-storage-guard\n' \
+		>"$tree/etc/systemd/system/liuqin-storage-guard.service"
 	printf '[Service]\nExecStart=/usr/local/libexec/liuqin-backlight-default\n' \
 		>"$tree/etc/systemd/system/liuqin-backlight-default.service"
 	printf '[Unit]\nRequires=liuqin-bt-preconfigure.service\nAfter=liuqin-bt-preconfigure.service\n' \
 		>"$tree/etc/systemd/system/bluetooth.service.d/20-liuqin-public-address.conf"
 	printf '[Unit]\nBefore=bluetooth.service\nPartOf=bluetooth.service\n[Service]\nType=oneshot\nExecStart=/usr/local/sbin/liuqin-bt-public-addr\nRemainAfterExit=yes\n' \
 		>"$tree/etc/systemd/system/liuqin-bt-preconfigure.service"
-	printf '[Service]\nRuntimeDirectory=liuqin-power-keyd\n' \
-		>"$tree/etc/systemd/system/liuqin-power-keyd.service.d/20-liuqin-session-runtime.conf"
 	for native_unit in \
-		liuqin-power-keyd.service liuqin-snap-root-admission.service \
+		liuqin-snap-root-admission.service \
 		liuqin-hexagonrpcd-sdsp.service \
 		liuqin-ssc-sample-gate.service liuqin-sensor-stack.target \
 		liuqin-wlan-mac.service; do
@@ -494,9 +487,7 @@ make_native_tree() {
 	chmod 0755 "$tree/usr/lib/systemd/systemd" "$tree/usr/bin/gnome-shell" \
 		"$tree/usr/bin/hexagonrpcd" \
 		"$tree/usr/sbin/gdm3" "$tree/usr/local/bin/busybox" \
-		"$tree/usr/local/sbin/liuqin-gnome-storage-guard" \
-		"$tree/usr/local/libexec/liuqin-power-keyd" \
-		"$tree/usr/local/libexec/liuqin-power-key-action" \
+		"$tree/usr/local/sbin/liuqin-storage-guard" \
 		"$tree/usr/local/libexec/liuqin-power-menu" \
 		"$tree/usr/libexec/iio-sensor-proxy" \
 		"$tree/usr/local/sbin/liuqin-snap-root-admission" \
@@ -504,11 +495,8 @@ make_native_tree() {
 		"$tree/usr/local/sbin/liuqin-wlan-mac" \
 		"$tree/usr/libexec/liuqin-ssc-sample-gate"
 	chmod 0644 "$tree/etc/liuqin-native-root" \
-		"$tree/etc/dconf/db/local.d/locks/00-liuqin-power" \
-		"$tree/etc/systemd/system/liuqin-gnome-storage-guard.service" \
+		"$tree/etc/systemd/system/liuqin-storage-guard.service" \
 		"$tree/etc/systemd/system/liuqin-backlight-default.service" \
-		"$tree/etc/systemd/system/liuqin-power-keyd.service" \
-		"$tree/etc/systemd/system/liuqin-power-keyd.service.d/20-liuqin-session-runtime.conf" \
 		"$tree/etc/systemd/system/liuqin-snap-root-admission.service" \
 		"$tree/etc/systemd/system/bluetooth.service.d/20-liuqin-public-address.conf" \
 		"$tree/etc/systemd/system/liuqin-bt-preconfigure.service" \
@@ -528,10 +516,8 @@ make_native_tree() {
 		"$tree/usr/share/liuqin/kernel-modules.manifest" \
 		"$tree/usr/share/liuqin/power/io.github.liuqin.power.gschema.xml" \
 		"$tree/usr/share/liuqin/power/gschemas.compiled"
-	ln -s ../liuqin-gnome-storage-guard.service \
-		"$tree/etc/systemd/system/basic.target.requires/liuqin-gnome-storage-guard.service"
-	ln -s ../liuqin-power-keyd.service \
-		"$tree/etc/systemd/system/multi-user.target.wants/liuqin-power-keyd.service"
+	ln -s ../liuqin-storage-guard.service \
+		"$tree/etc/systemd/system/basic.target.requires/liuqin-storage-guard.service"
 	ln -s ../liuqin-backlight-default.service \
 		"$tree/etc/systemd/system/graphical.target.wants/liuqin-backlight-default.service"
 	rm -f "$tree/usr/sbin/init"
@@ -586,11 +572,7 @@ reset_fixture() {
     export LIUQIN_STORAGE_PROFILE_FILE LIUQIN_STORAGE_NATIVE_CONTRACT LIUQIN_STORAGE_V2_TEST_HELPER TEST_V2_OWNER_MODEL
     kernel_release=$("$host_busybox" uname -r)
     for tree in "$probe/native-root" "$newroot"; do
-        rm -f "$tree/usr/sbin/gdm3" "$tree/usr/bin/gnome-shell" \
-            "$tree/etc/dconf/db/local.d/locks/00-liuqin-power" \
-            "$tree/usr/local/libexec/liuqin-power-keyd" "$tree/usr/local/libexec/liuqin-power-key-action" \
-            "$tree/etc/systemd/system/liuqin-power-keyd.service" \
-            "$tree/etc/systemd/system/multi-user.target.wants/liuqin-power-keyd.service"
+        rm -f "$tree/usr/sbin/gdm3" "$tree/usr/bin/gnome-shell"
         mkdir -p "$tree/usr/lib/modules/$kernel_release" "$tree/usr/share/liuqin/kernels/$kernel_release"
         printf 'liuqin-root-v2\n' >"$tree/etc/liuqin-root-interface"
         : >"$tree/usr/lib/modules/$kernel_release/modules.dep"
@@ -629,8 +611,8 @@ reset_fixture; printf 'wrong\n' >"$probe/native-root/etc/liuqin-native-root"; ex
 reset_fixture; printf 'LIUQIN_NATIVE_ROOT_CONTRACT_V1\n' >"$native_contract"; expect_rejected_before_open unsupported-contract
 reset_fixture; rm "$probe/native-root/usr/lib/modules/$kernel_release/modules.dep"; expect_rejected_before_open modules-missing
 reset_fixture; printf 'bad\n' >"$probe/native-root/usr/share/liuqin/kernels/$kernel_release/modules.manifest"; expect_rejected_before_open modules-identity
-reset_fixture; rm "$probe/native-root/etc/systemd/system/basic.target.requires/liuqin-gnome-storage-guard.service"; expect_rejected_before_open storage-guard-required
-reset_fixture; TEST_GNOME_OWNER='1000 0'; export TEST_GNOME_OWNER; expect_rejected_before_open owner-invalid
+reset_fixture; rm "$probe/native-root/etc/systemd/system/basic.target.requires/liuqin-storage-guard.service"; expect_rejected_before_open storage-guard-required
+reset_fixture; TEST_ROOT_FILE_OWNER='1000 0'; export TEST_ROOT_FILE_OWNER; expect_rejected_before_open owner-invalid
 reset_fixture; printf 'updated implementation\n' >"$probe/native-root/usr/libexec/iio-sensor-proxy"; native_expect_success mutable-device-service
 reset_fixture
 for tree in "$probe/native-root" "$newroot"; do

@@ -3,7 +3,6 @@
 from pathlib import Path, PurePosixPath
 import argparse
 import hashlib
-import json
 import os
 import re
 import shutil
@@ -16,7 +15,7 @@ PROJECT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(PROJECT/'shared'))
 from liuqin_kernel import extract_modules, parse_contract
 from plymouth_runtime import permitted
-from splash_assets import supports_firmware, theme_files
+from splash_assets import read_runtime_manifest, theme_files
 
 
 def safe_name(name):
@@ -47,7 +46,7 @@ def stage(runtime,modules,contract,staging,kernel_config=None,cc=None):
     if staging in (Path('/'),PROJECT) or not staging.is_dir():
         raise ValueError('splash staging needs an existing build directory')
     identity=parse_contract(contract.read_bytes())
-    manifest=json.loads((runtime/'runtime.json').read_text())
+    manifest=read_runtime_manifest(runtime)
     records=manifest.get('files',{})
     if (manifest.get('schema')!=1 or manifest.get('architecture')!='aarch64' or
         manifest.get('theme')!='spinner' or not records or len(records)>4096):
@@ -142,8 +141,8 @@ def stage(runtime,modules,contract,staging,kernel_config=None,cc=None):
     put(staging,'etc/liuqin-splash-modules.order',('\n'.join(order)+'\n').encode(),0o644)
     put(staging,'etc/liuqin-splash-modules.sha256',('\n'.join(hashes)+'\n').encode(),0o644)
     put(staging,'usr/libexec/liuqin-boot-splash',(PROJECT/'device/boot/liuqin-boot-splash.sh').read_bytes(),0o755)
-    if kernel_config is not None and supports_firmware(runtime,kernel_config):
-        if 'CONFIG_FB_SIMPLE=y' not in Path(kernel_config).read_text().splitlines():
+    if manifest['firmware_splash'] and kernel_config is not None and backlights:
+        if 'CONFIG_FB_SIMPLE=y' not in config:
             raise ValueError('firmware splash requires builtin simplefb')
         if not cc or not shutil.which(str(cc)):
             raise ValueError('firmware splash requires the ARM64 compiler')

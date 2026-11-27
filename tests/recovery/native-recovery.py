@@ -153,12 +153,13 @@ class NativeTests(unittest.TestCase):
         if not all(shutil.which(p) for p in ('dtc','fdtoverlay','fdtget','fdtput')):self.skipTest('device tree tools required')
         builder=load('native_display_builder',PROJECT/'build/recovery/build-native.py')
         with tempfile.TemporaryDirectory() as d:
+            installer_args=(PROJECT/'device/installer-bootargs.txt').read_text().strip()
             root=Path(d);source=root/'test.dts';source.write_text('''/dts-v1/;
-/ { chosen { bootargs="earlycon=simplefb console=drm_log console=tty0 keep_bootcon ignore_loglevel initcall_debug initcall_blacklist=simplefb_driver_init rootwait"; };
+/ { chosen { bootargs=%s; };
 soc@0 { gpu@3d00000 { status="okay"; }; ufs@1d84000 { status="okay"; }; clock-controller@af00000 { status="okay"; };
 display-subsystem@ae00000 { displayport-controller@ae90000 { status="okay"; };
 dsi@ae94000 { status="okay"; }; dsi@ae96000 { status="okay"; }; }; }; };
-''')
+''' % json.dumps(installer_args))
             subprocess.run(['dtc','-q','-I','dts','-O','dtb','-o',str(root/'input.dtb'),str(source)],check=True)
             builder.prepare_console_dtb((root/'input.dtb').read_bytes(),root)
             def prop(node,key='status'):return subprocess.check_output(['fdtget','-t','s',str(root/'console.dtb'),node,key],text=True).strip()
@@ -168,6 +169,13 @@ dsi@ae94000 { status="okay"; }; dsi@ae96000 { status="okay"; }; }; }; };
             for node in ('/soc@0/ufs@1d84000','/soc@0/display-subsystem@ae00000/dsi@ae94000','/soc@0/display-subsystem@ae00000/dsi@ae96000'):
                 self.assertEqual(prop(node),'okay')
             args=prop('/chosen','bootargs').split()
+            recipe=json.loads((PROJECT/'build/recovery/kernel/source.json').read_text())
+            retired={'clk_ignore_unused','pd_ignore_unused','loglevel=3','rootwait','panic=0',
+                     'msm.liuqin_oem_clk_gating=0','hung_task_panic=1','softlockup_panic=1'}
+            for name,words in [('installer',installer_args.split()),('console',args),
+                               ('recovery',recipe['bootargs'].split())]:
+                with self.subTest(profile=name):
+                    self.assertEqual(retired.intersection(words),set())
             self.assertIn('consoleblank=0',args);self.assertIn('earlycon=simplefb',args)
             self.assertNotIn('console=drm_log',args);self.assertNotIn('initcall_blacklist=simplefb_driver_init',args)
             self.assertNotIn('keep_bootcon',args);self.assertNotIn('ignore_loglevel',args)
@@ -239,7 +247,10 @@ dsi@ae94000 { status="okay"; }; dsi@ae96000 { status="okay"; }; }; }; };
             error=io.StringIO()
             with patch.object(host,'run_process',side_effect=AssertionError('device access forbidden')),contextlib.redirect_stderr(error):
                 with self.assertRaises(SystemExit):cli.main(['--bundle',str(engine.demo_bundle),'--allow-unverified'])
-            self.assertIn('CLI 不开放',error.getvalue());engine.close()
+            self.assertIn('CLI 对原生 Recovery 仅支持 --check',error.getvalue())
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli.main(['--bundle',str(engine.demo_bundle),'--check'])
+            engine.close()
 
     def test_discovery_allows_explicit_readonly_test_across_android_labels(self):
         with tempfile.TemporaryDirectory() as d:
@@ -258,7 +269,7 @@ dsi@ae94000 { status="okay"; }; dsi@ae96000 { status="okay"; }; }; }; };
     def test_non_scan_operations_stop_before_any_device_access(self):
         t=transport();t.engine.receipt['operation']='wizard'
         with patch('liuqin_gui.native_adb.probe_adb') as probe:
-            with self.assertRaisesRegex(InstallerError,'仅供'):t.check_device()
+            with self.assertRaisesRegex(InstallerError,'不支持所请求的操作'):t.check_device()
             probe.assert_not_called()
 
     def test_flash_slot_switch_reboot_and_rpc_mutations_are_rejected(self):

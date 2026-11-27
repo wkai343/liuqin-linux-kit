@@ -16,6 +16,10 @@ import fedora_libcamera
 import fedora_kamoso
 
 
+def root_builder_inputs():
+    return {path: sha(PROJECT/path) for path in ('build/scripts/build-fedora-root.py', 'build/lib/rootfs_common.py')}
+
+
 def charger_runtime_inputs():
     return dict(collector=sha(PROJECT/'build/lib/charger_runtime.py'),
                 resolver=sha(PROJECT/'build/lib/plymouth_runtime.py'),
@@ -55,7 +59,7 @@ class FedoraFlow(Flow):
         archive=self.target_base()
         def build(out):self.target_action('runtime',archive,out/'assembled')
         return self.stage('fedora-runtime-root',dict(base=sha(archive),
-            builder=sha(PROJECT/'build/scripts/build-fedora-root.py'),oci=sha(PROJECT/'build/lib/fedora_oci.py'),
+            builder=root_builder_inputs(),oci=sha(PROJECT/'build/lib/fedora_oci.py'),
             refresh=self.refresh),build,['assembled/root.tar.gz','assembled/packages.tsv'])/'assembled/root.tar.gz'
 
     def boot_splash_runtime(self):
@@ -63,7 +67,7 @@ class FedoraFlow(Flow):
         archive=self.target_runtime_root()
         def build(out):self.target_action('splash',archive,out/'assembled')
         return self.stage('fedora-splash-runtime',dict(base=sha(archive),
-            builder=sha(PROJECT/'build/scripts/build-fedora-root.py'),
+            builder=root_builder_inputs(),
             collector=sha(PROJECT/'build/lib/plymouth_runtime.py'),
             splash_assets=sha(PROJECT/'build/lib/splash_assets.py'),
             theme=tree_identity(PROJECT/'device/boot/splash'),charger=charger_runtime_inputs(),refresh=self.refresh),
@@ -80,7 +84,7 @@ class FedoraFlow(Flow):
             self.target_action('charger', archive, out/'assembled')
         stage = self.stage('fedora-charger-runtime', dict(base=sha(archive),
             charger=charger_runtime_inputs(),
-            builder=sha(PROJECT/'build/scripts/build-fedora-root.py')), build, ['assembled/runtime'])
+            builder=root_builder_inputs()), build, ['assembled/runtime'])
         return dict(inputs, CHARGER_RUNTIME=str(stage/'assembled/runtime'))
 
     def sensors(self):
@@ -88,17 +92,19 @@ class FedoraFlow(Flow):
         def build(out):self.target_action('sensors',archive,out/'assembled',rom_sensors=board/'sensors',jobs=self.data.get('jobs',12))
         return self.stage('fedora-sensors',dict(base=sha(archive),config=tree_identity(board/'sensors'),
             sources=tree_identity(PROJECT/'device/sensors'),overlay=tree_identity(PROJECT/'device/sensors-overlay'),
+            overlay_builder=sha(PROJECT/'build/lib/device_overlay.py'),
             integration_test=sha(PROJECT/'tests/input/ssc-accel-integration.py'),
             builder=sha(PROJECT/'build/scripts/build-liuqin-sensors-stack.sh')),
             build,['assembled/sensor-stack.tar'])/'assembled/sensor-stack.tar'
 
-    def device_debs(self):
+    def device_rpms(self):
         sensors=self.sensors();board=self.board();tools=self.tools();storage=storage_scope_inputs()
         def build(out):self.run([sys.executable,'build/scripts/build-liuqin-rpms.py',
             '--firmware',str(PROJECT/'device/firmware'),'--speakers',str(board/'speaker-firmware'),
             '--sensors',str(sensors),'--busybox',tools['BUSYBOX'],'--out',str(out/'rpms'),'--version',self.version],
             env=dict(STORAGE_SCOPE_CC=storage['compiler']))
         return self.stage('fedora-device-rpms',dict(sensors=sha(sensors),
+            sensor_claim=sha(PROJECT/'device/sensors-overlay/etc/polkit-1/rules.d/49-liuqin-sensorproxy.rules'),
             firmware=tree_identity(PROJECT/'device/firmware'),speakers=tree_identity(board/'speaker-firmware'),
             speaker_builder=sha(PROJECT/'build/lib/speaker_firmware.py'),
             board_overlay=tree_identity(PROJECT/'device/board-overlay'),
@@ -174,7 +180,7 @@ class FedoraFlow(Flow):
                 ffmpeg_source=source,jobs=self.data.get('jobs',12))
         return self.stage('fedora-ffmpeg',dict(base=sha(archive),source=sha(source),
             recipe=fedora_ffmpeg.inputs(),builder=sha(PROJECT/'build/lib/fedora_ffmpeg.py'),
-            root_builder=sha(PROJECT/'build/scripts/build-fedora-root.py'),refresh=self.refresh),
+            root_builder=root_builder_inputs(),refresh=self.refresh),
             build,['assembled/rpms','assembled/devel-rpms','assembled/manifest.json','assembled/build-packages.tsv',
                    'assembled/'+fedora_ffmpeg.source_filename(fedora_ffmpeg.record())])/'assembled'
 
@@ -191,7 +197,7 @@ class FedoraFlow(Flow):
                 libcamera_source=source,jobs=self.data.get('jobs',12))
         return self.stage('fedora-libcamera',dict(base=sha(archive),source=sha(source),
             recipe=fedora_libcamera.inputs(),builder=sha(PROJECT/'build/lib/fedora_libcamera.py'),
-            root_builder=sha(PROJECT/'build/scripts/build-fedora-root.py'),refresh=self.refresh),
+            root_builder=root_builder_inputs(),refresh=self.refresh),
             build,['assembled/rpms','assembled/extra-rpms','assembled/manifest.json','assembled/build-packages.tsv',
                    'assembled/'+fedora_libcamera.source_filename(fedora_libcamera.record())])/'assembled'
 
@@ -204,7 +210,7 @@ class FedoraFlow(Flow):
         return self.stage('fedora-obs-v4l2',dict(base=sha(archive),
             source=fedora_obs.inputs(),ffmpeg_manifest=sha(ffmpeg/'manifest.json'),
             ffmpeg_builder=sha(PROJECT/'build/lib/fedora_ffmpeg.py'),
-            root_builder=sha(PROJECT/'build/scripts/build-fedora-root.py'),refresh=self.refresh),
+            root_builder=root_builder_inputs(),refresh=self.refresh),
             build,['assembled/'+fedora_obs.filename(),'assembled/manifest.json',
                    'assembled/build-packages.tsv'])/'assembled'
 
@@ -225,16 +231,18 @@ class FedoraFlow(Flow):
                                jobs=self.data.get('jobs', 12))
         return self.stage('fedora-kamoso', dict(base=sha(archive), source=sha(source),
             recipe=tree_identity(fedora_kamoso.RECIPE), builder=sha(PROJECT/'build/lib/fedora_kamoso.py'),
-            root_builder=sha(PROJECT/'build/scripts/build-fedora-root.py'), refresh=self.refresh),
+            root_builder=root_builder_inputs(), refresh=self.refresh),
             build, ['assembled/'+name+'.aarch64.rpm', 'assembled/'+name+'.src.rpm'])/'assembled'
 
     def apps(self):
-        archive=self.target_runtime_root();devices=self.device_debs();stats=self.stats_rpm();fingerprint=self.fingerprint_rpm()
+        archive=self.target_runtime_root();devices=self.device_rpms();stats=self.stats_rpm();fingerprint=self.fingerprint_rpm()
         libclc=self.libclc_rpm();ffmpeg=self.ffmpeg_rpms();obs=self.obs_v4l2_rpm()
         camera=self.libcamera_rpms()
         kamoso=self.kamoso_bundle()
         inputs=dict(base=sha(archive),rpms=tree_identity(devices),recipe=self.recipe,
-            builder=sha(PROJECT/'build/scripts/build-fedora-root.py'),
+            builder=root_builder_inputs(),
+            overlay_builder=sha(PROJECT/'build/lib/device_overlay.py'),
+            sensor_claim=sha(PROJECT/'device/sensors-overlay/etc/polkit-1/rules.d/49-liuqin-sensorproxy.rules'),
             input_env=sha(PROJECT/'build/rootfs/fedora-input-env.sh'),
             auto_brightness=sha(PROJECT/'build/rootfs/liuqin-auto-brightness.json'),
             shell_defaults=sha(PROJECT/'build/lib/shell_defaults.py'),
@@ -289,31 +297,32 @@ class FedoraFlow(Flow):
         if not self.recipe['first_boot_setup']:artifacts.append('assembled/login.txt')
         return self.stage('fedora-apps',inputs,build,artifacts)/'assembled'
 
-    def kernel_debs(self):
+    def kernel_rpms(self):
         source,kernel=self.kernel();modules=self.modules();boot=self.boot()
         if 'CONFIG_SECURITY_SELINUX=y' not in (kernel/'.config').read_text().splitlines():
             raise ValueError('Fedora 目标内核缺少 SELinux 支持。')
-        def build(out):self.run([sys.executable,'build/scripts/build-liuqin-kernel-debs.py',
+        def build(out):self.run([sys.executable,'build/scripts/build-liuqin-kernel-packages.py',
             '--kernel-source',str(source),'--kernel-out',str(kernel),'--modules-dir',str(modules),
             '--boot-image',str(boot),'--out',str(out/'rpms'),'--version',self.version,'--format','rpm'])
         return self.stage('fedora-kernel-rpms',dict(boot=sha(boot),modules=sha(modules/'kernel.build.json'),
-            version=self.version,builder=sha(PROJECT/'build/scripts/build-liuqin-kernel-debs.py'),
+            version=self.version,builder=sha(PROJECT/'build/scripts/build-liuqin-kernel-packages.py'),
             packager=sha(PROJECT/'build/lib/rpm_package.py'),tools=sha(PROJECT/'device/boot/boot-update.py'),
             interfaces=tree_identity(PROJECT/'shared')),build,['rpms'])/'rpms'
 
     def rootfs(self):
         firmware=self.fingerprint_image()
-        apps=self.apps();rpms=self.kernel_debs();source,kernel=self.kernel();modules=self.modules()
+        apps=self.apps();rpms=self.kernel_rpms();source,kernel=self.kernel();modules=self.modules()
         def build(out):
             self.target_action('kernel-files',apps/'root.tar.gz',out/'assembled',rpms=rpms,
                 require_ffmpeg=fedora_ffmpeg.selected(self.recipe),require_obs=fedora_obs.selected(self.recipe),
                 require_libcamera=fedora_libcamera.selected(self.recipe))
             self.run([sys.executable,'build/scripts/extract-liuqin-fingerprint-firmware.py',
                 '--image',str(firmware),'--root',str(out/'assembled/rootfs')],root=True)
-            self.run([sys.executable,'build/scripts/build-liuqin-custom-root.py','--root',str(out/'assembled/rootfs'),
+            self.run([sys.executable,'build/scripts/pack-liuqin-rootfs.py','--root',str(out/'assembled/rootfs'),
                 '--kernel-out',str(kernel),'--modules-dir',str(modules),'--out',str(out/'packed'),'--selinux-labels'],root=True)
         return self.stage('fedora-rootfs',dict(apps=sha(apps/'root.tar.gz'),rpms=tree_identity(rpms),
-            builder=sha(PROJECT/'build/scripts/build-liuqin-custom-root.py'),interfaces=tree_identity(PROJECT/'shared'),
+            builder=sha(PROJECT/'build/scripts/pack-liuqin-rootfs.py'),root_builder=root_builder_inputs(),
+            interfaces=tree_identity(PROJECT/'shared'),
             fingerprint_firmware=sha(firmware),
             fingerprint_extractor=sha(PROJECT/'build/scripts/extract-liuqin-fingerprint-firmware.py'),
             fingerprint_hashes=sha(PROJECT/'device/fingerprint/oem/firmware/SHA256.json'),

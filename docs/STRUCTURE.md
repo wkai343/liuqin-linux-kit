@@ -43,7 +43,7 @@ out/                中间文件、成品和报告
 
 - [构建端](../build/README.md)生成配套的 boot/rootfs。[电脑安装器](../installer/README.md)使用独立 Rec，运行时无需编译器或 Devbox。
 - 原生 Rec 的内核、DTB、ADB、LVGL 与运行载荷独立封装，默认镜像目录见下表。
-- rootfs 先装配用户态，再嵌入目标内核包及模块。更换内核不必重新装配桌面。
+- Fedora 构建器使用 [rootfs_common.py](../build/lib/rootfs_common.py) 装配用户态，再嵌入目标内核包及模块。[pack-liuqin-rootfs.py](../build/scripts/pack-liuqin-rootfs.py) 将已适配的根系统打包成发布文件。更换内核不必重新装配桌面。
 - 构建端和安装器共用[数据格式与接口](../shared/README.md)，确认计划后由[设备侧安装脚本](../device/installer/README.md)执行。
 
 各阶段命令及产物见[构建指南](BUILD.md#当前构建产物)。
@@ -54,12 +54,12 @@ out/                中间文件、成品和报告
 `device/board-overlay` 保存睡眠、RTC、背光、CABC、显示恢复、启动方向、Wi-Fi MAC、
 蓝牙、充电认证、音频、存储保护和救援等板级文件。显示恢复当前使用 KScreen 后端，
 服务通过 `ConditionPathExists` 检查其是否可用。
-默认系统构建 Fedora RPM。独立的 [DEB 设备包脚本](../build/scripts/build-liuqin-debs.sh)提供通用板级包，[内核打包工具](../build/scripts/build-liuqin-kernel-debs.py)也支持 DEB。仓库提供的桌面镜像配方使用 Fedora。
+默认系统构建 Fedora RPM。独立的 [DEB 设备包脚本](../build/scripts/build-liuqin-debs.sh)提供通用板级包，[内核打包工具](../build/scripts/build-liuqin-kernel-packages.py)也支持 DEB。仓库提供的桌面镜像配方使用 Fedora。
 两种包格式通过 [device_overlay.py](../build/lib/device_overlay.py) 装配 `board-overlay`，
 复制前检查已有目标文件与异常父路径。DEB 可用 `BOARD_OVERLAY` 指定来源；
 Fedora 设备包缓存跟踪板级目录及装配代码，服务激活链接由打包入口生成。
 旧 GNOME 设置面板、会话 overlay、Snap 与 flash-kernel 集成已移除。
-服务文件名不决定桌面类型，例如 `liuqin-gnome-storage-guard` 继续用于现有设备包，保护策略不变。
+`liuqin-storage-guard.service` 由 `basic.target` 强制启动，在桌面登录前复核内置 UFS 的读写状态。
 
 ## 输出与私有数据
 

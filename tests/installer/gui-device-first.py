@@ -144,6 +144,10 @@ with tempfile.TemporaryDirectory() as directory:
     controller.prepareWorkflow();wait(lambda:controller.data['state']=='prepared' and not controller.data['busy'])
     assert len(controller.data['wizardPlan']['additions'])==3, (controller.data['wizardPlan'], controller.partition_configuration())
     assert next(p for p in controller.data['wizardPlan']['additions'] if p['name']==selected)['bytes']==capacity['max_bytes']
+    plan_row = visual_child(window.contentItem(), 'installationPlan_' + selected)
+    assert plan_row.isVisible()
+    assert '缺少匹配的实机验收记录' in plan_row.property('text')
+    assert str(Path(directory)/'demo-materials') in plan_row.property('text')
     assert any(p['action']=='删除' and p['name']=='userdata' for p in controller.data['wizardPlan']['destructive'])
     if args.screenshots:
         QTest.qWait(100);window.grabWindow().save(str(args.screenshots/'summary.png'))

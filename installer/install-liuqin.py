@@ -18,7 +18,10 @@ import tempfile
 import threading
 import time
 import uuid
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+INSTALLER_DIR = Path(__file__).resolve().parent
+SHARED = INSTALLER_DIR.parent / 'shared'
+sys.path.insert(0, str(INSTALLER_DIR))
+sys.path.insert(0, str(SHARED))
 from liuqin_gui import host
 
 # The supported single-root layout boots from slot A.
@@ -41,33 +44,21 @@ def server_address(address):
     return address, 37631 if host.IS_WINDOWS else 0
 
 
-def load_layout():
-    """Load the layout engine from the repository or from the bundle beside us."""
-    here = Path(__file__).resolve().parent
-    for candidate in (here.parent / 'shared/liuqin_layout.py',
-                      here / 'lib/liuqin_layout.py', here / 'liuqin_layout.py'):
-        if candidate.is_file():
-            spec = importlib.util.spec_from_file_location('liuqin_layout', candidate)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            return module
-    raise RuntimeError('liuqin_layout.py is missing next to this program'
-                       ' —— 安装包不完整，请下载同一版本的全部文件')
+def load_shared_module(name):
+    path = SHARED / (name + '.py')
+    if not path.is_file():
+        raise RuntimeError(f'安装包不完整，缺少 shared/{path.name}。')
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-layout = load_layout()
+layout = load_shared_module('liuqin_layout')
 
 
 def load_artifacts():
-    here = Path(__file__).resolve().parent
-    for candidate in (here.parent / 'shared/liuqin_artifacts.py', here / 'liuqin_artifacts.py'):
-        if candidate.is_file():
-            sys.path.insert(0, str(candidate.parent))
-            spec = importlib.util.spec_from_file_location('liuqin_artifacts', candidate)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            return module
-    raise RuntimeError('独立安装环境需要配套的 liuqin_artifacts.py。')
+    return load_shared_module('liuqin_artifacts')
 
 
 def sha(path):
@@ -214,7 +205,7 @@ def parse_arguments(argv=None):
     parser.add_argument('--restore-partition-table', type=Path, metavar='BACKUP_DIR',
                         help='Restore the partition table saved in an earlier backup directory and stop')
     parser.add_argument('--yes', action='store_true', help='Skip the interactive data-erasure confirmation')
-    parser.add_argument('--allow-unverified', action='store_true', help='Explicitly test an offline-only bundle')
+    parser.add_argument('--allow-unverified', action='store_true', help='Allow an attended installation without a matching device test record')
     return parser, parser.parse_args(argv)
 
 
@@ -260,13 +251,9 @@ def confirm_installation(parser, args, plan):
 
 def load_rom_table(parser):
     """The pinned stock-ROM identities, from the repository or from the bundle."""
-    here = Path(__file__).resolve().parent
-    pinned = next((item for item in (here.parent / 'shared/liuqin-rom-images.json',
-                                     here / 'lib/liuqin-rom-images.json',
-                                     here / 'liuqin-rom-images.json') if item.is_file()), None)
-    if pinned is None:
-        parser.error('liuqin-rom-images.json is missing next to this program'
-                     ' —— 安装包不完整，请下载同一版本的全部文件')
+    pinned = SHARED / 'liuqin-rom-images.json'
+    if not pinned.is_file():
+        parser.error('安装包不完整，缺少 shared/liuqin-rom-images.json。')
     return json.loads(pinned.read_text(encoding='utf-8'))
 
 
@@ -280,20 +267,11 @@ def main(argv=None):
             parser.error('安装文件缺失、为空或为符号链接：'+name)
     files = {name: sha(bundle/name) for name in ('boot.img', 'installer.img', 'rootfs.tar.gz')}
     interface = artifacts.inspect_package(bundle)
-    metadata = {}
-    try:
-        candidate = json.loads((bundle/'bundle.json').read_text(encoding='utf-8'))
-        if isinstance(candidate, dict): metadata = candidate
-    except (OSError, ValueError):
-        pass
-    tested = (metadata.get('device') == 'liuqin' and metadata.get('files') == files
-              and metadata.get('kernel_release') == interface['kernel_release']
-              and metadata.get('status') == 'DEVICE_TESTED')
     manifest = dict(device='liuqin', files=files, **interface,
                     installer_layouts=['linux-single'], single_root_boot_slot='a',
-                    status='DEVICE_TESTED' if tested else 'CUSTOM_UNVERIFIED')
+                    status=artifacts.bundle_test_status(bundle, files, interface['kernel_release']))
     if 'native_recovery_manifest' in manifest and not args.check:
-        parser.error('原生 Recovery 测试版仅供 GUI 只读检查，CLI 不开放安装或分区恢复；未访问设备。')
+        parser.error('CLI 对原生 Recovery 仅支持 --check 本地材料检查。设备安装请使用图形安装器和具备安装能力的 Recovery。')
     if args.filesystem not in manifest['filesystems']:
         parser.error('所选安装包不支持 ' + args.filesystem + '；未访问设备。')
     if not args.check:
@@ -306,15 +284,16 @@ def main(argv=None):
         parser.error('当前根系统仅支持 linux-single；未访问设备。')
     if args.check:
         validate_arguments(parser, args, preview=True)
-        print('Local bundle checksums verified; no device access')
+        print('Local package interfaces checked and SHA-256 digests computed; no device access')
+        print(artifacts.DEVICE_TEST_LABELS[manifest['status']])
         if args.layout:
             print('256 GB reference example only; the actual tablet plan is confirmed during installation:')
             print(reference_plan(parser, args).table())
         return
     validate_arguments(parser, args)
     if manifest['status'] != 'DEVICE_TESTED' and not args.allow_unverified:
-        parser.error('bundle has not passed device testing; use --allow-unverified only for attended tests'
-                     ' —— 该包未通过真机验证，请勿用于正式安装')
+        parser.error('No matching device test record. Use --allow-unverified only for attended tests.'
+                     ' —— 该包缺少匹配的实机验收记录。')
     restore = args.restore_partition_table
     if restore is None and not all((args.serial, args.backup, args.erase_userdata)):
         parser.error('--serial, --backup, --erase-userdata and --layout are required')

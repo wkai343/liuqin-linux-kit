@@ -20,6 +20,7 @@ import time
 PANEL_ROOT = Path('/sys/bus/mipi-dsi/devices')
 BACKLIGHT = Path('/sys/class/backlight/ktz8866-backlight')
 DOCTOR = '/usr/bin/kscreen-doctor'
+DRM = Path('/sys/class/drm')
 STOP = threading.Event()
 
 
@@ -182,9 +183,9 @@ def active_session(uid):
     return sid, env
 
 
-def excluded_outputs(config):
-    outputs = config.get('outputs')
-    if not isinstance(outputs, list):
+def require_internal_only(config):
+    outputs = config.get('outputs') if isinstance(config, dict) else None
+    if not isinstance(outputs, list) or not all(isinstance(o, dict) for o in outputs):
         raise ValueError('missing output configuration')
     names = [o.get('name') for o in outputs]
     if any(not isinstance(n, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', n) for n in names) or len(names) != len(set(names)):
@@ -192,23 +193,25 @@ def excluded_outputs(config):
     internal = [o for o in outputs if o['name'] == 'DSI-1' and o.get('connected') is True and o.get('enabled') is True]
     if len(internal) != 1:
         raise ValueError('active internal DSI-1 output unavailable')
-    return sorted(n for n in names if n != 'DSI-1')
+    if any(o['name'] != 'DSI-1' and (o.get('connected') is not False or o.get('enabled') is not False) for o in outputs):
+        raise Deferred('external Wayland output present')
+    connectors = list(DRM.glob('card*-DSI-1/status'))
+    if len(connectors) != 1 or connectors[0].read_text().strip() != 'connected':
+        raise Deferred('internal DRM connector unavailable')
+    for status in DRM.glob('card*-*/status'):
+        name = status.parent.name.split('-', 1)[1]
+        if name != 'DSI-1' and not name.startswith('Writeback-') and status.read_text().strip() != 'disconnected':
+            raise Deferred('external DRM connector present')
 
 
 class Session:
     def __init__(self, uid, panel):
         self.uid, self.panel = uid, panel
         self.sid, self.env = active_session(uid)
-        config = json.loads(command([DOCTOR, '--json'], env=self.env))
-        excluded = set(excluded_outputs(config))
-        # Also exclude currently disconnected connectors from a hotplug race.
-        for status in Path('/sys/class/drm').glob('card*-*/status'):
-            name = status.parent.name.split('-', 1)[1]
-            if name != 'DSI-1' and re.fullmatch(r'[A-Za-z0-9_-]+', name):
-                excluded.add(name)
-        self.argv = [DOCTOR]
-        for name in sorted(excluded):
-            self.argv += ['--dpms-excluded', name]
+        self.check_outputs()
+
+    def check_outputs(self):
+        require_internal_only(json.loads(command([DOCTOR, '--json'], env=self.env)))
 
     def still_active(self):
         sid, env = active_session(self.uid)
@@ -226,7 +229,7 @@ class Session:
             return True  # A diagnostic failure must not strand our own off request.
 
     def power(self, mode):
-        command(self.argv + ['--dpms', mode], env=self.env)
+        command([DOCTOR, '--dpms', mode], env=self.env)
 
     def read(self):
         return snapshot(self.panel)
@@ -244,6 +247,9 @@ def completed_frame(s, previous_cycle):
 def recover(session, before):
     if not session.still_active():
         raise ValueError('active session changed before recovery')
+    # DPMS on current KScreen is global. Recheck before each command; an
+    # external connector can appear even before KWin lists the new output.
+    session.check_outputs()
     off_attempted = False
     try:
         off_attempted = True
@@ -264,6 +270,7 @@ def recover(session, before):
         if off_attempted:
             if not session.restore_allowed():
                 raise RuntimeError('session ended or system is stopping; preserving its power state')
+            session.check_outputs()
             session.power('on')
     for _ in range(8):
         session.wait(0.5)

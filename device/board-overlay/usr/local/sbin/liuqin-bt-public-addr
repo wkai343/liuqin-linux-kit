@@ -11,10 +11,8 @@
 # index through the global MGMT list, and accepts only that state or the
 # reviewed placeholder identity.
 #
-# One provisioned public address is all it wants. This is deliberately much
-# narrower than the Weston root's liuqin-bluetooth supervisor, which also
-# launched and policed its own bluetoothd; the GNOME root has Canonical's
-# BlueZ and only needs the controller identity made usable before it starts.
+# This helper provisions the controller's public address before BlueZ starts.
+# bluetooth.service owns the bluetoothd process.
 #
 # The address comes from root-only, device-specific state provisioned from a
 # private persist backup.  It is stable across boots so BlueZ bond state stays

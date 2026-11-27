@@ -466,7 +466,19 @@ ApplicationWindow {
                         Body { objectName:"fixedRecoveryPlan";visible:!!window.v.wizardPlan.fixed_recovery;text:window.v.wizardPlan.fixed_recovery ? window.v.wizardPlan.fixed_recovery.message : "" }
                         Body { visible:!!window.v.wizardPlan.fixed_recovery;text:"固定 Rec 仅处理 recovery_a；recovery_b 保留。安装前后核验启动链和整分区摘要，失败留在当前安装环境。新 ROM 下的冷启动仍需实机确认。" }
                         Body { visible:!!window.v.wizardPlan.rom&&window.v.wizardPlan.fixed_recovery_policy==="rom";text:"Recovery：按 ROM 清单写入，可能替换本机固定 Rec。";color:"#94481e" }
-                        Repeater { model:window.v.wizardPlan.installations||[];delegate:Body { required property var modelData;text:(modelData.kind==="android" ? "Android" : modelData.name||"Linux")+" → "+modelData.target+(modelData.set_default ? "（最后写入默认引导）" : "") } }
+                        Repeater {
+                            model: window.v.wizardPlan.installations || []
+                            delegate: Body {
+                                required property var modelData
+                                objectName: "installationPlan_" + modelData.target
+                                wrapMode: Text.Wrap
+                                textFormat: Text.PlainText
+                                text: (modelData.kind === "android" ? "Android" : modelData.name || "Linux")
+                                    + " → " + modelData.target + (modelData.set_default ? "（最后写入默认引导）" : "")
+                                    + (modelData.device_test_label ? " · " + modelData.device_test_label : "")
+                                    + (modelData.bundle ? "\n材料目录：" + modelData.bundle : "")
+                            }
+                        }
                         Body { visible:(window.v.wizardPlan.preserved_roots||[]).length>0;text:"不安装的 Linux rootfs："+(window.v.wizardPlan.preserved_roots||[]).join("、") }
                         Repeater { model:window.v.wizardPlan.additions||[];delegate:Body { required property var modelData;text:"新建 "+modelData.name+" · "+window.gib(modelData.bytes) } }
                         Repeater { model:window.v.wizardPlan.destructive||[];delegate:Body { required property var modelData;text:modelData.action+"："+modelData.name+" · "+window.gib(modelData.bytes);color:"#a34b24" } }
@@ -482,7 +494,7 @@ ApplicationWindow {
                             visible: !!window.v.wizardPlan.plan_id
                             text: window.v.bootStoreMode ? "我确认执行以上引导存储或中断恢复操作" : window.v.bootSwitchMode
                                 ? "我确认切换下次开机的默认启动系统"
-                                : "个人资料已另行备份，确认以上分区与刷写操作（当前实现尚未完成真机验收）"
+                                : "我已另行备份个人资料，了解本次操作的验收范围，并确认执行以上分区与刷写操作。"
                             Layout.fillWidth: true
                         }
                         CheckBox { id:experimental;visible:false;checked:consent.checked }

@@ -150,7 +150,7 @@ storage_ufs_only=false
 if [ "$storage_mode" = persistent ] && [ "$storage_profile" = native-updatable ]; then
 	if [ -f /etc/liuqin-storage-policy ] && [ ! -L /etc/liuqin-storage-policy ] &&
 	   [ "$("$BB" stat -c '%a %u %g' /etc/liuqin-storage-policy)" = '644 0 0' ] &&
-	   [ "$("$BB" cat /etc/liuqin-storage-policy)" = LIUQIN_DESKTOP_UFS_ONLY_V1 ]; then
+	   [ "$("$BB" cat /etc/liuqin-storage-policy)" = LIUQIN_DESKTOP_UFS_ONLY_V2 ]; then
 		storage_ufs_only=true
 	else
 		log 'desktop storage policy missing or incompatible; retaining the RAM-only baseline'
@@ -283,11 +283,8 @@ storage_native_reject() {
 	return 1
 }
 
-# Native-install profile:
-# the fresh root lives in the native-root subdir of LIUQIN_ROOT and every pinned
-# path is project-owned.  Development evidence tools (uinput-automation,
-# audio-hwparams-probe, ssccli) and the snap admission text check deliberately
-# appear in no gate here: they must not decide whether the system boots.
+# The native installation lives under LIUQIN_ROOT/native-root.
+# Check its boot contract and the board services required for startup.
 storage_native_root_ok() {
 	storage_checked_root=$1
     if [ "$storage_binding" = true ]; then
@@ -328,30 +325,25 @@ storage_native_root_ok() {
 		/usr/bin/hexagonrpcd \
 		/usr/local/bin/busybox \
 		/usr/libexec/iio-sensor-proxy \
-		/usr/local/sbin/liuqin-gnome-storage-guard \
-		/usr/local/libexec/liuqin-power-keyd \
-		/usr/local/libexec/liuqin-power-key-action \
+		/usr/local/sbin/liuqin-storage-guard \
 		/usr/local/sbin/liuqin-bt-public-addr \
 		/usr/local/sbin/liuqin-wlan-mac \
 		/usr/libexec/liuqin-ssc-sample-gate; do
-        case $storage_native_executable in /usr/local/libexec/liuqin-power-keyd|/usr/local/libexec/liuqin-power-key-action) continue ;; esac
 		[ "$("$BB" stat -c '%a' "$storage_checked_root$storage_native_executable" 2>/dev/null || true)" = 755 ] ||
 			storage_native_reject "not executable: $storage_native_executable" || return 1
 	done
 	storage_policy=$storage_checked_root/etc/liuqin-storage-policy
 	[ -f "$storage_policy" ] && [ ! -L "$storage_policy" ] &&
 		[ "$("$BB" stat -c '%a %u %g' "$storage_policy")" = '644 0 0' ] &&
-		[ "$("$BB" cat "$storage_policy")" = LIUQIN_DESKTOP_UFS_ONLY_V1 ] ||
+		[ "$("$BB" cat "$storage_policy")" = LIUQIN_DESKTOP_UFS_ONLY_V2 ] ||
 		storage_native_reject 'root requires the UFS-only storage policy update' || return 1
-	"$BB" grep -qx 'policy_version=LIUQIN_DESKTOP_UFS_ONLY_V1' \
-		"$storage_checked_root/usr/local/sbin/liuqin-gnome-storage-guard" || return 1
+	"$BB" grep -qx 'policy_version=LIUQIN_DESKTOP_UFS_ONLY_V2' \
+		"$storage_checked_root/usr/local/sbin/liuqin-storage-guard" || return 1
 	[ "$("$BB" stat -c '%a' "$storage_checked_root/usr/libexec/liuqin-storage-seal")" = 755 ] &&
 		[ "$("$BB" chroot "$storage_checked_root" /usr/libexec/liuqin-storage-seal --version)" = liuqin-storage-scope-v1 ] ||
 		storage_native_reject 'UFS scope helper missing or incompatible' || return 1
 	for storage_native_regular in \
-		/etc/dconf/db/local.d/locks/00-liuqin-power \
-		/etc/systemd/system/liuqin-gnome-storage-guard.service \
-		/etc/systemd/system/liuqin-power-keyd.service \
+		/etc/systemd/system/liuqin-storage-guard.service \
 		/etc/systemd/system/liuqin-backlight-default.service \
 		/etc/systemd/system/bluetooth.service.d/20-liuqin-public-address.conf \
 		/etc/systemd/system/liuqin-bt-preconfigure.service \
@@ -363,14 +355,12 @@ storage_native_root_ok() {
 		/etc/udev/rules.d/80-liuqin-fastrpc.rules \
 		/usr/lib/firmware/qcom/sm8450/Xiaomi-Pad-6-Pro-tplg.bin \
 		/usr/share/qcom/sm8450/Xiaomi/liuqin/sensors/sns_reg_version; do
-		if [ "$storage_native_regular" = /etc/systemd/system/liuqin-power-keyd.service ]; then continue; fi
-		if [ "$storage_native_regular" = /etc/dconf/db/local.d/locks/00-liuqin-power ]; then continue; fi
 		[ "$("$BB" stat -c '%a' "$storage_checked_root$storage_native_regular" 2>/dev/null || true)" = 644 ] ||
 			storage_native_reject "project regular-file mode is invalid: $storage_native_regular" || return 1
 	done
-	[ -L "$storage_checked_root/etc/systemd/system/basic.target.requires/liuqin-gnome-storage-guard.service" ] ||
+	[ -L "$storage_checked_root/etc/systemd/system/basic.target.requires/liuqin-storage-guard.service" ] ||
 		storage_native_reject "storage guard is not required by basic.target" || return 1
-	[ "$("$BB" readlink "$storage_checked_root/etc/systemd/system/basic.target.requires/liuqin-gnome-storage-guard.service")" = ../liuqin-gnome-storage-guard.service ] || return 1
+	[ "$("$BB" readlink "$storage_checked_root/etc/systemd/system/basic.target.requires/liuqin-storage-guard.service")" = ../liuqin-storage-guard.service ] || return 1
 	[ ! -e "$storage_checked_root/etc/systemd/system/basic.target.requires/liuqin-snap-root-admission.service" ] &&
 		[ ! -L "$storage_checked_root/etc/systemd/system/basic.target.requires/liuqin-snap-root-admission.service" ] ||
 		storage_native_reject "snap admission still gates basic.target" || return 1
@@ -815,7 +805,7 @@ storage_prepare_persistent_root() {
 		fi
 		storage_probe_mounted=true
 		if ! "$BB" mount --bind "$storage_probe_root/$storage_root_subdir" "$storage_newroot"; then
-			log "persistent GNOME subroot bind failed"
+			log "persistent subroot bind failed: $storage_probe_root/$storage_root_subdir -> $storage_newroot"
 			storage_abort
 			return 1
 		fi
@@ -1058,7 +1048,7 @@ fi
 
 # ABL uses androidboot.mode=charger when external power wakes a deeply
 # discharged tablet.  A normal desktop boot in that state consumes more than
-# an SDP input can supply and creates a boot/drain/reboot loop.  Product GNOME
+# an SDP input can supply and creates a boot/drain/reboot loop.  Persistent Linux
 # images therefore divert here, before USB gadget setup, any read-write mount,
 # slot metadata update, or stage-2/systemd handoff. The charger process shows
 # a bounded charging screen and independently powers off after confirmed
@@ -1088,7 +1078,7 @@ if [ "$storage_profile" = native-updatable ] && [ "$charger_boot" = true ]; then
 		log "critical: charger boot lacks its exact low-power state machine; refusing normal boot"
 	fi
 	# PID 1 must stay alive even if a damaged helper cannot exec.  Never fall
-	# through to gadget setup, persistent-root preparation, or GNOME.
+	# through to gadget setup, persistent-root preparation, or stage-2 startup.
 	while :; do sleep 60; done
 fi
 

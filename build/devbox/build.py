@@ -29,7 +29,7 @@ DEFAULTS = {
 }
 CONFIG_KEYS = set(DEFAULTS) | {'rootfs_config', 'kernel_source_lock', 'kernel_config', 'rom_images'}
 BUILD_TARGETS = {'system': 'rootfs', 'kernel': 'kernel', 'modules': 'modules',
-                 'boot': 'boot', 'packages': 'kernel-debs', 'obs-v4l2': 'obs-v4l2', 'libcamera': 'libcamera'}
+                 'boot': 'boot', 'packages': 'kernel-rpms', 'obs-v4l2': 'obs-v4l2', 'libcamera': 'libcamera'}
 
 
 def command_help():

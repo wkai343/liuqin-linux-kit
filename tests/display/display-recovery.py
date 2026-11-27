@@ -19,6 +19,7 @@ class FakeSession:
     def __init__(self,before,*,fail_off=False,fail_on=False,unchanged=False,active=True):
         self.before=before;self.calls=[];self.fail_off=fail_off;self.fail_on=fail_on;self.unchanged=unchanged;self.active=active
     def still_active(self):return self.active
+    def check_outputs(self):pass
     def restore_allowed(self):return True
     def power(self,mode):
         self.calls.append(mode)
@@ -162,11 +163,34 @@ class Tests(unittest.TestCase):
         s=FakeSession(state(),active=False)
         with self.assertRaises(ValueError):m.recover(s,state())
         self.assertEqual(s.calls,[])
-    def test_external_outputs_excluded(self):
-        self.assertEqual(m.excluded_outputs({'outputs':[{'name':'DSI-1','connected':True,'enabled':True},{'name':'DP-1','connected':True,'enabled':True},{'name':'HDMI-A-1','connected':False,'enabled':False}]}),['DP-1','HDMI-A-1'])
+    def test_global_dpms_requires_internal_only_in_kwin_and_drm(self):
+        internal = dict(name='DSI-1', connected=True, enabled=True)
+        external = dict(name='DP-1', connected=False, enabled=False)
+        config = dict(outputs=[internal, external])
+        with tempfile.TemporaryDirectory() as temp, patch.object(m, 'DRM', Path(temp)):
+            for connector, status in [('DSI-1','connected'), ('DP-1','disconnected'), ('Writeback-1','unknown')]:
+                directory = Path(temp) / ('card0-' + connector)
+                directory.mkdir()
+                (directory / 'status').write_text(status)
+            m.require_internal_only(config)
+            for status in ('connected', 'unknown'):
+                (Path(temp) / 'card0-DP-1/status').write_text(status)
+                with self.assertRaises(m.Deferred):
+                    m.require_internal_only(config)
+            (Path(temp) / 'card0-DP-1/status').write_text('disconnected')
+            for connected, enabled in [(True, False), (None, False), (False, True)]:
+                external.update(connected=connected, enabled=enabled)
+                with self.assertRaises(m.Deferred):
+                    m.require_internal_only(config)
+    def test_hotplug_blocks_each_global_request(self):
+        for checks, expected in [([m.Deferred('external')], []), ([None, m.Deferred('external')], ['off'])]:
+            s = FakeSession(state())
+            with patch.object(s, 'check_outputs', side_effect=checks), self.assertRaises(m.Deferred):
+                m.recover(s, state())
+            self.assertEqual(s.calls, expected)
     def test_invalid_or_inactive_internal_output_refused(self):
         for outputs in [[],[{'name':'DSI-1','enabled':False,'connected':True}],[{'name':'DSI-2','enabled':True,'connected':True}],[{'name':'DSI-1','enabled':True,'connected':True}]*2,[{'name':'bad;command'}]]:
-            with self.subTest(outputs=outputs),self.assertRaises(ValueError):m.excluded_outputs({'outputs':outputs})
+            with self.subTest(outputs=outputs),self.assertRaises(ValueError):m.require_internal_only({'outputs':outputs})
     def test_status_format(self):
         s={k:v for k,v in state().items() if k in ['version','available','enabled','pending','armed','cycle','events','last','age_ms']}
         text=' '.join(f'{k}={v}' for k,v in s.items());self.assertEqual(m.parse_status(text),s)

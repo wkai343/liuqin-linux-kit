@@ -239,7 +239,7 @@ class ReleaseTests(unittest.TestCase):
         pipeline.cache = Cache(self.base / 'cache', run)
         with patch.object(pipeline, 'fingerprint_image', return_value=image), \
              patch.object(pipeline, 'apps', return_value=apps), \
-             patch.object(pipeline, 'kernel_debs', return_value=rpms), \
+             patch.object(pipeline, 'kernel_rpms', return_value=rpms), \
              patch.object(pipeline, 'kernel', return_value=(self.base, self.base)), \
              patch.object(pipeline, 'modules', return_value=self.base), \
              patch.object(pipeline, 'target_action', side_effect=target), \

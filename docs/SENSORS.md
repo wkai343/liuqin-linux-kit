@@ -89,6 +89,8 @@ Plasma 会话，再备份 `~/.config/kwinoutputconfig.json`，只把系统默认
 发行版 `80-iio-sensor-proxy.rules` 已为 `fastrpc-sdsp` 添加 `ssc-light`；板级规则
 额外添加 `ssc-accel`。仅检查板级规则会漏掉光感的实际准入来源。
 保留现有 SLPI/真实加速度采样启动门控，环境光可用性仍由 SSC 驱动枚举决定。
+Fedora 在启动时拉起 `iio-sensor-proxy.service`。本地桌面通过 Polkit 的
+`net.hadess.SensorProxy.claim-sensor` 授权读取加速度和环境光，登录时无需重启代理。
 
 ## 可复现检查
 

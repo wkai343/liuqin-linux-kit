@@ -25,7 +25,7 @@ from liuqin_gui.demo import demo_image
 
 spec = importlib.util.spec_from_file_location('boot_update', PROJECT / 'device/boot/boot-update.py')
 updater = importlib.util.module_from_spec(spec); spec.loader.exec_module(updater)
-spec = importlib.util.spec_from_file_location('kernel_debs', PROJECT / 'build/scripts/build-liuqin-kernel-debs.py')
+spec = importlib.util.spec_from_file_location('kernel_packages', PROJECT / 'build/scripts/build-liuqin-kernel-packages.py')
 packager = importlib.util.module_from_spec(spec); spec.loader.exec_module(packager)
 
 
@@ -95,7 +95,7 @@ class UpdateTests(unittest.TestCase):
     def test_new_storage_policy_requires_userspace_update_before_boot_write(self):
         original_interface=updater.boot_interface
         def new_policy(path):
-            return dict(original_interface(path),storage_policy_version=1)
+            return dict(original_interface(path),storage_policy_version=2)
         with patch.object(updater,'boot_interface',side_effect=new_policy):
             with self.assertRaisesRegex(ArtifactError,'设备支持包'):
                 self.update.apply(self.new)
@@ -232,7 +232,7 @@ class UpdateTests(unittest.TestCase):
                 with self.assertRaises(OSError): device.write(self.first[2], context)
             self.assertEqual(calls, [0, 0, 1, 1])
 
-    def test_custom_root_builder_keeps_old_modules_and_legacy_identity(self):
+    def test_rootfs_packer_keeps_old_modules_and_legacy_identity(self):
         self.update.enabled.unlink()
         shutil.rmtree(self.update.state)
         put(self.root / 'usr/share/liuqin/kernel.release', (self.old + '\n').encode())
@@ -243,7 +243,7 @@ class UpdateTests(unittest.TestCase):
         (PROJECT / 'out').mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(prefix='v2-root-test-', dir=PROJECT / 'out') as directory:
             output = Path(directory) / 'result'
-            command = prefix + [sys.executable, str(PROJECT / 'build/scripts/build-liuqin-custom-root.py'), '--root', str(self.root),
+            command = prefix + [sys.executable, str(PROJECT / 'build/scripts/pack-liuqin-rootfs.py'), '--root', str(self.root),
                 '--kernel-out', str(self.second[0]), '--modules-dir', str(self.second[1]), '--out', str(output)]
             result = subprocess.run(command, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
@@ -253,7 +253,7 @@ class UpdateTests(unittest.TestCase):
     def test_device_service_update_does_not_bind_boot_to_old_contents(self):
         self.update.enabled.unlink(); shutil.rmtree(self.update.state)
         (self.root / f'usr/lib/modules/{self.old}/build').symlink_to('/usr/src/old-headers')
-        put(self.root / 'usr/local/sbin/liuqin-gnome-storage-guard', b'#!/bin/sh\n# updated implementation\nexit 0\n', 0o755)
+        put(self.root / 'usr/local/sbin/liuqin-storage-guard', b'#!/bin/sh\n# updated implementation\nexit 0\n', 0o755)
         bundle = self.base / 'bundle'; bundle.mkdir()
         shutil.copyfile(self.second[2], bundle / 'boot.img')
         (bundle / 'installer.img').write_bytes(installer_fixture())

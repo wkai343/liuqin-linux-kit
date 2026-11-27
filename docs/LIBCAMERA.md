@@ -63,11 +63,8 @@ c++ -std=c++20 -O2 tests/camera/camera-rear-manual-focus.cpp \
 
 ### Fedora Snapshot
 
-默认 Fedora Plasma 镜像从发行版的桌面文件生成 Snapshot 菜单入口，为相机进程启用
-DMA-BUF 和 OpenGL 预览。旧镜像若全局设置了 `GDK_DISABLE=dmabuf`，可复制发行版桌面文件到用户的
-`~/.local/share/applications/org.gnome.Snapshot.desktop`，把 `Exec` 设为
-`/usr/bin/env GDK_DISABLE=vulkan GSK_RENDERER=gl /usr/bin/snapshot`，并设
-`DBusActivatable=false`，使菜单启动也使用相同环境。其他 GTK 应用继续使用各自的设置。
+Fedora Plasma 使用发行版提供的 `org.gnome.Snapshot.desktop`，通过 D-Bus 启动相机。
+前后摄预览使用 GTK 默认渲染器。镜像通过 GSettings 默认启用硬件录像编码。
 
 #### 桌面相机硬件录像
 

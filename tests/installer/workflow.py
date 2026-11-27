@@ -183,6 +183,29 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.engine.receipt['installed_targets'][-1],request['default_target'])
         self.assertEqual(len(self.engine.receipt['children']),3)
 
+    def test_each_linux_target_matches_its_record_against_the_selected_runtime(self):
+        request = self.combined_request()
+        targets = list(request['linux_bundles'])
+        for index, target in enumerate(targets):
+            bundle = self.root / target
+            bundle.mkdir()
+            for name in ('boot.img', 'rootfs.tar.gz'):
+                shutil.copyfile(self.engine.demo_bundle / name, bundle / name)
+            record = json.loads((self.engine.demo_bundle / 'bundle.json').read_text())
+            record['status'] = 'DEVICE_TESTED'
+            if index == 1:
+                record['files']['installer.img'] = '0' * 64
+            (bundle / 'bundle.json').write_text(json.dumps(record))
+            request['linux_bundles'][target] = str(bundle)
+        events = []
+        self.engine.emit_callback = events.append
+        workflow.prepare(self.engine, request)
+        plan = next(e['plan'] for e in events if e['type'] == 'wizard_plan')
+        jobs = {j['target']: j for j in plan['installations']}
+        self.assertNotIn('device_test_label', jobs['userdata'])
+        self.assertEqual(jobs[targets[0]]['device_test_label'], '已匹配实机验收记录')
+        self.assertEqual(jobs[targets[1]]['device_test_label'], '缺少匹配的实机验收记录')
+
     def test_multiple_linux_do_not_require_a_rom_and_android_can_be_default(self):
         request=self.combined_request(android=False);request.pop('rom_path')
         workflow.prepare(self.engine,request);self.assertNotIn('android_profile_sha256',self.engine.workflow_snapshot)

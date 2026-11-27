@@ -58,7 +58,7 @@ d94af8648a0347903b68809b4100ea816e76afb6ead967c8b353c6521500f285  amss.bin.zst
 ba583c3550d15871dbbbe1349dab64bac5badced5b6bf122aa7263f8d7df76d4  board-2.bin.zst
 7769d18f26c025008221702e6884c9225f375db46d3e584e20223e33728376ec  m3.bin.zst
 c4b298869269bc55ca73d71beeb756b72a9b19e710cea2af0401accbafa2d3c7  regdb.bin.zst"
-# The GNOME product image uses the complete HSP2-amss20 tuple that passed the
+# The installer and persistent images use the complete HSP2-amss20 tuple that passed the
 # device validation. ath11k probes before
 # switch_root, so carrying this only in the stage-2 device layer would leave a
 # cold boot on the old HSP1.1 tuple.  Keep all four protocol inputs atomic and
@@ -146,12 +146,12 @@ auto)
 esac
 # The explicit installer branch switches the final image to read-only RAM mode.
 if [ "$root_profile" != installer ] && [ "$charger_mode" != 1 ] && [ -z "${INSTALLER_RUNTIME:-}" ]; then
-	echo "error: a persistent GNOME/native image must include charger-mode hold" >&2
+	echo "error: a persistent $root_profile image must include charger-mode hold" >&2
 	exit 1
 fi
 if [ "$root_profile" = native-updatable ] || [ "$root_profile" = installer ]; then
 	[ -d "$wlan_hsp2_tuple/hw2.0" ] && [ -d "$wlan_hsp2_tuple/hw2.1" ] || {
-		echo "error: the GNOME image requires the reviewed HSP2 WLAN tuple: $wlan_hsp2_tuple" >&2
+		echo "error: the $root_profile image requires the reviewed HSP2 WLAN tuple: $wlan_hsp2_tuple" >&2
 		exit 1
 	}
 	for wlan_item in \
@@ -346,7 +346,6 @@ cp "$project_root/device/boot/boot-target-v1.sh" "$staging/usr/lib/liuqin/boot-t
 chmod 0644 "$staging/usr/lib/liuqin/boot-target-v1.sh"
 printf '1\n' >"$staging/etc/liuqin-multiboot"
 chmod 0644 "$staging/etc/liuqin-multiboot"
-cp "$source_dir/etc/issue" "$staging/etc/issue"
 cp "$source_dir/etc/mdev.conf" "$staging/etc/mdev.conf"
 chmod 0644 "$staging/etc/mdev.conf"
 chmod 0755 "$staging/init" "$staging/bin/busybox"
@@ -364,7 +363,7 @@ if [ "$root_profile" = native-updatable ]; then
     printf '%s\n' "$root_profile" >"$staging/etc/liuqin-root-profile"
     chmod 0644 "$staging/etc/liuqin-root-profile"
     if [ "$storage_mode" = persistent ]; then
-        printf 'LIUQIN_DESKTOP_UFS_ONLY_V1\n' >"$staging/etc/liuqin-storage-policy"
+        printf 'LIUQIN_DESKTOP_UFS_ONLY_V2\n' >"$staging/etc/liuqin-storage-policy"
         chmod 0644 "$staging/etc/liuqin-storage-policy"
     fi
 fi
@@ -526,6 +525,8 @@ if [ -n "${INSTALLER_RUNTIME:-}" ]; then
 fi
 
 # Keep these build-selected strings outside the reusable runtime payload.
+image_storage_mode=$(cat "$staging/etc/liuqin-storage-mode")
+install -m 0644 "$source_dir/etc/issue.$image_storage_mode" "$staging/etc/issue"
 python3 "$project_root/build/lib/usb_identity.py" --output-directory "$staging/etc"
 python3 "$project_root/build/lib/root_filesystems.py" --kernel-config "${KERNEL_CONFIG:?set KERNEL_CONFIG}" \
     --output "$staging/etc/liuqin-filesystems"
@@ -585,7 +586,7 @@ printf 'bluetooth firmware: %s files, set sha256 %s\n' \
 printf 'initramfs: %s bytes\n' "$(stat -c %s "$archive")"
 printf 'initramfs: %s\n' "$archive"
 printf 'initramfs compression: %s\n' "$compression"
-printf 'storage mode: %s\n' "$storage_mode"
+printf 'storage mode: %s\n' "$image_storage_mode"
 printf 'embedded rootfs: %s\n' "$embed_rootfs"
 printf 'root profile: %s\n' "$root_profile"
 printf 'charger mode: %s\n' "$charger_mode"

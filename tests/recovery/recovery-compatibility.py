@@ -81,6 +81,16 @@ class CompatibilityTests(unittest.TestCase):
             path,status=c.select_image(environment(),'wrong.img')
             self.assertEqual(path,'right.img');self.assertTrue(status['ready'])
 
+    def test_native_roles_are_distinct_on_first_discovery(self):
+        for properties, role in [
+            ({'inspection_only': True}, '只读维护版'),
+            ({'installer_version': 1}, '临时安装版'),
+            ({'installer_version': 1, 'fixed_installer_version': 1}, '固定安装版'),
+        ]:
+            with self.subTest(role=role), patch.object(c, 'adb_state', return_value='recovery'), \
+                    patch('liuqin_gui.native_adb.probe_adb', return_value=properties):
+                self.assertEqual(c.inspect_device('tablet', native=True)['label'], f'原生 ADB Recovery（{role}）')
+
     def test_discovery_uses_readonly_adb_commands(self):
         calls=[]
         def run(argv,**kwargs):

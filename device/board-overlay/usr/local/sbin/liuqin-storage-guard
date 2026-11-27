@@ -1,20 +1,20 @@
 #!/usr/local/bin/busybox sh
 # SPDX-License-Identifier: MIT
 set -u
-# The LIUQIN_GNOME_GUARD_TEST_* overrides exist for the host-side fixture in
-# tests/storage-guard.sh.  systemd starts this script with a clean unit
+# The LIUQIN_STORAGE_GUARD_TEST_* overrides exist for the host-side fixture in
+# tests/storage/storage-guard.sh.  systemd starts this script with a clean unit
 # environment, so on the device every default below applies unchanged.
-BB=${LIUQIN_GNOME_GUARD_TEST_BUSYBOX:-/usr/local/bin/busybox}
-marker=${LIUQIN_GNOME_GUARD_TEST_MARKER:-/etc/liuqin-native-root}
+BB=${LIUQIN_STORAGE_GUARD_TEST_BUSYBOX:-/usr/local/bin/busybox}
+marker=${LIUQIN_STORAGE_GUARD_TEST_MARKER:-/etc/liuqin-native-root}
 marker_sha=4fdae4f7a27af8b0d4a2bbc168c7f01c3c5c6b5e245fcc521389d662f8212c5b
-dev_root=${LIUQIN_GNOME_GUARD_TEST_DEV_ROOT:-/dev}
-mounts=${LIUQIN_GNOME_GUARD_TEST_MOUNTS:-/proc/mounts}
-kmsg=${LIUQIN_GNOME_GUARD_TEST_KMSG:-/dev/kmsg}
-scope=${LIUQIN_GNOME_GUARD_TEST_SCOPE_HELPER:-/usr/libexec/liuqin-storage-seal}
-policy_version=LIUQIN_DESKTOP_UFS_ONLY_V1
+dev_root=${LIUQIN_STORAGE_GUARD_TEST_DEV_ROOT:-/dev}
+mounts=${LIUQIN_STORAGE_GUARD_TEST_MOUNTS:-/proc/mounts}
+kmsg=${LIUQIN_STORAGE_GUARD_TEST_KMSG:-/dev/kmsg}
+scope=${LIUQIN_STORAGE_GUARD_TEST_SCOPE_HELPER:-/usr/libexec/liuqin-storage-seal}
+policy_version=LIUQIN_DESKTOP_UFS_ONLY_V2
 
 fail() {
-	echo "liuqin-gnome-guard: critical: $*" >>"$kmsg" 2>/dev/null || :
+	echo "liuqin-storage-guard: critical: $*" >>"$kmsg" 2>/dev/null || :
 	$BB mount -o remount,ro / 2>/dev/null || :
 	exit 1
 }
@@ -24,7 +24,7 @@ path_is_block() {
 	# Host-side tests cannot create block nodes without privilege.  The bypass
 	# is reachable only together with the test BusyBox above, which the unit
 	# never sets.
-	[ -n "${LIUQIN_GNOME_GUARD_TEST_BUSYBOX:-}" ] && [ -f "$1" ]
+	[ -n "${LIUQIN_STORAGE_GUARD_TEST_BUSYBOX:-}" ] && [ -f "$1" ]
 }
 
 [ -f "$marker" ] && [ ! -L "$marker" ] || fail 'root marker missing'
@@ -88,4 +88,4 @@ done
 "$scope" --verify-flags "$dev_root" /sys ufs "${root_source##*/}" $nodes >/dev/null ||
     fail 'UFS read-only state or device identity changed'
 [ "$("$scope" --list-ufs)" = "$nodes" ] || fail 'internal UFS namespace changed'
-echo "liuqin-gnome-guard: PASS ($total nodes; root pair rw, all UFS siblings ro)" >>"$kmsg" 2>/dev/null || :
+echo "liuqin-storage-guard: PASS ($total nodes; root pair rw, all UFS siblings ro)" >>"$kmsg" 2>/dev/null || :

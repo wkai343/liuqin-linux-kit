@@ -133,7 +133,7 @@ PY
 
 ### 内核与启动配置
 
-[source.json](../build/kernel/source.json) 固定内核版本、基础提交、配置和 `target_patches`，构建核对 `expected_source_tree`。补丁顺序以清单为准，不按编号补齐空缺。固定基础提交的补丁应用在构建缓存中，不改写用户源码；使用其他提交须自行合入适用补丁。`tested_source_commit` / `tested_source_tree` 仅是历史验收基线，不能证明当前产物已通过实机测试。
+[source.json](../build/kernel/source.json) 固定内核版本、基础提交、配置和 `target_patches`，应用这些补丁时，清单必须用 `expected_source_tree` 指定预期的 40 位小写十六进制 Git 树 ID，构建会核对补丁应用后的源码树。补丁顺序以清单为准，不按编号补齐空缺。固定基础提交的补丁应用在构建缓存中，不改写用户源码；使用其他提交须自行合入适用补丁。`tested_source_commit` / `tested_source_tree` 仅是历史验收基线，不能证明当前产物已通过实机测试。
 
 [Rec 内核清单](../build/recovery/kernel/source.json)按同一顺序应用公共补丁，再应用 Rec 专用补丁。仅整理补丁时须保持最终源码树一致。修改源码内容时重新核对目标树。补丁文件或顺序变化都会改变构建身份，须同步 Rec 清单内的补丁摘要和公共清单摘要。用 `python3 tests/recovery/recovery-source.py` 检查两份清单。各项改动的原厂依据和实测范围见[硬件适配清单](HARDWARE.md)。
 
@@ -143,10 +143,10 @@ PY
 
 目标引导使用 [native-bootargs.txt](../device/native-bootargs.txt) 和 [native-display.config](../build/kernel/configs/native-display.config)，四档刷新率默认配置见[显示文档](DISPLAY.md#默认配置)。原生 Rec 同样使用 Linux 7.3.4 公共源码和补丁，配置、专用补丁与构建产物独立，见 [Rec 内核配方](../build/recovery/kernel/README.md)。
 
-- **图形启动**：Fedora 启用 Plymouth 时装配独立启动运行包，应用 `firmware-splash.config`，使用 `CONFIG_BACKLIGHT_KTZ8866=m`、`CONFIG_FB_SIMPLE=y`、`CONFIG_SM_DISPCC_8450=m`，由固件帧缓冲过渡到原生 DRM；未启用 Plymouth 的目标仍内置 KTZ8866。动画准备与 UFS 校验并行，在最终存储证明前等待准备结束；动画失败不跳过存储检查。
+- **图形启动**：Fedora 启用 Plymouth 时装配独立启动运行包。运行包的 `runtime.json` 必须用布尔值 `firmware_splash` 声明是否支持固件帧缓冲交接。默认配方应用 `firmware-splash.config`，使用 `CONFIG_BACKLIGHT_KTZ8866=m`、`CONFIG_FB_SIMPLE=y`、`CONFIG_SM_DISPCC_8450=m`，由固件帧缓冲过渡到原生 DRM；未启用 Plymouth 的目标仍内置 KTZ8866。动画准备与 UFS 校验并行，在最终存储证明前等待准备结束；动画失败不跳过存储检查。
 - **压缩与驱动等待**：目标启用 `CONFIG_RD_ZSTD=y` 时用 Zstd，否则用 gzip；独立安装环境用 gzip。`deferred_probe_timeout=60` 允许等待根系统模块，依赖就绪即继续，不固定等待 60 秒。
 - **存储保护**：两轮 UFS、双份 GPT 和分区节点证明一致后提前结束等待；就绪证明未通过时，保留约 10 秒的有界等待及后续独立只读检查。桌面沿用 Rec 对原厂 LUN 3/5 自指备份头的有限兼容，仍核对 GPT 校验和、主备内容及 sysfs 几何，不写盘修表。持久化桌面仅封存内部 UFS，外接磁盘保持原权限；安装、充电和失败回退封存全部 SCSI 设备。
-- **配套核验**：boot/rootfs 的 `LIUQIN_DESKTOP_UFS_ONLY_V1` 策略与设备支持包须匹配；新根交接前后重验节点身份，失败则拒绝桌面启动，不写盘修表。
+- **配套核验**：boot/rootfs 的 `LIUQIN_DESKTOP_UFS_ONLY_V2` 策略与设备支持包须匹配；新根交接前后重验节点身份，失败则拒绝桌面启动，不写盘修表。
 - **只读复查**：`liuqin-storage-seal --verify-flags` 在每个原有检查点重新打开完整节点快照，批量读取 `BLKROGET`，核对设备号、节点身份、UFS 归属和前后命名空间。写保护操作、读写挂载前后、移动内核文件系统前及 `switch_root` 前的独立复查均保留，桌面 guard 同样使用批量复查；失败仍进入原有拒绝或回退路径，不沿用先前的校验结果。
 - **网络**：Fedora 由 [早期模块列表](../device/board-overlay/etc/modules-load.d/liuqin-wlan.conf) 加载 WLAN 电源控制和 `ath11k_pci`，与 RTC 采样并行，避免固件启动阻塞进入 `/init`。须提供同版根系统模块；仅依赖稍后的 udev 自动加载会把等待转移到网络准入。设置本机 Wi-Fi MAC 时仍等待目标网卡完成 udev 初始化、核对并设置原厂身份，再启动 NetworkManager；原有失败处理和用户会话顺序保留。桌面不启动诊断 USB 网络；RAM 故障救援与 Rec ADB 分开维护。
 
@@ -201,7 +201,7 @@ VP9 会暂时使用软件解码。已有 overlay 的本地启动器保留，维�
 | `distribution`、`desktop` | 发行版与桌面，如 `fedora`、`plasma` |
 | `packages` / `remove` | 额外安装 / 裁剪软件；保留启动及设备运行依赖 |
 | `overlay` | 合并到根目录的配置目录，只允许普通文件、目录和不离开目标根的相对链接，不可写运行时挂载目录 |
-| `first_boot_setup` | `true` 首次开机创建账号；`false` 构建时预置账号 |
+| `first_boot_setup` | 必填布尔值。选 `true` 在首次开机时创建账号，选 `false` 在构建时预置账号 |
 
 Fedora 桌面安装推荐依赖，`remove` 清单阻止相应弱依赖引入并在装配结束时移除。裁剪时保留登录、网络、电源管理、存储和所需语言组件。SSH 服务端预装但停用，需要时在平板执行 `sudo systemctl enable --now sshd`，主机密钥在设备上生成。
 
@@ -210,7 +210,7 @@ Fedora 桌面安装推荐依赖，`remove` 清单阻止相应弱依赖引入并�
 ### 首次设置与输入法
 
 - `first_boot_setup: true`：不预置普通用户或密码，也不生成 `out/login/` 凭据。开机由 Plasma Setup 设置语言、网络、时区、设备名和账号，完成标记为 `/etc/plasma-setup-done`，不要在已有系统上删除此标记重做初始化。
-- `first_boot_setup: false`：填写 `user`，可选 `hostname`、`password_file`。密码文件须为权限 0600 的单行文件；省略时生成随机密码，存入权限 0600 的 `out/login/<发行版>-plasma-<内容标识>.txt`。旧配方仅含 `user` 时仍按预置账号处理。
+- `first_boot_setup: false`：填写 `user`，可选 `hostname`、`password_file`。密码文件须为权限 0600 的单行文件；省略时生成随机密码，存入权限 0600 的 `out/login/<发行版>-plasma-<内容标识>.txt`。
 - 默认使用 Plasma 屏幕键盘，保留 Fcitx5、移除重复的 IBus/Maliit 主程序；不要用 `langpacks-zh_CN` 元包重新引入 IBus 拼音。
 - Wayland 可在“系统设置 → 键盘 → 虚拟键盘”切换 Plasma 键盘与 Fcitx 5；后者是输入框架启动器，不提供屏幕按键。两者不能同时占用 KWin 输入法接口。
 - 共用 `XMODIFIERS=@im=fcitx`，清除全局 `QT_IM_MODULES`；Wayland 不全局设置 `GTK_IM_MODULE`、`QT_IM_MODULE`、`SDL_IM_MODULE`，X11 将三项设为 `fcitx` 并自动启动 Fcitx5。旧 Qt/XWayland 应用可单独用 `QT_IM_MODULE=fcitx 程序名`。

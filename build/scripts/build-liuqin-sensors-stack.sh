@@ -467,8 +467,8 @@ rm -rf "$dest/usr/$libdir/systemd"
 # The upstream install target also emits headers, pkg-config metadata and its
 # Python mock server.  They are build/test inputs, not tablet runtime files.
 rm -rf "$dest/usr/include/libssc" \
-	"$dest/usr/lib/python3/dist-packages/ssc_server" \
 	"$dest/usr/libexec/installed-tests"
+python3 "$project_root/build/lib/device_overlay.py" --remove-sensor-mock --out "$dest"
 rm -f "$dest/usr/$libdir/libhexagonrpc.so" \
 	"$dest/usr/$libdir/libssc.so" \
 	"$dest/usr/$libdir/pkgconfig/libssc.pc"

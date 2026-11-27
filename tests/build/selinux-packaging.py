@@ -16,7 +16,7 @@ PROJECT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(PROJECT/'build/lib'), str(PROJECT/'tests')]
 import source_build
 from kernel_fixtures import kernel_fixture, install_fixture, archive_root
-spec = importlib.util.spec_from_file_location('root_packer', PROJECT/'build/scripts/build-liuqin-custom-root.py')
+spec = importlib.util.spec_from_file_location('root_packer', PROJECT/'build/scripts/pack-liuqin-rootfs.py')
 packer = importlib.util.module_from_spec(spec); spec.loader.exec_module(packer)
 
 

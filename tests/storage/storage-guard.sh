@@ -1,5 +1,5 @@
 #!/bin/sh
-# Host-side execution tests for the GNOME storage guard.
+# Host-side execution tests for the storage guard.
 #
 # Exercise the real guard against synthetic mounts and blockdev state.
 # Only the root and its parent may remain writable; other mounts cannot
@@ -8,8 +8,8 @@
 set -eu
 
 project_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-guard_source=${LIUQIN_GUARD_SCRIPT:-$project_root/device/board-overlay/usr/local/sbin/liuqin-gnome-storage-guard}
-guard_unit=$project_root/device/board-overlay/etc/systemd/system/liuqin-gnome-storage-guard.service
+guard_source=${LIUQIN_GUARD_SCRIPT:-$project_root/device/board-overlay/usr/local/sbin/liuqin-storage-guard}
+guard_unit=$project_root/device/board-overlay/etc/systemd/system/liuqin-storage-guard.service
 real_marker=$project_root/device/board-overlay/etc/liuqin-native-root
 for input in "$guard_source" "$guard_unit" "$real_marker"; do
 	[ -f "$input" ] ||
@@ -137,12 +137,12 @@ SCOPE
 run_guard() {
 	status=0
 	env PATH="$bin:/usr/bin:/bin" \
-		LIUQIN_GNOME_GUARD_TEST_BUSYBOX="$bin/bb" \
-		LIUQIN_GNOME_GUARD_TEST_MARKER="$marker" \
-		LIUQIN_GNOME_GUARD_TEST_DEV_ROOT="$dev" \
-		LIUQIN_GNOME_GUARD_TEST_MOUNTS="$mounts" \
-		LIUQIN_GNOME_GUARD_TEST_KMSG="$kmsg" \
-		LIUQIN_GNOME_GUARD_TEST_SCOPE_HELPER="$scope" \
+		LIUQIN_STORAGE_GUARD_TEST_BUSYBOX="$bin/bb" \
+		LIUQIN_STORAGE_GUARD_TEST_MARKER="$marker" \
+		LIUQIN_STORAGE_GUARD_TEST_DEV_ROOT="$dev" \
+		LIUQIN_STORAGE_GUARD_TEST_MOUNTS="$mounts" \
+		LIUQIN_STORAGE_GUARD_TEST_KMSG="$kmsg" \
+		LIUQIN_STORAGE_GUARD_TEST_SCOPE_HELPER="$scope" \
 		TEST_STATE="$state" \
 		TEST_COMMAND_LOG="$command_log" \
 		TEST_MARKER_STAT="$TEST_MARKER_STAT" \
@@ -153,13 +153,13 @@ run_guard() {
 expect_pass() { # NAME PASS-LINE
 	[ "$status" = 0 ] ||
 		fail "$1: the guard failed: $(cat "$case_root/output")"
-	grep -qxF "liuqin-gnome-guard: PASS ($2)" "$kmsg" ||
+	grep -qxF "liuqin-storage-guard: PASS ($2)" "$kmsg" ||
 		fail "$1: expected the PASS line '$2', got: $(cat "$kmsg")"
 }
 
 expect_fail() { # NAME CRITICAL-MESSAGE
 	[ "$status" != 0 ] || fail "$1: the guard passed unexpectedly"
-	grep -qxF "liuqin-gnome-guard: critical: $2" "$kmsg" ||
+	grep -qxF "liuqin-storage-guard: critical: $2" "$kmsg" ||
 		fail "$1: expected critical '$2', got: $(cat "$kmsg")"
 	grep -qx 'bb mount -o remount,ro /' "$command_log" ||
 		fail "$1: the root filesystem was not remounted read-only"
@@ -250,4 +250,4 @@ rm -f "${marker%/*}/liuqin-root-filesystem"
 run_guard
 expect_fail btrfs-marker-missing 'Btrfs root lacks its installation marker'
 
-printf '%s\n' 'liuqin GNOME storage guard execution tests: PASS'
+printf '%s\n' 'liuqin storage guard execution tests: PASS'

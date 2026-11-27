@@ -40,13 +40,8 @@ partition_size=$((0x0c000000))
 # empty so ABL contributes the DT bootargs exactly once; both fields remain
 # independently audited.
 #
-# Three flags are gone on purpose and the DTS says why at length: keep_bootcon
-# kept simplefb0 writing into the bootloader framebuffer all session, which a
-# desktop compositor cannot draw over, and clk_ignore_unused/pd_ignore_unused
-# kept every unclaimed clock and power domain alive, which is why the tablet
-# discharges while plugged in. Keep this string equal to the DTS one; the build
-# fails below if they drift.
-cmdline=${CMDLINE:-"earlycon=simplefb console=drm_log console=tty0 initcall_blacklist=simplefb_driver_init rootwait"}
+# The native and installer builders supply their own CMDLINE and matching DT.
+cmdline=${CMDLINE:-"earlycon=simplefb console=drm_log console=tty0 initcall_blacklist=simplefb_driver_init"}
 header_cmdline=${HEADER_CMDLINE-$cmdline}
 
 for input in "$image" "$dtb" "$abl_overlay" "$ramdisk" "$dtc" "$fdtoverlay" \

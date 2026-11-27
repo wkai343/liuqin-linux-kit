@@ -199,7 +199,8 @@ class SplashTests(unittest.TestCase):
                 archive.addfile(item,io.BytesIO(data))
                 records[name]=dict(sha256=hashlib.sha256(data).hexdigest(),mode=item.mode,size=len(data))
             if extra:archive.addfile(extra)
-        (self.runtime/'runtime.json').write_text(json.dumps(dict(schema=1,architecture='aarch64',theme='spinner',files=records)))
+        (self.runtime/'runtime.json').write_text(json.dumps(dict(schema=1,architecture='aarch64',theme='spinner',
+                                                                firmware_splash=False,files=records)))
 
     def write_modules(self,bad_clock=False,backlight=False,bad_backlight=False,unsafe_dependency=False):
         prefix='usr/lib/modules/'+self.release+'/'
@@ -268,6 +269,13 @@ class SplashTests(unittest.TestCase):
         manifest=self.runtime/'runtime.json';data=json.loads(manifest.read_text())
         data['files']['usr/bin/plymouth']['sha256']='0'*64;manifest.write_text(json.dumps(data))
         with self.assertRaisesRegex(ValueError,'content differs'):self.run_stage()
+
+    def test_staging_requires_declared_firmware_splash_even_without_kernel_config(self):
+        manifest=self.runtime/'runtime.json';data=json.loads(manifest.read_text())
+        del data['firmware_splash']
+        manifest.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError,'firmware_splash'):self.run_stage()
+        self.assertEqual(list(self.output.iterdir()),[])
 
     def test_traversal_and_symlinks_are_rejected_without_writing_outside_staging(self):
         for kind in ('traversal','link','hardlink'):

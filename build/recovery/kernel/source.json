@@ -5,7 +5,7 @@
   "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
   "tag": "v7.3.4",
   "commit": "7595a62d45ee1a2297eafa5f2ef5d0a45142d84d",
-  "expected_source_tree": "fce0bb306065bbc20c5d99f34ce88da55e5332f3",
+  "expected_source_tree": "cce6107dca440d33103999c2b2f8d3d934ead0f6",
   "config": {
     "path": "build/recovery/kernel/7.3.4.config",
     "sha256": "2ef7c5627d56a5b0e7d552f6bd50e5621746708523084b1fca1f036d0232596c"
@@ -13,7 +13,7 @@
   "patches": [
     {
       "path": "build/kernel/patches/linux-7.3/0001-preserve-liuqin-adaptation.patch",
-      "sha256": "5ae16b3b3daeb74eb7d1dbb546ed120dd7e279d5b625e7d28a34b9bf15e1e1ff"
+      "sha256": "1f8c7ceac2b00b70d021d7faa41cb8f50919e6c2eed2a09e56aec5a0b7ad8cdf"
     },
     {
       "path": "build/kernel/patches/linux-7.3/0002-fix-gpio-and-camcc-probe.patch",
@@ -431,11 +431,11 @@
       "sha256": "275eb4741ed29b806bac14c65ce5dac1239c9535e5d442ebe00d47f01a8c2a89"
     }
   ],
-  "bootargs": "earlycon=simplefb console=tty0 clk_ignore_unused pd_ignore_unused rootwait mtdoops.dump_oops=1 panic=0 qcom_q6v5_pas.slpi_auto_boot=0 consoleblank=0",
+  "bootargs": "earlycon=simplefb console=tty0 qcom_q6v5_pas.slpi_auto_boot=0 consoleblank=0",
   "build_timestamp": "2026-11-11T00:00:00+00:00",
   "shared_kernel": {
     "path": "build/kernel/source.json",
-    "sha256": "ab22626adff2c533d1386e77fc0ddef8085132a62623c403a203ae0430b4732f"
+    "sha256": "fa43c06807f6306afd100e3e6742763ccc5d43544403261cc64c37ded3939c92"
   },
   "touch_patches": [
     {

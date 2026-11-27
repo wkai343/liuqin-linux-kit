@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Package a customized, device-adapted ARM64 systemd root (no desktop or Snap requirement)."""
+"""Pack an assembled Liuqin ARM64 systemd root into a rootfs archive with its kernel contract."""
 import argparse
 import contextlib
 import hashlib
@@ -177,7 +177,7 @@ def pack_labeled_root(root, archive, labels):
 def main():
     project = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--root', type=Path, required=True, help='Already customized root with the liuqin device layer installed')
+    parser.add_argument('--root', type=Path, required=True, help='Assembled ARM64 root with the Liuqin device layer installed')
     parser.add_argument('--kernel-out', type=Path, required=True)
     parser.add_argument('--modules-dir', type=Path, required=True, help='Output of build-liuqin-kernel-modules.sh')
     parser.add_argument('--out', type=Path, default=project / 'out/custom-root')

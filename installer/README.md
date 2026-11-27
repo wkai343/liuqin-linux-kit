@@ -25,6 +25,8 @@ uv run --project installer installer/install-gui.py --demo
 | `backups.py`、`fixed_recovery.py` | 备份索引/复用和本机固定 Rec 保护 |
 | `../device/installer/`、`../device/recovery/`、`../shared/` | 设备执行、能力/分区范围及共用接口 |
 
+向导根据镜像能力区分只读维护版、临时安装版和固定安装版。Linux 目标的验收状态来自材料目录中的 `bundle.json`。设备、内核版本和 boot、rootfs、实际使用的 Recovery 三个文件的 SHA-256 均与 `DEVICE_TESTED` 记录匹配时，确认页显示「已匹配实机验收记录」。其他情况显示「缺少匹配的实机验收记录」。
+
 连接只识别，点击读分区才按需进入环境。确认计划绑定材料、设备、当前启动、布局、备份和旧引导，写入阶段拒绝取消/关闭。
 
 ## 当前 worker 协议

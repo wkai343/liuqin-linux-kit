@@ -211,7 +211,7 @@ class WizardController(Controller):
         if not self.configEditable() or not self.data['inventorySummary']:return
         if self.data.get('inspectionOnly'):
             if self.data['targetKind']=='android':self.startRomPreview()
-            else:self.update(error='此 Recovery 测试版仅开放读取及 Android ROM 安装预览。')
+            else:self.update(error='当前 Recovery 会话仅开放读取及 Android ROM 安装预览。')
             return
         if not self.data['targetKind'] and not(self.data['editActions'] or self.data['newRoots'] or self.data['newUserdata']):
             self.update(error='请选择 userdata、rootfs，或添加分区操作。');return

@@ -25,7 +25,7 @@ class DeviceOverlayTests(unittest.TestCase):
         target = self.root / 'payload'
         stage_overlay(target, board_overlay=BOARD)
         for name in (SLEEP, 'usr/libexec/liuqin-rtc', 'usr/local/sbin/liuqin-wlan-mac',
-                     'usr/local/sbin/liuqin-gnome-storage-guard'):
+                     'usr/local/sbin/liuqin-storage-guard'):
             self.assertEqual((target / name).read_bytes(), (BOARD / name).read_bytes())
         self.assertTrue((target / 'usr/libexec/liuqin-rtc').stat().st_mode & 0o111)
         for name in ('usr/local/bin/liuqin-shell','usr/local/sbin/liuqin-rescue',

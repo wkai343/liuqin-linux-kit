@@ -5,7 +5,8 @@ from __future__ import annotations
 import gzip
 import hashlib
 import io
-from pathlib import PurePosixPath
+import json
+from pathlib import Path, PurePosixPath
 import re
 import struct
 import tarfile
@@ -19,13 +20,37 @@ class ArtifactError(ValueError):
     pass
 
 
+DEVICE_TEST_LABELS = {
+    'DEVICE_TESTED': '已匹配实机验收记录',
+    'NO_MATCHING_DEVICE_TEST_RECORD': '缺少匹配的实机验收记录',
+}
+
+
+def bundle_test_status(bundle, files, kernel_release):
+    """Match the optional local test record to the actual three artifacts."""
+    path = Path(bundle) / 'bundle.json'
+    try:
+        info = path.lstat()
+        if stat.S_ISREG(info.st_mode) and info.st_size <= 1024**2:
+            record = json.loads(path.read_text(encoding='utf-8'))
+            if (isinstance(record, dict) and record.get('status') == 'DEVICE_TESTED'
+                    and record.get('device') == 'liuqin' and record.get('files') == files
+                    and record.get('kernel_release') == kernel_release):
+                return 'DEVICE_TESTED'
+    except (OSError, ValueError, RecursionError):
+        pass
+    return 'NO_MATCHING_DEVICE_TEST_RECORD'
+
+
 def verify_storage_policy(root, version):
     """Require the installed userspace companion before using a new boot."""
-    if not version:
-        return
-    from pathlib import Path
     root = Path(root)
-    names = ((STORAGE_POLICY_PATH,0o644),('usr/local/sbin/liuqin-gnome-storage-guard',0o755),
+    policy = root/STORAGE_POLICY_PATH
+    if not version:
+        if policy.exists() or policy.is_symlink():
+            raise ArtifactError('启动镜像与已安装系统的存储保护接口不匹配。')
+        return
+    names = ((STORAGE_POLICY_PATH,0o644),('usr/local/sbin/liuqin-storage-guard',0o755),
              ('usr/libexec/liuqin-storage-seal',0o755))
     for name, mode in names:
         p=root/name
@@ -34,15 +59,17 @@ def verify_storage_policy(root, version):
         if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode)!=mode:
             raise ArtifactError('UFS 存储保护文件属性不正确。')
     helper=(root/'usr/libexec/liuqin-storage-seal').read_bytes()[:20]
-    if (version!=1 or (root/STORAGE_POLICY_PATH).read_bytes()!=STORAGE_POLICY or
-            'policy_version=LIUQIN_DESKTOP_UFS_ONLY_V1' not in (root/names[1][0]).read_text().splitlines() or
+    if (version!=STORAGE_POLICY_VERSION or policy.read_bytes()!=STORAGE_POLICY or
+            GUARD_POLICY_LINE not in (root/names[1][0]).read_bytes().splitlines() or
             len(helper)<20 or helper[:6]!=b'\x7fELF\x02\x01' or helper[18:20]!=b'\xb7\x00'):
         raise ArtifactError('启动镜像需要配套的 UFS 存储保护设备支持包。')
 
 
 INSTALLER_INTERFACE = b'liuqin-installer-v2\n'
 STORAGE_POLICY_PATH = 'etc/liuqin-storage-policy'
-STORAGE_POLICY = b'LIUQIN_DESKTOP_UFS_ONLY_V1\n'
+STORAGE_POLICY_VERSION = 2
+STORAGE_POLICY = f'LIUQIN_DESKTOP_UFS_ONLY_V{STORAGE_POLICY_VERSION}\n'.encode()
+GUARD_POLICY_LINE = b'policy_version=' + STORAGE_POLICY.rstrip(b'\n')
 
 
 ROOT_DEVICES = {'dev/console': (5, 1), 'dev/null': (1, 3), 'dev/zero': (1, 5),
@@ -171,7 +198,7 @@ def boot_interface(path, installer=False):
         if (installer or files[STORAGE_POLICY_PATH][0] & 0o177777 != 0o100644 or
                 regular(STORAGE_POLICY_PATH) != STORAGE_POLICY):
             raise ArtifactError('启动镜像的存储保护策略无效。')
-        result['storage_policy_version'] = 1
+        result['storage_policy_version'] = STORAGE_POLICY_VERSION
     if 'etc/liuqin-native-recovery.json' in files:
         if not installer:raise ArtifactError('原生 Recovery 不能作为系统 boot.img。')
         from liuqin_native_recovery import validate
@@ -269,9 +296,9 @@ def inspect_root(path, pins, check_cancel=lambda: None, profile='native-updatabl
                 if not entry.isfile() or (entry.mode, entry.uid, entry.gid) != (0o644, 0, 0):
                     raise ArtifactError('模块必须是 root 拥有的普通文件：' + name)
                 modules_found[name] = hashlib.file_digest(archive.extractfile(entry), 'sha256').hexdigest()
-            if name in ('usr/local/sbin/liuqin-gnome-storage-guard',
-                    'usr/local/bin/liuqin-gnome-storage-guard',
-                    'etc/systemd/system/liuqin-gnome-storage-guard.service'):
+            if name in ('usr/local/sbin/liuqin-storage-guard',
+                    'usr/local/bin/liuqin-storage-guard',
+                    'etc/systemd/system/liuqin-storage-guard.service'):
                 expected_mode = 0o755 if name.startswith('usr/') else 0o644
                 if not entry.isfile() or (entry.mode, entry.uid, entry.gid) != (expected_mode, 0, 0):
                     raise ArtifactError('存储保护文件无效：' + name)
@@ -327,26 +354,26 @@ def inspect_root(path, pins, check_cancel=lambda: None, profile='native-updatabl
             raise ArtifactError('根文件系统与启动镜像的设备接口不匹配：' + name)
     # Fedora merges local sbin into bin. Admit only that exact relative
     # alias; the canonical executable above still has root/mode checks.
-    if links.get('usr/local/sbin')=='bin' and 'usr/local/bin/liuqin-gnome-storage-guard' in runtime:
-        runtime['usr/local/sbin/liuqin-gnome-storage-guard']=runtime['usr/local/bin/liuqin-gnome-storage-guard']
+    if links.get('usr/local/sbin')=='bin' and 'usr/local/bin/liuqin-storage-guard' in runtime:
+        runtime['usr/local/sbin/liuqin-storage-guard']=runtime['usr/local/bin/liuqin-storage-guard']
     if kernel_contract is None or manifest_content is None:
         raise ArtifactError('根文件系统缺少版本化内核身份。')
     expected = module_records(manifest_content, release)
     prefix = 'usr/lib/modules/' + release + '/'
     if {k: v for k, v in modules_found.items() if k.startswith(prefix)} != expected:
         raise ArtifactError('根文件系统中的内核模块与目标内核不匹配。')
-    if not all(name in runtime for name in ('usr/local/sbin/liuqin-gnome-storage-guard',
-                'etc/systemd/system/liuqin-gnome-storage-guard.service')):
+    if not all(name in runtime for name in ('usr/local/sbin/liuqin-storage-guard',
+                'etc/systemd/system/liuqin-storage-guard.service')):
         raise ArtifactError('根文件系统缺少存储保护文件。')
     policy = runtime.get(STORAGE_POLICY_PATH)
-    policy_version = 1 if policy == STORAGE_POLICY else 0
-    if policy is not None and policy_version != 1:
+    policy_version = STORAGE_POLICY_VERSION if policy == STORAGE_POLICY else 0
+    if policy is not None and not policy_version:
         raise ArtifactError('根文件系统的存储保护策略不受支持。')
     if storage_policy_version is not None and policy_version != storage_policy_version:
         raise ArtifactError('boot/rootfs 的存储保护版本不匹配，请同步升级启动镜像和设备支持包。')
     if policy_version:
         helper = runtime.get('usr/libexec/liuqin-storage-seal',b'')
-        if (b'policy_version=LIUQIN_DESKTOP_UFS_ONLY_V1' not in runtime['usr/local/sbin/liuqin-gnome-storage-guard'] or
+        if (GUARD_POLICY_LINE not in runtime['usr/local/sbin/liuqin-storage-guard'].splitlines() or
                 helper[:6] != b'\x7fELF\x02\x01' or len(helper)<20 or helper[18:20]!=b'\xb7\x00'):
             raise ArtifactError('根文件系统缺少配套的 UFS 保护脚本或 ARM64 识别工具。')
     if not release or not re.fullmatch(r'[A-Za-z0-9._+-]+', release):
@@ -357,7 +384,7 @@ def inspect_root(path, pins, check_cancel=lambda: None, profile='native-updatabl
     for name in ('etc/passwd', 'etc/group'):
         if not any(re.fullmatch(r'fastrpc:[^:]*:[0-9]+:.*', row) for row in identities.get(name, '').splitlines()):
             raise ArtifactError('根文件系统缺少设备校准所需的 fastrpc 账号或组。')
-    if links.get('etc/systemd/system/basic.target.requires/liuqin-gnome-storage-guard.service') != '../liuqin-gnome-storage-guard.service':
+    if links.get('etc/systemd/system/basic.target.requires/liuqin-storage-guard.service') != '../liuqin-storage-guard.service':
         raise ArtifactError('根文件系统未启用平板存储保护服务。')
     support = parse_support(runtime.get(CAPABILITY_PATH))
     if 'btrfs' in support and runtime.get('etc/liuqin-root-filesystem') not in (b'ext4\n', b'btrfs\n'):

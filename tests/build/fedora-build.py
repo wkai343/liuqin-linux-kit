@@ -22,6 +22,8 @@ from fedora_flow import FedoraFlow
 from rpm_package import build as rpm
 spec=importlib.util.spec_from_file_location('fedora_root_builder',PROJECT/'build/scripts/build-fedora-root.py')
 root_builder=importlib.util.module_from_spec(spec);spec.loader.exec_module(root_builder)
+spec=importlib.util.spec_from_file_location('board_payload_test',PROJECT/'build/scripts/build-liuqin-rpms.py')
+board=importlib.util.module_from_spec(spec);spec.loader.exec_module(board)
 
 
 class FedoraTests(unittest.TestCase):
@@ -88,12 +90,14 @@ class FedoraTests(unittest.TestCase):
         self.assertFalse(root.exists());self.assertFalse((self.work/'escape').exists())
 
     def test_display_recovery_user_unit_is_activated_in_board_payload(self):
-        spec=importlib.util.spec_from_file_location('board_payload_test',PROJECT/'build/scripts/build-liuqin-rpms.py')
-        board=importlib.util.module_from_spec(spec);spec.loader.exec_module(board)
         busybox=self.work/'busybox';busybox.write_bytes(b'fixture');busybox.chmod(0o755)
         root=self.work/'board';root.mkdir()
         storage_fixture=self.work/'storage-helper';storage_fixture.write_bytes(b'fixture');storage_fixture.chmod(0o755)
         board.board_overlay(root,busybox,storage_fixture)
+        guard = root/'etc/systemd/system/basic.target.requires/liuqin-storage-guard.service'
+        self.assertEqual(guard.readlink(), Path('../liuqin-storage-guard.service'))
+        self.assertIn('ExecStart=/usr/local/sbin/liuqin-storage-guard', guard.read_text().splitlines())
+        self.assertFalse((root/'etc/chrony/conf.d/90-liuqin-no-rtc-bootstrap.conf').exists())
         unit=root/'etc/systemd/user/liuqin-display-recovery.service'
         link=root/'etc/systemd/user/default.target.wants/liuqin-display-recovery.service'
         helper=root/'usr/local/libexec/liuqin-display-recovery'
@@ -131,6 +135,50 @@ class FedoraTests(unittest.TestCase):
             self.assertFalse((root/name).exists(),name)
         self.assertIn('ConditionUser=!root',unit.read_text())
         self.assertIn('NoNewPrivileges=yes',unit.read_text())
+
+    def test_plasma_filters_gnome_refresh_even_from_old_sensor_bundles(self):
+        archive = self.work/'sensors.tar'
+        overlay = PROJECT/'device/sensors-overlay'
+        rule = Path('etc/polkit-1/rules.d/49-liuqin-sensorproxy.rules')
+        self.assertEqual(list(overlay.rglob('*refresh*')), [])
+        with tarfile.open(archive, 'w') as tar:
+            tar.add(overlay, arcname='.')
+            stale_policy = b'// legacy org.freedesktop.systemd1.manage-units grant'
+            for name in ['etc/systemd/system/liuqin-sensor-proxy-refresh.service',
+                         'etc/systemd/user/liuqin-sensor-proxy-session-refresh.service',
+                         'usr/local/sbin/liuqin-sensor-proxy-refresh',
+                         'usr/local/sbin/liuqin-sensor-proxy-session-refresh',
+                         'etc/polkit-1/rules.d/50-liuqin-gnome-sensor-refresh.rules']:
+                tar.addfile(tarfile.TarInfo(name))
+            for prefix, target, unit in [('system','graphical','liuqin-sensor-proxy-refresh.service'),
+                                         ('user','graphical-session','liuqin-sensor-proxy-session-refresh.service')]:
+                link = tarfile.TarInfo(f'etc/systemd/{prefix}/{target}.target.wants/{unit}')
+                link.type = tarfile.SYMTYPE
+                link.linkname = '../' + unit
+                tar.addfile(link)
+            elf = b'\x7fELF\x02\x01' + bytes(12) + b'\xb7\x00'
+            for name, data in [(str(rule), stale_policy), ('usr/lib/python3.15/site-packages/ssc_server/ssc.py', b'mock'),
+                               ('usr/lib/python3.15/site-packages/keep/ssc.py', b'other module'), ('usr/bin/hexagonrpcd', elf),
+                               ('usr/bin/ssccli', elf), ('usr/local/libexec/liuqin-iio-sensor-proxy', elf)]:
+                entry = tarfile.TarInfo(name)
+                entry.size = len(data)
+                tar.addfile(entry, io.BytesIO(data))
+        project = self.work/'project'
+        project.mkdir()
+        for component in ('hexagonrpc','libssc','iio-sensor-proxy'):
+            directory = project/'inputs/sensor-stack-src'/component
+            directory.mkdir(parents=True)
+            (directory/'COPYING').write_text('test fixture')
+        root = self.work/'payload'
+        with patch.object(board, 'PROJECT', project):
+            board.sensor_payload(archive, root)
+        self.assertEqual((root/rule).read_bytes(), (overlay/rule).read_bytes())
+        self.assertIn('claim-sensor', (root/rule).read_text())
+        self.assertNotIn('manage-units', (root/rule).read_text())
+        self.assertEqual(list(root.rglob('*refresh*')), [])
+        self.assertFalse((root/'usr/lib/python3.15/site-packages/ssc_server').exists())
+        self.assertEqual((root/'usr/lib/python3.15/site-packages/keep/ssc.py').read_bytes(), b'other module')
+        self.assertTrue((root/'etc/systemd/system/iio-sensor-proxy.service.d/90-liuqin-ssc.conf').is_file())
 
     def test_root_builder_prunes_expected_retired_desktop_rescue_activation(self):
         root=self.work/'root';path=root/'etc/systemd/system/multi-user.target.wants/liuqin-gnome-usb-rescue.service'
@@ -204,7 +252,7 @@ class FedoraTests(unittest.TestCase):
         fixture=kernel_fixture(self.work/'kernel','6.17.0-liuqin-fedora')
         root=self.work/'root';root.mkdir();install_fixture(root,'6.17.0-liuqin-fedora',fixture)
         directory=root/'usr/local/sbin';directory.rename(root/'usr/local/bin');directory.symlink_to('bin')
-        guard=root/'usr/local/bin/liuqin-gnome-storage-guard'
+        guard=root/'usr/local/bin/liuqin-storage-guard'
         guard.chmod(0o777)
         with self.assertRaisesRegex(ValueError,'权限'):verify_installed(root,fixture[3])
         guard.chmod(0o755);guard.rename(guard.with_name('real-guard'));guard.symlink_to('real-guard')
@@ -246,8 +294,6 @@ class FedoraTests(unittest.TestCase):
         desktop = 'share/applications/org.gnome.Snapshot.desktop'
         source = self.work/'usr'/desktop
         launcher = self.work/'usr/local'/desktop
-        root_builder.configure_snapshot(self.work)
-        self.assertFalse(launcher.exists())
         source.parent.mkdir(parents=True)
         original = '[Desktop Entry]\nName[zh_CN]=相机\nExec=snapshot %U\nDBusActivatable=true\n'
         source.write_text(original)
@@ -258,13 +304,12 @@ class FedoraTests(unittest.TestCase):
         self.assertEqual((self.work/override).read_text().splitlines(),
                          ['[org.gnome.Snapshot]', 'enable-hardware-encoding=true'])
         with patch.object(root_builder, 'chroot') as chroot:
-            root_builder.configure_snapshot(self.work)
+            root_builder.compile_snapshot_schema(self.work)
+            chroot.assert_not_called()
+            (self.work/schemas/'org.gnome.Snapshot.gschema.xml').touch()
+            root_builder.compile_snapshot_schema(self.work)
         chroot.assert_called_once_with(self.work, ['glib-compile-schemas', '/' + str(schemas)])
-        entry = launcher.read_text().splitlines()
-        self.assertIn('Name[zh_CN]=相机', entry)
-        self.assertIn('Exec=/usr/bin/env GDK_DISABLE=vulkan GSK_RENDERER=gl snapshot %U', entry)
-        self.assertIn('DBusActivatable=false', entry)
-        self.assertIn('TryExec=/usr/bin/snapshot', entry)
+        self.assertFalse(launcher.exists())
         self.assertEqual(source.read_text(), original)
 
     def test_firefox_chinese_registration_uses_local_packs_and_preserves_existing_files(self):
@@ -400,7 +445,7 @@ class FedoraTests(unittest.TestCase):
         def stage(_name,_inputs,build,_artifacts):
             output=self.work/'stage';output.mkdir();build(output);return output
         with patch.object(flow,'target_runtime_root',return_value=archive), \
-             patch.object(flow,'device_debs',return_value=devices), \
+             patch.object(flow,'device_rpms',return_value=devices), \
              patch.object(flow,'stats_rpm',return_value=stats), \
              patch.object(flow,'fingerprint_rpm',return_value=fingerprint), \
              patch.object(flow,'libclc_rpm',return_value=libclc), \

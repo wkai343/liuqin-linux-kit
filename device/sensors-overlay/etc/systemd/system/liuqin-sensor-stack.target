@@ -3,9 +3,4 @@ Description=liuqin Qualcomm SSC sensor stack
 Requires=liuqin-hexagonrpcd-sdsp.service
 Wants=liuqin-ssc-sample-gate.service
 After=liuqin-hexagonrpcd-sdsp.service
-# iio-sensor-proxy is deliberately NOT boot-started here: gnome-shell only
-# establishes its accelerometer claim at the moment the SensorProxy name
-# appears on the bus.  A proxy that started earlier leaves every session
-# claimless until a manual restart (2026-09-12 boot-0 root cause).  The first
-# D-Bus caller activates the proxy on demand; the 90-liuqin-ssc.conf drop-in
-# still orders the sample gate first.
+# The proxy's own drop-in requires a successful SSC sample before it starts.

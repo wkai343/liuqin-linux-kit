@@ -14,7 +14,7 @@ PROJECT=Path(__file__).resolve().parents[2];sys.path.insert(0,str(PROJECT/'build
 from rpm_package import build as rpm
 from source_build import sha
 from speaker_firmware import install as install_speakers
-from device_overlay import stage_overlay
+from device_overlay import RETIRED_SENSOR_FILES, SENSOR_CLAIM_RULE, stage_overlay, stage_sensor_policy
 from storage_scope import build as build_storage_helper, legacy_cleanup
 
 
@@ -25,7 +25,10 @@ def docs(root, name):
 
 def board_overlay(root, busybox, storage_helper):
     stage_overlay(root, board_overlay=PROJECT/'device/board-overlay')
-    guard=root/'usr/local/sbin/liuqin-gnome-storage-guard';text=guard.read_text()
+    guard=root/'usr/local/sbin/liuqin-storage-guard';text=guard.read_text()
+    activation=root/'etc/systemd/system/basic.target.requires/liuqin-storage-guard.service'
+    activation.parent.mkdir(parents=True,exist_ok=True)
+    activation.symlink_to('../liuqin-storage-guard.service')
     recovery=root/'etc/systemd/user/default.target.wants/liuqin-display-recovery.service'
     recovery.parent.mkdir(parents=True,exist_ok=True)
     recovery.symlink_to('../liuqin-display-recovery.service')
@@ -36,7 +39,7 @@ def board_overlay(root, busybox, storage_helper):
     auth_events.symlink_to('../liuqin-mipps-auth.path')
     thermal=root/'etc/systemd/system/multi-user.target.wants/liuqin-charge-thermal.service'
     thermal.symlink_to('../liuqin-charge-thermal.service')
-    old='marker=${LIUQIN_GNOME_GUARD_TEST_MARKER:-/etc/liuqin-native-root}'
+    old='marker=${LIUQIN_STORAGE_GUARD_TEST_MARKER:-/etc/liuqin-native-root}'
     if text.count(old)!=1:raise ValueError('存储保护脚本标记不符。')
     text=text.replace(old,'marker=/etc/liuqin-native-root')
     guard.write_text(text)
@@ -52,6 +55,8 @@ def sensor_payload(archive, root):
             name=Path(member.name.removeprefix('./'))
             if name.is_absolute() or '..' in name.parts or not (member.isdir() or member.isfile() or member.issym()):
                 raise ValueError('传感器层有不安全的文件。')
+            if name.as_posix() == SENSOR_CLAIM_RULE or name.as_posix() in RETIRED_SENSOR_FILES:
+                continue
             # Distro libraries belong to Fedora RPMs, not to this device package.
             if len(name.parts)>=3 and name.parts[:2]==('usr','lib64'):
                 if not name.name.startswith(('libssc.so.','libhexagonrpc.so.')):continue
@@ -69,6 +74,7 @@ def sensor_payload(archive, root):
                 target.symlink_to(member.linkname)
             else:
                 target.write_bytes(tar.extractfile(member).read());target.chmod(member.mode&0o755)
+    stage_sensor_policy(root)
     for path in root.rglob('*'):
         if path.is_file() and not path.is_symlink() and path.suffix in ('.service','.conf'):
             text=path.read_text();path.write_text(text.replace('/usr/local/lib/aarch64-linux-gnu','/usr/local/lib64'))
@@ -114,7 +120,7 @@ def build(firmware, speakers, sensors, busybox, output, version):
         rpm(root,'liuqin-device-support',version,packages,requires=['systemd','systemd-udev','python3',
             'NetworkManager','bluez','glib2','iproute','chrony','alsa-utils','wireplumber-libs >= 0.5',
             'python3-gobject-base'],summary='Liuqin board services independent of the desktop',
-            posttrans=legacy_cleanup(),provides=['liuqin-storage-policy-ufs = 1'])
+            posttrans=legacy_cleanup(),provides=['liuqin-storage-policy-ufs = 2'])
         root=work/'sensors';root.mkdir();sensor_payload(sensors,root);docs(root,'liuqin-sensors')
         rpm(root,'liuqin-sensors',version,packages,requires=['glib2','libgudev','polkit-libs','libqmi',
             'libqrtr-glib','qrtr-libs','protobuf-c','iio-sensor-proxy','systemd'],

@@ -1,0 +1,6 @@
+Liuqin persistent Linux boot
+
+Normal boot mounts the selected Linux root read-write after storage checks.
+
+If the development USB Telnet shell is enabled, it has no authentication.
+Connect it only to a trusted host.

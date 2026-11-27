@@ -14,8 +14,6 @@ import sys
 import tempfile
 
 PROJECT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(PROJECT/'shared'))
-from liuqin_artifacts import boot_interface
 sys.path.insert(0, str(PROJECT/'build/recovery'))
 from kernel_recipe import DEFAULT_LOCK, load, prepare_touch, project_file, verify_build
 
@@ -58,16 +56,6 @@ def aligned_kernel(image, output):
     return wrapped
 
 
-def recovery_dtb(base_image, output):
-    """Read a historical image for comparison; new builds use kernel_dtb.py."""
-    blob = base_image.read_bytes()
-    kernel_size, ramdisk_size = struct.unpack_from('<I', blob, 8)[0], struct.unpack_from('<I', blob, 16)[0]
-    offset = 4096+(kernel_size+4095)//4096*4096+(ramdisk_size+4095)//4096*4096
-    length = struct.unpack_from('<I', blob, 1648)[0]
-    output.write_bytes(blob[offset:offset+length])
-    return configure_recovery_dtb(output)
-
-
 def configure_recovery_dtb(output):
     get, put = tool('fdtget'), tool('fdtput')
 
@@ -86,9 +74,6 @@ def configure_recovery_dtb(output):
 
     run([put, output, '/', 'liuqin,recovery'])
     run([put, output, '/pmic-glink', 'liuqin,recovery'])
-    args = subprocess.check_output([get, '-t', 's', str(output), '/chosen', 'bootargs'], text=True).split()
-    args = [arg for arg in args if not arg.startswith(('hung_task_panic=', 'softlockup_panic='))]
-    run([put, '-t', 's', output, '/chosen', 'bootargs', ' '.join(args)])
 
     # The ADSP remains available for PMIC battery/charging messages. Audio
     # services and DSP compute consumers are outside this maintenance image.
@@ -105,21 +90,14 @@ def configure_recovery_dtb(output):
         if result.returncode == 0:
             disable(node)
 
-    # New Qualcomm bindings flatten the legacy wrapper and DWC3 child.
-    candidates = ('/soc@0/usb@a600000', '/soc@0/usb@a6f8800/usb@a600000')
-    controllers = [node for node in candidates if subprocess.run(
-        [get, '-p', str(output), node], capture_output=True).returncode == 0]
-    if len(controllers) != 1:
-        raise ValueError('expected exactly one Liuqin USB controller')
-    usb = controllers[0]
+    usb = '/soc@0/usb@a600000'
     # MDSS stays disabled as in the qualified base. Its unbound panel node
     # must remain available to the RAM-only touch follower handoff module.
     run([put, output, '/soc@0/phy@88e8000', 'liuqin,recovery'])
     run([put, '-t', 's', output, usb, 'dr_mode', 'peripheral'])
     run([put, output, usb, 'usb-role-switch'])
     run([put, output, usb, 'liuqin,recovery'])
-    if usb == '/soc@0/usb@a600000':
-        remove_property(usb, 'role-switch-default-mode')
+    remove_property(usb, 'role-switch-default-mode')
     # The battery service CC state drives QMP orientation/mode in Recovery.
     # Keep the session-control and SuperSpeed links. The controller's Rec
     # switch accepts NONE/DEVICE only; no UCSI, DP or host policy is enabled.
@@ -133,7 +111,6 @@ def configure_recovery_dtb(output):
     # the unsupported stylus report path, without changing finger firmware.
     touch='/soc@0/geniqup@9c0000/spi@990000/touchscreen@0'
     remove_property(touch, 'novatek,pen-support')
-    return disabled
 
 
 def prepare(args):

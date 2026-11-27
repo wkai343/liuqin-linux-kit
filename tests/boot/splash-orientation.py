@@ -35,15 +35,17 @@ class Assets(unittest.TestCase):
         for argument in ('fbcon=map:0', 'liuqin.firmware_splash=0', 'liuqin.splash_orientation=0'):
             with self.assertRaises(ValueError): bootargs(original+' '+argument, True)
 
-    def test_legacy_runtime_and_builtin_backlight_do_not_enable_handoff(self):
+    def test_firmware_handoff_requires_declared_capability_and_modular_backlight(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); config = root/'config'; manifest = root/'runtime.json'
-            for record, kernel, expected in [({}, 'm', False), ({'firmware_splash':True}, 'y', False),
+            self.assertFalse(supports_firmware(None,config))
+            for record, kernel, expected in [({'firmware_splash':False}, 'm', False), ({'firmware_splash':True}, 'y', False),
                                               ({'firmware_splash':True}, 'm', True)]:
                 manifest.write_text(json.dumps(record));config.write_text('CONFIG_BACKLIGHT_KTZ8866='+kernel+'\n')
                 self.assertEqual(supports_firmware(root,config),expected)
-            manifest.write_text('{"firmware_splash": "yes"}')
-            with self.assertRaises(ValueError): supports_firmware(root,config)
+            for invalid in ({}, {'firmware_splash':'yes'}, {'firmware_splash':0}):
+                manifest.write_text(json.dumps(invalid))
+                with self.assertRaisesRegex(ValueError,'firmware_splash'): supports_firmware(root,config)
 
     def test_all_theme_files_install_without_following_destination_links(self):
         with tempfile.TemporaryDirectory() as tmp:

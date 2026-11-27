@@ -298,8 +298,8 @@ class DemoEngine(Engine):
                          'etc/liuqin-native-root': b'liuqin-native-root-v1\n',
                          f'usr/share/liuqin/kernels/{release}/boot.contract': contract,
                          f'usr/share/liuqin/kernels/{release}/modules.manifest': manifest,
-                         'etc/systemd/system/liuqin-gnome-storage-guard.service': b'DEMO ONLY\n',
-                         'usr/local/sbin/liuqin-gnome-storage-guard': b'DEMO ONLY\n'})
+                         'etc/systemd/system/liuqin-storage-guard.service': b'DEMO ONLY\n',
+                         'usr/local/sbin/liuqin-storage-guard': b'DEMO ONLY\n'})
         elf = bytearray(20); elf[:6] = b'\x7fELF\x02\x01'; elf[18:20] = (183).to_bytes(2, 'little')
         contents.update({'usr/lib/systemd/systemd': bytes(elf),
                          'etc/passwd': b'fastrpc:x:1:1::/:/bin/false\n', 'etc/group': b'fastrpc:x:1:\n'})
@@ -307,10 +307,10 @@ class DemoEngine(Engine):
         with tarfile.open(fileobj=stream, mode='w:gz') as archive:
             for name, data in contents.items():
                 entry = tarfile.TarInfo(name); entry.size = len(data)
-                entry.mode = 0o755 if name in ('usr/lib/systemd/systemd', 'usr/local/sbin/liuqin-gnome-storage-guard') else 0o644
+                entry.mode = 0o755 if name in ('usr/lib/systemd/systemd', 'usr/local/sbin/liuqin-storage-guard') else 0o644
                 archive.addfile(entry, io.BytesIO(data))
-            entry = tarfile.TarInfo('etc/systemd/system/basic.target.requires/liuqin-gnome-storage-guard.service')
-            entry.type = tarfile.SYMTYPE; entry.linkname = '../liuqin-gnome-storage-guard.service'
+            entry = tarfile.TarInfo('etc/systemd/system/basic.target.requires/liuqin-storage-guard.service')
+            entry.type = tarfile.SYMTYPE; entry.linkname = '../liuqin-storage-guard.service'
             archive.addfile(entry)
         root_archive = stream.getvalue()
 

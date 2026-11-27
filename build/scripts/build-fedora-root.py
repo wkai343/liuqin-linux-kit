@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: MIT
 """Assemble an official Fedora ARM64 system in a private mount namespace."""
 import argparse
-import importlib.util
 import json
 import os
 import re
@@ -17,6 +16,7 @@ PROJECT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(PROJECT/'build/lib'))
 from source_build import mounted_root, sha, arm64_execution
 from fedora_oci import extract as extract_oci
+from device_overlay import SENSOR_CLAIM_RULE, stage_sensor_policy
 from shell_defaults import check_skeleton, ensure as ensure_shell_defaults
 from splash_assets import install_themes
 import fedora_libcamera
@@ -24,8 +24,7 @@ import fedora_kamoso
 import fedora_ffmpeg
 import fedora_obs
 import firefox_media
-spec=importlib.util.spec_from_file_location('rootfs_common',PROJECT/'build/scripts/build-official-root.py')
-common=importlib.util.module_from_spec(spec);spec.loader.exec_module(common)
+import rootfs_common as common
 
 RUNTIME_PACKAGES=['systemd','systemd-udev','systemd-pam','dbus-broker','dbus-daemon','python3','kmod','gdisk','e2fsprogs',
                   'libcap','tar','gzip','coreutils','which','ca-certificates','glib2','alsa-lib',
@@ -148,23 +147,12 @@ def configure_firefox_languages(root):
             target.symlink_to('../../langpacks/'+name)
 
 
-def configure_snapshot(root):
-    desktop = 'share/applications/org.gnome.Snapshot.desktop'
-    source = root/'usr'/desktop
-    if not source.is_file():
-        return
-    # The board disables GTK DMA-BUF imports globally. Snapshot needs them
-    # for its PipeWire preview. D-Bus activation would bypass the Exec line.
-    entry = re.sub(r'^Exec=', 'Exec=/usr/bin/env GDK_DISABLE=vulkan GSK_RENDERER=gl ',
-                   source.read_text(), flags=re.MULTILINE)
-    entry = re.sub(r'^DBusActivatable=.*$', 'DBusActivatable=false', entry, flags=re.MULTILINE)
-    if not re.search(r'^TryExec=', entry, re.MULTILINE):
-        entry = entry.replace('[Desktop Entry]\n', '[Desktop Entry]\nTryExec=/usr/bin/snapshot\n', 1)
-    common.write_config(root, 'usr/local/'+desktop, entry)
+def compile_snapshot_schema(root):
     # The overlay is copied after RPM's GLib schema trigger has run.
-    schemas = '/usr/share/glib-2.0/schemas'
-    if (root/schemas[1:]/'90-liuqin-snapshot.gschema.override').is_file():
-        chroot(root, ['glib-compile-schemas', schemas])
+    schemas = root/'usr/share/glib-2.0/schemas'
+    if ((schemas/'org.gnome.Snapshot.gschema.xml').is_file()
+            and (schemas/'90-liuqin-snapshot.gschema.override').is_file()):
+        chroot(root, ['glib-compile-schemas', '/usr/share/glib-2.0/schemas'])
 
 
 def configure_login_output(root):
@@ -198,8 +186,6 @@ def configure_login_output(root):
 
 
 def configure_input(root):
-    # The shared overlay uses Maliit. Fedora ships Plasma
-    # Keyboard as a desktop/login dependency and should select that keyboard.
     common.write_config(root,'etc/xdg/kwinrc',
         '[Wayland]\nInputMethod=/usr/share/applications/org.kde.plasma.keyboard.desktop\nVirtualKeyboardEnabled=true\n')
     if not (root/'usr/bin/fcitx5').is_file():return
@@ -367,10 +353,7 @@ def configure(root, data, output):
     configure_login_output(root)
     configure_firefox_languages(root)
     if fedora_ffmpeg.selected(data):firefox_media.install(root)
-    configure_snapshot(root)
-    legacy_panel=root/'etc/xdg/autostart/liuqin-plasma-panel-defaults.desktop'
-    if not legacy_panel.is_symlink() and legacy_panel.is_file() and 'TryExec=/usr/libexec/liuqin-plasma-panel-defaults' in legacy_panel.read_text():
-        legacy_panel.unlink()
+    compile_snapshot_schema(root)
     common.write_config(root,'etc/hostname',data['hostname']+'\n')
     common.write_config(root,'etc/hosts','127.0.0.1 localhost\n127.0.1.1 '+data['hostname']+'\n::1 localhost\n')
     common.write_config(root,'etc/locale.conf','LANG=en_US.UTF-8\n')
@@ -380,15 +363,15 @@ def configure(root, data, output):
         path=units/name;path.parent.mkdir(parents=True,exist_ok=True)
         if path.exists() or path.is_symlink():path.unlink()
         path.symlink_to(value)
-    link('basic.target.requires/liuqin-gnome-storage-guard.service','../liuqin-gnome-storage-guard.service')
+    link('basic.target.requires/liuqin-storage-guard.service','../liuqin-storage-guard.service')
     common.remove_desktop_rescue_activation(root)
     # Factory data is created by the distro-neutral RAM installer. Label that
     # narrow data set in Fedora before any service consumes it; installer.img
     # remains independent of the target distribution and its SELinux policy.
     common.write_config(root,'etc/systemd/system/liuqin-private-labels.service',
         '[Unit]\nDescription=Label Liuqin factory data with the Fedora policy\n'
-        'DefaultDependencies=no\nRequires=liuqin-gnome-storage-guard.service\n'
-        'After=local-fs.target liuqin-gnome-storage-guard.service\nBefore=basic.target\n'
+        'DefaultDependencies=no\nRequires=liuqin-storage-guard.service\n'
+        'After=local-fs.target liuqin-storage-guard.service\nBefore=basic.target\n'
         '[Service]\nType=oneshot\nRemainAfterExit=yes\n'
         'ExecStart=/usr/sbin/setfiles -F /etc/selinux/targeted/contexts/files/file_contexts '
         '/usr/lib/firmware/cirrus /var/lib/liuqin-private /var/lib/liuqin-sensors\n')
@@ -419,9 +402,6 @@ def configure(root, data, output):
         services=['sshd.service']
         if (root/'usr/lib/systemd/system/sshd.socket').is_file():services.append('sshd.socket')
         chroot(root,['systemctl','--no-reload','disable',*services])
-    for rel in ('etc/systemd/system/graphical.target.wants/liuqin-sensor-proxy-refresh.service',
-                'etc/systemd/user/graphical-session.target.wants/liuqin-sensor-proxy-session-refresh.service'):
-        (root/rel).unlink(missing_ok=True)
     common.write_config(root,'etc/systemd/logind.conf.d/90-liuqin.conf','[Login]\nHandlePowerKey=suspend\n')
     chroot(root,['systemd-sysusers'])
     if data['first_boot_setup']:
@@ -570,6 +550,9 @@ def main():
                     source=fedora_kamoso.nvr()+'.src.rpm'
                     shutil.copyfile(args.kamoso_bundle/source,root/'usr/share/licenses/kamoso'/source)
                 restore_core_manpages(root)
+                # The standalone builder also accepts previously built sensor RPMs.
+                if (root/SENSOR_CLAIM_RULE).is_file():
+                    stage_sensor_policy(root)
                 if data.get('overlay'):common.overlay(data['overlay'],root)
                 configure(root,data,output)
                 if fedora_ffmpeg.selected(data):fedora_ffmpeg.configure(root,args.ffmpeg_bundle,chroot)

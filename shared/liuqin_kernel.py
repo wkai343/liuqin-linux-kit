@@ -135,17 +135,17 @@ def verify_installed(root, content):
         raise ValueError('根系统的启动接口不受支持。')
     if regular('etc/liuqin-native-root').read_bytes() != b'liuqin-native-root-v1\n':
         raise ValueError('根目录身份无效。')
-    guard = 'usr/local/sbin/liuqin-gnome-storage-guard'
+    guard = 'usr/local/sbin/liuqin-storage-guard'
     directory = root / 'usr/local/sbin'
     if directory.is_symlink() and os.readlink(directory) == 'bin':
-        guard = 'usr/local/bin/liuqin-gnome-storage-guard'
+        guard = 'usr/local/bin/liuqin-storage-guard'
     for name, mode in ((guard, 0o755),
-                       ('etc/systemd/system/liuqin-gnome-storage-guard.service', 0o644),
+                       ('etc/systemd/system/liuqin-storage-guard.service', 0o644),
                        ('usr/lib/systemd/systemd', 0o755)):
         if regular(name).stat().st_mode & 0o777 != mode:
             raise ValueError('启动组件权限无效：' + name)
-    link = root / 'etc/systemd/system/basic.target.requires/liuqin-gnome-storage-guard.service'
-    if not link.is_symlink() or os.readlink(link) != '../liuqin-gnome-storage-guard.service':
+    link = root / 'etc/systemd/system/basic.target.requires/liuqin-storage-guard.service'
+    if not link.is_symlink() or os.readlink(link) != '../liuqin-storage-guard.service':
         raise ValueError('存储保护服务未启用。')
     if regular(base + '/boot.contract').read_bytes() != content:
         raise ValueError('已安装内核身份不匹配。')

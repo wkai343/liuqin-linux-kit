@@ -91,10 +91,11 @@ def inspect_device(serial,native=False):
     state = adb_state(serial)
     if state in ('device', 'recovery'):
         from .native_adb import probe_adb
+        from .native_profiles import native_recovery_label
         try:
             if not native:raise InstallerError('native detection not requested')
             value=probe_adb(serial)
-            return dict(serial=serial,kind='native-recovery',label='原生 ADB Recovery（安装候选）' if value.get('installer_version')==1 else '原生 ADB Recovery（只读）',properties=value,transport='adb-native')
+            return dict(serial=serial,kind='native-recovery',label=native_recovery_label(value),properties=value,transport='adb-native')
         except (OSError,RuntimeError,ValueError,KeyError,subprocess.SubprocessError):pass
         return read_adb(serial)
     if state:
@@ -218,7 +219,7 @@ def select_image(environment, selected):
                     reason='固定安装版已连接，可读取分区并准备安装方案。' if ready else '请先在平板启动对应的固定 Recovery。')
             return selected,dict(ready=ready,profile_id='native-recovery-prototype',inspection_only=True,native=True,usb_transport='adb',automatic_boot_allowed=False,auto_selected=False,fixed_install_allowed=False,
                 firmware=dict(status='unavailable',reason='进入原生 Recovery 后才能读取底层固件指纹。'),
-                reason=('已选择支持安装的 Rec 候选，尚未真机验收。点击读取分区仅临时启动并检查；备份和确认完整方案前保持只读。' if install else '固件指纹尚未读取。当前选择用于显式临时启动检查；进入原生 Recovery 后自动读取指纹并匹配适配表，仅开放读取。'))
+                reason=('已选择临时安装版 Recovery。点击读取分区仅临时启动并检查；备份和确认完整方案前保持只读。' if install else '固件指纹尚未读取。当前选择用于显式临时启动检查；进入原生 Recovery 后自动读取指纹并匹配适配表，仅开放读取。'))
         return selected, dict(ready=False,profile_id='retired-network-runtime',reason='旧 USB 网络安装环境已停用，请选择 ADB Recovery。')
     return selected, assess(environment, manifest, digest, catalog)
 

@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Plasma Camera (liuqin test)
-Name[zh_CN]=Plasma 相机（liuqin 测试版）
-Icon=camera-photo
-Exec=plasma-camera-liuqin-test
-Categories=Qt;KDE;AudioVideo;
-X-KDE-FormFactor=desktop;tablet;handset;

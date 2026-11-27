@@ -1,0 +1,6 @@
+Liuqin RAM installer
+
+Internal storage starts read-only. An installation can write selected partitions.
+
+If the development USB Telnet shell is enabled, it has no authentication.
+Connect it only to a trusted host.

@@ -15,6 +15,7 @@ import unittest
 from unittest.mock import patch
 
 PROJECT = Path(__file__).resolve().parents[2]
+HISTORICAL_IMAGE = PROJECT/'out/releases/native-recovery/recovery.img'
 sys.path.insert(0, str(PROJECT/'build/recovery'))
 import kernel_recipe as recipe
 spec=importlib.util.spec_from_file_location('source_installer_builder',PROJECT/'build/recovery/build-native-installer.py')
@@ -312,15 +313,13 @@ class BuiltKernelTests(unittest.TestCase):
                      '/soc@0/clock-controller@af00000','/sound','/soc@0/remoteproc@3000000/glink-edge/gpr'):
             self.assertEqual(nodes[node]['status'],b'disabled\0',node)
         self.assertEqual(nodes['/soc@0/remoteproc@3000000']['status'],b'okay\0')
-        usb=('/soc@0/usb@a600000' if '/soc@0/usb@a600000' in nodes else
-             '/soc@0/usb@a6f8800/usb@a600000')
+        usb='/soc@0/usb@a600000'
         self.assertEqual(nodes[usb]['dr_mode'],b'peripheral\0')
         self.assertEqual(nodes[usb]['maximum-speed'],b'super-speed\0',
                          'Recovery overlays must retain the shared board speed limit')
         self.assertIn('usb-role-switch',nodes[usb])
         self.assertIn('liuqin,recovery',nodes[usb])
-        if usb == '/soc@0/usb@a600000':
-            self.assertNotIn('role-switch-default-mode',nodes[usb])
+        self.assertNotIn('role-switch-default-mode',nodes[usb])
         connector='/pmic-glink/connector@0'
         phy='/soc@0/phy@88e8000'
         self.assertEqual(nodes[connector]['data-role'],b'device\0')
@@ -347,8 +346,30 @@ class BuiltKernelTests(unittest.TestCase):
         self.assertNotIn('kinetic,backlight-initially-off',nodes[backlight],
                          'Retained scanout has no real DRM panel to enable its backlight')
         self.assertIn('liuqin,recovery',nodes['/']);self.assertIn('liuqin,recovery',nodes['/pmic-glink'])
-        args=nodes['/chosen']['bootargs']
-        self.assertNotIn(b'hung_task_panic=',args);self.assertNotIn(b'softlockup_panic=',args)
+        self.assertEqual(nodes['/']['model'],b'Xiaomi Pad 6 Pro\0')
+        bootargs = json.loads((self.components/'source-lock.json').read_text())['bootargs']
+        self.assertEqual(nodes['/chosen']['bootargs'], bootargs.encode()+b'\0')
+
+    @unittest.skipUnless(HISTORICAL_IMAGE.is_file(), 'qualified historical Recovery image required')
+    def test_scanout_clock_and_power_nodes_retain_historical_status(self):
+        blob = HISTORICAL_IMAGE.read_bytes()
+        self.assertEqual(blob[:8], b'ANDROID!')
+        self.assertEqual(struct.unpack_from('<II', blob, 36), (4096, 2))
+        offset = 4096
+        for size_field in (8, 16, 24, 1632):  # kernel, ramdisk, second, recovery_dtbo
+            size, = struct.unpack_from('<I', blob, size_field)
+            offset += (size + 4095) // 4096 * 4096
+        dtb_size, = struct.unpack_from('<I', blob, 1648)
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = Path(directory)/'base.dtb'
+            baseline.write_bytes(blob[offset:offset + dtb_size])
+            original, _ = dtb_snapshot(baseline)
+        current, _ = dtb_snapshot(self.components/'recovery.dtb')
+        for node in ('/soc@0/gmu@3d6a000', '/soc@0/iommu@3da0000',
+                     '/soc@0/clock-controller@3d90000', '/soc@0/clock-controller@af00000',
+                     '/soc@0/clock-controller@aaf0000', '/soc@0/clock-controller@ade0000',
+                     '/soc@0/remoteproc@32300000'):
+            self.assertEqual(current[node].get('status'), original[node].get('status'), node)
 
     @unittest.skipUnless(os.environ.get('LIUQIN_RECOVERY_BASELINE_DTB'), 'set baseline DTB for migration equivalence')
     def test_every_dtb_property_and_memory_reservation_matches_the_qualified_baseline(self):

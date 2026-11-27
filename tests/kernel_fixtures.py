@@ -72,11 +72,11 @@ def install_fixture(root, release, fixture):
     elf = bytearray(20); elf[:6] = b'\x7fELF\x02\x01'; elf[18:20] = (183).to_bytes(2, 'little')
     put(root / 'usr/lib/systemd/systemd', bytes(elf), 0o755)
     put(root / 'etc/passwd', b'fastrpc:x:1:1::/:/bin/false\n'); put(root / 'etc/group', b'fastrpc:x:1:\n')
-    put(root / 'usr/local/sbin/liuqin-gnome-storage-guard', b'#!/bin/sh\nexit 0\n', 0o755)
-    put(root / 'etc/systemd/system/liuqin-gnome-storage-guard.service', b'[Service]\nType=oneshot\n')
-    link = root / 'etc/systemd/system/basic.target.requires/liuqin-gnome-storage-guard.service'
+    put(root / 'usr/local/sbin/liuqin-storage-guard', b'#!/bin/sh\nexit 0\n', 0o755)
+    put(root / 'etc/systemd/system/liuqin-storage-guard.service', b'[Service]\nType=oneshot\n')
+    link = root / 'etc/systemd/system/basic.target.requires/liuqin-storage-guard.service'
     link.parent.mkdir(parents=True, exist_ok=True)
-    if not link.is_symlink(): link.symlink_to('../liuqin-gnome-storage-guard.service')
+    if not link.is_symlink(): link.symlink_to('../liuqin-storage-guard.service')
 
 
 def archive_root(root, output):

@@ -212,7 +212,7 @@ class BuildTests(unittest.TestCase):
             execute.assert_not_called()
 
     def test_retired_stages_are_rejected_before_any_build(self):
-        for action in ('all','build-target','kernel','modules','rootfs','boot','kernel-debs','kernel-packages',
+        for action in ('all','build-target','kernel','modules','rootfs','boot','kernel-debs','kernel-rpms','kernel-packages',
                        'init-build','images','installer','installer-kernel','build-installer','runtime'):
             with self.subTest(action=action), patch.object(sys,'argv',['build.py',action]), \
                  patch.object(builder,'config') as config, contextlib.redirect_stderr(io.StringIO()), \
@@ -228,7 +228,7 @@ class BuildTests(unittest.TestCase):
         config = self.root/'official.json'
         config.write_text(json.dumps({'rootfs_config':'build/rootfs/fedora-plasma.json'}))
         for target, expected in (('system','rootfs'),('kernel','kernel'),('modules','modules'),
-                                 ('boot','boot'),('packages','kernel-debs'),('obs-v4l2','obs-v4l2')):
+                                 ('boot','boot'),('packages','kernel-rpms'),('obs-v4l2','obs-v4l2')):
             with self.subTest(target=target), \
                  patch.object(sys,'argv',['build.py','build','--target',target,'--config',str(config)]), \
                  patch('source_flow.execute') as execute,patch.object(builder,'run') as run:

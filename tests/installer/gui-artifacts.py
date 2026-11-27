@@ -97,12 +97,12 @@ class ArtifactTests(unittest.TestCase):
                     target.addfile(entry, io.BytesIO(content) if content is not None else None)
         path.write_bytes(stream.getvalue())
 
-    def storage_boot(self, version=1):
+    def storage_boot(self, version=2):
         old=boot_interface(self.bundle/'boot.img')
         records={'etc/liuqin-storage-mode':b'persistent\n',
                  'etc/liuqin-root-profile':b'native-updatable\n',
                  'etc/liuqin-native-root.contract':old['contract']}
-        if version:records['etc/liuqin-storage-policy']=b'LIUQIN_DESKTOP_UFS_ONLY_V1\n'
+        if version:records['etc/liuqin-storage-policy']=f'LIUQIN_DESKTOP_UFS_ONLY_V{version}\n'.encode()
         (self.bundle/'boot.img').write_bytes(demo_image(records))
 
     def storage_root(self):
@@ -110,11 +110,11 @@ class ArtifactTests(unittest.TestCase):
         with tarfile.open(path) as source,tarfile.open(fileobj=stream,mode='w:gz') as target:
             for entry in source:
                 content=source.extractfile(entry).read() if entry.isfile() else None
-                if entry.name=='usr/local/sbin/liuqin-gnome-storage-guard':
-                    content=b'policy_version=LIUQIN_DESKTOP_UFS_ONLY_V1\n';entry.size=len(content)
+                if entry.name=='usr/local/sbin/liuqin-storage-guard':
+                    content=b'policy_version=LIUQIN_DESKTOP_UFS_ONLY_V2\n';entry.size=len(content)
                 target.addfile(entry,io.BytesIO(content) if content is not None else None)
             elf=bytearray(20);elf[:6]=b'\x7fELF\x02\x01';elf[18:20]=(183).to_bytes(2,'little')
-            for name,data,mode in [('etc/liuqin-storage-policy',b'LIUQIN_DESKTOP_UFS_ONLY_V1\n',0o644),
+            for name,data,mode in [('etc/liuqin-storage-policy',b'LIUQIN_DESKTOP_UFS_ONLY_V2\n',0o644),
                     ('usr/libexec/liuqin-storage-seal',bytes(elf),0o755)]:
                 entry=tarfile.TarInfo(name);entry.mode=mode;entry.size=len(data);target.addfile(entry,io.BytesIO(data))
         path.write_bytes(stream.getvalue())
@@ -129,14 +129,20 @@ class ArtifactTests(unittest.TestCase):
 
     def test_matching_ufs_policy_boot_and_root_are_admitted(self):
         self.storage_boot();self.storage_root()
-        self.assertEqual(inspect_package(self.bundle)['storage_policy_version'],1)
+        self.assertEqual(inspect_package(self.bundle)['storage_policy_version'],2)
+
+    def test_old_guard_boot_cannot_be_paired_with_renamed_guard(self):
+        self.storage_boot(version=1)
+        self.storage_root()
+        with self.assertRaisesRegex(ArtifactError,'存储保护策略'):
+            inspect_package(self.bundle)
 
     def test_three_files_without_json_accept_custom_root_without_snap_or_gnome(self):
         (self.bundle / 'bundle.json').unlink()
         self.engine.validate_bundle(self.bundle)
         self.assertEqual(self.engine.manifest['kernel_release'], '6.17-demo')
         self.assertEqual(self.engine.manifest['root_profile'], 'native-updatable')
-        self.assertEqual(self.engine.manifest['status'], 'CUSTOM_UNVERIFIED')
+        self.assertEqual(self.engine.manifest['status'], 'NO_MATCHING_DEVICE_TEST_RECORD')
         self.assertEqual(set(self.engine.manifest['files']), {'boot.img', 'installer.img', 'rootfs.tar.gz'})
 
     def test_zstd_target_keeps_gzip_installer_independent(self):
@@ -162,12 +168,28 @@ class ArtifactTests(unittest.TestCase):
         result = subprocess.run([sys.executable, cli, '--bundle', self.bundle, '--check'], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('no device access', result.stdout)
+        self.assertIn('缺少匹配的实机验收记录', result.stdout)
 
     def test_stale_or_malformed_json_does_not_bind_custom_artifacts(self):
         for metadata in ('not json', json.dumps({'kernel_release': 'other', 'files': {}, 'installer_layouts': []})):
             (self.bundle / 'bundle.json').write_text(metadata)
             self.engine.validate_bundle(self.bundle)
             self.assertEqual(self.engine.manifest['kernel_release'], '6.17-demo')
+
+    def test_device_test_record_matches_materials_independently_of_origin(self):
+        path = self.bundle / 'bundle.json'
+        record = dict(json.loads(path.read_text()), status='DEVICE_TESTED')
+        for origin in ('project', 'custom'):
+            path.write_text(json.dumps(dict(record, origin=origin)))
+            self.engine.validate_bundle(self.bundle)
+            self.assertEqual(self.engine.manifest['status'], 'DEVICE_TESTED')
+        changes = [dict(device='other'), dict(kernel_release='other'), dict(status='OFFLINE_ASSEMBLED')]
+        changes.extend(dict(files={**record['files'], name: '0' * 64}) for name in record['files'])
+        for fields in changes:
+            with self.subTest(fields=fields):
+                path.write_text(json.dumps(dict(record, **fields)))
+                self.engine.validate_bundle(self.bundle)
+                self.assertEqual(self.engine.manifest['status'], 'NO_MATCHING_DEVICE_TEST_RECORD')
 
     def test_a_changed_valid_archive_changes_confirmation_identity(self):
         self.engine.validate_bundle(self.bundle)
@@ -186,7 +208,7 @@ class ArtifactTests(unittest.TestCase):
     def test_installer_is_reused_after_mutable_device_service_update(self):
         original = (self.bundle / 'installer.img').read_bytes()
         self.rewrite_root(lambda entry, data: (entry, b'UPDATED DEVICE GUARD\n'
-                          if entry.name.endswith('/liuqin-gnome-storage-guard') else data))
+                          if entry.name.endswith('/liuqin-storage-guard') else data))
         self.assertEqual(inspect_package(self.bundle)['kernel_release'], '6.17-demo')
         self.assertEqual((self.bundle / 'installer.img').read_bytes(), original)
 

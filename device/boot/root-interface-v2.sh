@@ -37,12 +37,12 @@ liuqin_root_v2_check() {
     # real executable; other directory or executable aliases remain invalid.
     if [ -L "$1/usr/local/sbin" ]; then
         [ "$("$BB" readlink "$1/usr/local/sbin")" = bin ] || return 1
-        liuqin_v2_regular "$1" usr/local/bin/liuqin-gnome-storage-guard 755 || return 1
+        liuqin_v2_regular "$1" usr/local/bin/liuqin-storage-guard 755 || return 1
     else
-        liuqin_v2_regular "$1" usr/local/sbin/liuqin-gnome-storage-guard 755 || return 1
+        liuqin_v2_regular "$1" usr/local/sbin/liuqin-storage-guard 755 || return 1
     fi
-    liuqin_v2_regular "$1" etc/systemd/system/liuqin-gnome-storage-guard.service 644 || return 1
-    [ "$("$BB" readlink "$1/etc/systemd/system/basic.target.requires/liuqin-gnome-storage-guard.service")" = ../liuqin-gnome-storage-guard.service ] || return 1
+    liuqin_v2_regular "$1" etc/systemd/system/liuqin-storage-guard.service 644 || return 1
+    [ "$("$BB" readlink "$1/etc/systemd/system/basic.target.requires/liuqin-storage-guard.service")" = ../liuqin-storage-guard.service ] || return 1
     if [ "${3:-0}" = 1 ]; then
         "$BB" awk -v prefix="usr/lib/modules/$liuqin_release/" '
           { h=substr($0,1,64); p=substr($0,67)

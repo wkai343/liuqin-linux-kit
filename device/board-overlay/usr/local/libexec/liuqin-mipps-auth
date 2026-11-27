@@ -1222,8 +1222,6 @@ def main():
                              "which enables standard PPS fast charging on third-party "
                              "adapters that cannot pass Xiaomi's private authentication")
     parser.add_argument("--force", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--skip-completed", action="store_true",
-                        help="deprecated; completed handshakes are skipped unless --force is used")
     parser.add_argument("--once-per-attach", action="store_true",
                         help="attempt authentication at most once for the current Type-C partner attach")
     parser.add_argument("--state-file", default="/run/liuqin-mipps-auth/last-attach",

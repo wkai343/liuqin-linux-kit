@@ -1,5 +1,5 @@
 [Unit]
-Description=Restore saved Liuqin display policy
+Description=Restore saved Liuqin panel CABC mode
 ConditionPathExists=/etc/liuqin/display-policy.json
 After=systemd-udev-trigger.service
 
