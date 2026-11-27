@@ -93,12 +93,12 @@ Plasma 会话，再备份 `~/.config/kwinoutputconfig.json`，只把系统默认
 ## 可复现检查
 
 1. 核对原厂材料：从固定 ROM 的 vendor 提取资源 APK，执行
-   `python3 tests/ambient-light-reference.py --stock-overlay /path/to/FrameworksResTarget_Vendor.apk --aapt2 /path/to/aapt2`。
+   `python3 tests/display/ambient-light-reference.py --stock-overlay /path/to/FrameworksResTarget_Vendor.apk --aapt2 /path/to/aapt2`。
    脚本先要求 SHA-256 相同，再通过 Android `aapt2 dump resources` 对照完整数组。
-2. 运行 `python3 tests/fedora-build.py` 和 `python3 tests/sensor-build-environment.py`。
+2. 运行 `python3 tests/build/fedora-build.py` 和 `python3 tests/input/sensor-build-environment.py`。
    检查桌面/登录界面配置分离、已有用户设置保留、曲线单调性及构建环境。
 3. `build/scripts/build-liuqin-sensors-stack.sh` 在固定 libssc 的 mock server 上运行
-   `tests/ssc-accel-integration.py`。六项必须实际通过：加速度、加速度提前请求、
+   `tests/input/ssc-accel-integration.py`。六项必须实际通过：加速度、加速度提前请求、
    环境光释放重取、环境光提前请求、光感/加速度共用，以及提前请求后释放。
    测试通过 `LIUQIN_SSC_TEST_SERVER_PID` 暂停专用 mock server，让 coldplug 竞态
    在原生主机和 QEMU 下都确定发生；不能把跳过或旧的 light 测试失败当作通过。

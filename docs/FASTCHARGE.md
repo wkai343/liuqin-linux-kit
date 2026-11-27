@@ -60,8 +60,8 @@ M81 充电固件需要主机周期读取小米扩展属性 `XM_THERMAL_TEMP`（�
 与 [`power_supply_read_temp()`](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/power/supply/qti_battery_charger.c#L1856)。
 
 小米专有 `0x50` 通知包含其他厂商状态，电量快照通过 `0x80` 通知更新。
-离线回归由 `tests/kernel-common-fixes.py --source <完整适配源码>` 覆盖刷新请求、
-服务离线、超时后重试及平台限定的唤醒行为；电池单位换算仍由 `tests/battery-readings.py` 覆盖。
+离线回归由 `tests/kernel/kernel-common-fixes.py --source <完整适配源码>` 覆盖刷新请求、
+服务离线、超时后重试及平台限定的唤醒行为；电池单位换算仍由 `tests/power/battery-readings.py` 覆盖。
 
 ADSP 同时承载音频与充电服务。整块 ADSP 重启时，短暂读不到电量不代表电池已经耗尽：
 UPower 曾将这段通信故障转成 0% 和 0 Wh，触发 Plasma 的低电量提示。
@@ -72,7 +72,7 @@ M81 电池读取现保留各属性最后一次有效结果，在服务离线或�
 
 缓存不能表示故障期间仍有实时测量：首次没有有效读数时继续返回错误，真实的低电量或
 0% 不会被替换；属性格式错误、溢出及充电控制阈值读写不走该回退。
-`tests/battery-readings.py` 检查这些边界。实机验证需同时观察 sysfs 和
+`tests/power/battery-readings.py` 检查这些边界。实机验证需同时观察 sysfs 和
 `upower --monitor-detail` 中的当前百分比、能量与告警级别，不能把历史记录中的旧 0%
 误当成新故障，也不能用重启 ADSP 代替正常充电恢复。
 
@@ -149,8 +149,8 @@ CPU 限频写入由内核异步应用，读回确认最多等待 200 毫秒；�
 可复现的主机检查：
 
 ```sh
-devbox run -- python3 tests/charger-mode.py
-devbox run -- python3 tests/boot-splash.py
+devbox run -- python3 tests/power/charger-mode.py
+devbox run -- python3 tests/boot/boot-splash.py
 ```
 
 主机检查覆盖断电防抖、重插、无效读数、关机失败、存储保护、按键和 KMS 显示资源。
@@ -186,7 +186,7 @@ sudo liuqin-charge-logs --count 10 --interval 1 > out/charger-logs/ulog.txt
 旧内核手动解绑仍会触发固件关闭主充电通道，需正常重启恢复。
 原厂源码及量产模块的对应关系见[日志通道生命周期](FASTCHARGE-SOURCES.md#日志通道生命周期)。
 
-主机回归执行 `devbox run -- python3 tests/charge-logs.py`。实机依次验证正常结束、
+主机回归执行 `devbox run -- python3 tests/power/charge-logs.py`。实机依次验证正常结束、
 中断、强制结束及重新打开，并确认 `qcom-battmgr-usb/online`、输入限额、温控服务
 状态及 Type-C 伙伴仍有效。验证内核修复还应覆盖打开文件时解绑、旧文件在重绑后关闭、
 驱动卸载重载，以及 ADSP 停止和恢复；用 GLINK 跟踪确认本地解绑不发送 `CLOSE`，
@@ -242,7 +242,7 @@ PDO，忽略响应缓冲区未被本次回复覆盖的尾部。只有内容变�
 使用已有工作队列对临时错误最多重试 30 次、间隔 1 秒，后续通知也可再次触发。
 替换子目录期间存在短暂的目录缺失窗口，调用方应重新读取；内存分配失败时缺失可持续到重试成功。
 断开时释放能力对象并清除比较缓存。源码回归入口为
-`tests/ucsi-source-pdos.py --source <完整适配源码>`，覆盖认证前后能力变化、无变化时不重建、
+`tests/usb/ucsi-source-pdos.py --source <完整适配源码>`，覆盖认证前后能力变化、无变化时不重建、
 短列表替换、读取失败、注册失败清理与重试及 PD 对象稳定性。
 
 `0042` 另修正 UCSI 接口本身的注册状态与注销所有权，采用上游的
@@ -263,7 +263,7 @@ PDO，忽略响应缓冲区未被本次回复覆盖的尾部。只有内容变�
 这些是本项目的 Linux 恢复策略；原厂公开驱动的处理边界见[原厂依据](FASTCHARGE-SOURCES.md#固件服务恢复)。
 恢复路径不主动重启 ADSP，不新增充电电流、电压策略写入，保留现有 Liuqin PPM reset 限制。
 
-`tests/battmgr-recovery.py` 和 `tests/ucsi-lifecycle.py` 使用 `--source <完整适配源码>`
+`tests/power/battmgr-recovery.py` 和 `tests/usb/ucsi-lifecycle.py` 使用 `--source <完整适配源码>`
 编译执行实际工作函数，注入超时、零版本、服务变更和部分初始化失败，验证重试上限及端口、工作队列的清理。
 
 ## 组件

@@ -135,7 +135,7 @@ PY
 
 [source.json](../build/kernel/source.json) 固定内核版本、基础提交、配置和 `target_patches`，构建核对 `expected_source_tree`。补丁顺序以清单为准，不按编号补齐空缺。固定基础提交的补丁应用在构建缓存中，不改写用户源码；使用其他提交须自行合入适用补丁。`tested_source_commit` / `tested_source_tree` 仅是历史验收基线，不能证明当前产物已通过实机测试。
 
-[Rec 内核清单](../build/recovery/kernel/source.json)按同一顺序应用公共补丁，再应用 Rec 专用补丁。仅整理补丁时须保持最终源码树一致。修改源码内容时重新核对目标树。补丁文件或顺序变化都会改变构建身份，须同步 Rec 清单内的补丁摘要和公共清单摘要。用 `python3 tests/recovery-source.py` 检查两份清单。各项改动的原厂依据和实测范围见[硬件适配清单](HARDWARE.md)。
+[Rec 内核清单](../build/recovery/kernel/source.json)按同一顺序应用公共补丁，再应用 Rec 专用补丁。仅整理补丁时须保持最终源码树一致。修改源码内容时重新核对目标树。补丁文件或顺序变化都会改变构建身份，须同步 Rec 清单内的补丁摘要和公共清单摘要。用 `python3 tests/recovery/recovery-source.py` 检查两份清单。各项改动的原厂依据和实测范围见[硬件适配清单](HARDWARE.md)。
 
 修改源码后先提交，再更换 `kernel_localversion`。用 `--target kernel --configure-only` 检查自定义片段；zram 选项只提供内核能力，容量和算法由 rootfs 服务配置。Fedora 额外应用 `fedora.config` 启用 SELinux，并将 `ath11k` / `ath11k_pci` 编为模块；Rec 保留原有内置配置。
 

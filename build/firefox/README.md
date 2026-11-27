@@ -67,7 +67,7 @@ AV1 软件解码、WebAudio FFT、主动禁用硬解、未知版本回退及适�
 核对真实解码器、帧输出、画面、沙箱状态和测试区间的内核日志。
 没有验证的 10-bit/HDR、网站 MSE/DRM、WebRTC 和长片播放不包含在短测结论中。
 
-`python3 tests/firefox-media.py` 用合成 ELF 和临时根目录检查兼容识别、未知组合拒绝、
+`python3 tests/video/firefox-media.py` 用合成 ELF 和临时根目录检查兼容识别、未知组合拒绝、
 参数传递、嵌套回退路径和安装时保留用户配置，不启动浏览器或访问视频设备。
 
 ## 来源

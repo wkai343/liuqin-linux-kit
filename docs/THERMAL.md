@@ -98,11 +98,11 @@ wifi_therm、xo_therm`。外部热敏电阻与 PMIC 内部告警温区是不同�
 离线检查与实机命令：
 
 ```sh
-devbox run -- python3 tests/charge-thermal.py
-devbox run -- python3 tests/charge-thermal-kernel.py --source /path/to/assembled/source
+devbox run -- python3 tests/power/charge-thermal.py
+devbox run -- python3 tests/power/charge-thermal-kernel.py --source /path/to/assembled/source
 sudo systemctl stop liuqin-charge-thermal.service
-sudo python3 tests/charge-thermal-device.py --mode limits > out/charge-limits.jsonl
-sudo python3 tests/charge-thermal-device.py --mode cycle > out/charge-cycle.jsonl
+sudo python3 tests/power/charge-thermal-device.py --mode limits > out/charge-limits.jsonl
+sudo python3 tests/power/charge-thermal-device.py --mode cycle > out/charge-cycle.jsonl
 sudo systemctl start liuqin-charge-thermal.service
 ```
 
@@ -132,25 +132,25 @@ SIGTERM 中断后的阈值恢复也已检查。该范围使用降低的被动阈
 critical 阈值及现有 GPU 策略：
 
 ```sh
-devbox run -- python3 tests/thermal-cooling.py --dtb /path/to/sm8475-xiaomi-liuqin.dtb
+devbox run -- python3 tests/power/thermal-cooling.py --dtb /path/to/sm8475-xiaomi-liuqin.dtb
 ```
 
-将 `thermal-device.py` 与 `thermal-gpu-load.py` 放到平板上的 `tests/` 目录，
-在其上级目录逐项运行，前一项结束且设备冷却后再开始下一项：
+将 `thermal-device.py` 与 `thermal-gpu-load.py` 放到平板工作目录下的 `tests/power/`，
+在工作目录中逐项运行，前一项结束且设备冷却后再开始下一项。
 
 ```sh
 mkdir -p out/thermal
-sudo timeout --signal=TERM --kill-after=15 240 python3 tests/thermal-device.py \
+sudo timeout --signal=TERM --kill-after=15 240 python3 tests/power/thermal-device.py \
   --zone cpu0-thermal --cpu 0 > out/thermal/cpu0.jsonl
-sudo timeout --signal=TERM --kill-after=15 240 python3 tests/thermal-device.py \
+sudo timeout --signal=TERM --kill-after=15 240 python3 tests/power/thermal-device.py \
   --zone cpu4-bottom-thermal --cpu 4 > out/thermal/cpu4.jsonl
-sudo timeout --signal=TERM --kill-after=15 240 python3 tests/thermal-device.py \
+sudo timeout --signal=TERM --kill-after=15 240 python3 tests/power/thermal-device.py \
   --zone cpu7-middle-thermal --cpu 7 > out/thermal/cpu7.jsonl
-sudo timeout --signal=TERM --kill-after=15 240 python3 tests/thermal-device.py \
-  --zone gpu-top-thermal --workload python3 tests/thermal-gpu-load.py \
+sudo timeout --signal=TERM --kill-after=15 240 python3 tests/power/thermal-device.py \
+  --zone gpu-top-thermal --workload python3 tests/power/thermal-gpu-load.py \
   > out/thermal/gpu-top.jsonl
-sudo timeout --signal=TERM --kill-after=15 240 python3 tests/thermal-device.py \
-  --zone gpu-bottom-thermal --workload python3 tests/thermal-gpu-load.py \
+sudo timeout --signal=TERM --kill-after=15 240 python3 tests/power/thermal-device.py \
+  --zone gpu-bottom-thermal --workload python3 tests/power/thermal-gpu-load.py \
   > out/thermal/gpu-bottom.jsonl
 ```
 

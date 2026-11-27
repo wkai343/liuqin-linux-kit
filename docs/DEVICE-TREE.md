@@ -132,7 +132,7 @@ fast switch。该策略仍需独立移植与验证。
 - 在新组装的 Rec 源码上运行 `olddefconfig`，配置无漂移，BWMON 保持内置。
 - 编译修改前后板级 DTB；原有 DTC 警告均为 28 条、类别不变，相关绑定的 `dt-validate` 诊断为零。
 - 校验新增 BWMON 绑定，并用实际 Rec 装配流程验证 ABL 元数据和维护环境 DTB。
-- [对照脚本](../tests/oem-device-tree.py)校验原厂输入摘要、CPU 功耗数据、PSCI 引用链、
+- [对照脚本](../tests/kernel/oem-device-tree.py)校验原厂输入摘要、CPU 功耗数据、PSCI 引用链、
   带宽表换算、寄存器不重叠、供电/互连提供者可用性；解析 phandle 重编号后，既有属性不变。
 - 四种故意改错的 DTB（功耗系数、空闲域、带宽单位、既有供电约束）均被拒绝。
 

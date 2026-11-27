@@ -64,7 +64,7 @@ Iris2 的编码参考帧按图像分别分配，数量包含当前重建帧，�
 
 GStreamer 可在设置输入尺寸之前选择 H.264 级别。SM8450 的 Iris 编码器在协商尺寸和帧率时更新
 V4L2 级别下限，保留应用显式请求的较高级别。计算使用编码画面的宏块数量和每秒宏块数。
-在平板上运行 `python3 tests/iris-recording-levels.py` 可用测试图直接检查码流 SPS、
+在平板上运行 `python3 tests/video/iris-recording-levels.py` 可用测试图直接检查码流 SPS、
 图像尺寸和帧数。应用配置见[桌面相机硬件录像](LIBCAMERA.md#桌面相机硬件录像)。
 级别约束见 [ITU-T H.264 附录 A](https://www.itu.int/rec/T-REC-H.264)。
 
@@ -176,7 +176,7 @@ H.264/H.265 的有效 MP4 短片已同时检查 60 帧像素摘要及 PTS，与�
 解码 flush 会停止并分离旧硬件会话，下一次取帧时重新打开，清除旧的 EOS 和队列。
 渲染器保留的末帧继续引用旧缓冲区，释放时不会混入新会话。
 已用三种格式检查播完后两次跳回开头，均重新输出 DRM PRIME 帧并正常到达 EOF。
-可用 [播放器回归](../tests/ffmpeg-v4l2-playback.py) 重复此检查；它不替代长片任意位置跳转测试。
+可用 [播放器回归](../tests/video/ffmpeg-v4l2-playback.py) 重复此检查；它不替代长片任意位置跳转测试。
 
 ### 应用播放与自动硬解
 

@@ -103,7 +103,7 @@ OOB 和 HFI 事务至多等待转储 1000 ms；转储完成后只重试一次，
 转储后 GMU 仍无响应，以及重试时又出现故障：
 
 ```sh
-devbox run -- python3 tests/gpu-fault-recovery.py --kernel /path/to/patched-kernel
+devbox run -- python3 tests/gpu/gpu-fault-recovery.py --kernel /path/to/patched-kernel
 ```
 
 真机复测应包含正常图形/计算回读、负载和空闲切换、相机枚举服务重启，
@@ -154,7 +154,7 @@ GMU→host 的 HFI 中断并清掉上轮状态。主线驱动轮询启动应答�
 离线检查覆盖上电失败、初始化超时、其他初始化错误和正常空闲/活动提交：
 
 ```sh
-devbox run -- python3 tests/gpu-submit-error.py --kernel /path/to/patched-kernel
+devbox run -- python3 tests/gpu/gpu-submit-error.py --kernel /path/to/patched-kernel
 ```
 
 实机复测需分别覆盖纯时间戳查询（唤醒但不提交）、正常命令、二者并发，以及
@@ -182,8 +182,8 @@ ACK、电源/忙状态、`hung`、`needs_hw_init` 和调用位置，不需要 kp
 不能证明历史超时由此触发，仍需保留追踪确认；这些修复没有放宽超时。
 
 ```sh
-devbox run python3 tests/gpu-hfi-notification.py --kernel /path/to/patched-kernel
-devbox run python3 tests/gpu-fault-recovery.py --kernel /path/to/patched-kernel
+devbox run python3 tests/gpu/gpu-hfi-notification.py --kernel /path/to/patched-kernel
+devbox run python3 tests/gpu/gpu-fault-recovery.py --kernel /path/to/patched-kernel
 ```
 
 前一检查提取实际 IRQ 处理函数，覆盖八种状态组合，确保只清除故障位并保留
@@ -213,7 +213,7 @@ devbox run -- python3 build/scripts/build-mesa-libclc.py --out out/packages/mesa
 sudo dnf install ./libclc22-spirv-22.1.8.3-1.liuqin.aarch64.rpm
 rpm -V libclc22 libclc22-spirv
 clinfo
-python3 tests/opencl-smoke.py
+python3 tests/gpu/opencl-smoke.py
 ```
 
 测试要求枚举到 GPU 类型的 `FD730`，编译并执行向量加法、局部内存归约与 barrier、
@@ -438,7 +438,7 @@ CTS 和其他设备批次仍需独立验收。
 在仓库根目录使用候选源码及其编译出的 DTB：
 
 ```sh
-devbox run -- python3 tests/gpu-sm8475.py \
+devbox run -- python3 tests/gpu/gpu-sm8475.py \
   --source /path/to/kernel \
   --dtb /path/to/sm8475-xiaomi-liuqin.dtb \
   --stock-base /path/to/oem-dtb-02.dtb \
@@ -452,7 +452,7 @@ GMU 200/500 MHz 表。它不代替真机初始化与高频负载检查。
 寄存器恢复列表另执行：
 
 ```sh
-devbox run -- python3 tests/gpu-reglist.py --source /path/to/kernel
+devbox run -- python3 tests/gpu/gpu-reglist.py --source /path/to/kernel
 ```
 
 该检查编译实际列表构造函数，验证 A730 与其他型号的恢复项、固件计数和动态项边界。

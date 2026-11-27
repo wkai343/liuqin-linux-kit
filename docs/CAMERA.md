@@ -88,7 +88,7 @@ S5KJN1 通过媒体图的 ancillary link 关联 PM8350C 闪光灯，实体名为
 启动 Kamoso 时设置 `QT_LOGGING_RULES=kamoso.rearflash.debug=true` 可同时查看每次自动判定的曝光折算值和 Y75。
 
 ```sh
-python3 tests/kamoso-flash-rows.py --off off1.jpg off2.jpg --flash single.jpg burst*.jpg
+python3 tests/camera/kamoso-flash-rows.py --off off1.jpg off2.jpg --flash single.jpg burst*.jpg
 ```
 
 只测选帧逻辑时，在装有 GStreamer 视频开发包及 JPEG 插件的主机上，用 Fedora 配方解包并应用补丁后，
@@ -96,7 +96,7 @@ python3 tests/kamoso-flash-rows.py --off off1.jpg off2.jpg --flash single.jpg bu
 
 ```sh
 mkdir -p out/kamoso-test
-c++ -std=c++20 -I"$kamoso_src/src/video" tests/kamoso-flash-window.cpp \
+c++ -std=c++20 -I"$kamoso_src/src/video" tests/camera/kamoso-flash-window.cpp \
     $(pkg-config --cflags --libs gstreamer-video-1.0) -pthread -o out/kamoso-test/flash-window
 out/kamoso-test/flash-window </dev/null
 ```
@@ -107,10 +107,10 @@ out/kamoso-test/flash-window </dev/null
 `pyatspi`、PyGObject 和 GdkPixbuf。可在启动测试窗口时设置 `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`。
 
 ```sh
-python3 tests/kamoso-flash-pair.py --pids "$pid_a" "$pid_b" --directory "$photo_dir"
+python3 tests/camera/kamoso-flash-pair.py --pids "$pid_a" "$pid_b" --directory "$photo_dir"
 ```
 
-若要在不替换系统版的情况下验证 Fedora 官方 Kamoso 能否保存独立插件返回的帧，见[官方版快门插件测试](../tests/kamoso-gst/README.md)。该测试单独选择一个相机源，不触发闪光。
+若要在不替换系统版的情况下验证 Fedora 官方 Kamoso 能否保存独立插件返回的帧，见[官方版快门插件测试](../tests/camera/kamoso-gst/README.md)。该测试单独选择一个相机源，不触发闪光。
 
 以下命令让后摄闪光一次，电流 250 mA、时长 120 ms。PMIC 硬件计时结束后
 自动熄灯。最后写入 0 释放通道。
@@ -137,7 +137,7 @@ echo 0 | sudo tee /sys/class/leds/white:flash/brightness
 单次脉冲上限采用原厂驱动的默认 200 ms。可用以下命令对照原厂与编译后的 DTB。
 
 ```sh
-python3 tests/camera-oem.py --kernel /path/to/patched-linux --vendor /path/to/vendor \
+python3 tests/camera/camera-oem.py --kernel /path/to/patched-linux --vendor /path/to/vendor \
   --dtb /path/to/sm8475-xiaomi-liuqin.dtb --stock-overlay /path/to/entry.15
 ```
 
@@ -253,7 +253,7 @@ IO 电源为 L1C 的 1.8 V。驱动按原厂配置提供以下模式：
 可对解出的同版 vendor 分区检查原厂寄存器表：
 
 ```sh
-python3 tests/camera-oem.py --kernel /path/to/patched-kernel --vendor /path/to/vendor
+python3 tests/camera/camera-oem.py --kernel /path/to/patched-kernel --vendor /path/to/vendor
 ```
 
 真机检查应包括前后摄各自连续出帧、关闭后再次打开、交替切换；后摄应分别使用

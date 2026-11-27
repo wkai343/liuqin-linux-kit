@@ -114,7 +114,7 @@ uv run --project installer python installer/package.py \
 
 ```sh
 uv run --project installer installer/install-gui.py --demo
-uv run --project installer python tests/gui-qml.py
+uv run --project installer python tests/installer/gui-qml.py
 ```
 
 GUI 回归加载产品使用的 `Main.qml`；协议见[安装器开发说明](../installer/README.md)。

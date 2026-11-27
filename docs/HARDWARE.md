@@ -171,7 +171,7 @@ SM8475 的 USB SerDes 公共寄存器采用 4 nm/V6 布局。
 改为与实际地址对应的 V6 名称。来源为固定原厂 ROM 的 DTBO 第 15 项，以及
 MiCode 提交 `eb49e10028e27fa98856cb5e458c0f0ec5b4554e` 中
 `liuqin-sm8475.dtsi` 的 `usb_qmp_dp_phy` 初始化表。
-`tests/usb-phy-oem.py --source <完整适配源码>` 编译执行实际初始化表及写入函数，
+`tests/usb/usb-phy-oem.py --source <完整适配源码>` 编译执行实际初始化表及写入函数，
 对照原厂的 173 项寄存器配置；该检查不能代替实机链路训练验收。
 
 普通 USB 插线不保证产生 DisplayPort PAN 通知，因而不能仅靠 altmode 客户端设置

@@ -92,7 +92,7 @@ RPM 构建使用 `-DOBS_INSTALL_SYSTEM=ON -DCMAKE_INSTALL_PREFIX=/usr`。
 真机 Wayland 会话中运行以下脚本，使用自己生成的测试图片，输出目录必须尚不存在：
 
 ```sh
-python3 tests/obs-v4l2-record.py \
+python3 tests/video/obs-v4l2-record.py \
   --plugin out/obs-v4l2/liuqin-v4l2.so --data build/obs-v4l2/data \
   --image /path/to/generated-test.png --output out/obs-h264-mkv \
   --codec h264 --container mkv --repeat 2

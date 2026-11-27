@@ -11,7 +11,7 @@ liuqin 的键盘连接问题由 `build/kernel/patches/linux-7.3/0001-preserve-li
 固定来源与校验值见 `source.json`。单独下载其中归档后运行：
 
 ```sh
-python3 tests/kwin-tablet-mode.py --source-archive /path/to/kwin-6.7.5.tar.xz
+python3 tests/desktop/kwin-tablet-mode.py --source-archive /path/to/kwin-6.7.5.tar.xz
 ```
 
 检查需要 C++、pkg-config 和 Qt6Core 开发工具。`--unpatched` 可复现原有失败，预期返回非零。

@@ -28,13 +28,15 @@ device/
   …                 固件及其他设备组件
 shared/             不依赖 Qt 的安装包接口、布局与项目标识
 docs/               中文文档
-tests/              离线测试和回归验证
+tests/              按被测功能分组的离线回归与设备测试
+  fixtures/         固定测试数据
 inputs/             本机素材、ROM 与下载缓存
 sources/            外部源码检出
 out/                中间文件、成品和报告
 ```
 
 `inputs/`、`sources/`、`out/` 和本机 `build.json` 不提交 Git。
+各测试目录的职责和运行命令见[测试说明](../tests/README.md#按功能查找)。
 组件自身的 `tools/` 目录包含实际构建工具，仍需保留。
 
 ## 构建与安装的依赖

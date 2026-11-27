@@ -57,4 +57,4 @@ python3 build/recovery/build-universal.py \
 
 构建只操作主机文件，私钥不随包发布。检查镜像布局、载荷、签名和完整性后，分别测试临时启动、固定启动、冷启动及回刷。自签名不代表 OEM 信任。
 
-[verify-universal-offline.py](../build/recovery/verify-universal-offline.py) 检查 ABL 指令、AVB、DTBO 选择/合并与内核解压；模型不能代替真实 TEE、UEFI 退出及内核交接。回归入口：`tests/universal-recovery.py`、`tests/fixed-recovery.py`、`tests/fixed-recovery-preserve.py`。
+[verify-universal-offline.py](../build/recovery/verify-universal-offline.py) 检查 ABL 指令、AVB、DTBO 选择/合并与内核解压；模型不能代替真实 TEE、UEFI 退出及内核交接。回归入口：`tests/recovery/universal-recovery.py`、`tests/recovery/fixed-recovery.py`、`tests/recovery/fixed-recovery-preserve.py`。

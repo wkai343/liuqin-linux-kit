@@ -72,13 +72,13 @@ devbox run -- python3 build/recovery/build-native-installer.py \
 `kernel/recovery-build.json` 记录编译输出；`components/kernel-manifest.json` 记录组件和生成源码摘要。完整配置、Rec/公共来源锁、内核与触控模块补丁及对齐入口随最终镜像附在 `/usr/share/licenses/liuqin-recovery-kernel/`。硬件验证绑定最终镜像 SHA256，存放在配套记录中，不写入可复用的源码锁。
 
 ```sh
-devbox run -- python3 tests/recovery-source.py
-devbox run -- python3 tests/recovery-startup.py
+devbox run -- python3 tests/recovery/recovery-source.py
+devbox run -- python3 tests/recovery/recovery-startup.py
 LIUQIN_RECOVERY_COMPONENTS=out/build/rec-kernel/components \
-  devbox run -- python3 tests/recovery-source.py
+  devbox run -- python3 tests/recovery/recovery-source.py
 ```
 
-设置 `LIUQIN_RECOVERY_BASELINE_DTB=/path/to/reference.dtb` 可逐项比较候选与参考 DTB；该参考仅供回归验收，不是构建依赖。ARM64 对齐入口仿真见 `tests/recovery-kernel-components.py`，需要 Unicorn。
+设置 `LIUQIN_RECOVERY_BASELINE_DTB=/path/to/reference.dtb` 可逐项比较候选与参考 DTB；该参考仅供回归验收，不是构建依赖。ARM64 对齐入口仿真见 `tests/recovery/recovery-kernel-components.py`，需要 Unicorn。
 
 哈希或源码树不符时检查本地补丁和来源锁；组件与基础镜像不匹配时使用同一次配方重建，不能修改清单绕过检查。触控排查查看 `/run/liuqin-native-touch.json`、对应日志及 `dmesg` 中的 NVT 固件状态；显示排查先确认 simplefb、保留的显示时钟和电源依赖，不能为消除 deferred-probe 日志随意裁剪设备树。
 

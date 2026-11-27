@@ -39,7 +39,7 @@ FPRINTD_SOURCE=/path/to/fprintd-v1.94.5 sh build/scripts/build-liuqin-fingerprin
 
 录入会写入设备私有状态和 Gatekeeper/RPMB；随机秘密、handle、模板、令牌及校准不能进入源码或通用镜像。修改 Linux 密码不要求同步指纹密码；保留密码登录，故障时不要删除身份文件来强行重试。
 
-离线检查包括 `tests/fingerprint-gallery.py`、`fingerprint-gallery-client.py` 和 `fingerprint-abi.py`，分别覆盖文件事务、C 协议及真实 libfprint API。实际录入、异指拒绝、重启/休眠恢复和锁屏需通过设备操作检查。
+离线检查包括 `tests/fingerprint/fingerprint-gallery.py`、`fingerprint-gallery-client.py` 和 `fingerprint-abi.py`，分别覆盖文件事务、C 协议及真实 libfprint API。实际录入、异指拒绝、重启/休眠恢复和锁屏需通过设备操作检查。
 
 ## 许可证
 

@@ -22,4 +22,4 @@ Canonical 数据库以 `gallery.json` 原子替换，保留精确旧文件直至
 
 ## 验证
 
-`tests/fingerprint-gallery.py` 和 `fingerprint-gallery-client.py` 分别检查实际私有文件事务和 C 协议/匹配代码；`fingerprint-abi.py` 在真实 libfprint Enroll/Verify/Identify API 上运行合成进程回归并编译 fprintd。测试不访问传感器或真实模板；物理录入、手指区分与长期恢复另行验收。
+`tests/fingerprint/fingerprint-gallery.py` 和 `fingerprint-gallery-client.py` 分别检查实际私有文件事务和 C 协议/匹配代码；`fingerprint-abi.py` 在真实 libfprint Enroll/Verify/Identify API 上运行合成进程回归并编译 fprintd。测试不访问传感器或真实模板；物理录入、手指区分与长期恢复另行验收。

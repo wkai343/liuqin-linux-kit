@@ -174,11 +174,11 @@ WirePlumber 启动桌面用户服务 `liuqin-speaker-tuning`。当应用的 `Com
 功放的数字音量字段（`0`）、模拟档位（`18`）和 DSP 调音。
 第 23 块均衡器的五个系数应维持原厂值，第 27 块在工作内存 `0x02801f78`
 的增益应依次为 `0x47cf26`、`0x400000`、`0x47cf26`，
-`command/state/error` 均应为零。[实机出声测试](../tests/speaker-playback-device.py) · [功放回读工具](../tests/speaker-tuning-device.py)
+`command/state/error` 均应为零。[实机出声测试](../tests/audio/speaker-playback-device.py) · [功放回读工具](../tests/audio/speaker-tuning-device.py)
 
 ```sh
 sudo -v
-python3 tests/speaker-playback-device.py --check-dsp
+python3 tests/audio/speaker-playback-device.py --check-dsp
 ```
 
 ## SoundWire 中断与停钟
@@ -347,11 +347,11 @@ journalctl -k -b -g 'ASoC|APM|[Ss]ound[Ww]ire|wcd938|timeout|audio backend|Oops|
 
 离线检查集中为四个入口，均使用 `--source /path/to/assembled-kernel`：
 
-- `tests/microphones.py`：四路接线、DSP 通道映射、TX mixer/mute、共享 ADC 时钟、
+- `tests/audio/microphones.py`：四路接线、DSP 通道映射、TX mixer/mute、共享 ADC 时钟、
   高通滤波延时与离线收尾；包含声卡重建、360 种 ADC 子集和关闭顺序及任务竞态。
-- `tests/dp-audio.py`：链路停启、首帧恢复、关闭顺序和未接外屏时的 PCM 探测。
-- `tests/soundwire.py`：WCD 中断归属、SoundWire 停钟、FIFO/完成事件及复位恢复。
-- `tests/audio-recovery.py`：服务与设备恢复顺序、时钟和端口、播放队列、回调注销，
+- `tests/audio/dp-audio.py`：链路停启、首帧恢复、关闭顺序和未接外屏时的 PCM 探测。
+- `tests/audio/soundwire.py`：WCD 中断归属、SoundWire 停钟、FIFO/完成事件及复位恢复。
+- `tests/audio/audio-recovery.py`：服务与设备恢复顺序、时钟和端口、播放队列、回调注销，
   以及离线 graph 的引用释放；保留在线错误和非关闭请求的失败处理。
 
 `microphones.py` 可追加 `--stock-overlay /path/to/entry.15` 从原厂 DTBO 读取传输参数；

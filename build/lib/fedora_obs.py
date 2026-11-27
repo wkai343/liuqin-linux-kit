@@ -12,7 +12,7 @@ from rpm_package import build as rpm
 from source_build import PROJECT, sha, tree_identity
 
 RECIPE = PROJECT/'build/obs-v4l2'
-TESTS = (PROJECT/'tests/obs-v4l2-packets.c', PROJECT/'tests/obs-v4l2-record.py')
+TESTS = (PROJECT/'tests/video/obs-v4l2-packets.c', PROJECT/'tests/video/obs-v4l2-record.py')
 NAME, VERSION, RELEASE = 'obs-studio-plugin-liuqin-v4l2', '0.1.0', '1.liuqin'
 PLUGIN = 'usr/lib64/obs-plugins/liuqin-v4l2.so'
 DATA = 'usr/share/obs/obs-plugins/liuqin-v4l2'
@@ -129,11 +129,12 @@ def build(root, ffmpeg_bundle, output, jobs, chroot, dnf):
     source = work/'source'
     (source/'build').mkdir(parents=True)
     shutil.copytree(RECIPE, source/'build/obs-v4l2')
-    (source/'tests').mkdir()
+    test_dir = source/'tests/video'
+    test_dir.mkdir(parents=True)
     for path in TESTS:
-        shutil.copyfile(path, source/'tests'/path.name)
+        shutil.copyfile(path, test_dir/path.name)
     if (tree_identity(source/'build/obs-v4l2') != identity['recipe'] or
-            {p.name:sha(p) for p in (source/'tests').iterdir()} != identity['tests']):
+            {p.name:sha(p) for p in test_dir.iterdir()} != identity['tests']):
         raise ValueError('OBS 源码在暂存期间变化。')
     staging = work/'rpms'
     staging.mkdir()

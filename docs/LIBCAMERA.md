@@ -36,7 +36,7 @@
 ### 后摄手动对焦标定
 
 将带细字的平面固定在已量出的物距，距离从后摄镜头量到文字平面。用
-`tests/camera-rear-manual-focus.cpp` 的 `scan <镜头子设备> <每档帧数> <DAC> ...`
+`tests/camera/camera-rear-manual-focus.cpp` 的 `scan <镜头子设备> <每档帧数> <DAC> ...`
 在本机有效 AF 行程内粗扫，再反向细扫。取中心清晰度中位数的峰值。
 至少测两个距离，按物距从远到近写入 `/var/lib/libcamera/liuqin/s5kjn1-focus.json`。
 顶层字段为 `schema`（整数 1）、`model`（`s5kjn1`）、`eeprom_sha256`（本机完整后摄
@@ -53,7 +53,7 @@ EEPROM 的 SHA-256）和 `points`。每个点包含 `distance_cm` 和整数 `dac
 
 ```sh
 mkdir -p out
-c++ -std=c++20 -O2 tests/camera-rear-manual-focus.cpp \
+c++ -std=c++20 -O2 tests/camera/camera-rear-manual-focus.cpp \
     $(pkg-config --cflags --libs libcamera) -pthread -o out/camera-rear-manual-focus
 ```
 
@@ -199,7 +199,7 @@ lux 220–350，对应 region 1576/1578/1580/1582/1584。原厂自定义选择�
 布局和 RGB 行列次序可对照 Qualcomm 的
 [CC13 参数定义](https://github.com/bjzhou/CamxChi/blob/9f17f1b568626b393e785b369c5dc94543774d7a/chi-cdk/api/chromatix/XSD/isp/cc_1_3_0.xsd)
 及 [CC13 寄存器转换](https://github.com/bjzhou/CamxChi/blob/9f17f1b568626b393e785b369c5dc94543774d7a/camx/src/hwl/iqsetting/cc13setting.cpp)。
-不分发原厂二进制；`tests/camera-oem.py --libcamera /path/to/libcamera`
+不分发原厂二进制；`tests/camera/camera-oem.py --libcamera /path/to/libcamera`
 会追踪上述引用并逐项核对矩阵和黑电平。
 
 前摄单机 EEPROM 白平衡/镜头阴影校准已接入硬件路径；软件路径尚未使用它。
@@ -216,7 +216,7 @@ lux 220–350，对应 region 1576/1578/1580/1582/1584。原厂自定义选择�
 相对白点轨迹与单机校准排除非中性色，对有效候选按中央区域及亮度加权，先选主要
 光源，再成对合并红蓝增益。暗区域、高光和无效值不参与，候选不足时保持上一白点；
 没有给所有场景添加固定的暖色偏置。算法属于本项目，不能称为原厂 AWB。
-`tests/camera-isp-awb.py --libcamera /path/to/source` 检查暖光/日光中性色、混合光
+`tests/camera/camera-isp-awb.py --libcamera /path/to/source` 检查暖光/日光中性色、混合光
 暗背景、高光、暗场和无效输入，可增加 `--sanitize` 检查内存与算术。
 此补丁已进入配方；普通白纸对比不能替代混合光源和标准色卡验收。
 
@@ -230,7 +230,7 @@ AF 范围；内核通过独立能力控制声明后摄 LSC 几何。缺失或无
 `0011` 保持阴影网格的裁剪偏移为有符号数。网格第一行允许略早于有效图像，
 若将负坐标与无符号裁剪量相加，会回绕为极大值，插值得到的增益随即被夹到极限，
 形成顶部亮带或暗带。后摄及前摄 1952 行模式都需要这一修复。
-`tests/camera-lsc-coordinates.py --libcamera /path/to/source` 执行实际采样代码，
+`tests/camera/camera-lsc-coordinates.py --libcamera /path/to/source` 执行实际采样代码，
 检查三种硬件几何与四种翻转下的边缘范围和对称性。实拍验收还需检查整条上缘，
 不能仅以四角平均亮度评价镜头阴影校正。
 
@@ -270,7 +270,7 @@ meson test -C /path/to/build --print-errorlogs frame-duration contrast-af softwa
 对焦测试检查搜索、失败、旧帧、取消与重试；统计测试检查 RAW8、RAW10、RAW12 的
 打包/非打包统计、中央窗口、暗场噪声和无有效统计的帧。可用
 `-Db_sanitize=address,undefined` 检查内存访问与算术。
-打包边界检查为 `devbox run -- python3 tests/fedora-libcamera.py`。
+打包边界检查为 `devbox run -- python3 tests/camera/fedora-libcamera.py`。
 
 这些测试不替代真实镜头的近远景清晰度、前后摄切换和应用兼容性检查。
 
@@ -315,7 +315,7 @@ LIBCAMERA_LOG_LEVELS=IPASoft:DEBUG cam -c "$REAR_ID" \
 
 ## 固定曝光的 HDR 输入采集
 
-`tests/camera-hdr-capture.cpp` 使用 libcamera 的 `Camera::start(controls)`，先让
+`tests/camera/camera-hdr-capture.cpp` 使用 libcamera 的 `Camera::start(controls)`，先让
 AE/AWB 和后摄对焦运行，再停流，分别采集 2、8、32 ms 三档曝光。每档开流前关闭
 AE/AWB，固定同一增益、白平衡和颜色矩阵，后摄停止连续对焦；两个传感器驱动均在
 写入开流寄存器前执行控制初始化。IPE 会话历史随停流清除，避免混入上一档曝光。
@@ -330,11 +330,11 @@ SHA-256。校验器复核每个首、末帧文件与原始记录相符，检查�
 转换器帧号，并拒绝硬链接复用。同一校验器可读取版本 1，其摘要只代表校验时的内容。
 
 ```sh
-c++ -std=c++17 -O2 tests/camera-hdr-capture.cpp -o /tmp/camera-hdr-capture \
+c++ -std=c++17 -O2 tests/camera/camera-hdr-capture.cpp -o /tmp/camera-hdr-capture \
   $(pkg-config --cflags --libs libcamera libcrypto) -pthread
 /tmp/camera-hdr-capture front /path/to/new/front-bracket
-python3 tests/camera-hdr-validate.py /path/to/new/front-bracket
-python3 tests/camera-hdr-validate.py --self-test
+python3 tests/camera/camera-hdr-validate.py /path/to/new/front-bracket
+python3 tests/camera/camera-hdr-validate.py --self-test
 ```
 
 后摄将 `front` 换为 `rear`。输出目录必须不存在，完整成功才产生 `COMPLETE`。

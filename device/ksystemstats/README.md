@@ -108,8 +108,8 @@ CPU、内存和网络传感器读取正常。
 验证真实读取函数与补丁：
 
 ```sh
-python3 tests/adreno-stats.py
-devbox run -- python3 tests/fedora-stats.py
+python3 tests/gpu/adreno-stats.py
+devbox run -- python3 tests/gpu/fedora-stats.py
 ```
 
 宿主测试需要 C++ 编译器、pkg-config 和 Qt6Core 开发文件。ARM64 构建依赖在隔离 Fedora 环境内安装。

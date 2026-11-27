@@ -39,8 +39,8 @@ devbox run -- python3 build/recovery/build-runtime.py \
 ## 验证与排查
 
 ```sh
-devbox run -- python3 tests/android-runtime.py
-devbox run -- python3 tests/rec-runtime.py \
+devbox run -- python3 tests/android/android-runtime.py
+devbox run -- python3 tests/recovery/rec-runtime.py \
   --runtime out/build/rec-tools/runtime \
   --report out/build/rec-tools/runtime-test.json
 ```

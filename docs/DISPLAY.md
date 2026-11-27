@@ -201,7 +201,7 @@ DPU 关闭链路时，先清空软件缓存中的上一帧刷新请求，再构�
 CTL 的刷新位无法消退并触发 `vblank timeout`。此处采用
 [上游修复及审查](https://lists.openwall.net/linux-kernel/2026/09/13/976)
 中的处理顺序，保留硬件复位、本次关闭提交和后续帧完成检查。
-`tests/display-live-refresh.py --source /path/to/assembled-kernel` 执行实际关闭和提交等待函数，模拟 32 种残留请求组合；
+`tests/display/display-live-refresh.py --source /path/to/assembled-kernel` 执行实际关闭和提交等待函数，模拟 32 种残留请求组合；
 移除入口清理后，同一模型应重新报提交超时。实机仍需结合全系统睡眠、桌面熄屏恢复、
 帧计数推进与内核日志验证，单次未出现超时不能证明所有唤醒场景均已覆盖。
 
@@ -215,7 +215,7 @@ CTL 的刷新位无法消退并触发 `vblank timeout`。此处采用
 与正常帧提交的 [0064 补丁](../build/kernel/patches/linux-7.3/0064-drm-msm-dpu-single-flush-bonded-video.patch)
 处理不同路径；错误字符串相同，不能用其中一项短测代替另一项验证。
 
-`tests/display-single-flush.py --source /path/to/assembled-kernel` 执行实际视频使能和
+`tests/display/display-single-flush.py --source /path/to/assembled-kernel` 执行实际视频使能和
 提交函数，覆盖单路、旧版双路与共享 CTL 的 14 种组合；恢复旧判断应重新出现重复提交。
 实机定向复测须先解锁桌面，让绘图窗口实际参与合成，再交替运行短时窗口和全屏绘图，
 检查 CTL/DSC 刷新位、两路帧计数、超时和 underrun，并复测四档切换及熄屏恢复。

@@ -25,7 +25,7 @@ adbd 使用固定版本的 [Roboparty/adbd4linux](https://github.com/Roboparty/a
 
 安装范围校验用于防止误操作，不隔离已取得 root shell 的主机。
 
-协议回归见 [native-adb.py](../tests/native-adb.py)，覆盖 shell v2、退出码、二进制传输、boot ID、分片响应、映射清理和超时释放。QEMU 环回检查与真实 USB 枚举分别测试。
+协议回归见 [native-adb.py](../tests/recovery/native-adb.py)，覆盖 shell v2、退出码、二进制传输、boot ID、分片响应、映射清理和超时释放。QEMU 环回检查与真实 USB 枚举分别测试。
 
 ## 能力与会话
 
@@ -87,7 +87,7 @@ GUI 的「引导存储与中断恢复」只读统计空间、默认匹配、事�
 
 普通清理只开放 linux_boot，恢复原引导额外开放 boot_a。未结束事务、未知状态、变化的恢复材料或默认引导不匹配会阻止普通清理。未写完的 rootfs/ROM、没有新持久记录的旧安装、没有 linux_boot 的单 Android 失败，仍需原电脑报告和备份分析。
 
-事务检查见 [boot-store.py](../tests/boot-store.py) 和 [transaction-recovery.py](../tests/transaction-recovery.py)；离线注入不覆盖真实物理断电。
+事务检查见 [boot-store.py](../tests/boot/boot-store.py) 和 [transaction-recovery.py](../tests/installer/transaction-recovery.py)；离线注入不覆盖真实物理断电。
 
 ## BCB 退出清理
 

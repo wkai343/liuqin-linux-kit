@@ -88,7 +88,7 @@ class FedoraFlow(Flow):
         def build(out):self.target_action('sensors',archive,out/'assembled',rom_sensors=board/'sensors',jobs=self.data.get('jobs',12))
         return self.stage('fedora-sensors',dict(base=sha(archive),config=tree_identity(board/'sensors'),
             sources=tree_identity(PROJECT/'device/sensors'),overlay=tree_identity(PROJECT/'device/sensors-overlay'),
-            integration_test=sha(PROJECT/'tests/ssc-accel-integration.py'),
+            integration_test=sha(PROJECT/'tests/input/ssc-accel-integration.py'),
             builder=sha(PROJECT/'build/scripts/build-liuqin-sensors-stack.sh')),
             build,['assembled/sensor-stack.tar'])/'assembled/sensor-stack.tar'
 

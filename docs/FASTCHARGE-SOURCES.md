@@ -70,7 +70,7 @@ ROM 为 `OS2.0.6.0.VMYCNXM`，镜像身份固定在
 包括客户端已经解绑的情况，仍完成双方关闭与引用释放；整个 GLINK 边移除也照常
 清理保留的通道。保留传输不意味着缓存充电成功状态或忽略固件服务掉线。
 
-`tests/charge-logs-kernel.py --source <完整适配源码>` 编译执行上述真实函数，
+`tests/power/charge-logs-kernel.py --source <完整适配源码>` 编译执行上述真实函数，
 覆盖重复解绑、回调生命周期、握手失败、远端关闭、传输移除和其他通道行为。
 
 可复现检查包括：正常退出、SIGTERM、SIGKILL 后重新打开日志文件，并确认主充电
@@ -249,7 +249,7 @@ cat /sys/class/power_supply/qcom-battmgr-usb/input_current_limit
 在供电在线、sink 角色、固定 PD 且上述能力为 0 时，对 500000、750000 和 `-1`
 的独立请求应分别核对实际固件应答与未变的 GET 限额；不能用 `EREMOTEIO` 单独证明
 返回码一定是 `0x204`。使用现有 `pmic_glink_trace` 可记录线上 24 字节应答，完成后恢复
-原跟踪开关。`tests/charge-thermal-kernel.py` 覆盖完整 `0x204` 应答的错误传播与失败不覆盖
+原跟踪开关。`tests/power/charge-thermal-kernel.py` 覆盖完整 `0x204` 应答的错误传播与失败不覆盖
 成功缓存，实机记录保存在 `out/`。SDP 限流及能力位为 1 的 PD 电源仍需分别实测。
 
 需要补充固件执行路径时使用 `liuqin-charge-logs`，按[原厂生命周期](#日志通道生命周期)

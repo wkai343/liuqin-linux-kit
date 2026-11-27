@@ -27,7 +27,7 @@ Bayer 统计，执行基础自动曝光和白平衡，不处理整幅 Bayer 图�
 按输入尺寸核对 IPE 能力。加载宽屏配置后，三档后摄 NV12 均可走 IPE TF21；查询输出行宽前先在探测文件描述符上选择同尺寸输入。原厂 VFE680 的
 `CAM_VFE_BUS_VER3_VFE_OUT_FULL` 单路上限为 4096×4096。前摄 5184×3904、
 后摄 8160×6120 超出这条输出的上限；目前全尺寸原始图走 RDI。
-可用 `tests/camera-hwisp-libcamera.py --camera "$ID" --size 3840x2160 --fps 60 --output out/uhd`
+可用 `tests/camera/camera-hwisp-libcamera.py --camera "$ID" --size 3840x2160 --fps 60 --output out/uhd`
 复核 NV12 缓冲区大小、逐帧时间戳和实测速率。
 
 AE/AWB 是本项目的基础策略，不是原厂闭源算法。白平衡每六帧更新并平滑，
@@ -82,7 +82,7 @@ gst-launch-1.0 -e libcamerasrc camera-name="$FRONT_ID" \
 
 检查日志中的 `IFE680 NV12, hardware Bayer statistics and calibrated LSC`，
 以及实际格式、帧数、时间戳和新内核错误。可运行
-`python3 tests/camera-hwisp-libcamera.py --camera "$FRONT_ID" --fps 60 --frames 600 --output out/ife-libcamera`
+`python3 tests/camera/camera-hwisp-libcamera.py --camera "$FRONT_ID" --fps 60 --frames 600 --output out/ife-libcamera`
 核验系统 GStreamer 路径的帧数、完整 NV12 大小与实际帧率。GStreamer 的 `libcamerasrc` 和设备
 提供器使用同一 libcamera 路径；Kamoso 前摄预览与拍照可使用此通路；其他桌面应用兼容性仍需分别验证。
 测试桌面应用时保留 WirePlumber 的音频功能；暂停整个服务可能让 Kamoso 的
@@ -121,16 +121,16 @@ CPU 只计算低密度梯度，去马赛克与色彩处理仍由 IFE 完成。
 该路径不使用 PDAF/BF 硬件统计，速度和暗场行为仍需继续调校。
 
 ```sh
-python3 tests/camera-hwisp-libcamera.py --camera "$REAR_ID" \
+python3 tests/camera/camera-hwisp-libcamera.py --camera "$REAR_ID" \
   --size 4080x3060 --fps 30 --frames 600 --output out/rear-ife
-python3 tests/camera-isp-multilight.py --sensor s5kjn1 \
+python3 tests/camera/camera-isp-multilight.py --sensor s5kjn1 \
   --libcamera /path/to/patched-libcamera --vendor /path/to/vendor
-python3 tests/camera-isp-format.py --kernel /path/to/patched-linux
-python3 tests/camera-rear-calibration.py --vendor /path/to/vendor
-python3 tests/camera-rear-lsc.py --kernel /path/to/patched-linux --vendor /path/to/vendor
-python3 tests/camera-lsc-coordinates.py --libcamera /path/to/patched-libcamera
-python3 tests/camera-vfe-stop.py --kernel /path/to/patched-linux
-python3 tests/camera-stream-unwind.py --kernel /path/to/patched-linux
+python3 tests/camera/camera-isp-format.py --kernel /path/to/patched-linux
+python3 tests/camera/camera-rear-calibration.py --vendor /path/to/vendor
+python3 tests/camera/camera-rear-lsc.py --kernel /path/to/patched-linux --vendor /path/to/vendor
+python3 tests/camera/camera-lsc-coordinates.py --libcamera /path/to/patched-libcamera
+python3 tests/camera/camera-vfe-stop.py --kernel /path/to/patched-linux
+python3 tests/camera/camera-stream-unwind.py --kernel /path/to/patched-linux
 ```
 
 后摄连续 NV12 需要 18727200 字节。PIX 的逻辑行数上限必须按内存平面的纵向
@@ -166,7 +166,7 @@ python3 tests/camera-stream-unwind.py --kernel /path/to/patched-linux
 持续返回 EBUSY。`camera-stream-unwind.py` 执行实际启动与回退函数，逐节点注入
 错误，核验没有残留启动状态、没有重复停止，并保留原始错误及缓冲状态。
 
-关闭所有相机客户端和枚举服务后，可使用 `tests/camera-hwisp.py` 验证直接 V4L2
+关闭所有相机客户端和枚举服务后，可使用 `tests/camera/camera-hwisp.py` 验证直接 V4L2
 采集。模块必须与内核匹配；不要绕过版本检查，也不要用 `modprobe -r` 递归卸载
 时钟和 VB2 依赖。CAMSS 的异步绑定会持有传感器模块引用；确认采集已停止、没有
 客户端占用后，先卸载 CAMSS，再按需卸载传感器，不能强制卸载仍被引用的模块。
@@ -174,8 +174,8 @@ python3 tests/camera-stream-unwind.py --kernel /path/to/patched-linux
 不能将 STREAMON 回退修复视为底层 CCI 超时的根因修复。
 
 ```sh
-sudo python3 tests/camera-hwisp.py --output out/ife-30 --fps 30 --frames 300
-sudo python3 tests/camera-hwisp.py --output out/ife-60 --fps 60 --frames 300
+sudo python3 tests/camera/camera-hwisp.py --output out/ife-30 --fps 30 --frames 300
+sudo python3 tests/camera/camera-hwisp.py --output out/ife-60 --fps 60 --frames 300
 ```
 
 脚本检查实际 DQBUF 数量、连续帧号、字节数、时间戳与新增错误。`--save` 保存
@@ -212,7 +212,7 @@ LSC411 使用 14-bit 通道打包、Q10 增益，Gr/Gb 单机差异并入网格�
 可使用主机 C 编译器、`unicorn` 和 `pyelftools` 复核真实内核写寄存器函数：
 
 ```sh
-python3 tests/camera-isp-colour.py --kernel /path/to/patched-linux \
+python3 tests/camera/camera-isp-colour.py --kernel /path/to/patched-linux \
   --libcamera /path/to/patched-libcamera --vendor /path/to/extracted-vendor
 ```
 
@@ -245,7 +245,7 @@ IPE 是独立于 CAMSS PIX 的固件通路；可选前后摄实时桥接已有 D
 暗部噪声和移动物体的重影仍需定量验收。详见[三曝光拍照](CAMERA-ICP.md#三曝光硬件-hdr-拍照)。
 
 
-`tests/camera-ipe-hdr-tuning.py --vendor /path/to/vendor --output out/hdr-audit.json`
+`tests/camera/camera-ipe-hdr-tuning.py --vendor /path/to/vendor --output out/hdr-audit.json`
 使用匹配的原厂解析器核验前后摄 HDR401 树，并以合成的两/三曝光元数据执行参数
 转换。两颗模组的 HDR401 默认 enable 均为零，转换后也保持关闭。
 这项检查证明参数布局与调用链可复现；它不证明硬件不支持 HDR，也不能代替
@@ -254,7 +254,7 @@ IPE 是独立于 CAMSS PIX 的固件通路；可选前后摄实时桥接已有 D
 多光源参数和本地估计器可离线核验（需要 C++ 编译器及用户提取的原厂 vendor）：
 
 ```sh
-python3 tests/camera-isp-multilight.py --libcamera /path/to/patched-libcamera --vendor /path/to/vendor
+python3 tests/camera/camera-isp-multilight.py --libcamera /path/to/patched-libcamera --vendor /path/to/vendor
 ```
 
 此检查比对五组原厂 CCM 区间、五个白点，检查两个单机响应下的正反映射、矩阵连续性和

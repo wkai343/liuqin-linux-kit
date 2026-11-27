@@ -203,26 +203,54 @@ def doctor():
 
 
 def test():
-    for name in ('project-identity.py', 'project-structure.py', 'devbox-build.py', 'source-build.py', 'device-overlays.py', 'stock-rom.py', 'fedora-build.py', 'fedora-ffmpeg.py', 'fedora-libcamera.py', 'fedora-obs.py', 'firefox-media.py', 'fedora-stats.py', 'mesa-libclc.py', 'fedora-startup.py', 'speaker-tuning.py', 'nanosic-folio.py', 'selinux-packaging.py', 'backlight-default.py', 'charger-mode.py', 'boot-splash.py', 'splash-handoff.py', 'splash-logo.py', 'splash-orientation.py', 'plymouth-guard.py', 'display-clock.py', 'display-brightness-minimum.py', 'display-refresh-rates.py', 'display-live-refresh.py', 'display-policy.py', 'display-recovery.py', 'resume-display.py', 'wlan-mac.py', 'rtc.py', 'login-ready.py', 'mipps-startup.py', 'charge-status.py', 'charge-logs.py', 'charge-thermal.py', 'mipps-events.py', 'storage-scope.py', 'storage-seal.py', 'storage-ready.py', 'storage-paths.py', 'mkbootimg-fetch.py', 'initramfs-inputs.py', 'sensor-build-environment.py', 'gui-artifacts.py', 'filesystems.py', 'windows-installer.py', 'usb-installer-network.py', 'custom-kernel.py', 'ucsi-source-pdos.py', 'ucsi-power-supply.py', 'ucsi-lifecycle.py', 'battmgr-recovery.py', 'rootless-build.py', 'kernel-updates.py', 'boot-update-store.py', 'gui-engine.py', 'gui-worker.py', 'install-root-single.py', 'multiboot.py', 'multiboot-device.py', 'multiboot-store.py', 'android-installer.py', 'android-device.py', 'android-direct.py', 'android-rom.py', 'android-runtime.py', 'staged-install.py', 'managed-linux-device.py', 'partition-discovery.py', 'partition-device.py', 'partition-editor-device.py', 'workflow.py', 'recovery-installer.py', 'recovery-source.py', 'recovery-startup.py', 'recovery-usb-session.py'):
+    for name in (
+        'build/project-structure.py', 'build/devbox-build.py', 'build/source-build.py',
+        'build/device-overlays.py', 'android/stock-rom.py', 'build/fedora-build.py',
+        'video/fedora-ffmpeg.py', 'camera/fedora-libcamera.py', 'video/fedora-obs.py',
+        'video/firefox-media.py', 'gpu/fedora-stats.py', 'gpu/mesa-libclc.py',
+        'desktop/fedora-startup.py', 'audio/speaker-tuning.py', 'input/nanosic-folio.py',
+        'build/selinux-packaging.py', 'display/backlight-default.py', 'power/charger-mode.py',
+        'boot/boot-splash.py', 'boot/splash-handoff.py', 'boot/splash-logo.py',
+        'boot/splash-orientation.py', 'boot/plymouth-guard.py', 'display/display-clock.py',
+        'display/display-brightness-minimum.py', 'display/display-refresh-rates.py',
+        'display/display-live-refresh.py', 'display/display-policy.py', 'display/display-recovery.py',
+        'display/resume-display.py', 'wireless/wlan-mac.py', 'power/rtc.py', 'desktop/login-ready.py',
+        'power/mipps-startup.py', 'power/charge-status.py', 'power/charge-logs.py',
+        'power/charge-thermal.py', 'power/mipps-events.py', 'storage/storage-scope.py',
+        'storage/storage-seal.py', 'storage/storage-ready.py', 'storage/storage-paths.py',
+        'build/mkbootimg-fetch.py', 'boot/initramfs-inputs.py', 'input/sensor-build-environment.py',
+        'installer/gui-artifacts.py', 'storage/filesystems.py', 'installer/windows-installer.py',
+        'installer/usb-installer-network.py', 'build/custom-kernel.py', 'usb/ucsi-source-pdos.py',
+        'usb/ucsi-power-supply.py', 'usb/ucsi-lifecycle.py', 'power/battmgr-recovery.py',
+        'build/rootless-build.py', 'boot/kernel-updates.py', 'boot/boot-update-store.py',
+        'installer/gui-engine.py', 'installer/gui-worker.py', 'installer/install-root-single.py',
+        'boot/multiboot.py', 'boot/multiboot-device.py', 'boot/multiboot-store.py',
+        'android/android-installer.py', 'android/android-device.py', 'android/android-direct.py',
+        'android/android-rom.py', 'android/android-runtime.py', 'installer/staged-install.py',
+        'installer/managed-linux-device.py', 'storage/partition-discovery.py',
+        'storage/partition-device.py', 'storage/partition-editor-device.py', 'installer/workflow.py',
+        'recovery/recovery-installer.py', 'recovery/recovery-source.py', 'recovery/recovery-startup.py',
+        'recovery/recovery-usb-session.py',
+    ):
         run([shutil.which('python3'), 'tests/' + name])
     kernel_source = os.environ.get('LIUQIN_KERNEL_SOURCE')
     source_args = ['--source', kernel_source] if kernel_source else []
-    run([shutil.which('python3'), 'tests/kernel-common-fixes.py', *source_args])
+    run([shutil.which('python3'), 'tests/kernel/kernel-common-fixes.py', *source_args])
     if kernel_source:
-        for name in ('usb-cc-orientation.py', 'usb-initial-role.py', 'usb-phy-oem.py',
-                     'usb-connection-retry.py', 'charge-logs-kernel.py', 'battmgr-usb-type.py',
-                     'charge-thermal-kernel.py', 'display-panel-resx.py', 'display-panel-power.py',
-                     'kernel73-display-bt-pm.py',
-                     'kernel73-ufs-dsi-rpc-gmu.py', 'mdp-speaker-power.py', 'wcn6855-power.py',
-                     'audio-recovery.py'):
+        for name in ('usb/usb-cc-orientation.py', 'usb/usb-initial-role.py', 'usb/usb-phy-oem.py',
+                     'usb/usb-connection-retry.py', 'power/charge-logs-kernel.py', 'power/battmgr-usb-type.py',
+                     'power/charge-thermal-kernel.py', 'display/display-panel-resx.py', 'display/display-panel-power.py',
+                     'kernel/kernel73-display-bt-pm.py',
+                     'kernel/kernel73-ufs-dsi-rpc-gmu.py', 'audio/mdp-speaker-power.py', 'wireless/wcn6855-power.py',
+                     'audio/audio-recovery.py'):
             run([shutil.which('python3'), 'tests/' + name, *source_args])
     else:
         print('内核完整源码回归未执行；设置 LIUQIN_KERNEL_SOURCE 为当前适配源码目录后重跑。')
-    run([shutil.which('python3'), 'tests/fingerprint-gallery-client.py'])
+    run([shutil.which('python3'), 'tests/fingerprint/fingerprint-gallery-client.py'])
     # The provider's private-file checks run as namespace root using fake TAs.
     # Polkit's JavaScript policy test runs separately in CI with Node available.
-    for name, selection in (('fingerprint-native-provider.py', ['ProviderTests']),
-                            ('fingerprint-enrol-preflight.py', []), ('fingerprint-gallery.py', [])):
+    for name, selection in (('fingerprint/fingerprint-native-provider.py', ['ProviderTests']),
+                            ('fingerprint/fingerprint-enrol-preflight.py', []), ('fingerprint/fingerprint-gallery.py', [])):
         command = [shutil.which('python3'), 'tests/' + name, *selection]
         if os.geteuid() != 0:
             command = ['unshare', '-Ur', *command]

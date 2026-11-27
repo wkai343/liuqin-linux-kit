@@ -9,7 +9,7 @@
 
 内核中的 liuqin 设备判断复用 `include/linux/platform_data/liuqin.h` 的 `liuqin_board_quirks()`。
 原厂 ABL 会改写设备树顶层 `compatible` 和 `model`；该函数兼容原始设备树与原厂名称、板号组合。
-`tests/kernel-common-fixes.py` 在常规离线回归中检查共享内核补丁是否绕过了这个统一入口。
+`tests/kernel/kernel-common-fixes.py` 在常规离线回归中检查共享内核补丁是否绕过了这个统一入口。
 
 提交应围绕明确的问题，说明最终行为、修改原因和验证结果。适配第三方代码时保留原作者与许可证声明。修改后构建、测试受影响的组件，再提出变更。
 
@@ -29,7 +29,7 @@ QML、Python 后端及备份逻辑在 installer/liuqin_gui/；共用规则在 sh
 
 ```sh
 uv run --project installer installer/install-gui.py --demo
-uv run --project installer python tests/gui-qml.py
+uv run --project installer python tests/installer/gui-qml.py
 ```
 
 演示不访问平板，DEMO 备份不可用于恢复；离线结果不能替代真机验收。

@@ -65,11 +65,11 @@ worker 继续提供 validate、backup/find_backup/select_backup、prepare/instal
 ## 测试与打包
 
 ```sh
-python3 tests/gui-engine.py
-python3 tests/gui-worker.py
-uv run --project installer python tests/gui-qml.py
-uv run --project installer python tests/gui-device-first.py
-uv run --project installer python tests/gui-combined-install.py
+python3 tests/installer/gui-engine.py
+python3 tests/installer/gui-worker.py
+uv run --project installer python tests/installer/gui-qml.py
+uv run --project installer python tests/installer/gui-device-first.py
+uv run --project installer python tests/installer/gui-combined-install.py
 ```
 
 所有 GUI 回归使用当前 Main.qml、真实模拟 worker 和 offscreen/software 渲染；窗口关闭/信号保护、报告、ROM 预览及引导维护分别覆盖。完整项目的测试说明位于 tests/README.md；独立分发包不包含 tests/。

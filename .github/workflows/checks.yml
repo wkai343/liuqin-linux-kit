@@ -31,133 +31,132 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y python3-pyelftools python3-lz4 python3-unicorn gdisk busybox-static device-tree-compiler rpm rsync pigz acl libcap2-bin btrfs-progs f2fs-tools gcc-aarch64-linux-gnu libglib2.0-bin libdrm-dev nodejs
-          python3 tests/installer.py
-          python3 tests/storage-layouts.py
-          python3 tests/multiboot.py
-          python3 tests/multiboot-device.py
-          python3 tests/multiboot-store.py
-          python3 tests/android-installer.py
-          python3 tests/android-device.py
-          python3 tests/android-direct.py
-          python3 tests/android-rom.py
-          python3 tests/miku-rom.py
-          python3 tests/multi-rom.py
-          python3 tests/generic-ota.py
-          python3 tests/full-rom.py
-          python3 tests/miku-workflow.py
-          python3 tests/android-runtime.py
-          python3 tests/staged-install.py
-          python3 tests/managed-linux-device.py
-          python3 tests/partition-discovery.py
-          python3 tests/partition-device.py
-          python3 tests/partition-editor-device.py
-          python3 tests/partition-reread.py
-          python3 tests/partition-names.py
-          python3 tests/workflow.py
-          python3 tests/workflow-capacity.py
-          python3 tests/recovery-installer.py
-          python3 tests/paired-recovery.py
-          python3 tests/recovery-compatibility.py
-          python3 tests/native-recovery.py
-          python3 tests/native-installer.py
-          python3 tests/fixed-recovery-preserve.py
-          python3 tests/boot-switch-device.py
-          python3 tests/boot-store.py
-          python3 tests/boot-retention.py
-          python3 tests/transaction-recovery.py
-          python3 tests/native-adb.py
-          python3 tests/native-firmware.py
-          python3 tests/fixed-recovery.py
-          python3 tests/universal-recovery.py
-          python3 tests/rom-preview.py
-          python3 tests/native-ui-service.py
-          python3 tests/native-bcb.py
-          python3 tests/native-touch-service.py
-          python3 tests/recovery-startup.py
-          python3 tests/recovery-touch-startup.py
-          python3 tests/recovery-usb-session.py
-          python3 tests/recovery-kernel-components.py
-          python3 tests/recovery-source.py
-          python3 tests/kernel-common-fixes.py
-          python3 tests/rootless-build.py
-          cc -Wall -Wextra -Werror -I device/recovery/ui tests/native-touch-input.c device/recovery/ui/touch_input.c -o /tmp/liuqin-touch-input
+          python3 tests/installer/installer.py
+          python3 tests/storage/storage-layouts.py
+          python3 tests/boot/multiboot.py
+          python3 tests/boot/multiboot-device.py
+          python3 tests/boot/multiboot-store.py
+          python3 tests/android/android-installer.py
+          python3 tests/android/android-device.py
+          python3 tests/android/android-direct.py
+          python3 tests/android/android-rom.py
+          python3 tests/android/miku-rom.py
+          python3 tests/android/multi-rom.py
+          python3 tests/android/generic-ota.py
+          python3 tests/android/full-rom.py
+          python3 tests/installer/miku-workflow.py
+          python3 tests/android/android-runtime.py
+          python3 tests/installer/staged-install.py
+          python3 tests/installer/managed-linux-device.py
+          python3 tests/storage/partition-discovery.py
+          python3 tests/storage/partition-device.py
+          python3 tests/storage/partition-editor-device.py
+          python3 tests/storage/partition-reread.py
+          python3 tests/storage/partition-names.py
+          python3 tests/installer/workflow.py
+          python3 tests/installer/workflow-capacity.py
+          python3 tests/recovery/recovery-installer.py
+          python3 tests/recovery/paired-recovery.py
+          python3 tests/recovery/recovery-compatibility.py
+          python3 tests/recovery/native-recovery.py
+          python3 tests/recovery/native-installer.py
+          python3 tests/recovery/fixed-recovery-preserve.py
+          python3 tests/boot/boot-switch-device.py
+          python3 tests/boot/boot-store.py
+          python3 tests/boot/boot-retention.py
+          python3 tests/installer/transaction-recovery.py
+          python3 tests/recovery/native-adb.py
+          python3 tests/recovery/native-firmware.py
+          python3 tests/recovery/fixed-recovery.py
+          python3 tests/recovery/universal-recovery.py
+          python3 tests/android/rom-preview.py
+          python3 tests/recovery/native-ui-service.py
+          python3 tests/recovery/native-bcb.py
+          python3 tests/recovery/native-touch-service.py
+          python3 tests/recovery/recovery-startup.py
+          python3 tests/recovery/recovery-touch-startup.py
+          python3 tests/recovery/recovery-usb-session.py
+          python3 tests/recovery/recovery-kernel-components.py
+          python3 tests/recovery/recovery-source.py
+          python3 tests/kernel/kernel-common-fixes.py
+          python3 tests/build/rootless-build.py
+          cc -Wall -Wextra -Werror -I device/recovery/ui tests/recovery/native-touch-input.c device/recovery/ui/touch_input.c -o /tmp/liuqin-touch-input
           /tmp/liuqin-touch-input
-          python3 tests/recovery-session.py
-          python3 tests/recovery-bootstrap.py
-          python3 tests/block-identity.py
-          python3 tests/installer-bundled-runtime.py
-          python3 tests/gui-engine.py
-          python3 tests/gui-artifacts.py
-          python3 tests/filesystems.py
-          python3 tests/windows-installer.py
-          python3 tests/usb-installer-network.py
-          python3 tests/custom-kernel.py
-          python3 tests/kernel-updates.py
-          python3 tests/boot-update-store.py
-          python3 tests/devbox-build.py
-          python3 tests/source-build.py
-          python3 tests/device-overlays.py
-          python3 tests/stock-rom.py
-          python3 tests/fedora-build.py
-          python3 tests/fedora-ffmpeg.py
-          python3 tests/fedora-obs.py
-          python3 tests/firefox-media.py
-          python3 tests/fedora-stats.py
-          python3 tests/mesa-libclc.py
-          python3 tests/fedora-startup.py
-          python3 tests/nanosic-folio.py
-          python3 tests/selinux-packaging.py
-          python3 tests/fedora-fingerprint.py
-          python3 tests/fingerprint-irq.py
-          sudo python3 tests/fingerprint-native-provider.py
-          sudo python3 tests/fingerprint-gallery.py
-          python3 tests/fingerprint-gallery-client.py
-          sudo python3 tests/fingerprint-enrol-preflight.py
-          sudo python3 tests/fingerprint-release.py
-          python3 tests/shell-defaults.py
-          python3 tests/display-clock.py
-          python3 tests/display-brightness-minimum.py
-          python3 tests/display-refresh-rates.py
-          python3 tests/display-live-refresh.py
-          python3 tests/backlight-default.py
-          python3 tests/charger-mode.py
-          python3 tests/boot-splash.py
-          python3 tests/splash-handoff.py
-          python3 tests/splash-logo.py
-          python3 tests/splash-orientation.py
-          python3 tests/plymouth-guard.py
-          python3 tests/display-recovery.py
-          python3 tests/resume-display.py
-          python3 tests/display-policy.py
-          python3 tests/wlan-mac.py
-          python3 tests/rtc.py
-          python3 tests/login-ready.py
-          python3 tests/mipps-startup.py
-          python3 tests/charge-status.py
-          python3 tests/mipps-events.py
-          python3 tests/storage-scope.py
-          python3 tests/mkbootimg-fetch.py
-          python3 tests/initramfs-inputs.py
-          python3 tests/sensor-build-environment.py
-          python3 tests/project-structure.py
-          python3 tests/project-identity.py
-          python3 tests/docs-links.py
-          python3 tests/gui-worker.py
-          python3 tests/installer-layout.py
-          sudo python3 tests/rootfs-archive.py
+          python3 tests/recovery/recovery-session.py
+          python3 tests/recovery/recovery-bootstrap.py
+          python3 tests/storage/block-identity.py
+          python3 tests/installer/installer-bundled-runtime.py
+          python3 tests/installer/gui-engine.py
+          python3 tests/installer/gui-artifacts.py
+          python3 tests/storage/filesystems.py
+          python3 tests/installer/windows-installer.py
+          python3 tests/installer/usb-installer-network.py
+          python3 tests/build/custom-kernel.py
+          python3 tests/boot/kernel-updates.py
+          python3 tests/boot/boot-update-store.py
+          python3 tests/build/devbox-build.py
+          python3 tests/build/source-build.py
+          python3 tests/build/device-overlays.py
+          python3 tests/android/stock-rom.py
+          python3 tests/build/fedora-build.py
+          python3 tests/video/fedora-ffmpeg.py
+          python3 tests/video/fedora-obs.py
+          python3 tests/video/firefox-media.py
+          python3 tests/gpu/fedora-stats.py
+          python3 tests/gpu/mesa-libclc.py
+          python3 tests/desktop/fedora-startup.py
+          python3 tests/input/nanosic-folio.py
+          python3 tests/build/selinux-packaging.py
+          python3 tests/fingerprint/fedora-fingerprint.py
+          python3 tests/fingerprint/fingerprint-irq.py
+          sudo python3 tests/fingerprint/fingerprint-native-provider.py
+          sudo python3 tests/fingerprint/fingerprint-gallery.py
+          python3 tests/fingerprint/fingerprint-gallery-client.py
+          sudo python3 tests/fingerprint/fingerprint-enrol-preflight.py
+          sudo python3 tests/fingerprint/fingerprint-release.py
+          python3 tests/desktop/shell-defaults.py
+          python3 tests/display/display-clock.py
+          python3 tests/display/display-brightness-minimum.py
+          python3 tests/display/display-refresh-rates.py
+          python3 tests/display/display-live-refresh.py
+          python3 tests/display/backlight-default.py
+          python3 tests/power/charger-mode.py
+          python3 tests/boot/boot-splash.py
+          python3 tests/boot/splash-handoff.py
+          python3 tests/boot/splash-logo.py
+          python3 tests/boot/splash-orientation.py
+          python3 tests/boot/plymouth-guard.py
+          python3 tests/display/display-recovery.py
+          python3 tests/display/resume-display.py
+          python3 tests/display/display-policy.py
+          python3 tests/wireless/wlan-mac.py
+          python3 tests/power/rtc.py
+          python3 tests/desktop/login-ready.py
+          python3 tests/power/mipps-startup.py
+          python3 tests/power/charge-status.py
+          python3 tests/power/mipps-events.py
+          python3 tests/storage/storage-scope.py
+          python3 tests/build/mkbootimg-fetch.py
+          python3 tests/boot/initramfs-inputs.py
+          python3 tests/input/sensor-build-environment.py
+          python3 tests/build/project-structure.py
+          python3 tests/build/docs-links.py
+          python3 tests/installer/gui-worker.py
+          python3 tests/installer/installer-layout.py
+          sudo python3 tests/build/rootfs-archive.py
       - name: 指纹用户态 ABI 与多指识别
         run: |
           sudo apt-get install --no-install-recommends -y meson ninja-build pkg-config gettext libglib2.0-dev libgusb-dev libgudev-1.0-dev libpolkit-gobject-1-dev libdbus-1-dev libsystemd-dev libssl-dev
-          sudo python3 tests/fingerprint-abi.py
+          sudo python3 tests/fingerprint/fingerprint-abi.py
           aarch64-linux-gnu-gcc -std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -c device/fingerprint/oem/src/fingerprint/oem/fpc_build_info.c -o "$RUNNER_TEMP/fpc-gallery-client.o"
       - name: 根文件系统存储保护
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y busybox-static
-          python3 tests/storage-seal.py
-          python3 tests/storage-ready.py
-          python3 tests/storage-paths.py
-          sh tests/persistent-root.sh
+          python3 tests/storage/storage-seal.py
+          python3 tests/storage/storage-ready.py
+          python3 tests/storage/storage-paths.py
+          sh tests/boot/persistent-root.sh
       - name: Adreno 传感器读取
         run: |
           sudo apt-get install --no-install-recommends -y g++ pkg-config qt6-base-dev
@@ -169,7 +168,7 @@ jobs:
           record = json.loads(Path('build/rootfs/fedora-stats-source.json').read_text())
           download(record['url'], Path('inputs/ksystemstats') / record['archive'], record['sha256'])
           PY
-          python3 tests/adreno-stats.py
+          python3 tests/gpu/adreno-stats.py
       - name: KWin 平板模式回归
         run: |
           python3 - <<'PY'
@@ -180,24 +179,24 @@ jobs:
           record = json.loads(Path('device/kwin/source.json').read_text())
           download(record['url'], Path('inputs/kwin') / record['archive'], record['sha256'])
           PY
-          python3 tests/kwin-tablet-mode.py
+          python3 tests/desktop/kwin-tablet-mode.py
       - name: 设备存储保护
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y busybox-static
-          sh tests/storage-guard.sh
+          sh tests/storage/storage-guard.sh
       - name: 设备端分区布局
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y busybox-static
-          sh tests/install-layout.sh
+          sh tests/installer/install-layout.sh
       - name: 设备端单根安装
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y busybox-static e2fsprogs
-          python3 tests/install-root-single.py
+          python3 tests/installer/install-root-single.py
       - name: 传感器启动策略
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y bubblewrap
-          sudo python3 tests/sensor-startup.py
+          sudo python3 tests/input/sensor-startup.py

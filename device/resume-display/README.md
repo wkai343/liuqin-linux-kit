@@ -30,7 +30,7 @@ USB/蓝牙输入及未知来源
 在装有 `rpmbuild` 的构建机运行：
 
 ```sh
-python3 tests/resume-display.py
+python3 tests/display/resume-display.py
 python3 build/scripts/build-resume-display.py --out out/packages/resume-display
 ```
 

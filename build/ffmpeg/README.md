@@ -122,7 +122,7 @@ sudo dnf distro-sync ffmpeg-free libavcodec-free libavdevice-free \
 的主机 FFmpeg 树上：
 
 ```sh
-python3 tests/ffmpeg-v4l2.py --source /path/to/configured-ffmpeg --cc clang
+python3 tests/video/ffmpeg-v4l2.py --source /path/to/configured-ffmpeg --cc clang
 ```
 
 另需 `pkg-config` 和 libdrm 开发头文件；也可用 `--drm-include /path/to/libdrm/include`
@@ -139,7 +139,7 @@ DRM 回归使用真实 FD 模拟导出，覆盖单/双内存平面、736 行存�
 未修补的 9.0.2 在第一项出现越界读取。
 这不代替硬件的完整帧数、画质和内核日志检查。
 
-真机解锁桌面后，可运行 `tests/ffmpeg-v4l2-playback.py`，使用时间戳正确的两秒素材
+真机解锁桌面后，可运行 `tests/video/ffmpeg-v4l2-playback.py`，使用时间戳正确的两秒素材
 检查可见 DRM PRIME 播放，以及保留末帧时连续两次跳回开头。
 参数和输出说明见 [测试入口](../../tests/README.md)。
 

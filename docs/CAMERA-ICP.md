@@ -2,7 +2,7 @@
 
 [硬件 ISP](CAMERA-ISP.md) ｜ [已安装系统的临时启动](BUILD.md#已安装系统的临时启动)
 
-`tests/camera-icp/` 是独立的 SM8475 测试组件，未加入发行内核。默认构建没有
+`tests/camera/camera-icp/` 是独立的 SM8475 测试组件，未加入发行内核。默认构建没有
 视频节点；可选视频桥接、经过本机校验的启动服务及配套 libcamera
 补丁见下文。它能认证加载原厂 ICP 固件，建立 HFI 队列，执行 SYS_INIT、
 ping、IPE 实时会话 CREATE/DESTROY、固定 640×480 NV12 CONFIG_IO，以及有界的
@@ -61,7 +61,7 @@ phandle、运行内核和当前启动目标。ABL 可能把 `__symbols__` 重写
 在工作机执行（所有输出放在 `out/`）：
 
 ```sh
-python3 tests/camera-icp/prepare.py build \
+python3 tests/camera/camera-icp/prepare.py build \
   --snapshot out/icp-resources.json --firmware /path/to/CAMERA_ICP.mbn \
   --kernel-source /path/to/matching/kernel/source \
   --kernel-build /path/to/matching/kernel/build \
@@ -69,7 +69,7 @@ python3 tests/camera-icp/prepare.py build \
   --output out/icp-modules
 ```
 
-可用 `python3 tests/camera-icp-config.py --vendor /path/to/vendor` 离线核对实际
+可用 `python3 tests/camera/camera-icp-config.py --vendor /path/to/vendor` 离线核对实际
 测试驱动的 CONFIG_IO 命令及 NV12 描述符与原厂 HAL 的描述符构造（需要 Unicorn、
 pyelftools 和 C 编译器）。这只核对字节布局，不能替代第 5 级实机检查。
 
@@ -77,9 +77,9 @@ pyelftools 和 C 编译器）。这只核对字节布局，不能替代第 5 级
 `--frame-fixture out/ipe-fixture`：
 
 ```sh
-python3 tests/camera-icp/make-frame-fixture.py \
+python3 tests/camera/camera-icp/make-frame-fixture.py \
   --vendor /path/to/vendor --output out/ipe-fixture
-python3 tests/camera-ipe-programs.py --vendor /path/to/vendor
+python3 tests/camera/camera-ipe-programs.py --vendor /path/to/vendor
 ```
 
 生成器解释实际 HAL 的 CDM 数组构造，分别在两个主机地址执行原厂条带库，
@@ -162,7 +162,7 @@ opcode、cookie、两层返回码、输入 CRC、亮度平面逐字节匹配和�
 加载配套测试模块后，在平板以 root 运行：
 
 ```sh
-python3 tests/camera-icp/replay.py \
+python3 tests/camera/camera-icp/replay.py \
   --input out/front-640x480.nv12 --output out/ipe-photo-result
 ```
 
@@ -189,7 +189,7 @@ API 的单个连续 NV12 内存平面，兼容 CAMSS 导出的同一 DMA-BUF 内
 私有配置须另外生成，并显式传给构建器：
 
 ```sh
-python3 tests/camera-icp/make-video-fixture.py \
+python3 tests/camera/camera-icp/make-video-fixture.py \
   --vendor /path/to/vendor --output out/ipe-video-fixture
 # 在前述 prepare.py build 参数中增加：
 # --video-fixture out/ipe-video-fixture
@@ -241,7 +241,7 @@ Linux 7.3 的 V4L2 ioctl 回调须由 `file_to_v4l2_fh(file)` 获取上下文，
 
 ## 原厂命令与地址接口
 
-`tests/camera-ipe-programs.py` 解释本机 HAL 的命令构造，在 PacketBuilder 写入前
+`tests/camera/camera-ipe-programs.py` 解释本机 HAL 的命令构造，在 PacketBuilder 写入前
 记录目标和数据范围：TF211 为每级 404 字节、四级，每级拆成 `0x5868` 起 94 个
 寄存器和 `0x59fc` 起 7 个寄存器，写入 NPS 命令缓冲槽 9；IPE HDR401 为
 `0x15964` 起 62 个寄存器，写入槽 5。旧 TF20 的 396 字节布局不适用于此包。
@@ -255,8 +255,8 @@ Linux 7.3 的 V4L2 ioctl 回调须由 `file_to_v4l2_fh(file)` 获取上下文，
 可选 TF 配置还使用 FULL_REF 输入/输出地址。三曝光拍照使用下文独立的 MFHDR 配置。
 
 ```sh
-python3 tests/camera-ipe-history.py --vendor /path/to/vendor
-python3 tests/camera-ipe-programs.py --vendor /path/to/vendor
+python3 tests/camera/camera-ipe-history.py --vendor /path/to/vendor
+python3 tests/camera/camera-ipe-programs.py --vendor /path/to/vendor
 ```
 
 实时桥接已有 DMA-BUF 与 libcamera 请求生命周期；单层 TF 已接入 FULL 当前/参考
@@ -276,7 +276,7 @@ python3 tests/camera-ipe-programs.py --vendor /path/to/vendor
 首帧开始。超时路径在认证停机成功后才释放四个图像槽。
 
 ```sh
-python3 tests/camera-icp/make-temporal-fixture.py \
+python3 tests/camera/camera-icp/make-temporal-fixture.py \
   --vendor /path/to/vendor --output out/ipe-temporal-fixture
 # 以 temporal-fixture 替代 video-fixture：
 # prepare.py build ... --temporal-fixture out/ipe-temporal-fixture
@@ -324,14 +324,14 @@ sudo systemctl enable --now liuqin-ipe.service
 
 ## HDR 曝光拓扑检查
 
-`tests/camera-ipe-hdr-topology.py` 在离线解释器内执行同一原厂 HAL 的
+`tests/camera/camera-ipe-hdr-topology.py` 在离线解释器内执行同一原厂 HAL 的
 `SetupMFHDRExposureMap` 和 `FillMFHDRIQSettings` 对应代码段。它验证两曝光映射
 `[1, 0, 2]`、三曝光映射 `[1, 3, 2]`，以及相邻曝光 sensitivity 比值是否严格大于
 16 的两个路由分支。四曝光被原厂函数拒绝。倍率应由已校验的实际曝光时间与增益
 计算，不能直接用请求值或固定延迟推测。
 
 ```sh
-python3 tests/camera-ipe-hdr-topology.py --vendor /path/to/vendor
+python3 tests/camera/camera-ipe-hdr-topology.py --vendor /path/to/vendor
 ```
 
 ### IPE 多曝光拍照
@@ -349,7 +349,7 @@ NV12。两曝光图有 8、9 两个输出端口，三曝光图为 8。CHI 图另
 EVA 节点。两曝光图的控制通路可单独核对，三档采集的中间曝光元数据不能直接
 充当独立两档采集时的原厂 AEC 状态。
 
-`tests/camera-ipe-hdr-snapshot.py` 将格式版本 2 的实拍输入按采集时记录的摘要绑定至原厂图并执行
+`tests/camera/camera-ipe-hdr-snapshot.py` 将格式版本 2 的实拍输入按采集时记录的摘要绑定至原厂图并执行
 `IQSetupTriggerData`、DSX101、HDR401、Titan680 寄存器打包和原厂条带库。
 DS4 的宽、高分别按 `2 * ceil(dimension / 8)` 对齐，由 DSX 设置和相应端口共同描述。
 脚本分别在两个地址计算条带并核对内部指针，比较 HDR 开/关及两、三曝光模式。
@@ -360,7 +360,7 @@ DS4 的宽、高分别按 `2 * ceil(dimension / 8)` 对齐，由 DSX 设置和�
 跳过类型 255。拍照分支在调用描述符构造函数时直接传入该常数，对应 LUT 索引 4。
 
 实际加载的 `CAMERA_ICP.mbn` 在 Titan680 的 IPE 初始化阶段写入 MAC 权重。
-`tests/camera-icp/hdr-firmware.py` 从签名镜像的 PT_LOAD 段读取数据，以相关调试
+`tests/camera/camera-icp/hdr-firmware.py` 从签名镜像的 PT_LOAD 段读取数据，以相关调试
 ELF 的 `ipeInitMfhdrMacLut_48` 符号交叉核对全部 512 字节。签名镜像
 `0xec0e8` 处是表地址 `0xecb30` 和长度 512。初始化代码从 `ipeInfo + 216`
 取表，检查 Titan680 芯片描述符的 `mfhdrMacLutSingleBuffered` 标志，再向
@@ -369,9 +369,9 @@ ELF 的 `ipeInitMfhdrMacLut_48` 符号交叉核对全部 512 字节。签名镜�
 每帧的曝光倍率和 MAC 参数仍通过 pre-LTM 直接写程序提交。
 
 ```sh
-python3 tests/camera-ipe-hdr-snapshot.py --vendor /path/to/vendor \
+python3 tests/camera/camera-ipe-hdr-snapshot.py --vendor /path/to/vendor \
   --capture /path/to/front-bracket --output out/front-stages-640.json
-python3 tests/camera-ipe-hdr-snapshot.py --vendor /path/to/vendor \
+python3 tests/camera/camera-ipe-hdr-snapshot.py --vendor /path/to/vendor \
   --capture /path/to/rear-bracket --native --output out/rear-stages-native.json
 ```
 
@@ -386,7 +386,7 @@ selftest 9 为预处理，10、11 为两、三曝光融合，12、13 为三、�
 `--hdr-still-fixture out/ipe-still-fixture`。构建器核验每份命令的长度与摘要。
 
 ```sh
-python3 tests/camera-icp/make-snapshot-fixture.py --vendor /path/to/vendor \
+python3 tests/camera/camera-icp/make-snapshot-fixture.py --vendor /path/to/vendor \
   --output out/ipe-still-fixture
 ```
 
@@ -422,7 +422,7 @@ python3 tests/camera-icp/make-snapshot-fixture.py --vendor /path/to/vendor \
 camera-hdr-capture rear out/bracket-wide 4080x2296
 camera-hdr-capture rear out/bracket-uhd 3840x2160
 for mode in wide uhd; do
-  python3 tests/camera-icp/make-snapshot-fixture.py --vendor /path/to/vendor --native \
+  python3 tests/camera/camera-icp/make-snapshot-fixture.py --vendor /path/to/vendor --native \
     --capture "out/bracket-$mode" --output "out/ipe-$mode"
 done
 # 在含原有前后摄 native、MAC 配置的 prepare.py build 命令中增加
@@ -431,9 +431,9 @@ done
 
 ```sh
 for sensor in front rear; do
-  python3 tests/camera-icp/make-snapshot-fixture.py --vendor /path/to/vendor \
+  python3 tests/camera/camera-icp/make-snapshot-fixture.py --vendor /path/to/vendor \
     --capture "/path/to/${sensor}-bracket" --output "out/ipe-mac-${sensor}"
-  python3 tests/camera-icp/make-snapshot-fixture.py --vendor /path/to/vendor --native \
+  python3 tests/camera/camera-icp/make-snapshot-fixture.py --vendor /path/to/vendor --native \
     --capture "/path/to/${sensor}-bracket" --output "out/ipe-native-${sensor}"
 done
 # 在前述 prepare.py build 命令中加入以下选项
@@ -462,7 +462,7 @@ REPORT 时超时。原厂 CCI 对每个 master 记录活动客户端，并按引
 将 `liuqin-hdr-photo` 链接到拍照脚本。每次拍摄使用新的输出文件名。
 
 ```sh
-cc -std=c11 -O2 -ffp-contract=off tests/camera-icp/hdr-pixels.c -lm -o hdr-pixels
+cc -std=c11 -O2 -ffp-contract=off tests/camera/camera-icp/hdr-pixels.c -lm -o hdr-pixels
 sudo liuqin-hdr-photo --sensor rear --output rear-hdr.jpg
 sudo liuqin-hdr-photo --sensor front --output front-hdr.jpg
 sudo python3 /usr/local/libexec/liuqin-hdr/camera-icp/check-hdr-photo.py --sensor rear --native
@@ -491,7 +491,7 @@ IPE 按当前尺寸的固件配置、IQ 和硬件条带，完成三路预处理�
 三曝光目录时，还可检查每个传感器原尺寸及 VGA 的实际融合输入，`--align` 需要同目录的 `hdr-motion`。
 
 ```sh
-python3 tests/camera-hdr-still-colour.py --tools out/hdr-tools --align \
+python3 tests/camera/camera-hdr-still-colour.py --tools out/hdr-tools --align \
   --capture /path/to/front-bracket --capture /path/to/rear-bracket
 ```
 
@@ -537,7 +537,7 @@ mkdir -p out/camera-uhd
 sudo env LIUQIN_HDR_TRACE_STARTUP=1 LIUQIN_HDR_TRACE_TAIL=1 LIUQIN_HDR_REQUIRE_INTERLEAVED=1 \
   liuqin-hdr-video --sensor rear --resolution 3840x2160 --seconds 180 \
   --output out/camera-uhd/uhd.mkv 2>out/camera-uhd/uhd.log
-python3 tests/camera-hdr-video-timing.py --startup out/camera-uhd/uhd.log out/camera-uhd/uhd.mkv
+python3 tests/camera/camera-hdr-video-timing.py --startup out/camera-uhd/uhd.log out/camera-uhd/uhd.mkv
 ```
 
 录像在融合前按 sRGB 逆传递函数线性化颜色。两档后摄宽屏使用 root 专用的
@@ -557,7 +557,7 @@ Linux 为 4K 录像的预处理、HDR401 融合、P010 输出各创建一个固�
 正常关闭录像时按创建顺序的逆序销毁三个句柄。4080×2296 录像仍按阶段创建和销毁句柄。
 每个端口保留独立的保护页。关闭描述符或进程退出时，驱动先确认固件停机，再回收 DMA 映射。VGA 和旧模块继续通过 `video_fuse` 逐组提交。
 
-在平板上运行 `sudo python3 tests/camera-icp/check-hdr-record-contexts.py`，可用两组不同亮度的合成输入核对独立开流与交替融合的 P010 像素。
+在平板上运行 `sudo python3 tests/camera/camera-icp/check-hdr-record-contexts.py`，可用两组不同亮度的合成输入核对独立开流与交替融合的 P010 像素。
 脚本同时核对预配置后首次读取得到 `ENODATA`、首组及后续每组五个固件回复，以及关闭时三个销毁回复。该测试直接使用 IPE 录像设备。
 
 后摄宽屏采集与配准共用三个预分配的三曝光缓冲区。采集端在一组开始时取得空位，直接写入三路像素，配准读完后才归还空位。
@@ -575,7 +575,7 @@ Linux 为 4K 录像的预处理、HDR401 融合、P010 输出各创建一个固�
 
 后摄 4K 的四列和八列配置默认都由系统调度 VP9 线程。仅在设置 `LIUQIN_HDR_UHD_VP9_FAST_CPU=1` 时，录制器才按队列深度调整主线程。每个编码包输出时，若 appsrc 已积满两帧，主线程在其允许范围内选用高算力 CPU（SM8475 上为 CPU 4–7）。队列降至一帧或清空时恢复原范围。首包输出时 libvpx 已建好三个辅助线程，它们继续由系统调度。结束、取消或下游报错时，流线程在返回 GStreamer 线程池前恢复原范围。[GStreamer 流线程通知](https://gstreamer.freedesktop.org/documentation/additional/design/stream-status.html)
 
-可在装有 Python GStreamer 绑定和 10 位 `vp9enc` 的 Linux 上运行 `python3 tests/camera-hdr-video-scheduling.py` 做离线回归。测试通过录像器编码内存帧，检查默认设置、显式开关和适用分辨率。可控队列用于验证线程的 CPU 切换与恢复，并覆盖 CPU 容量不可读或修改亲和性被拒绝时的回退。
+可在装有 Python GStreamer 绑定和 10 位 `vp9enc` 的 Linux 上运行 `python3 tests/camera/camera-hdr-video-scheduling.py` 做离线回归。测试通过录像器编码内存帧，检查默认设置、显式开关和适用分辨率。可控队列用于验证线程的 CPU 切换与恢复，并覆盖 CPU 容量不可读或修改亲和性被拒绝时的回退。
 对照时固定输入、瓦片配置和跟踪选项，交替安排两种调度方式的测试顺序。用 `encoder_tail_ms` 核对关键帧和预测帧耗时，并比较送帧等待、`wait_for_registration` 和末分钟每十秒的实际保存帧数。
 宽屏录像的成功命令默认只更新驱动状态。需要逐条核对 CONFIG_IO 和 FRAME_PROCESS 回复时，可在测试前把
 `/sys/module/qcom_icp_test/parameters/hdr_log_acks` 设为 `1`，结束后恢复为 `0`。固件错误仍会写入内核日志。
@@ -586,16 +586,16 @@ Python GStreamer 绑定，以及带 10 位支持的 GStreamer VP9 编码器。Fe
 模组原尺寸配置的 IPE 模块，使用匹配的内核和本机 manifest。两档宽屏另需上述宽屏配置。用户态可在平板上构建。
 
 ```sh
-tests/build-camera-hdr-tools.sh out/hdr-tools
+tests/camera/build-camera-hdr-tools.sh out/hdr-tools
 sudo liuqin-hdr-photo --sensor rear --resolution 3840x2160 --output uhd.jpg
 sudo liuqin-hdr-video --sensor rear --resolution 4080x2296 --seconds 15 --output wide.mkv
 sudo liuqin-hdr-video --sensor rear --resolution 3840x2160 --seconds 15 --output uhd.mkv
 sudo python3 out/hdr-tools/camera-hdr-video.py --sensor front --seconds 10 --output front-hdr.mkv
 ffprobe -v error -count_frames -select_streams v:0 \
   -show_entries stream=width,height,profile,pix_fmt,color_space,color_transfer,color_primaries,nb_read_frames:format=duration front-hdr.mkv
-python3 tests/camera-hdr-motion.py --motion out/hdr-tools/hdr-motion --pixels out/hdr-tools/hdr-pixels
-python3 tests/camera-hdr-video-pixels.py out/hdr-tools
-c++ -std=c++17 -O3 tests/camera-hdr-warp.cpp -o out/hdr-tools/check-warp $(pkg-config --cflags --libs opencv4)
+python3 tests/camera/camera-hdr-motion.py --motion out/hdr-tools/hdr-motion --pixels out/hdr-tools/hdr-pixels
+python3 tests/camera/camera-hdr-video-pixels.py out/hdr-tools
+c++ -std=c++17 -O3 tests/camera/camera-hdr-warp.cpp -o out/hdr-tools/check-warp $(pkg-config --cflags --libs opencv4)
 out/hdr-tools/check-warp
 sudo python3 out/hdr-tools/camera-icp/check-hdr-photo.py --sensor rear --size 3840x2160 --recording
 ```

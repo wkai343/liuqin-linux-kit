@@ -68,7 +68,7 @@ sudo /usr/libexec/liuqin-rtc save --trust-system-time
 
 ## 回归与日志
 
-`python3 tests/rtc.py` 执行实际 helper 的保存/恢复逻辑，用模拟时钟和 sysfs 检查经过时间、错误状态拒绝及保存故障，不修改测试主机时钟。服务语法和依赖可用 `systemd-analyze verify` 检查。
+`python3 tests/power/rtc.py` 执行实际 helper 的保存/恢复逻辑，用模拟时钟和 sysfs 检查经过时间、错误状态拒绝及保存故障，不修改测试主机时钟。服务语法和依赖可用 `systemd-analyze verify` 检查。
 
 日志入口：
 
