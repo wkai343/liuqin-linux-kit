@@ -78,6 +78,20 @@ ROM 为 `OS2.0.6.0.VMYCNXM`，镜像身份固定在
 内核记录 `qcom_glink_cmd_open/open_ack/close/close_ack` 的方向、通道名和 ID，
 区分主机主动关闭、远端关闭和通道重新公告；测试产物保存在忽略的 `out/` 中。
 
+## 关机充电的服务顺序
+
+在固定 ROM 的 vendor 分区，`etc/init/hw/init.batterysecret.rc` 的 `on charger`
+直接启动 `batterysecret`。同目录的 `init.mi_thermald.rc` 在独立的 `on charger`
+动作中等待 USB 电源类型节点，再启动 `mi_thermald`。两个动作各自等待所需条件。
+Linux 在存储只读就绪后分别运行双电芯及适配器认证、normal 温控，固件仍负责执行充电限制。[镜像摘要](../shared/liuqin-rom-images.json) · [关机充电实现](FASTCHARGE.md#关机充电)
+
+| 固定 ROM 中的文件 | SHA-256 |
+| --- | --- |
+| `init.batterysecret.rc` | `925fcfbf7479dea9a9f9a1940679a8a4c568a2fe2a6b107755d47698711c8ac5` |
+| `init.mi_thermald.rc` | `68c94bfebde4a1ab4d7bc14353a7211e0702fd3caba68922d39d7157bdb8950c` |
+
+关机充电日志的 `usb_type` 取自 Linux 电源类。内核用方括号标出当前协议，充电程序从列表中取出选中项，如 `[PD]` 或 `[PD_PPS]`，并以 `usb_type=PD` 或 `usb_type=PD_PPS` 记录。[Linux 7.3.4 电源类](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/drivers/power/supply/power_supply_sysfs.c?id=7595a62d45ee1a2297eafa5f2ef5d0a45142d84d#n281) · [关机充电日志实现](../device/charger-mode/liuqin-charger-mode)
+
 ## 认证程序
 
 `/vendor/etc/init/hw/init.batterysecret.rc` 在开机完成及关机充电模式下启动
@@ -191,6 +205,11 @@ ADC7 通道 `0x144/145/146/147/347/34d/44c/44`、100 kΩ 上拉、比例校准�
 转换为毫摄氏度。主机接口、Linux 生命周期规则及复现检查见[温控](THERMAL.md#充电温控)。
 
 ## USB 独立输入电流接口与 0x204
+
+量产 M81 充电模块在 `battery_chg_update_usb_type_work` 中的 `0x14b8` 至 `0x14c0` 判断适配器类型。
+`0x80`、`0x81`、`0x82` 归入 DCP，浮充 `0x83` 和 CLASSB `0x84` 走默认分支。
+Linux 将这个分类用于 `qcom-battmgr-usb/usb_type` 和 `POWER_SUPPLY_USB_TYPE` 事件。固件值 9 按 Android 枚举显示为 `BrickID`。
+输入电流策略继续使用固件原值，MiPPS 认证读取独立的 `real_type`。[原厂充电分类](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/power/supply/qti_battery_charger.c#L1118-L1145) · [原厂 USB 枚举](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/include/linux/power_supply.h#L199-L210)
 
 公开 [`usb_psy_set_icl()`](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/power/supply/qti_battery_charger.c#L1385)
 先读 `USB_ADAP_TYPE=7`，仅接受 SDP（1）或固定 PD（6），再以 USB SET `0x33`、

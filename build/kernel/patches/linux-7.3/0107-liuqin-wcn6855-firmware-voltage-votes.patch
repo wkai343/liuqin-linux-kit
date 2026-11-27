@@ -1,0 +1,871 @@
+Subject: [PATCH] arm64: qcom: match Liuqin WCN6855 boot and retention votes
+
+The M81 downstream RPMh regulators cache millivolt initial requests. BT
+and CNSS then vote their own ranges before enabling shared supplies,
+including the antenna switch. CNSS drops its bootstrap floors after FW
+init; the production Bluetooth HAL requests retention after UART setup.
+Neither uses the three initial voltages as permanent regulator floors.
+
+Model those consumers independently of the shared PMU enable counts.
+Pass firmware handoff to the powered target under the sequencer lock,
+including PCI enumeration and warm starts. Scope the millivolt VRM
+request domain to opted-in Liuqin rails and retain board constraints.
+
+OEM: Xiaomi M81 OS2.0.6.0.VMYCNXM, Cape DTB in vendor_boot.img and
+     vendor_a/lib64/hw/android.hardware.bluetooth@1.0-impl-qti.so
+     (UartController::Init() requests retention after setup).
+     MiCode/kernel_devicetree 1c507816ba8aa6117dcec41f577ef7a66d2091f7,
+     qcom/cape.dtsi, lists the BT and WLAN supply ranges.
+     MiCode/Xiaomi_Kernel_OpenSource eb49e10028e27fa98856cb5e458c0f0ec5b4554e,
+     drivers/regulator/rpmh-regulator.c, drivers/bluetooth/btpower.c and
+     drivers/net/wireless/cnss2/{power,main}.c implement the voltage votes
+     and their firmware handoff.
+
+diff --git a/Documentation/devicetree/bindings/regulator/qcom,qca6390-pmu.yaml b/Documentation/devicetree/bindings/regulator/qcom,qca6390-pmu.yaml
+index 105174d..9586c6f 100644
+--- a/Documentation/devicetree/bindings/regulator/qcom,qca6390-pmu.yaml
++++ b/Documentation/devicetree/bindings/regulator/qcom,qca6390-pmu.yaml
+@@ -17,6 +17,9 @@ description:
+ properties:
+   compatible:
+     oneOf:
++      - items:
++          - const: xiaomi,liuqin-wcn6855-pmu
++          - const: qcom,wcn6855-pmu
+       - items:
+           - enum:
+               - qcom,wcn6755-pmu
+@@ -28,6 +31,39 @@ properties:
+           - qcom,wcn6855-pmu
+           - qcom,wcn7850-pmu
+ 
++  bt-io-supply:
++    description: pm8350_s10 input for the Bluetooth firmware power sequence on Liuqin.
++
++  bt-dig-supply:
++    description: pm8350_s11 input for the Bluetooth firmware power sequence on Liuqin.
++
++  bt-rfa1-supply:
++    description: pm8350c_s1 input for the Bluetooth firmware power sequence on Liuqin.
++
++  bt-rfa2-supply:
++    description: pm8350_s12 input for the Bluetooth firmware power sequence on Liuqin.
++
++  bt-asd-supply:
++    description: pmr735a_l7 input for the Bluetooth firmware power sequence on Liuqin.
++
++  wlan-aon-supply:
++    description: pmr735a_s2 input for the WLAN firmware power sequence on Liuqin.
++
++  wlan-dig-supply:
++    description: pm8350_s11 input for the WLAN firmware power sequence on Liuqin.
++
++  wlan-io-supply:
++    description: pm8350_s10 input for the WLAN firmware power sequence on Liuqin.
++
++  wlan-rfa1-supply:
++    description: pm8350c_s1 input for the WLAN firmware power sequence on Liuqin.
++
++  wlan-rfa2-supply:
++    description: pm8350_s12 input for the WLAN firmware power sequence on Liuqin.
++
++  wlan-ant-switch-supply:
++    description: pmr735a_l7 input for the WLAN firmware power sequence on Liuqin.
++
+   vdd-supply:
+     description: VDD supply regulator handle
+ 
+@@ -123,6 +159,38 @@ required:
+   - regulators
+ 
+ allOf:
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: xiaomi,liuqin-wcn6855-pmu
++    then:
++      required:
++        - bt-io-supply
++        - bt-dig-supply
++        - bt-rfa1-supply
++        - bt-rfa2-supply
++        - bt-asd-supply
++        - wlan-aon-supply
++        - wlan-dig-supply
++        - wlan-io-supply
++        - wlan-rfa1-supply
++        - wlan-rfa2-supply
++        - wlan-ant-switch-supply
++    else:
++      properties:
++        bt-io-supply: false
++        bt-dig-supply: false
++        bt-rfa1-supply: false
++        bt-rfa2-supply: false
++        bt-asd-supply: false
++        wlan-aon-supply: false
++        wlan-dig-supply: false
++        wlan-io-supply: false
++        wlan-rfa1-supply: false
++        wlan-rfa2-supply: false
++        wlan-ant-switch-supply: false
++
+   - if:
+       properties:
+         compatible:
+diff --git a/Documentation/devicetree/bindings/regulator/qcom,rpmh-regulator.yaml b/Documentation/devicetree/bindings/regulator/qcom,rpmh-regulator.yaml
+index eed2ce7..6c59355 100644
+--- a/Documentation/devicetree/bindings/regulator/qcom,rpmh-regulator.yaml
++++ b/Documentation/devicetree/bindings/regulator/qcom,rpmh-regulator.yaml
+@@ -144,6 +144,14 @@ patternProperties:
+     $ref: regulator.yaml#
+     unevaluatedProperties: false
+     description: smps/ldo regulator nodes(s).
++    properties:
++      qcom,init-voltage:
++        $ref: /schemas/types.yaml#/definitions/uint32
++        multipleOf: 1000
++        description:
++          Initial cached RPMh VRM request in microvolts for Liuqin wireless
++          supplies. Later consumer requests replace it. The resource accepts
++          millivolt votes, independently of the PMIC output selector steps.
+     dependencies:
+       regulator-allow-set-load: [ regulator-allowed-modes ]
+ 
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+index 949e858..bcd547c 100644
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+@@ -374,7 +374,7 @@
+ 	 * is pinctrl@f000000, i.e. TLMM (:1367).
+ 	 */
+ 	wcn6855-pmu {
+-		compatible = "qcom,wcn6855-pmu";
++		compatible = "xiaomi,liuqin-wcn6855-pmu", "qcom,wcn6855-pmu";
+ 
+ 		pinctrl-0 = <&bt_en_state>, <&wlan_en_state>, <&xo_clk_state>;
+ 		pinctrl-names = "default";
+@@ -395,6 +395,19 @@
+ 		vddpcie1p3-supply = <&pm8350_s12>;
+ 		vddpcie1p9-supply = <&pm8350c_s1>;
+ 
++		/* Separate AP consumers while each radio boots its firmware. */
++		bt-io-supply = <&pm8350_s10>;
++		bt-dig-supply = <&pm8350_s11>;
++		bt-rfa1-supply = <&pm8350c_s1>;
++		bt-rfa2-supply = <&pm8350_s12>;
++		bt-asd-supply = <&pmr735a_l7>;
++		wlan-aon-supply = <&pmr735a_s2>;
++		wlan-dig-supply = <&pm8350_s11>;
++		wlan-io-supply = <&pm8350_s10>;
++		wlan-rfa1-supply = <&pm8350c_s1>;
++		wlan-rfa2-supply = <&pm8350_s12>;
++		wlan-ant-switch-supply = <&pmr735a_l7>;
++
+ 		regulators {
+ 			vreg_pmu_rfa_cmn_0p8: ldo0 {
+ 				regulator-name = "vreg_pmu_rfa_cmn_0p8";
+@@ -575,12 +588,14 @@
+ 
+ 		pm8350_s11: smps11 {
+ 			regulator-name = "pm8350_s11";
++			qcom,init-voltage = <952000>;
+ 			regulator-min-microvolt = <382000>;
+ 			regulator-max-microvolt = <1170000>;
+ 		};
+ 
+ 		pm8350_s12: smps12 {
+ 			regulator-name = "pm8350_s12";
++			qcom,init-voltage = <1256000>;
+ 			regulator-min-microvolt = <1224000>;
+ 			regulator-max-microvolt = <2040000>;
+ 		};
+@@ -631,6 +646,7 @@
+ 
+ 		pm8350c_s1: smps1 {
+ 			regulator-name = "pm8350c_s1";
++			qcom,init-voltage = <1880000>;
+ 			regulator-min-microvolt = <1800000>;
+ 			regulator-max-microvolt = <2024000>;
+ 			regulator-always-on;
+@@ -715,10 +731,17 @@
+ 
+ 		pmr735a_s2: smps2 {
+ 			regulator-name = "pmr735a_s2";
++			qcom,init-voltage = <500000>;
+ 			regulator-min-microvolt = <500000>;
+ 			regulator-max-microvolt = <1040000>;
+ 			regulator-always-on;
+ 		};
++
++		pmr735a_l7: ldo7 {
++			regulator-name = "pmr735a_l7";
++			regulator-min-microvolt = <2800000>;
++			regulator-max-microvolt = <2800000>;
++		};
+ 	};
+ };
+ 
+diff --git a/drivers/bluetooth/hci_qca.c b/drivers/bluetooth/hci_qca.c
+index 29e42b3..de607b3 100644
+--- a/drivers/bluetooth/hci_qca.c
++++ b/drivers/bluetooth/hci_qca.c
+@@ -1945,11 +1945,16 @@ static int qca_setup(struct hci_uart *hu)
+ 	int ret;
+ 	struct qca_btsoc_version ver;
+ 	struct qca_serdev *qcadev = NULL;
++	struct pwrseq_desc *fw_pwrseq = NULL;
+ 	const char *soc_name;
+ 
+ 	if (hu->serdev)
+ 		qcadev = serdev_device_get_drvdata(hu->serdev);
+ 
++	if (qcadev && soc_type == QCA_WCN6855 && qcadev->bt_power &&
++	    liuqin_wcn6855_fw_supplies(hu->serdev->dev.of_node))
++		fw_pwrseq = qcadev->bt_power->pwrseq;
++
+ 	ret = qca_check_speeds(hu);
+ 	if (ret)
+ 		return ret;
+@@ -2002,6 +2007,11 @@ retry:
+ 	if (ret)
+ 		goto out;
+ 
++	/* A warm setup can reuse a target already in retention. */
++	ret = pwrseq_set_retention(fw_pwrseq, false);
++	if (ret)
++		goto out;
++
+ 	clear_bit(QCA_SSR_TRIGGERED, &qca->flags);
+ 
+ 	switch (soc_type) {
+@@ -2059,6 +2069,10 @@ retry:
+ 	ret = qca_uart_setup(hdev, qca_baudrate, soc_type, ver,
+ 			firmware_name, rampatch_name);
+ 	if (!ret) {
++		/* The M81 HAL requests retention after successful patch/NVM setup. */
++		if (pwrseq_set_retention(fw_pwrseq, true))
++			bt_dev_warn(hdev, "could not release firmware supply votes");
++
+ 		clear_bit(QCA_IBS_DISABLED, &qca->flags);
+ 		qca_debugfs_init(hdev);
+ 		hu->hdev->hw_error = qca_hw_error;
+@@ -2532,6 +2546,10 @@ static int qca_serdev_probe(struct serdev_device *serdev)
+ 			 * through the power sequence. In such cases, fall through
+ 			 * to follow the legacy flow.
+ 			 */
++			if (PTR_ERR_OR_ZERO(qcadev->bt_power->pwrseq) == -EPROBE_DEFER &&
++			    qcadev->btsoc_type == QCA_WCN6855 &&
++			    liuqin_wcn6855_fw_supplies(serdev->dev.of_node))
++				return -EPROBE_DEFER;
+ 			if (IS_ERR(qcadev->bt_power->pwrseq))
+ 				qcadev->bt_power->pwrseq = NULL;
+ 			else
+diff --git a/drivers/net/wireless/ath/ath11k/core.c b/drivers/net/wireless/ath/ath11k/core.c
+index 8039124..2a184ce 100644
+--- a/drivers/net/wireless/ath/ath11k/core.c
++++ b/drivers/net/wireless/ath/ath11k/core.c
+@@ -2314,6 +2314,9 @@ int ath11k_core_qmi_firmware_ready(struct ath11k_base *ab)
+ 	ath11k_hif_irq_enable(ab);
+ 	mutex_unlock(&ab->core_lock);
+ 
++	if (ath11k_wcn_set_retention(ab, true))
++		ath11k_warn(ab, "could not release WLAN firmware supply votes\n");
++
+ 	return 0;
+ 
+ err_core_stop:
+diff --git a/drivers/net/wireless/ath/ath11k/core.h b/drivers/net/wireless/ath/ath11k/core.h
+index a0d7259..ff56db0 100644
+--- a/drivers/net/wireless/ath/ath11k/core.h
++++ b/drivers/net/wireless/ath/ath11k/core.h
+@@ -7,6 +7,7 @@
+ #ifndef ATH11K_CORE_H
+ #define ATH11K_CORE_H
+ 
++#include <linux/pwrseq/consumer.h>
+ #include <linux/types.h>
+ #include <linux/interrupt.h>
+ #include <linux/irq.h>
+@@ -926,6 +927,7 @@ struct ath11k_base {
+ 	enum ath11k_firmware_mode fw_mode;
+ 	struct platform_device *pdev;
+ 	struct device *dev;
++	struct pwrseq_desc *wcn_pwrseq;
+ 	struct ath11k_qmi qmi;
+ 	struct ath11k_wmi_base wmi_ab;
+ 	struct completion fw_ready;
+@@ -1266,6 +1268,13 @@ extern const struct service_to_pipe ath11k_target_service_to_ce_map_wlan_ipq5018
+ 
+ extern const struct ce_pipe_config ath11k_target_ce_config_wlan_qcn9074[];
+ extern const struct service_to_pipe ath11k_target_service_to_ce_map_wlan_qcn9074[];
++static inline int ath11k_wcn_set_retention(struct ath11k_base *ab, bool retain)
++{
++	if (IS_REACHABLE(CONFIG_POWER_SEQUENCING))
++		return pwrseq_set_retention(ab->wcn_pwrseq, retain);
++	return 0;
++}
++
+ int ath11k_core_qmi_firmware_ready(struct ath11k_base *ab);
+ int ath11k_core_pre_init(struct ath11k_base *ab);
+ int ath11k_core_init(struct ath11k_base *ath11k);
+diff --git a/drivers/net/wireless/ath/ath11k/pci.c b/drivers/net/wireless/ath/ath11k/pci.c
+index a163168..a90ca1e 100644
+--- a/drivers/net/wireless/ath/ath11k/pci.c
++++ b/drivers/net/wireless/ath/ath11k/pci.c
+@@ -7,6 +7,7 @@
+ #include <linux/module.h>
+ #include <linux/msi.h>
+ #include <linux/pci.h>
++#include <linux/platform_data/liuqin.h>
+ #include <linux/of.h>
+ #include <linux/time.h>
+ #include <linux/vmalloc.h>
+@@ -820,6 +821,10 @@ static int ath11k_pci_power_up(struct ath11k_base *ab)
+ 	struct ath11k_pci *ab_pci = ath11k_pci_priv(ab);
+ 	int ret;
+ 
++	ret = ath11k_wcn_set_retention(ab, false);
++	if (ret)
++		return ret;
++
+ 	ab_pci->register_window = 0;
+ 	clear_bit(ATH11K_FLAG_DEVICE_INIT_DONE, &ab->dev_flags);
+ 	ath11k_pci_sw_reset(ab_pci->ab, true);
+@@ -834,6 +839,7 @@ static int ath11k_pci_power_up(struct ath11k_base *ab)
+ 	ret = ath11k_mhi_start(ab_pci);
+ 	if (ret) {
+ 		ath11k_err(ab, "failed to start mhi: %d\n", ret);
++		ath11k_wcn_set_retention(ab, true);
+ 		return ret;
+ 	}
+ 
+@@ -857,6 +863,8 @@ static void ath11k_pci_power_down(struct ath11k_base *ab, bool is_suspend)
+ 	ath11k_mhi_stop(ab_pci, is_suspend);
+ 	clear_bit(ATH11K_FLAG_DEVICE_INIT_DONE, &ab->dev_flags);
+ 	ath11k_pci_sw_reset(ab_pci->ab, false);
++	if (ath11k_wcn_set_retention(ab, true))
++		ath11k_warn(ab, "could not release WLAN power-down votes\n");
+ }
+ 
+ static int ath11k_pci_hif_suspend(struct ath11k_base *ab)
+@@ -946,6 +954,12 @@ static int ath11k_pci_set_irq_affinity_hint(struct ath11k_pci *ab_pci,
+ 	return irq_set_affinity_and_hint(ab_pci->pdev->irq, m);
+ }
+ 
++static void ath11k_pci_release_wcn_votes(void *data)
++{
++	if (IS_REACHABLE(CONFIG_POWER_SEQUENCING))
++		pwrseq_set_retention(data, true);
++}
++
+ static int ath11k_pci_probe(struct pci_dev *pdev,
+ 			    const struct pci_device_id *pci_dev)
+ {
+@@ -980,6 +994,24 @@ static int ath11k_pci_probe(struct pci_dev *pdev,
+ 	if (of_property_present(ab->dev->of_node, "memory-region"))
+ 		set_bit(ATH11K_FLAG_FIXED_MEM_RGN, &ab->dev_flags);
+ 
++	/* PCI pwrctrl owns WLAN_EN before enumeration. Use the same target
++	 * for firmware handoff and warm restarts without taking another enable.
++	 */
++	if (IS_REACHABLE(CONFIG_POWER_SEQUENCING) &&
++	    of_device_is_compatible(pdev->dev.of_node, "pci17cb,1103") &&
++	    liuqin_wcn6855_fw_supplies(pdev->dev.of_node)) {
++		ab->wcn_pwrseq = devm_pwrseq_get(&pdev->dev, "wlan");
++		if (IS_ERR(ab->wcn_pwrseq)) {
++			ret = dev_err_probe(&pdev->dev, PTR_ERR(ab->wcn_pwrseq),
++					    "WLAN firmware power sequencer\n");
++			goto err_free_core;
++		}
++		ret = devm_add_action_or_reset(&pdev->dev, ath11k_pci_release_wcn_votes,
++					       ab->wcn_pwrseq);
++		if (ret)
++			goto err_free_core;
++	}
++
+ 	ret = ath11k_pci_claim(ab_pci, pdev);
+ 	if (ret) {
+ 		ath11k_err(ab, "failed to claim device: %d\n", ret);
+diff --git a/drivers/net/wireless/ath/ath11k/qmi.c b/drivers/net/wireless/ath/ath11k/qmi.c
+index 7dc0733..567166f 100644
+--- a/drivers/net/wireless/ath/ath11k/qmi.c
++++ b/drivers/net/wireless/ath/ath11k/qmi.c
+@@ -3268,7 +3268,9 @@ static void ath11k_qmi_driver_event_work(struct work_struct *work)
+ 
+ 			if (ab->qmi.cal_done == 0 &&
+ 			    ath11k_core_coldboot_cal_support(ab)) {
+-				ath11k_qmi_process_coldboot_calibration(ab);
++				ret = ath11k_qmi_process_coldboot_calibration(ab);
++				if (!ret && ath11k_wcn_set_retention(ab, true))
++					ath11k_warn(ab, "could not release calibration supply votes\n");
+ 			} else {
+ 				clear_bit(ATH11K_FLAG_CRASH_FLUSH,
+ 					  &ab->dev_flags);
+diff --git a/drivers/power/sequencing/core.c b/drivers/power/sequencing/core.c
+index 3076b38..2a77b9e 100644
+--- a/drivers/power/sequencing/core.c
++++ b/drivers/power/sequencing/core.c
+@@ -179,6 +179,7 @@ static void pwrseq_unit_release(struct kref *ref)
+  * @list: Siblings on the list of all targets exposed by a power sequencer.
+  * @name: Name of the target.
+  * @unit: Final unit for this target.
++ * @set_retention: Optional change of supply requests for a powered target.
+  * @post_enable: Callback run after the target unit has been enabled, *after*
+  *               the state lock has been released. It's useful for implementing
+  *               boot-up delays without blocking other users from powering up
+@@ -189,6 +190,7 @@ struct pwrseq_target {
+ 	const char *name;
+ 	struct pwrseq_unit *unit;
+ 	pwrseq_power_state_func post_enable;
++	int (*set_retention)(struct pwrseq_device *pwrseq, bool retain);
+ };
+ 
+ static struct pwrseq_target *
+@@ -207,6 +209,7 @@ pwrseq_target_new(const struct pwrseq_target_data *data)
+ 	}
+ 
+ 	target->post_enable = data->post_enable;
++	target->set_retention = data->set_retention;
+ 
+ 	return target;
+ }
+@@ -971,6 +974,39 @@ int pwrseq_disable(struct pwrseq_desc *desc)
+ }
+ EXPORT_SYMBOL_GPL(pwrseq_disable);
+ 
++/**
++ * pwrseq_set_retention() - Change the supplies for a powered target.
++ * @desc: Target descriptor, possibly separate from its power owner (PCI).
++ * @retain: Release bootstrap requirements after firmware takes over.
++ *
++ * Does not acquire or release a power reference. A target without a
++ * retention callback has identical supply requirements in both modes.
++ *
++ * Return: 0 on success or a negative error code.
++ */
++int pwrseq_set_retention(struct pwrseq_desc *desc, bool retain)
++{
++	struct pwrseq_device *pwrseq;
++
++	if (!desc)
++		return 0;
++
++	pwrseq = desc->pwrseq;
++	guard(rwsem_read)(&pwrseq->rw_lock);
++	if (!device_is_registered(&pwrseq->dev))
++		return -ENODEV;
++
++	if (!desc->target->set_retention)
++		return 0;
++
++	guard(mutex)(&pwrseq->state_lock);
++	if (!desc->target->unit->enable_count)
++		return retain ? 0 : -EHOSTDOWN;
++
++	return desc->target->set_retention(pwrseq, retain);
++}
++EXPORT_SYMBOL_GPL(pwrseq_set_retention);
++
+ /**
+  * pwrseq_to_device() - Get the pwrseq device pointer from a descriptor.
+  * @desc: Descriptor referencing the power sequencer.
+diff --git a/drivers/power/sequencing/pwrseq-qcom-wcn.c b/drivers/power/sequencing/pwrseq-qcom-wcn.c
+index 34146d6..3302638 100644
+--- a/drivers/power/sequencing/pwrseq-qcom-wcn.c
++++ b/drivers/power/sequencing/pwrseq-qcom-wcn.c
+@@ -10,6 +10,7 @@
+ #include <linux/jiffies.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
++#include <linux/platform_data/liuqin.h>
+ #include <linux/platform_device.h>
+ #include <linux/property.h>
+ #include <linux/regulator/consumer.h>
+@@ -27,12 +28,26 @@ struct pwrseq_qcom_wcn_pdata {
+ 	int (*match)(struct pwrseq_device *pwrseq, struct device *dev);
+ };
+ 
++struct liuqin_wcn_supply {
++	const char *name;
++	int min_uv;
++	int max_uv;
++};
++
++struct liuqin_wcn_radio {
++	const struct liuqin_wcn_supply *levels;
++	struct regulator_bulk_data *regs;
++	unsigned int count;
++	bool boot_vote;
++};
++
+ struct pwrseq_qcom_wcn_ctx {
+ 	struct pwrseq_device *pwrseq;
+ 	struct device_node *of_node;
+ 	const struct pwrseq_qcom_wcn_pdata *pdata;
+ 	struct regulator_bulk_data *regs;
+ 	struct regulator *vddio;
++	struct liuqin_wcn_radio bt, wlan;
+ 	struct gpio_desc *bt_gpio;
+ 	struct gpio_desc *wlan_gpio;
+ 	struct gpio_desc *xo_clk_gpio;
+@@ -156,6 +171,108 @@ static const struct pwrseq_unit_data pwrseq_qcom_wcn6855_xo_clk_assert = {
+ 	.enable = pwrseq_qcom_wcn6855_clk_assert,
+ };
+ 
++/* M81 stock Cape BT power and CNSS consumers. The BT AON, DIG, RFACMN
++ * and RFA_0p8 inputs all request the same range on S11B.
++ */
++static const struct liuqin_wcn_supply liuqin_bt_supplies[] = {
++	{ "bt-io", 1800000, 1800000 },
++	{ "bt-dig", 966000, 1170000 },
++	{ "bt-rfa1", 1900000, 2040000 },
++	{ "bt-rfa2", 1350000, 2024000 },
++	{ "bt-asd", 2800000, 2800000 },
++};
++
++static const struct liuqin_wcn_supply liuqin_wlan_supplies[] = {
++	{ "wlan-aon", 1012000, 1040000 },
++	{ "wlan-dig", 966000, 1170000 },
++	{ "wlan-io", 1800000, 1800000 },
++	{ "wlan-rfa1", 1900000, 2024000 },
++	{ "wlan-rfa2", 1350000, 2040000 },
++	{ "wlan-ant-switch", 2800000, 2800000 },
++};
++
++static int liuqin_wcn_get_supplies(struct device *dev,
++				   struct liuqin_wcn_radio *radio,
++				   const struct liuqin_wcn_supply *levels,
++				   unsigned int count)
++{
++	unsigned int i;
++
++	radio->regs = devm_kcalloc(dev, count, sizeof(*radio->regs), GFP_KERNEL);
++	if (!radio->regs)
++		return -ENOMEM;
++
++	radio->levels = levels;
++	radio->count = count;
++	for (i = 0; i < count; i++)
++		radio->regs[i].supply = levels[i].name;
++
++	return devm_regulator_bulk_get(dev, count, radio->regs);
++}
++
++static int liuqin_wcn_vote_one(struct liuqin_wcn_radio *radio,
++			       unsigned int i, bool boot)
++{
++	const struct liuqin_wcn_supply *level = &radio->levels[i];
++
++	return regulator_set_voltage(radio->regs[i].consumer,
++				     boot ? level->min_uv : 0, level->max_uv);
++}
++
++static int liuqin_wcn_vote(struct liuqin_wcn_radio *radio, bool boot)
++{
++	unsigned int i;
++	int ret;
++
++	for (i = 0; i < radio->count; i++) {
++		ret = liuqin_wcn_vote_one(radio, i, boot);
++		if (ret) {
++			while (i--)
++				if (liuqin_wcn_vote_one(radio, i, radio->boot_vote))
++					pr_err("WCN6855: failed to restore %s vote\n",
++					       radio->levels[i].name);
++			return ret;
++		}
++	}
++
++	radio->boot_vote = boot;
++	return 0;
++}
++
++static int liuqin_wcn_power_on(struct liuqin_wcn_radio *radio)
++{
++	int ret;
++
++	if (!radio->count)
++		return 0;
++
++	ret = liuqin_wcn_vote(radio, true);
++	if (ret)
++		return ret;
++
++	ret = regulator_bulk_enable(radio->count, radio->regs);
++	if (ret)
++		liuqin_wcn_vote(radio, false);
++	return ret;
++}
++
++static int liuqin_wcn_power_off(struct liuqin_wcn_radio *radio)
++{
++	int ret;
++
++	if (!radio->count)
++		return 0;
++
++	ret = regulator_bulk_disable(radio->count, radio->regs);
++	if (ret)
++		return ret;
++
++	ret = liuqin_wcn_vote(radio, false);
++	if (ret && regulator_bulk_enable(radio->count, radio->regs))
++		pr_err("WCN6855: failed to restore regulator enables\n");
++	return ret;
++}
++
+ static const struct pwrseq_unit_data *pwrseq_qcom_wcn6855_unit_deps[] = {
+ 	&pwrseq_qcom_wcn_vregs_unit_data,
+ 	&pwrseq_qcom_wcn_clk_unit_data,
+@@ -163,6 +280,77 @@ static const struct pwrseq_unit_data *pwrseq_qcom_wcn6855_unit_deps[] = {
+ 	NULL
+ };
+ 
++static const struct pwrseq_unit_data wcn6855_common_unit = {
++	.name = "pmu-enable",
++	.deps = pwrseq_qcom_wcn6855_unit_deps,
++};
++
++static int liuqin_bt_enable(struct pwrseq_device *pwrseq)
++{
++	struct pwrseq_qcom_wcn_ctx *ctx = pwrseq_device_get_drvdata(pwrseq);
++
++	return liuqin_wcn_power_on(&ctx->bt);
++}
++
++static int liuqin_bt_disable(struct pwrseq_device *pwrseq)
++{
++	struct pwrseq_qcom_wcn_ctx *ctx = pwrseq_device_get_drvdata(pwrseq);
++
++	return liuqin_wcn_power_off(&ctx->bt);
++}
++
++static int liuqin_bt_retention(struct pwrseq_device *pwrseq, bool retain)
++{
++	struct pwrseq_qcom_wcn_ctx *ctx = pwrseq_device_get_drvdata(pwrseq);
++
++	return liuqin_wcn_vote(&ctx->bt, !retain);
++}
++
++static const struct pwrseq_unit_data liuqin_bt_supplies_unit = {
++	.name = "bt-firmware-supplies",
++	.enable = liuqin_bt_enable,
++	.disable = liuqin_bt_disable,
++};
++
++static const struct pwrseq_unit_data *wcn6855_bt_deps[] = {
++	&liuqin_bt_supplies_unit,
++	&wcn6855_common_unit,
++	NULL,
++};
++
++static int liuqin_wlan_enable(struct pwrseq_device *pwrseq)
++{
++	struct pwrseq_qcom_wcn_ctx *ctx = pwrseq_device_get_drvdata(pwrseq);
++
++	return liuqin_wcn_power_on(&ctx->wlan);
++}
++
++static int liuqin_wlan_disable(struct pwrseq_device *pwrseq)
++{
++	struct pwrseq_qcom_wcn_ctx *ctx = pwrseq_device_get_drvdata(pwrseq);
++
++	return liuqin_wcn_power_off(&ctx->wlan);
++}
++
++static int liuqin_wlan_retention(struct pwrseq_device *pwrseq, bool retain)
++{
++	struct pwrseq_qcom_wcn_ctx *ctx = pwrseq_device_get_drvdata(pwrseq);
++
++	return liuqin_wcn_vote(&ctx->wlan, !retain);
++}
++
++static const struct pwrseq_unit_data liuqin_wlan_supplies_unit = {
++	.name = "wlan-firmware-supplies",
++	.enable = liuqin_wlan_enable,
++	.disable = liuqin_wlan_disable,
++};
++
++static const struct pwrseq_unit_data *wcn6855_wlan_deps[] = {
++	&liuqin_wlan_supplies_unit,
++	&wcn6855_common_unit,
++	NULL,
++};
++
+ static int pwrseq_qcom_wcn_bt_enable(struct pwrseq_device *pwrseq)
+ {
+ 	struct pwrseq_qcom_wcn_ctx *ctx = pwrseq_device_get_drvdata(pwrseq);
+@@ -192,7 +380,7 @@ static const struct pwrseq_unit_data pwrseq_qcom_wcn_bt_unit_data = {
+ 
+ static const struct pwrseq_unit_data pwrseq_qcom_wcn6855_bt_unit_data = {
+ 	.name = "bluetooth-enable",
+-	.deps = pwrseq_qcom_wcn6855_unit_deps,
++	.deps = wcn6855_bt_deps,
+ 	.enable = pwrseq_qcom_wcn_bt_enable,
+ 	.disable = pwrseq_qcom_wcn_bt_disable,
+ };
+@@ -226,7 +414,7 @@ static const struct pwrseq_unit_data pwrseq_qcom_wcn_wlan_unit_data = {
+ 
+ static const struct pwrseq_unit_data pwrseq_qcom_wcn6855_wlan_unit_data = {
+ 	.name = "wlan-enable",
+-	.deps = pwrseq_qcom_wcn6855_unit_deps,
++	.deps = wcn6855_wlan_deps,
+ 	.enable = pwrseq_qcom_wcn_wlan_enable,
+ 	.disable = pwrseq_qcom_wcn_wlan_disable,
+ };
+@@ -279,12 +467,14 @@ static const struct pwrseq_target_data pwrseq_qcom_wcn3990_wlan_target_data = {
+ static const struct pwrseq_target_data pwrseq_qcom_wcn6855_bt_target_data = {
+ 	.name = "bluetooth",
+ 	.unit = &pwrseq_qcom_wcn6855_bt_unit_data,
++	.set_retention = liuqin_bt_retention,
+ 	.post_enable = pwrseq_qcom_wcn6855_xo_clk_deassert,
+ };
+ 
+ static const struct pwrseq_target_data pwrseq_qcom_wcn6855_wlan_target_data = {
+ 	.name = "wlan",
+ 	.unit = &pwrseq_qcom_wcn6855_wlan_unit_data,
++	.set_retention = liuqin_wlan_retention,
+ 	.post_enable = pwrseq_qcom_wcn6855_xo_clk_deassert,
+ };
+ 
+@@ -491,6 +681,18 @@ static int pwrseq_qcom_wcn_probe(struct platform_device *pdev)
+ 			return dev_err_probe(dev, PTR_ERR(ctx->vddio), "Failed to get VDDIO\n");
+ 	}
+ 
++	if (liuqin_board_quirks() &&
++	    of_device_is_compatible(dev->of_node, "xiaomi,liuqin-wcn6855-pmu")) {
++		ret = liuqin_wcn_get_supplies(dev, &ctx->bt, liuqin_bt_supplies,
++					      ARRAY_SIZE(liuqin_bt_supplies));
++		if (ret)
++			return dev_err_probe(dev, ret, "Bluetooth firmware supplies\n");
++		ret = liuqin_wcn_get_supplies(dev, &ctx->wlan, liuqin_wlan_supplies,
++					      ARRAY_SIZE(liuqin_wlan_supplies));
++		if (ret)
++			return dev_err_probe(dev, ret, "WLAN firmware supplies\n");
++	}
++
+ 	ctx->bt_gpio = devm_gpiod_get_optional(dev, "bt-enable", GPIOD_OUT_LOW);
+ 	if (IS_ERR(ctx->bt_gpio))
+ 		return dev_err_probe(dev, PTR_ERR(ctx->bt_gpio),
+diff --git a/drivers/regulator/qcom-rpmh-regulator.c b/drivers/regulator/qcom-rpmh-regulator.c
+index 4422e7b..55c8b53 100644
+--- a/drivers/regulator/qcom-rpmh-regulator.c
++++ b/drivers/regulator/qcom-rpmh-regulator.c
+@@ -579,6 +579,34 @@ static int rpmh_regulator_init_vreg(struct rpmh_vreg *vreg, struct device *dev,
+ 	if (!init_data)
+ 		return -ENOMEM;
+ 
++	/*
++	 * Stock VRM requests are in millivolts. Cache the initial request until
++	 * first enable or a consumer vote, as on the M81 without send-defaults.
++	 */
++	if (liuqin_board_quirks() && of_property_present(node, "qcom,init-voltage")) {
++		struct regulation_constraints *c = &init_data->constraints;
++		struct linear_range *range;
++		u32 uv;
++
++		ret = of_property_read_u32(node, "qcom,init-voltage", &uv);
++		if (ret || vreg->hw_data->regulator_type != VRM ||
++		    c->min_uV <= 0 || c->max_uV < c->min_uV ||
++		    uv < c->min_uV || uv > c->max_uV ||
++		    (uv % 1000) || (c->min_uV % 1000) || (c->max_uV % 1000))
++			return dev_err_probe(dev, -EINVAL, "%pOF: invalid initial VRM vote\n", node);
++
++		range = devm_kzalloc(dev, sizeof(*range), GFP_KERNEL);
++		if (!range)
++			return -ENOMEM;
++		range->min = c->min_uV;
++		range->step = 1000;
++		range->max_sel = (c->max_uV - c->min_uV) / range->step;
++		vreg->rdesc.linear_ranges = range;
++		vreg->rdesc.n_linear_ranges = 1;
++		vreg->rdesc.n_voltages = range->max_sel + 1;
++		vreg->voltage_selector = (uv - range->min) / range->step;
++	}
++
+ 	if (rpmh_data->hw_data->regulator_type == XOB &&
+ 	    init_data->constraints.min_uV &&
+ 	    init_data->constraints.min_uV == init_data->constraints.max_uV) {
+diff --git a/include/linux/platform_data/liuqin.h b/include/linux/platform_data/liuqin.h
+index 8c67af0..a6775c9 100644
+--- a/include/linux/platform_data/liuqin.h
++++ b/include/linux/platform_data/liuqin.h
+@@ -19,6 +19,22 @@ static inline bool liuqin_board_quirks(void)
+ 		id[0] == 0x10 && id[1] == 0;
+ }
+ 
++/* Old device trees can use discrete regulators instead of the WCN6855 PMU. */
++static inline bool liuqin_wcn6855_fw_supplies(struct device_node *radio)
++{
++	struct device_node *aon __free(device_node) = NULL;
++	struct device_node *regs __free(device_node) = NULL;
++	struct device_node *pmu __free(device_node) = NULL;
++
++	if (!radio || !liuqin_board_quirks())
++		return false;
++
++	aon = of_parse_phandle(radio, "vddaon-supply", 0);
++	regs = of_get_parent(aon);
++	pmu = of_get_parent(regs);
++	return of_device_is_compatible(pmu, "xiaomi,liuqin-wcn6855-pmu");
++}
++
+ enum liuqin_panel {
+ 	LIUQIN_PANEL_UNKNOWN = -1,
+ 	LIUQIN_PANEL_TIANMA,
+diff --git a/include/linux/pwrseq/consumer.h b/include/linux/pwrseq/consumer.h
+index 16fad5f..359cefc 100644
+--- a/include/linux/pwrseq/consumer.h
++++ b/include/linux/pwrseq/consumer.h
+@@ -22,6 +22,7 @@ devm_pwrseq_get(struct device *dev, const char *target);
+ 
+ int pwrseq_enable(struct pwrseq_desc *desc);
+ int pwrseq_disable(struct pwrseq_desc *desc);
++int pwrseq_set_retention(struct pwrseq_desc *desc, bool retain);
+ 
+ struct device *pwrseq_to_device(struct pwrseq_desc *desc);
+ 
+@@ -53,6 +54,11 @@ static inline int pwrseq_disable(struct pwrseq_desc *desc)
+ 	return -ENOSYS;
+ }
+ 
++static inline int pwrseq_set_retention(struct pwrseq_desc *desc, bool retain)
++{
++	return 0;
++}
++
+ static inline struct device *pwrseq_to_device(struct pwrseq_desc *desc)
+ {
+ 	return NULL;
+diff --git a/include/linux/pwrseq/provider.h b/include/linux/pwrseq/provider.h
+index 33b3d2c..788fc67 100644
+--- a/include/linux/pwrseq/provider.h
++++ b/include/linux/pwrseq/provider.h
+@@ -6,6 +6,8 @@
+ #ifndef __POWER_SEQUENCING_PROVIDER_H__
+ #define __POWER_SEQUENCING_PROVIDER_H__
+ 
++#include <linux/types.h>
++
+ struct device;
+ struct module;
+ struct pwrseq_device;
+@@ -39,6 +41,8 @@ struct pwrseq_unit_data {
+  * @name: Name of the target.
+  * @unit: Final unit that this target must reach in order to be considered
+  *        enabled.
++ * @set_retention: Optional change between bootstrap and firmware-controlled
++ *                 supplies while the target is powered. Runs under the state lock.
+  * @post_enable: Callback run after the target unit has been enabled, *after*
+  *               the state lock has been released. It's useful for implementing
+  *               boot-up delays without blocking other users from powering up
+@@ -48,6 +52,7 @@ struct pwrseq_target_data {
+ 	const char *name;
+ 	const struct pwrseq_unit_data *unit;
+ 	pwrseq_power_state_func post_enable;
++	int (*set_retention)(struct pwrseq_device *pwrseq, bool retain);
+ };
+ 
+ /**

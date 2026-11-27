@@ -4,11 +4,15 @@
 import os
 import hashlib
 from pathlib import Path
+import runpy
 import shlex
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 PROJECT = Path(__file__).resolve().parents[1]
 SOURCE = PROJECT / 'device/charger-mode'
@@ -61,6 +65,32 @@ class ChargerTests(unittest.TestCase):
         script = self.root / 'test-script'
         script.write_text(self.functions + '\n' + action + '\n')
         return subprocess.run(['sh', str(script)], env=self.env, capture_output=True, text=True, timeout=10)
+
+    def test_status_logs_selected_usb_type(self):
+        path = self.root / 'usb/usb_type'
+        cases = (
+            ('Unknown SDP DCP CDP ACA C [PD] PD_DRP PD_PPS BrickID', 'PD'),
+            ('Unknown SDP DCP CDP ACA C PD PD_DRP [PD_PPS] BrickID', 'PD_PPS'),
+            ('[Unknown] SDP PD', 'Unknown'),
+            ('SDP\tPD\t[BrickID]', 'BrickID'),
+            ('[PD]', 'PD'),
+            ('PD_PPS', 'PD_PPS'),
+            ('PD PD_PPS', 'NA'),
+            ('[PD] [PD_PPS]', 'NA'),
+            ('PD [PD_PPS', 'NA'),
+            ('', 'NA'),
+            (None, 'NA'),
+        )
+        for value, expected in cases:
+            with self.subTest(value=value):
+                if value is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.write_text(value + '\n')
+                result = self.run_functions('charger_log "$(charger_status)"')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                line = (self.root / 'log').read_text().splitlines()[-1]
+                self.assertEqual(line.split(' usb_type=')[-1], expected)
 
     def monitor(self, values):
         # Each fake sleep advances monotonic time and publishes the next sample.
@@ -270,6 +300,22 @@ charger_wake_display
             else:
                 self.assertEqual((self.root / 'exits').read_text().split()[0], expected)
 
+    def test_charge_services_start_once_after_ufs_seal_and_ignore_each_others_readiness(self):
+        for name in ('auth', 'thermal'):
+            self.env['LIUQIN_CHARGER_' + name.upper() + '_TOOL'] = str(self.program(name,
+                'echo started >>"$FIXTURE/' + name + '-starts"\nexec sleep 15\n'))
+        self.env['LIUQIN_CHARGER_MAX_TICKS'] = '3'
+        self.env['LIUQIN_CHARGER_KEY_TOOL'] = str(self.program('key', 'sleep .08\nexit 2\n'))
+        script = ['sh', str(SOURCE/'liuqin-charger-mode')]
+        with self.subTest(ufs='unsealed'):
+            subprocess.run(script, env=dict(self.env, LIUQIN_CHARGER_BLOCKDEV='false'),
+                           capture_output=True, timeout=6, check=True)
+            self.assertFalse((self.root/'auth-starts').exists())
+            self.assertFalse((self.root/'thermal-starts').exists())
+        subprocess.run(script, env=self.env, capture_output=True, timeout=6, check=True)
+        for name in ('auth', 'thermal'):
+            self.assertEqual((self.root/(name+'-starts')).read_text().splitlines(), ['started'])
+
     def test_power_monitor_is_not_blocked_by_display_or_key_waits(self):
         self.program('key', 'sleep 2\n: >"$FIXTURE/key-done"\nexit 2\n')
         self.program('prepare', 'sleep 2\n: >"$FIXTURE/prepare-done"\n')
@@ -308,7 +354,119 @@ printf '%s.00 0\\n' "$((101+n))" >"$FIXTURE/uptime"
         self.assertFalse((self.root / 'ui-started').exists())
 
 
+class AuthenticationTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.module = runpy.run_path(str(SOURCE/'liuqin-charger-auth'))
+        self.api = {key: Mock(return_value=value) for key, value in {
+            'usb_is_online': True, 'current_attach_token': None, 'find_xiaomi_dir': str(self.root),
+            'partner_source_usb_data': False, 'adapter_readiness_snapshot': ['PD_PPS', 'SNK_Ready', 1],
+            'adapter_is_ready': True, 'current_adapter_svid': 0x2717, 'clear_verdict': None,
+            'set_verify_process': None}.items()}
+        for name in ('ATTEMPT_STATE_FILE', 'READY_STATE_FILE', 'VERIFIED_STATE_FILE',
+                     'AUTHENTICATED_STATE_FILE', 'PENDING_EVENT_FILE'):
+            self.api[name] = str(self.root / name)
+        self.charging = self.module['Charging'](self.api)
+        self.spawn = self.enterContext(patch.object(subprocess, 'Popen'))
+        self.worker = self.spawn.return_value
+        self.worker.poll.return_value = None
+        self.kill = self.enterContext(patch.object(os, 'killpg'))
+        self.clock = self.enterContext(patch('time.monotonic', return_value=0))
+
+    def test_cold_gauges_late_partner_and_qualified_adapter(self):
+        self.charging.tick()
+        self.spawn.assert_not_called()
+        (self.root/'verify_digest').touch()
+        self.charging.tick()
+        self.assertIn('--battery-auth-only', self.spawn.call_args.args[0])
+        self.worker.poll.return_value = 0
+        self.charging.tick()
+        self.assertEqual(self.spawn.call_count, 1)
+        self.api['current_attach_token'].return_value = 'new partner'
+        self.charging.tick()
+        self.assertIn('--battery-auth-only', self.spawn.call_args.args[0])
+        for data in (None, True):
+            self.api['partner_source_usb_data'].return_value = data
+            self.charging.tick()
+            self.assertEqual(self.spawn.call_count, 2)
+        self.api['partner_source_usb_data'].return_value = False
+        self.charging.tick()
+        self.assertIn('--consume-event', self.spawn.call_args.args[0])
+        self.assertIn('--expected-attach', self.spawn.call_args.args[0])
+        self.assertIn('new partner', self.spawn.call_args.args[0])
+        self.charging.tick()
+        self.assertEqual(self.spawn.call_count, 3)
+        self.charging.tick()
+        self.assertEqual(self.spawn.call_count, 3)
+
+    def test_detach_cancels_process_group_before_replacement(self):
+        (self.root/'verify_digest').touch()
+        self.charging.tick()
+        self.api['usb_is_online'].return_value = False
+        self.charging.tick()
+        self.assertEqual([c.args[1] for c in self.kill.call_args_list],
+                         [signal.SIGTERM, signal.SIGKILL])
+        self.worker.wait.assert_called_with()
+        self.api['clear_verdict'].assert_called_once()
+        self.api['usb_is_online'].return_value = True
+        self.charging.tick()
+        self.assertEqual(self.spawn.call_count, 2)
+        self.assertTrue(self.spawn.call_args.kwargs['start_new_session'])
+        self.assertTrue(self.module['cable_removed'](b'ACTION=remove\0SUBSYSTEM=typec\0DEVPATH=/x/port0-partner\0'))
+        self.assertTrue(self.module['cable_removed'](b'POWER_SUPPLY_NAME=qcom-battmgr-usb\0POWER_SUPPLY_ONLINE=0\0'))
+        self.assertFalse(self.module['cable_removed'](b'POWER_SUPPLY_NAME=qcom-battmgr-bat\0POWER_SUPPLY_ONLINE=0\0'))
+
+    def test_bounded_worker_and_retry_budget(self):
+        (self.root/'verify_digest').touch()
+        self.charging.tick()
+        self.clock.return_value = 121
+        self.charging.tick()
+        self.kill.assert_called_with(self.worker.pid, signal.SIGKILL)
+        self.worker.poll.return_value = 1
+        for second in (127, 128, 140, 141, 180):
+            self.clock.return_value = second
+            self.charging.tick()
+        self.assertEqual(self.spawn.call_count, 3)
+
+    def test_transient_online_read_and_missing_provider_at_unplug(self):
+        (self.root / 'verify_digest').touch()
+        self.charging.tick()
+        proof = Path(self.api['VERIFIED_STATE_FILE'])
+        proof.write_text('old attachment')
+        self.api['usb_is_online'].return_value = None
+        self.charging.tick()
+        self.kill.assert_not_called()
+        self.assertEqual(proof.read_text(), 'old attachment')
+        self.clock.return_value = 121
+        self.charging.tick()
+        self.kill.assert_called_with(self.worker.pid, signal.SIGKILL)
+        self.api['usb_is_online'].return_value = False
+        self.api['find_xiaomi_dir'].side_effect = FileNotFoundError()
+        self.charging.tick()
+        self.assertFalse(proof.exists())
+        self.assertIsNone(self.charging.attach)
+
+
 class HelperTests(unittest.TestCase):
+    def test_cancel_reaches_a_role_child_after_its_parent_exits(self):
+        child = ('import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); '
+                 'print("ready", flush=True); signal.pause()')
+        leader = 'import subprocess,sys; subprocess.run([sys.executable, "-c", sys.argv[1]])'
+        stop_worker = runpy.run_path(str(SOURCE / 'liuqin-charger-auth'))['stop_worker']
+        with subprocess.Popen([sys.executable, '-c', leader, child], start_new_session=True,
+                              stdout=subprocess.PIPE, text=True) as worker:
+            try:
+                self.assertEqual(worker.stdout.readline(), 'ready\n')
+                stop_worker(worker)
+                worker.communicate(timeout=3)  # The child's copy of stdout must close.
+            finally:
+                try:
+                    os.killpg(worker.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
     def test_actual_key_classifier_and_press_across_timeout(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); binary = root / 'key'; events = root / 'events'

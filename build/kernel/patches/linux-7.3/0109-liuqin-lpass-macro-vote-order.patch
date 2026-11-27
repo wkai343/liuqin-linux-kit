@@ -1,0 +1,291 @@
+Subject: [PATCH] ASoC: lpass: vote M81 codec resources before enabling clocks
+
+The M81 codec parent lists core and audio HW votes. Its runtime resume
+requests HW_CORE_ID_LPASS then HW_CORE_ID_DCODEC. The SM8450 TX and RX
+macros consume MCLK, NPL and VA's FS generator; VA consumes MCLK and
+NPL and supplies the FS generator itself.
+
+Use the clocks already acquired by each driver. Finish both votes before
+the first functional clock, release in reverse and propagate failures
+before syncing registers. Keep the existing DSP-readiness check. Other
+boards keep their firmware-provided PM clock lists.
+
+OEM: Xiaomi Pad 6 Pro (M81), OS2.0.6.0.VMYCNXM
+     The Cape DTB in vendor_boot.img names both votes on the lpass-cdc
+     node. In vendor_dlkm_a, lib/modules/lpass_cdc_dlkm.ko acquires the
+     core vote before the audio vote in lpass_cdc_runtime_resume().
+
+diff --git a/sound/soc/codecs/lpass-macro-common.c b/sound/soc/codecs/lpass-macro-common.c
+index 7e59616..bd7ffc7 100644
+--- a/sound/soc/codecs/lpass-macro-common.c
++++ b/sound/soc/codecs/lpass-macro-common.c
+@@ -2,6 +2,7 @@
+ // Copyright (c) 2022, The Linux Foundation. All rights reserved.
+ 
+ #include <linux/cleanup.h>
++#include <linux/clk.h>
+ #include <linux/export.h>
+ #include <linux/module.h>
+ #include <linux/init.h>
+@@ -10,11 +11,62 @@
+ #include <linux/pm_domain.h>
+ #include <linux/pm_runtime.h>
+ 
++#ifdef CONFIG_PM_CLK
++#include <linux/platform_data/liuqin-audio.h>
++#endif
++
+ #include "lpass-macro-common.h"
+ 
+ static DEFINE_MUTEX(lpass_codec_mutex);
+ static enum lpass_codec_version lpass_codec_version;
+ 
++#ifdef CONFIG_PM_CLK
++int lpass_macro_pm_clks_init(struct device *dev)
++{
++	int ret;
++
++	/* M81 runtime PM uses the driver's existing, named clock references. */
++	if (liuqin_board_quirks())
++		return 0;
++
++	ret = devm_pm_clk_create(dev);
++	if (ret)
++		return ret;
++	ret = of_pm_clk_add_clks(dev);
++	return ret < 0 ? ret : 0;
++}
++EXPORT_SYMBOL_GPL(lpass_macro_pm_clks_init);
++
++int lpass_macro_pm_clks_set(struct device *dev, struct clk * const *clks,
++			    unsigned int count, bool enable)
++{
++	unsigned int i;
++	int ret = 0;
++
++	if (!liuqin_board_quirks())
++		return enable ? liuqin_audio_clk_resume(dev) : pm_clk_suspend(dev);
++
++	if (enable) {
++		if (!liuqin_audio_transport_ready())
++			return -EBUSY;
++
++		for (i = 0; i < count; i++) {
++			ret = clk_prepare_enable(clks[i]);
++			if (ret)
++				goto disable;
++		}
++		return 0;
++	}
++
++	i = count;
++disable:
++	while (i)
++		clk_disable_unprepare(clks[--i]);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(lpass_macro_pm_clks_set);
++#endif
++
+ struct lpass_macro *lpass_macro_pds_init(struct device *dev)
+ {
+ 	struct lpass_macro *l_pds;
+diff --git a/sound/soc/codecs/lpass-macro-common.h b/sound/soc/codecs/lpass-macro-common.h
+index 10ad682..cddc909 100644
+--- a/sound/soc/codecs/lpass-macro-common.h
++++ b/sound/soc/codecs/lpass-macro-common.h
+@@ -37,6 +37,11 @@ struct lpass_macro {
+ 	struct device *dcodec_pd;
+ };
+ 
++struct clk;
++int lpass_macro_pm_clks_init(struct device *dev);
++int lpass_macro_pm_clks_set(struct device *dev, struct clk * const *clks,
++			    unsigned int count, bool enable);
++
+ struct lpass_macro *lpass_macro_pds_init(struct device *dev);
+ void lpass_macro_pds_exit(struct lpass_macro *pds);
+ void lpass_macro_set_codec_version(enum lpass_codec_version version);
+diff --git a/sound/soc/codecs/lpass-rx-macro.c b/sound/soc/codecs/lpass-rx-macro.c
+index e12126d..994a5a9 100644
+--- a/sound/soc/codecs/lpass-rx-macro.c
++++ b/sound/soc/codecs/lpass-rx-macro.c
+@@ -3898,14 +3898,10 @@ static int rx_macro_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = devm_pm_clk_create(dev);
++	ret = lpass_macro_pm_clks_init(dev);
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = of_pm_clk_add_clks(dev);
+-	if (ret < 0)
+-		return ret;
+-
+ 	pm_runtime_set_autosuspend_delay(dev, 100);
+ 	pm_runtime_use_autosuspend(dev);
+ 	ret = devm_pm_runtime_enable(dev);
+@@ -3978,6 +3974,13 @@ static const struct of_device_id rx_macro_dt_match[] = {
+ };
+ MODULE_DEVICE_TABLE(of, rx_macro_dt_match);
+ 
++static int rx_macro_set_clocks(struct rx_macro *rx, bool enable)
++{
++	struct clk *clks[] = { rx->macro, rx->dcodec, rx->mclk, rx->npl, rx->fsgen };
++
++	return lpass_macro_pm_clks_set(rx->dev, clks, ARRAY_SIZE(clks), enable);
++}
++
+ static int rx_macro_runtime_suspend(struct device *dev)
+ {
+ 	struct rx_macro *rx = dev_get_drvdata(dev);
+@@ -3985,7 +3988,7 @@ static int rx_macro_runtime_suspend(struct device *dev)
+ 
+ 	regcache_cache_only(rx->regmap, true);
+ 
+-	ret = pm_clk_suspend(dev);
++	ret = rx_macro_set_clocks(rx, false);
+ 	if (ret) {
+ 		regcache_cache_only(rx->regmap, false);
+ 		return ret;
+@@ -4001,7 +4004,7 @@ static int rx_macro_runtime_resume(struct device *dev)
+ 	struct rx_macro *rx = dev_get_drvdata(dev);
+ 	int ret;
+ 
+-	ret = liuqin_audio_clk_resume(dev);
++	ret = rx_macro_set_clocks(rx, true);
+ 	if (ret) {
+ 		regcache_cache_only(rx->regmap, true);
+ 		regcache_mark_dirty(rx->regmap);
+@@ -4013,7 +4016,7 @@ static int rx_macro_runtime_resume(struct device *dev)
+ 	if (ret) {
+ 		regcache_cache_only(rx->regmap, true);
+ 		regcache_mark_dirty(rx->regmap);
+-		pm_clk_suspend(dev);
++		rx_macro_set_clocks(rx, false);
+ 		return ret;
+ 	}
+ 
+diff --git a/sound/soc/codecs/lpass-tx-macro.c b/sound/soc/codecs/lpass-tx-macro.c
+index c892630..09d268f 100644
+--- a/sound/soc/codecs/lpass-tx-macro.c
++++ b/sound/soc/codecs/lpass-tx-macro.c
+@@ -2519,14 +2519,10 @@ static int tx_macro_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		goto err;
+ 
+-	ret = devm_pm_clk_create(dev);
++	ret = lpass_macro_pm_clks_init(dev);
+ 	if (ret)
+ 		goto err;
+ 
+-	ret = of_pm_clk_add_clks(dev);
+-	if (ret < 0)
+-		goto err;
+-
+ 	pm_runtime_set_autosuspend_delay(dev, 100);
+ 	pm_runtime_use_autosuspend(dev);
+ 	ret = devm_pm_runtime_enable(dev);
+@@ -2587,6 +2583,13 @@ static void tx_macro_remove(struct platform_device *pdev)
+ 	lpass_macro_pds_exit(tx->pds);
+ }
+ 
++static int tx_macro_set_clocks(struct tx_macro *tx, bool enable)
++{
++	struct clk *clks[] = { tx->macro, tx->dcodec, tx->mclk, tx->npl, tx->fsgen };
++
++	return lpass_macro_pm_clks_set(tx->dev, clks, ARRAY_SIZE(clks), enable);
++}
++
+ static int tx_macro_runtime_suspend(struct device *dev)
+ {
+ 	struct tx_macro *tx = dev_get_drvdata(dev);
+@@ -2594,7 +2597,7 @@ static int tx_macro_runtime_suspend(struct device *dev)
+ 
+ 	regcache_cache_only(tx->regmap, true);
+ 
+-	ret = pm_clk_suspend(dev);
++	ret = tx_macro_set_clocks(tx, false);
+ 	if (ret) {
+ 		regcache_cache_only(tx->regmap, false);
+ 		return ret;
+@@ -2610,7 +2613,7 @@ static int tx_macro_runtime_resume(struct device *dev)
+ 	struct tx_macro *tx = dev_get_drvdata(dev);
+ 	int ret;
+ 
+-	ret = liuqin_audio_clk_resume(dev);
++	ret = tx_macro_set_clocks(tx, true);
+ 	if (ret) {
+ 		regcache_cache_only(tx->regmap, true);
+ 		regcache_mark_dirty(tx->regmap);
+@@ -2622,7 +2625,7 @@ static int tx_macro_runtime_resume(struct device *dev)
+ 	if (ret) {
+ 		regcache_cache_only(tx->regmap, true);
+ 		regcache_mark_dirty(tx->regmap);
+-		pm_clk_suspend(dev);
++		tx_macro_set_clocks(tx, false);
+ 		return ret;
+ 	}
+ 
+diff --git a/sound/soc/codecs/lpass-va-macro.c b/sound/soc/codecs/lpass-va-macro.c
+index f7e7897..3b4085d 100644
+--- a/sound/soc/codecs/lpass-va-macro.c
++++ b/sound/soc/codecs/lpass-va-macro.c
+@@ -1622,14 +1622,10 @@ static int va_macro_probe(struct platform_device *pdev)
+ 			goto err;
+ 	}
+ 
+-	ret = devm_pm_clk_create(dev);
++	ret = lpass_macro_pm_clks_init(dev);
+ 	if (ret)
+ 		goto err;
+ 
+-	ret = of_pm_clk_add_clks(dev);
+-	if (ret < 0)
+-		goto err;
+-
+ 	pm_runtime_set_autosuspend_delay(dev, 100);
+ 	pm_runtime_use_autosuspend(dev);
+ 	ret = devm_pm_runtime_enable(dev);
+@@ -1721,6 +1717,13 @@ static void va_macro_remove(struct platform_device *pdev)
+ 	lpass_macro_pds_exit(va->pds);
+ }
+ 
++static int va_macro_set_clocks(struct va_macro *va, bool enable)
++{
++	struct clk *clks[] = { va->macro, va->dcodec, va->mclk, va->npl };
++
++	return lpass_macro_pm_clks_set(va->dev, clks, ARRAY_SIZE(clks), enable);
++}
++
+ static int va_macro_runtime_suspend(struct device *dev)
+ {
+ 	struct va_macro *va = dev_get_drvdata(dev);
+@@ -1728,7 +1731,7 @@ static int va_macro_runtime_suspend(struct device *dev)
+ 
+ 	regcache_cache_only(va->regmap, true);
+ 
+-	ret = pm_clk_suspend(dev);
++	ret = va_macro_set_clocks(va, false);
+ 	if (ret) {
+ 		regcache_cache_only(va->regmap, false);
+ 		return ret;
+@@ -1744,7 +1747,7 @@ static int va_macro_runtime_resume(struct device *dev)
+ 	struct va_macro *va = dev_get_drvdata(dev);
+ 	int ret, sret;
+ 
+-	ret = liuqin_audio_clk_resume(dev);
++	ret = va_macro_set_clocks(va, true);
+ 	if (ret) {
+ 		regcache_cache_only(va->regmap, true);
+ 		regcache_mark_dirty(va->regmap);
+@@ -1757,7 +1760,7 @@ static int va_macro_runtime_resume(struct device *dev)
+ 	if (ret) {
+ 		regcache_cache_only(va->regmap, true);
+ 		regcache_mark_dirty(va->regmap);
+-		sret = pm_clk_suspend(dev);
++		sret = va_macro_set_clocks(va, false);
+ 		if (sret)
+ 			dev_err(va->dev,
+ 				"failed to suspend clocks after regcache sync failure: %d\n",

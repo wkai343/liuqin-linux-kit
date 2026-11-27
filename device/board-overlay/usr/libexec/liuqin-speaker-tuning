@@ -1,0 +1,355 @@
+#!/usr/bin/python3
+# SPDX-License-Identifier: MIT
+"""Select the stock CS35L41 media or speakerphone delta for the desktop audio graph."""
+from collections import defaultdict
+from contextlib import ExitStack
+from dataclasses import dataclass
+import hashlib
+import json
+import logging
+import os
+from pathlib import Path
+import signal
+import struct
+import subprocess
+import time
+import zlib
+
+AMPS = ('TL', 'TR', 'BL', 'BR')
+TUNING = Path('/usr/share/liuqin/speaker-tuning')
+FIRMWARE = Path('/usr/lib/firmware')
+FIRMWARE_DIRS = tuple(FIRMWARE / prefix / 'cirrus' for prefix in
+                      (f'updates/{os.uname().release}', 'updates', os.uname().release, ''))
+ZERO = bytes(4)
+UPDATE = (8).to_bytes(4, 'big')
+LOG = logging.getLogger('liuqin-speaker-tuning')
+
+
+def v35_blocks(path, amp):
+    """Read the EQ and gain records from this position's stock full WMDR profile."""
+    data = path.read_bytes()
+    if data[:8] != b'WMDR\x10\x00\x00\x00':
+        raise ValueError(f'Invalid Protection coefficient file {path}')
+    pos = 16
+    packed = metadata = None
+    while pos + 20 <= len(data):
+        offset, kind, algorithm, version, _, size = struct.unpack_from('<HHIIII', data, pos)
+        start = pos + 20
+        end = start + size
+        if end > len(data):
+            raise ValueError(f'Truncated WMDR section in {path}')
+        if (kind, offset, algorithm, version) == (0x12, 0x134, 0xcd, 0x1d500000):
+            packed = data[start:end]
+        elif kind == 0xfc00:
+            metadata = json.loads(data[start:end].rstrip(b'\0'))
+        pos = (end + 3) & ~3
+    if (not packed or len(packed) != 3732 or not isinstance(metadata, dict) or
+            not metadata.get('client_tuning_name', '').endswith(f'_{amp}_Music_Version3.5')):
+        raise ValueError(f'Unsupported {amp} speaker tuning in {path}')
+
+    # HALO packed YM has three bytes per signed word and reversed four-byte bus transfers.
+    raw = b''.join(packed[i:i+4][::-1] for i in range(0, len(packed), 4))
+    words = [int.from_bytes(raw[i:i+3], 'little', signed=True) for i in range(0, len(raw), 3)]
+    crc = zlib.crc32(struct.pack(f'<{len(words)}i', *words))
+    if crc != (int(metadata['checksum']) & 0xffffffff) or words[:4] != [len(words)+1, 4, 768, 1236]:
+        raise ValueError(f'Invalid full tuning checksum or header for {amp}')
+
+    # In M81 V3.5, block 23 is a five-coefficient biquad. Four consecutive
+    # biquads precede the gain at block 27. All offsets below are DSP words.
+    for pos in range(202, 234, 8):
+        if words[pos:pos+3] != [3, 9, 9]:
+            raise ValueError(f'Unexpected {amp} EQ layout')
+    if words[234:237] != [7, 9, 9] or words[238] != 0:
+        raise ValueError(f'Unexpected {amp} gain layout')
+    return words[205:210], words[237]
+
+
+def load_packets(directory, manifest, firmware_dirs=FIRMWARE_DIRS):
+    digests = json.loads(manifest.read_text())
+    packets = {'music': {}, 'voice': {}}
+    for amp in AMPS:
+        filename = f'cs35l41-dsp1-spk-prot-{amp.lower()}.bin'
+        profile = next((d/filename for d in firmware_dirs if (d/filename).is_file()), None)
+        if profile is None:
+            raise ValueError(f'Missing {amp} Protection tuning {filename}')
+        eq, base_gain = v35_blocks(profile, amp)
+        for mode, positions in packets.items():
+            name = f'{amp}-{mode}.txt'
+            data = (directory / name).read_bytes()
+            if hashlib.sha256(data).hexdigest() != digests.get(name):
+                raise ValueError(f'Unexpected stock tuning file {name}')
+            words = [int(word) for word in data.split(b',')]
+            if (len(words) != 12 or words[:9] != [12, 4, 768, 1236, 0, 0, 0, 1, 23]
+                    or words[10] != 0 or (mode == 'music' and words[9] != base_gain)):
+                raise ValueError(f'Invalid V3.5 source delta in {name}')
+            if (words[-1] & 0xffffffff) != zlib.crc32(struct.pack('<11i', *words[:-1])):
+                raise ValueError(f'Invalid CSPL checksum in {name}')
+            # The stock text has two gain arguments. On this full image slot 23
+            # consumes five EQ arguments; the CRC would become a filter coefficient.
+            # Restore that whole filter so an upgrade also repairs a running DSP.
+            body = [18, *words[1:7], 2, 23, *eq, 27, *words[9:11]]
+            crc = zlib.crc32(struct.pack('<17i', *body))
+            positions[amp] = struct.pack('>17iI', *body, crc)
+    return packets
+
+
+@dataclass(frozen=True)
+class Node:
+    media_class: str
+    role: str
+    group: tuple
+    running: bool
+    speaker: bool = False
+
+    @classmethod
+    def from_properties(cls, props, running):
+        media_class = props.get('media.class') or ''
+        group = props.get('node.link-group')
+        speaker = (media_class in ('Audio/Sink', 'Audio/Sink/Internal')
+                   and props.get('alsa.id') == 'XiaomiPad6Pro'
+                   and (props.get('api.alsa.path') == 'liuqin_speaker'
+                        or props.get('device.profile.name') == 'HiFi: Speaker: sink'))
+        return cls(media_class, props.get('media.role') or '',
+                   (props.get('client.id'), group) if group else (), running, speaker)
+
+
+def speaker_mode(nodes, links):
+    speakers = {i for i, n in nodes.items() if n.speaker and n.running}
+    if not speakers:
+        return None
+    calls = [i for i, n in nodes.items() if n.running and n.media_class == 'Stream/Output/Audio'
+             and n.role.lower() in ('communication', 'phone')]
+    if not calls:
+        return 'music'
+
+    edges = defaultdict(set)
+    for output, target in links:
+        edges[output].add(target)
+    # PipeWire connects the two halves of a virtual sink inside the client.
+    # Such edges do not appear as Link objects (including Plasma's Phone Calls sink).
+    outputs = defaultdict(set)
+    for i, node in nodes.items():
+        if node.running and node.group and node.media_class == 'Stream/Output/Audio':
+            outputs[node.group].add(i)
+    for i, node in nodes.items():
+        if node.running and node.group and node.media_class in ('Audio/Sink', 'Stream/Input/Audio'):
+            edges[i].update(outputs[node.group])
+
+    seen = set()
+    while calls:
+        node = calls.pop()
+        if node in speakers:
+            return 'voice'
+        if node not in seen:
+            seen.add(node)
+            calls.extend(edges[node] - seen)
+    return 'music'
+
+
+class Amplifiers:
+    def __init__(self, packets):
+        self.packets = packets
+
+    @staticmethod
+    def control(amp, name, data=None):
+        element = 'name=' + amp + ' ' + name
+        args = ['amixer', '-D', 'hw:XiaomiPad6Pro']
+        if data is None:
+            args.extend(('cget', element))
+        else:
+            args.extend(('-q', 'cset', element, ','.join(f'0x{x:02x}' for x in data)))
+        cmd = subprocess.run(args, capture_output=True, text=True, timeout=3)
+        if cmd.returncode:
+            raise OSError(f'{element}: {cmd.stderr.strip()}')
+        if data is None:
+            _, marker, value = cmd.stdout.partition('  : values=')
+            if not marker:
+                raise OSError(f'{element} has no readable value')
+            return value.strip()
+
+    def read(self, amp, name, size):
+        values = self.control(amp, 'DSP1 Protection cd ' + name)
+        try:
+            data = bytes(int(x, 0) for x in values.split(','))
+        except ValueError as error:
+            raise OSError(f'{amp} {name} has an invalid byte value') from error
+        if len(data) != size:
+            raise OSError(f'{amp} {name} has {len(data)} bytes, expected {size}')
+        return data
+
+    def write(self, amp, name, data):
+        self.control(amp, 'DSP1 Protection cd ' + name, data)
+
+    def require_ready(self, amp):
+        if self.control(amp, 'Speaker Calibration Loaded') != 'on':
+            raise OSError(f'{amp} has no loaded speaker calibration')
+        if self.read(amp, 'CSPL_STATE', 4) != ZERO:
+            raise OSError(f'{amp} Protection DSP is not running')
+
+    def commit(self, buffers):
+        # Stage every position before issuing the first update command.
+        for amp, buf in buffers.items():
+            self.write(amp, '_UPDATE_PARAMS_CONFIG', buf)
+            self.write(amp, 'CSPL_COMMAND', ZERO)
+        with ExitStack() as rearm:
+            for amp in buffers:
+                # The DSP consumes the command, but wm_adsp caches the last host
+                # write across transitions and firmware reloads, including on failure.
+                rearm.callback(self.write, amp, 'CSPL_COMMAND', ZERO)
+                self.write(amp, 'CSPL_COMMAND', UPDATE)
+            for amp in buffers:
+                for _ in range(5):
+                    if self.read(amp, 'CSPL_STATE', 4) == ZERO:
+                        break
+                    time.sleep(.0002)
+                else:
+                    raise OSError(f'{amp} did not return to CSPL running state')
+                if self.read(amp, 'CSPL_ERRORNO', 4) != ZERO:
+                    raise OSError(f'{amp} Protection DSP reported an error')
+
+    def apply(self, mode):
+        buffers = {}
+        for amp, packet in self.packets[mode].items():
+            self.require_ready(amp)
+            # ALSA exposes the entire 400-byte YM control; only replace this packet.
+            current = self.read(amp, '_UPDATE_PARAMS_CONFIG', 400)
+            buffers[amp] = packet + current[len(packet):]
+        try:
+            self.commit(buffers)
+        except (OSError, subprocess.TimeoutExpired):
+            # A device can disappear after preflight. Restore each reachable
+            # amp independently, then let the graph monitor retry the group.
+            for amp, buffer in buffers.items():
+                try:
+                    self.require_ready(amp)
+                    music = self.packets['music'][amp]
+                    self.commit({amp: music + buffer[len(music):]})
+                except (OSError, subprocess.TimeoutExpired) as error:
+                    LOG.debug('Could not restore %s: %s', amp, error)
+            raise
+
+
+def monitor(amps):
+    import gi
+    gi.require_version('Wp', '0.5')
+    from gi.repository import Gio, GLib, GLibUnix, GObject, Wp
+
+    Wp.init(Wp.InitFlags.ALL)
+    core = Wp.Core.new(None, None, None)
+    manager = Wp.ObjectManager.new()
+    loop = GLib.MainLoop()
+    objects = set()
+    applied = None
+    last_mode = None
+    timer = 0
+    retry = 0
+    retry_ms = 50
+    last_error = None
+
+    def desired_mode():
+        nodes = {}
+        links = []
+        for obj in objects:
+            if isinstance(obj, Wp.Link):
+                if obj.get_state()[0] == Wp.LinkState.ACTIVE:
+                    output, _, target, _ = obj.get_linked_object_ids()
+                    links.append((output, target))
+            else:
+                props = Wp.PipewireObject.get_properties(obj)
+                nodes[obj.get_bound_id()] = Node.from_properties(
+                    props, obj.get_state()[0] == Wp.NodeState.RUNNING)
+        return speaker_mode(nodes, links)
+
+    def update():
+        nonlocal applied, last_mode, timer, retry, retry_ms, last_error
+        timer = 0
+        mode = desired_mode()
+        closing = mode is None
+        if closing and last_mode is None:
+            return False
+        if mode != last_mode:
+            if retry:
+                GLib.source_remove(retry)
+                retry = 0
+            retry_ms = 50
+            last_error = None
+            last_mode = mode
+        elif retry:
+            return False
+        wanted = mode or 'music'
+        try:
+            if applied != wanted:
+                amps.apply(wanted)
+                LOG.info('Applied %s to %s', wanted, ', '.join(AMPS))
+            applied = None if closing else wanted
+            last_error = None
+            retry_ms = 50
+        except (OSError, subprocess.TimeoutExpired) as error:
+            applied = None
+            if not closing:
+                if retry_ms >= 400 and str(error) != last_error:
+                    LOG.warning('Waiting to apply %s: %s', wanted, error)
+                    last_error = str(error)
+                retry = GLib.timeout_add(retry_ms, retry_update)
+                retry_ms = min(retry_ms * 2, 3000)
+        return False
+
+    def retry_update():
+        nonlocal retry
+        retry = 0
+        queue()
+        return False
+
+    def queue(*_):
+        nonlocal timer
+        if not timer:
+            timer = GLib.timeout_add(20, update)
+
+    def added(_, obj):
+        objects.add(obj)
+        obj.connect('state-changed', queue)
+        if isinstance(obj, Wp.Node):
+            obj.connect('notify::properties', queue)
+        queue()
+
+    def removed(_, obj):
+        objects.discard(obj)
+        queue()
+
+    def sleep_changed(_bus, _sender, _path, _iface, _signal, parameters, _data):
+        nonlocal applied
+        if not parameters.unpack()[0]:
+            applied = None
+            queue()
+
+    for cls in (Wp.Node, Wp.Link):
+        manager.add_interest_full(Wp.ObjectInterest.new_type(cls))
+        manager.request_object_features(cls, Wp.ProxyFeatures.PROXY_FEATURE_BOUND |
+                                        Wp.ProxyFeatures.PIPEWIRE_OBJECT_FEATURE_INFO)
+    manager.connect('object-added', added)
+    manager.connect('object-removed', removed)
+    GObject.Object.connect(core, 'disconnected', lambda *_: loop.quit())
+    core.install_object_manager(manager)
+    if not core.connect():
+        raise OSError('Cannot connect to PipeWire')
+
+    bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+    bus.signal_subscribe('org.freedesktop.login1', 'org.freedesktop.login1.Manager',
+                         'PrepareForSleep', '/org/freedesktop/login1', None, Gio.DBusSignalFlags.NONE,
+                         sleep_changed, None)
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        GLibUnix.signal_add(GLib.PRIORITY_DEFAULT, sig, lambda *_: loop.quit() or False)
+    try:
+        loop.run()
+    finally:
+        if last_mode is not None and applied != 'music':
+            try:
+                amps.apply('music')
+            except (OSError, subprocess.TimeoutExpired) as error:
+                LOG.warning('Music will be reapplied on the next speaker start: %s', error)
+
+
+if __name__ == '__main__':
+    os.environ['LC_ALL'] = 'C'
+    logging.basicConfig(level=logging.INFO, format='%(message)s')
+    monitor(Amplifiers(load_packets(TUNING, TUNING/'sha256.json')))

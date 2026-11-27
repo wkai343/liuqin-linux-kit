@@ -1,0 +1,120 @@
+Subject: [PATCH] drm/msm/dpu: check the initial Liuqin MDP clock vote
+
+Reject an empty Liuqin OPP table at probe. Seed the first runtime resume
+of each DRM bind with the highest qualified rate. On subsequent resumes
+use the last rate accepted by the CRTC performance path. Check the vote
+before enabling clocks or touching registers. Let bind teardown destroy
+the private object once when the first resume fails.
+
+The 7.3.4 CRTC path keeps the last nonzero vote on blank. Runtime suspend
+and genpd continue to own clock gating and domain power management.
+
+OEM: MiCode/Xiaomi_Kernel_OpenSource, liuqin-t-oss
+     eb49e10028e27fa98856cb5e458c0f0ec5b4554e, drivers/clk/qcom/.
+     dispcc-waipio.c defines the MDP rate-to-voltage table. In clk-regmap.c,
+     clk_prepare_regmap() votes for the voltage level of the current rate.
+     The highest OPP on first bind and the saved CRTC rate on later resumes
+     are choices of this DRM driver.
+
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
+index 309f091bcf2c..af2b6a4025fd 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
+@@ -12,6 +12,7 @@
+ #include <linux/debugfs.h>
+ #include <linux/dma-buf.h>
+ #include <linux/of_irq.h>
++#include <linux/platform_data/liuqin.h>
+ #include <linux/pm_opp.h>
+ 
+ #include <drm/drm_liuqin.h>
+@@ -1276,8 +1277,9 @@ static int dpu_kms_hw_init(struct msm_kms *kms)
+ 	atomic_set(&dpu_kms->bandwidth_ref, 0);
+ 
+ 	rc = pm_runtime_resume_and_get(&dpu_kms->pdev->dev);
++	/* Bind unwind calls destroy() for the private object above. */
+ 	if (rc < 0)
+-		goto error;
++		return rc;
+ 
+ 	core_rev = readl_relaxed(dpu_kms->mmio + 0x0);
+ 
+@@ -1401,7 +1403,6 @@ static int dpu_kms_hw_init(struct msm_kms *kms)
+ 
+ err_pm_put:
+ 	pm_runtime_put_sync(&dpu_kms->pdev->dev);
+-error:
+ 	_dpu_kms_hw_destroy(dpu_kms);
+ 
+ 	return rc;
+@@ -1417,11 +1418,15 @@ static int dpu_kms_init(struct drm_device *ddev)
+ 	int ret = 0;
+ 	unsigned long max_freq = ULONG_MAX;
+ 
+-	opp = dev_pm_opp_find_freq_floor(dev, &max_freq);
+-	if (!IS_ERR(opp))
+-		dev_pm_opp_put(opp);
+-
+-	dev_pm_opp_set_rate(dev, max_freq);
++	if (dpu_kms->initial_core_opp_rate) {
++		/* First resume of each bind starts at the highest qualified rate. */
++		dpu_kms->perf.core_clk_rate = dpu_kms->initial_core_opp_rate;
++	} else {
++		opp = dev_pm_opp_find_freq_floor(dev, &max_freq);
++		if (!IS_ERR(opp))
++			dev_pm_opp_put(opp);
++		dev_pm_opp_set_rate(dev, max_freq);
++	}
+ 
+ 	ret = msm_kms_init(&dpu_kms->base, &kms_funcs);
+ 	if (ret) {
+@@ -1511,11 +1516,20 @@ static int dpu_dev_probe(struct platform_device *pdev)
+ 	ret = devm_pm_opp_set_clkname(dev, "core");
+ 	if (ret)
+ 		return ret;
+-	/* OPP table is optional */
+ 	ret = devm_pm_opp_of_add_table(dev);
+ 	if (ret && ret != -ENODEV)
+ 		return dev_err_probe(dev, ret, "invalid OPP table in device tree\n");
+ 
++	if (liuqin_board_quirks()) {
++		unsigned long rate = ULONG_MAX;
++		struct dev_pm_opp *opp = dev_pm_opp_find_freq_floor(dev, &rate);
++
++		if (IS_ERR(opp))
++			return dev_err_probe(dev, PTR_ERR(opp), "missing MDP core OPP\n");
++		dev_pm_opp_put(opp);
++		dpu_kms->initial_core_opp_rate = rate;
++	}
++
+ 	ret = devm_clk_bulk_get_all(&pdev->dev, &dpu_kms->clocks);
+ 	if (ret < 0)
+ 		return dev_err_probe(dev, ret, "failed to parse clocks\n");
+@@ -1573,6 +1587,15 @@ static int __maybe_unused dpu_runtime_resume(struct device *dev)
+ 
+ 	ddev = dpu_kms->dev;
+ 
++	/* After the first modeset, perf retains the last successful nonzero vote. */
++	if (dpu_kms->initial_core_opp_rate) {
++		rc = dev_pm_opp_set_rate(dev, dpu_kms->perf.core_clk_rate);
++		if (rc) {
++			dev_err(dev, "failed to vote for MDP core clock: %d\n", rc);
++			return rc;
++		}
++	}
++
+ 	rc = clk_bulk_prepare_enable(dpu_kms->num_clocks, dpu_kms->clocks);
+ 	if (rc) {
+ 		DPU_ERROR("clock enable failed rc:%d\n", rc);
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.h b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.h
+index e39831a397b1..9bd9c238a657 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.h
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.h
+@@ -88,6 +88,7 @@ struct dpu_kms {
+ 
+ 	struct platform_device *pdev;
+ 	bool rpm_enabled;
++	unsigned long initial_core_opp_rate;
+ 
+ 	struct clk_bulk_data *clocks;
+ 	size_t num_clocks;

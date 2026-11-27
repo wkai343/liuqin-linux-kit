@@ -4,14 +4,72 @@ Third-party notices
 The MIT license in LICENSE applies to original project work only. It does not
 replace licenses on third-party code, patches to that code, or binary inputs.
 File-level notices take precedence.
+CREDITS.md identifies the Linux implementations, tests and comparison commits
+used for the device adaptations.
+
+Binary releases must identify the corresponding source versions and provide
+the source materials required by the licenses of the distributed components.
+
+The M81 stock ROM cited below is Xiaomi OS2.0.6.0.VMYCNXM.
+shared/liuqin-rom-images.json records its image digests.
 
 Kernel
 ------
 
-The kernel is built from kernel.org sources and local adaptation patches.
-Its COPYING, LICENSES directory, file-level SPDX identifiers and original
-authorship are retained. Exact sources are recorded in build/kernel/source.json
-and build/recovery/kernel/source.json.
+Fedora and Recovery build Linux stable v7.3.4, based on Torvalds Linux v7.3,
+from kernel.org with local Liuqin adaptations. The kernel's COPYING, LICENSES
+directory, file-level SPDX identifiers and original authorship are retained.
+Exact sources are recorded in build/kernel/source.json and
+build/recovery/kernel/source.json.
+
+The Xiaomi kernel reference is MiCode/Xiaomi_Kernel_OpenSource, liuqin-t-oss
+at eb49e10028e27fa98856cb5e458c0f0ec5b4554e. The patch headers identify
+the relevant source files, functions and stock ROM components.
+
+The Iris SM8450 platform layout references
+pkgs/kernel/patches/0006-liuqin-media-iris.patch from Seeker0472/liuqin-nixos
+commit 73e8071e09880aeb47f0a427b9a65b8cc10927c4.
+The NanoSic Caps Lock management command draws on that revision's
+pkgs/kernel/patches/0002-liuqin-input-hid-touchscreen.patch and
+docs/PORTING-NOTES.md, adapted to the local connection and suspend lifecycle.
+Folio posture support uses Seeker0472's GPIO23 active-low back-fold
+measurements and host-side input suppression, with separate GPIO ownership,
+MCU connector reports and explicit HID input releases.
+https://github.com/Seeker0472/liuqin-nixos
+
+For the panel, dtbo.img entry 15 defines the reset waveforms and the shared
+M81 five-supply list with its post-switch waits (0112). The shipping msm_drm.ko
+drives RESX low before releasing the supplies (0098). The same module checks
+its clock request in dsi_display_prepare() (0102). Xiaomi's display clock
+driver votes for voltage during clock prepare (0099). Choosing the first
+DRM OPP is local to the Linux port.
+
+For the M81 MDP and speaker I2C clocks (0110, 0111), the power supplies
+come from the shipping Cape device tree. The operating levels follow
+dispcc-waipio.c and gcc-waipio.c in Xiaomi's liuqin-t-oss kernel.
+
+On Adreno, adreno_gen7_gmu.c clears and configures interrupts before GMU
+start (0104). The Linux driver chooses its HFI interrupt mask for polled
+firmware replies.
+
+UFS lane clock ownership (0101) follows the symbol clocks in vendor_boot.img
+and their management in ufs-qcom.c.
+
+On the Bluetooth UART, Xiaomi stops RX and masks the main IRQ before
+releasing resources. Linux serial-core system suspend needs an earlier
+mask (0097). Xiaomi's hci_core.c queues HCI suspend preparation on the
+request workqueue and bounds the wait (0105). The shipping QTI Bluetooth
+HAL stops the IBS timers and tears down the handler, then creates a new
+handler on UART initialization (0106).
+
+The WCN6855 supply ranges (0107) come from the shipping device tree and
+MiCode/kernel_devicetree at 1c507816ba8aa6117dcec41f577ef7a66d2091f7
+(qcom/cape.dtsi). The RPMh, BT power and CNSS2 regulator drivers and the
+Bluetooth HAL establish the startup votes and firmware handoff. See
+docs/HARDWARE.md.
+
+USB and charging
+----------------
 
 UCSI registration and connector-lifetime fixes in patch 0042 are adapted from
 yzddmr6 and Codex's linux-sm8450-liuqin commits, respectively:
@@ -19,8 +77,29 @@ https://github.com/yzddmr6/linux-sm8450-liuqin/commit/9f9cd5ac3bc1fade2c2584a051
 https://github.com/yzddmr6/linux-sm8450-liuqin/commit/f43a4aa7fa89c6e227c5ec763e695576e66e2eb7
 The kernel files' existing licenses apply.
 
-Sensor stack
-------------
+The M81 charger classification (0100) uses the QC range in
+qti_battery_charger_main_m81.ko and the USB enumeration in Xiaomi's
+Android kernel for Linux power-supply reporting.
+
+liuqin-mipps-auth (device/board-overlay/usr/local/libexec/liuqin-mipps-auth)
+is derived from xiaomi-mipps-auth by ianchb and is licensed under
+GPL-2.0-only. The file retains its SPDX identifier and authorship notice.
+https://github.com/ianchb/xiaomi-mipps-auth
+
+xiaoabiao contributed the liuqin adaptation and the standard PPS switch
+(--allow-unverified-adapter). Role-first sequencing by yumo666666 and
+current-attach verification are adapted from xiaomipad-6pro-mainline
+commits 43aa1cb and 87f0250.
+https://github.com/yzddmr6/xiaomipad-6pro-mainline/pull/7
+https://github.com/yzddmr6/xiaomipad-6pro-mainline
+
+For off-mode charging, the M81 vendor init rules in init.batterysecret.rc
+and init.mi_thermald.rc start authentication and thermal control in charger
+mode. The storage check and USB type log formatting use Linux interfaces.
+docs/FASTCHARGE-SOURCES.md records the init file hashes and log ABI.
+
+FastRPC and sensors
+-------------------
 
 Pinned repositories and revisions: device/sensors/sources.manifest.
 
@@ -34,45 +113,26 @@ Pinned repositories and revisions: device/sensors/sources.manifest.
 The patches under device/sensors/patches retain the licenses of the components
 they modify.
 
-Charger authentication
-----------------------
+In the kernel, Xiaomi's adsprpc.c recovers an interrupted DSP invocation.
+The Linux FastRPC driver uses a freezer-aware wait to preserve a userspace
+invocation across system sleep (0103).
 
-* liuqin-mipps-auth (device/board-overlay/usr/local/libexec/liuqin-mipps-auth)
-  is derived from xiaomi-mipps-auth by ianchb,
-  https://github.com/ianchb/xiaomi-mipps-auth, GPL-2.0-only; the file-level
-  SPDX identifier and authorship notice are retained. The liuqin adaptation
-  and the standard PPS switch (--allow-unverified-adapter) are by xiaoabiao,
-  https://github.com/yzddmr6/xiaomipad-6pro-mainline/pull/7. The file is not
-  covered by the project's MIT license.
-  Role-first sequencing by yumo666666 and current-attach verification are
-  adapted from xiaomipad-6pro-mainline commits 43aa1cb and 87f0250:
-  https://github.com/yzddmr6/xiaomipad-6pro-mainline.
+The hexagonrpc listener uses the continuation protocol in Qualcomm fastrpc
+3b7f929145db1a52a8d0a334805defefd287e97e (src/listener_android.c and
+inc/adsp_listener.h). The Linux port also checks that both calls report
+the same total length.
 
-Desktop and build components
-----------------------------
+Audio
+-----
 
-* AudioReach topology: the board topology source and build script carry
-  BSD-3-Clause identifiers. The generated Xiaomi-Pad-6-Pro-tplg.bin is built
-  from topology source; it is not classified as proprietary DSP firmware.
-* AOSP mkbootimg: Apache-2.0.
-  https://android.googlesource.com/platform/system/tools/mkbootimg/
-* BusyBox: GPL-2.0, with file-level exceptions as documented upstream.
-  https://busybox.net/
+The AudioReach board topology source and build script carry BSD-3-Clause
+identifiers. Xiaomi-Pad-6-Pro-tplg.bin is generated from the topology
+source. It is not classified as proprietary DSP firmware.
 
-Binary releases must identify the corresponding source versions and provide
-the source materials required by the licenses of the distributed components.
-
-Firmware and factory data
--------------------------
-
-Qualcomm, Xiaomi and Cirrus firmware remain subject to their respective
-licenses. Inclusion in a download bundle does not place firmware under MIT.
-Redistribution permissions and notices must be established for each distributed
-firmware set before publication.
-
-Device-specific calibration, WLAN and Bluetooth addresses and factory sensor
-registry data are read from the user's tablet. They are not public source or
-shared firmware assets and must not be distributed.
+The M81 capture sequence (0108) follows /vendor/lib64/libagm_pcm_plugin.so
+and /vendor/lib64/libagm.so. The LPASS hardware votes (0109) are named in
+the vendor_boot device tree. Their order comes from lpass_cdc_dlkm.ko.
+docs/AUDIO.md identifies the Qualcomm driver sources for these votes.
 
 Fingerprint integration
 -----------------------
@@ -83,44 +143,12 @@ retain upstream BSD licenses. QSEE supplicant is by Dawid Wróbel
 (https://github.com/wrobelda/qsee-supplicant); QCBOR is by Laurence Lundblade
 (https://github.com/laurencelundblade/QCBOR). Exact dependencies are in
 device/fingerprint/oem/SOURCE_LOCK.json.
-The libfprint TOD and fprintd upstream archives remain external and hash-pinned; distribution of
-binaries must include corresponding source/adaptation as required by its license.
+
+The libfprint TOD and fprintd upstream archives remain external and
+hash-pinned. Binary distributions must include the corresponding source
+and adaptations required by the applicable license.
 OEM TA firmware, credentials, HATs, templates, raw images and private calibration
 are not included in this source repository.
-
-Boot and shutdown artwork
--------------------------
-
-The generated Plymouth themes use Fedora's official spinner and logo assets
-from the installed plymouth-theme-spinner package. Those assets and the
-Plymouth plugins retain their package licenses and trademarks; they are not
-covered by the project's MIT license. The runtime export includes the source
-RPM identities and package license files.
-
-The orientation signature and test fixtures are sparse pixel classifications
-from Xiaomi OS2.0.6.0.VMYCNXM imagefv.elf, not redistributed firmware or complete
-logo images. The pinned source hash and regeneration tool are documented in
-build/scripts/generate-boot-logo-signature.py.
-
-Linux 7.3 device adaptation
---------------------------
-
-The default source record build/kernel/source.json pins Linux stable
-v7.3.4, based on Torvalds Linux v7.3, and a port of the existing Liuqin
-adaptations. The Iris SM8450 platform
-layout references Seeker0472/liuqin-nixos commit
-73e8071e09880aeb47f0a427b9a65b8cc10927c4,
-pkgs/kernel/patches/0006-liuqin-media-iris.patch:
-https://github.com/Seeker0472/liuqin-nixos
-The NanoSic Caps Lock management command also references that commit's
-pkgs/kernel/patches/0002-liuqin-input-hid-touchscreen.patch and
-docs/PORTING-NOTES.md, adapted to the local connection and suspend lifecycle.
-The folio posture adaptation references the same project's GPIO23 active-low
-back-fold measurements and host-side input suppression, with separate GPIO
-ownership, the existing MCU connector reports and explicit HID input releases.
-Original file-level authorship, SPDX identifiers and kernel licensing remain
-applicable. This source adaptation does not redistribute device firmware or
-private calibration data.
 
 Video application integration
 -----------------------------
@@ -137,3 +165,39 @@ The plugin RPM includes corresponding source and build provenance. Official
 OBS Studio, Firefox and their libraries retain their own licenses and files.
 The separate Firefox launcher and Python build/test helpers use their stated
 file-level licenses; the launcher does not redistribute Mozilla binaries.
+
+Build tools
+-----------
+
+* AOSP mkbootimg: Apache-2.0.
+  https://android.googlesource.com/platform/system/tools/mkbootimg/
+* BusyBox: GPL-2.0, with file-level exceptions as documented upstream.
+  https://busybox.net/
+
+Boot and shutdown artwork
+-------------------------
+
+The generated Plymouth themes use Fedora's official spinner and logo assets
+from the installed plymouth-theme-spinner package. Those assets and the
+Plymouth plugins retain their package licenses and trademarks; they are not
+covered by the project's MIT license. The runtime export includes the source
+RPM identities and package license files.
+
+The orientation signature and test fixtures are sparse pixel classifications
+from Xiaomi OS2.0.6.0.VMYCNXM imagefv.elf, not redistributed firmware or complete
+logo images. The pinned source hash and regeneration tool are documented in
+build/scripts/generate-boot-logo-signature.py.
+
+Firmware and factory data
+-------------------------
+
+Qualcomm, Xiaomi and Cirrus firmware remain subject to their respective
+licenses. Inclusion in a download bundle does not place firmware under MIT.
+Redistribution permissions and notices must be established for each distributed
+firmware set before publication.
+The kernel source adaptations do not redistribute device firmware or private
+calibration data.
+
+Device-specific calibration, WLAN and Bluetooth addresses and factory sensor
+registry data are read from the user's tablet. They are not public source or
+shared firmware assets and must not be distributed.

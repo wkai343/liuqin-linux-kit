@@ -9,7 +9,8 @@ import tempfile
 
 
 def function(source, name):
-    match = re.search(r'^(?:static )?(?:int|void|bool|unsigned (?:long|int))\s+'
+    match = re.search(r'^(?:static )?(?:int|void|bool|ssize_t|unsigned (?:long|int))\s+'
+                      r'(?:__maybe_unused\s+)?'
                       + re.escape(name) + r'\([^;{]*\)\s*\{', source, re.M)
     if not match:
         raise ValueError(name)

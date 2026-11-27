@@ -39,10 +39,10 @@ out/                中间文件、成品和报告
 
 ## 构建与安装的依赖
 
-- 当前目标系统构建生成配套 boot/rootfs，GUI 使用独立 Rec；安装器不调用编译器或 Devbox。
-- 原生 Rec 的内核、DTB、ADB、LVGL 与运行载荷独立封装；默认目录为 out/releases/native-recovery-flash/。
+- [构建端](../build/README.md)生成配套的 boot/rootfs。[电脑安装器](../installer/README.md)使用独立 Rec，运行时无需编译器或 Devbox。
+- 原生 Rec 的内核、DTB、ADB、LVGL 与运行载荷独立封装，默认镜像目录见下表。
 - rootfs 先装配用户态，再嵌入目标内核包及模块。更换内核不必重新装配桌面。
-- `shared/` 由两端共用；`device/installer/` 提供经过确认后在平板执行的操作。
+- 构建端和安装器共用[数据格式与接口](../shared/README.md)，确认计划后由[设备侧安装脚本](../device/installer/README.md)执行。
 
 各阶段命令及产物见[构建指南](BUILD.md#当前构建产物)。
 内核升级包见 [内核更新](KERNEL-UPDATES.md)。
@@ -52,7 +52,7 @@ out/                中间文件、成品和报告
 `device/board-overlay` 保存睡眠、RTC、背光、CABC、显示恢复、启动方向、Wi-Fi MAC、
 蓝牙、充电认证、音频、存储保护和救援等板级文件。显示恢复当前使用 KScreen 后端，
 服务通过 `ConditionPathExists` 检查其是否可用。
-默认系统只构建 Fedora RPM；独立 DEB 工具仅保留通用板级包，不提供桌面镜像配方。
+默认系统构建 Fedora RPM。独立的 [DEB 设备包脚本](../build/scripts/build-liuqin-debs.sh)提供通用板级包，[内核打包工具](../build/scripts/build-liuqin-kernel-debs.py)也支持 DEB。仓库提供的桌面镜像配方使用 Fedora。
 两种包格式通过 [device_overlay.py](../build/lib/device_overlay.py) 装配 `board-overlay`，
 复制前检查已有目标文件与异常父路径。DEB 可用 `BOARD_OVERLAY` 指定来源；
 Fedora 设备包缓存跟踪板级目录及装配代码，服务激活链接由打包入口生成。
@@ -64,14 +64,13 @@ Fedora 设备包缓存跟踪板级目录及装配代码，服务激活链接由�
 | 位置 | 内容 |
 | --- | --- |
 | `out/build/from-source/` | 完成阶段缓存与 `.attempt-*` 失败目录 |
+| `--export-dir` 指定的新目录 | 本次 Fedora 构建的 `boot.img`、`rootfs.tar.gz`、启动契约与校验文件 |
 | `out/releases/native-recovery-flash/` | 当前默认临时 Rec 及匹配的清单/状态 |
 | `out/releases/fixed-installers/<SHA256>/` | 设备绑定的固定安装版校验镜像与资格文件 |
 | `out/reports/` | 构建报告 |
 | `out/login/` | 仅预置账号模式生成的登录信息，权限 0600 |
 | 安装器 state-dir | 安装运行记录；设备备份使用单独选择的目录 |
 
-`python3 installer/package.py` 输出 `out/releases/liuqin-linux-kit-installer-source.zip`，
-包含安装器、公共模块、设备安装脚本和必要说明；默认不包含构建环境、镜像或设备备份；传入 --native-recovery、--fixed-installer 等参数时，仅嵌入指定镜像、对应清单、验收及许可材料。
-安装器的 uv 环境位于忽略的 `installer/.venv`，不会进入源码包。
+`python3 installer/package.py` 默认将安装器、公共模块、设备脚本和说明打包到 `out/releases/liuqin-linux-kit-installer-source.zip`。源码包排除构建环境、`installer/.venv`、系统镜像和设备备份。使用 `--native-recovery`、`--fixed-installer` 等选项时另附所选镜像、清单及相应的验收与许可材料。镜像声明见[原生 Rec 分发说明](../build/recovery/NATIVE-NOTICE.md)和[历史 TWRP 配套版说明](../build/recovery/NOTICE.md)。
 
 原作者与第三方来源见 [CREDITS](../CREDITS.md)，原 LICENSE/NOTICE 及文件级许可保留。

@@ -1,0 +1,132 @@
+Subject: [PATCH] scsi: ufs: give the M81 symbol clocks a single owner
+
+The M81 freq-table-hz includes the PHY symbol clocks. Keep those entries out
+of core gating and acquire RX0, TX0, RX1 and optional TX1 for the lane
+helpers. Balance repeated HCE, gating and resume calls. Preserve the clock
+layout used by the other Qualcomm variants and the OPP parser.
+
+OEM: Xiaomi M81 OS2.0.6.0.VMYCNXM, Cape DTB in vendor_boot.img. Its UFS
+     node lists TX0, RX0 and RX1 symbol clocks. In MiCode/Xiaomi_Kernel_OpenSource
+     eb49e10028e27fa98856cb5e458c0f0ec5b4554e, drivers/scsi/ufs/ufs-qcom.c,
+     ufs_qcom_init_lane_clks() treats TX1 as optional and
+     ufs_qcom_enable_lane_clks() tracks whether the lanes are enabled.
+
+diff --git a/drivers/ufs/host/ufs-qcom.c b/drivers/ufs/host/ufs-qcom.c
+index aedf41b32..c6b473269 100644
+--- a/drivers/ufs/host/ufs-qcom.c
++++ b/drivers/ufs/host/ufs-qcom.c
+@@ -13,6 +13,7 @@
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/phy/phy.h>
++#include <linux/platform_data/liuqin.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_domain.h>
+ #include <linux/reset-controller.h>
+@@ -356,6 +357,9 @@ static int ufs_qcom_enable_lane_clks(struct ufs_qcom_host *host)
+ {
+ 	int err;
+ 
++	if (host->is_lane_clks_enabled)
++		return 0;
++
+ 	err = clk_bulk_prepare_enable(host->num_clks, host->clks);
+ 	if (err)
+ 		return err;
+@@ -365,6 +369,43 @@ static int ufs_qcom_enable_lane_clks(struct ufs_qcom_host *host)
+ 	return 0;
+ }
+ 
++static const char * const ufs_qcom_lane_names[] = {
++	"rx_lane0_sync_clk", "tx_lane0_sync_clk",
++	"rx_lane1_sync_clk", "tx_lane1_sync_clk",
++};
++
++static bool ufs_qcom_owns_legacy_clk(const char *name)
++{
++	return liuqin_board_quirks() && match_string(ufs_qcom_lane_names,
++					ARRAY_SIZE(ufs_qcom_lane_names), name) >= 0;
++}
++
++static int ufs_qcom_get_liuqin_lane_clks(struct ufs_qcom_host *host)
++{
++	struct device *dev = host->hba->dev;
++	unsigned int count = host->hba->lanes_per_direction > 1 ? 4 : 2;
++	struct clk_bulk_data *clks;
++	int ret, i;
++
++	clks = devm_kcalloc(dev, count, sizeof(*clks), GFP_KERNEL);
++	if (!clks)
++		return -ENOMEM;
++
++	for (i = 0; i < count; i++)
++		clks[i].id = ufs_qcom_lane_names[i];
++
++	/* A dual-lane M81 normally shares the TX symbol clock. */
++	ret = devm_clk_bulk_get(dev, min(count, 3U), clks);
++	if (!ret && count == 4)
++		ret = devm_clk_bulk_get_optional(dev, 1, &clks[3]);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to get UFS lane clocks\n");
++
++	host->clks = clks;
++	host->num_clks = count;
++	return 0;
++}
++
+ static int ufs_qcom_init_lane_clks(struct ufs_qcom_host *host)
+ {
+ 	int err;
+@@ -373,6 +414,9 @@ static int ufs_qcom_init_lane_clks(struct ufs_qcom_host *host)
+ 	if (has_acpi_companion(dev))
+ 		return 0;
+ 
++	if (liuqin_board_quirks() && of_property_present(dev->of_node, "freq-table-hz"))
++		return ufs_qcom_get_liuqin_lane_clks(host);
++
+ 	err = devm_clk_bulk_get_all(dev, &host->clks);
+ 	if (err <= 0)
+ 		return err;
+@@ -2925,6 +2969,7 @@ static const struct ufs_hba_variant_ops ufs_hba_qcom_vops = {
+ 	.exit                   = ufs_qcom_exit,
+ 	.get_ufs_hci_version	= ufs_qcom_get_ufs_hci_version,
+ 	.clk_scale_notify	= ufs_qcom_clk_scale_notify,
++	.owns_legacy_clk        = ufs_qcom_owns_legacy_clk,
+ 	.setup_clocks           = ufs_qcom_setup_clocks,
+ 	.hce_enable_notify      = ufs_qcom_hce_enable_notify,
+ 	.link_startup_notify    = ufs_qcom_link_startup_notify,
+diff --git a/drivers/ufs/host/ufshcd-pltfrm.c b/drivers/ufs/host/ufshcd-pltfrm.c
+index 169dbc1a7..675836bac 100644
+--- a/drivers/ufs/host/ufshcd-pltfrm.c
++++ b/drivers/ufs/host/ufshcd-pltfrm.c
+@@ -82,6 +82,10 @@ static int ufshcd_parse_clock_info(struct ufs_hba *hba)
+ 		if (ret)
+ 			goto out;
+ 
++		if (hba->vops && hba->vops->owns_legacy_clk &&
++		    hba->vops->owns_legacy_clk(name))
++			continue;
++
+ 		clki = devm_kzalloc(dev, sizeof(*clki), GFP_KERNEL);
+ 		if (!clki) {
+ 			ret = -ENOMEM;
+diff --git a/include/ufs/ufshcd.h b/include/ufs/ufshcd.h
+index dfd302f2d..6318bab06 100644
+--- a/include/ufs/ufshcd.h
++++ b/include/ufs/ufshcd.h
+@@ -380,6 +380,7 @@ struct ufshcd_tx_eq_params {
+  *	capability bit.
+  * @get_ufs_hci_version: called to get UFS HCI version
+  * @clk_scale_notify: notifies that clks are scaled up/down
++ * @owns_legacy_clk: variant gates this clock from a DT freq-table-hz entry
+  * @setup_clocks: called before touching any of the controller registers
+  * @hce_enable_notify: called before and after HCE enable bit is set to allow
+  *                     variant specific Uni-Pro initialization.
+@@ -429,6 +430,7 @@ struct ufs_hba_variant_ops {
+ 	int	(*set_dma_mask)(struct ufs_hba *);
+ 	int	(*clk_scale_notify)(struct ufs_hba *, bool, unsigned long,
+ 				enum ufs_notify_change_status);
++	bool	(*owns_legacy_clk)(const char *name);
+ 	int	(*setup_clocks)(struct ufs_hba *, bool,
+ 				enum ufs_notify_change_status);
+ 	int	(*hce_enable_notify)(struct ufs_hba *,

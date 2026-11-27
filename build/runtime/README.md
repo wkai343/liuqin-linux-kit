@@ -51,8 +51,6 @@ devbox run -- python3 tests/rec-runtime.py \
 
 可选 `--baseline /path/to/previous-runtime` 用旧工具创建 ext4/Btrfs 普通文件镜像，再由新工具检查；旧目录仅用于兼容性对照，不是构建输入。
 
-当前运行环境已通过上述 ARM64 检查及旧 ext4/Btrfs 默认格式的兼容性对照，已组装为 7.3.4 原生 Rec。工具目录约 36.5 MiB，包含许可证；对应迁移前工具目录连同 BusyBox 约 58.6 MiB。候选镜像及离线报告位于 `out/releases/liuqin-native-rec-7.3.4-buildroot/`，报告绑定镜像与 runtime 摘要。
+Buildroot 运行环境通过了上述 ARM64 检查和既有 ext4/Btrfs 默认格式的兼容性对照。迁移时包含许可证的工具目录约 36.5 MiB，原工具目录含 BusyBox 约 58.6 MiB。
 
-该镜像已在一台天马屏设备上通过 Fastboot 临时启动：背光自动开启，用户确认画面和手指触控正常；ADB、运行时文件校验、GPT 只读读取及六个 UFS LUN、141 个块设备节点的只读检查通过。触控工程复位和看门狗计数为零，固件只加载一次；`boot_a`、`recovery_a` 摘要与此前基线一致。
-
-验收记录为上述产物目录内的 `hardware-boot-validation.json`，绑定本次镜像 SHA256、构建 ID 和设备启动 ID。内嵌 `DEVICE_UNTESTED` 保留构建时状态，验收结果由配套记录表达，不改写镜像，也未替换默认发布镜像。真实安装写入、格式化、固定启动、长期运行和其他面板仍待验证。
+7.3.4 基线镜像还在天马屏设备上验证了运行时文件和 GPT 只读读取。屏幕、触控、ADB 和 UFS 的实测范围见[Rec 内核验证范围](../recovery/kernel/README.md#验证范围)。内嵌 `DEVICE_UNTESTED` 记录构建时状态，后续实机结果由镜像旁的 `hardware-boot-validation.json` 绑定其 SHA256、构建 ID 和启动 ID。

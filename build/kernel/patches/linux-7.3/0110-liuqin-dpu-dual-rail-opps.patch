@@ -1,0 +1,123 @@
+Subject: [PATCH] drm/msm/dpu: vote MMCX and MX for the Liuqin MDP clock
+
+The M81 production DISPCC has vdd_mm and vdd_mxa supplies. The vendor
+MDP clock applies its five voltage ceilings to both. Describe both
+required OPPs on Liuqin and attach the virtual genpd devices before the
+OPP table is parsed. Runtime PM links own both suppliers across clock
+disable and resume. Existing single-domain boards retain the PM core's
+implicit attachment and Liuqin retains its checked first clock vote.
+
+OEM: Xiaomi OS2.0.6.0.VMYCNXM vendor_boot, clock-controller@af00000.
+     MiCode/Xiaomi_Kernel_OpenSource eb49e10028e27fa98856cb5e458c0f0ec5b4554e,
+     drivers/clk/qcom/dispcc-waipio.c, disp_cc_mdss_mdp_clk_src.
+
+diff --git a/Documentation/devicetree/bindings/display/msm/dpu-common.yaml b/Documentation/devicetree/bindings/display/msm/dpu-common.yaml
+index 3f953aa5e..4c5f243ff 100644
+--- a/Documentation/devicetree/bindings/display/msm/dpu-common.yaml
++++ b/Documentation/devicetree/bindings/display/msm/dpu-common.yaml
+@@ -26,7 +26,8 @@ properties:
+     maxItems: 1
+ 
+   power-domains:
+-    maxItems: 1
++    minItems: 1
++    maxItems: 2
+ 
+   operating-points-v2: true
+   opp-table:
+@@ -53,4 +54,22 @@ required:
+   - operating-points-v2
+   - ports
+ 
++allOf:
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: qcom,sm8450-dpu
++    then:
++      properties:
++        power-domains:
++          minItems: 1
++          items:
++            - description: Multimedia core domain (MMCX)
++            - description: Memory domain (MX) for the MDP clock
++    else:
++      properties:
++        power-domains:
++          maxItems: 1
++
+ additionalProperties: true
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+index bcd547c1e..8f5d6ccb3 100644
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+@@ -1255,6 +1255,33 @@ &mdss {
+ 	status = "okay";
+ };
+ 
++/* The Cape MDP clock requires the same performance level on MMCX and MX. */
++&mdss_mdp {
++	power-domains = <&rpmhpd RPMHPD_MMCX>, <&rpmhpd RPMHPD_MX>;
++};
++
++&mdp_opp_table {
++	opp-172000000 {
++		required-opps = <&rpmhpd_opp_low_svs_d1>, <&rpmhpd_opp_low_svs_d1>;
++	};
++
++	opp-200000000 {
++		required-opps = <&rpmhpd_opp_low_svs>, <&rpmhpd_opp_low_svs>;
++	};
++
++	opp-325000000 {
++		required-opps = <&rpmhpd_opp_svs>, <&rpmhpd_opp_svs>;
++	};
++
++	opp-375000000 {
++		required-opps = <&rpmhpd_opp_svs_l1>, <&rpmhpd_opp_svs_l1>;
++	};
++
++	opp-500000000 {
++		required-opps = <&rpmhpd_opp_nom>, <&rpmhpd_opp_nom>;
++	};
++};
++
+ &mdss_dsi0 {
+ 	vdda-supply = <&pm8350c_l10>;
+ 
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
+index af2b6a402..a14194e80 100644
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_kms.c
+@@ -13,6 +13,7 @@
+ #include <linux/dma-buf.h>
+ #include <linux/of_irq.h>
+ #include <linux/platform_data/liuqin.h>
++#include <linux/pm_domain.h>
+ #include <linux/pm_opp.h>
+ 
+ #include <drm/drm_liuqin.h>
+@@ -1513,6 +1514,22 @@ static int dpu_dev_probe(struct platform_device *pdev)
+ 
+ 	dpu_kms->pdev = pdev;
+ 
++	/*
++	 * One domain is attached by the PM core; multi-rail OPPs need both
++	 * virtual devices registered in required-opps order before parsing.
++	 */
++	if (of_count_phandle_with_args(dev->of_node, "power-domains",
++				       "#power-domain-cells") > 1) {
++		struct dev_pm_domain_attach_data pd_data = {
++			.pd_flags = PD_FLAG_REQUIRED_OPP,
++		};
++		struct dev_pm_domain_list *pds;
++
++		ret = devm_pm_domain_attach_list(dev, &pd_data, &pds);
++		if (ret < 0)
++			return dev_err_probe(dev, ret, "failed to attach MDP OPP domains\n");
++	}
++
+ 	ret = devm_pm_opp_set_clkname(dev, "core");
+ 	if (ret)
+ 		return ret;

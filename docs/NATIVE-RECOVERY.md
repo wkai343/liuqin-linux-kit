@@ -27,6 +27,8 @@ uv run --project installer installer/install-gui.py \
 
 显示使用 Bootloader simplefb 和保留的时钟，触屏通过专用面板状态衔接加载 RAM 固件。USB 使用 [ADB](NATIVE-RECOVERY-INSTALLER.md#adb-连接与传输)，不创建 USB 网卡；USB 已连接不代表已建立 ADB 会话。桌面 Fedora 使用自己的 DRM、音频与 OTG 配置。
 
+### USB 方向与速率
+
 正式内核和 Rec 共用的板级设备树将 USB 控制器最高速率设为 SuperSpeed（5 Gbit/s），与
 [小米平板 6 Pro 的 USB 3.2 Gen1 官方规格](https://www.mi.com/xiaomi-pad-6-pro/specs)
 一致，并保留 USB 2 回退。ADB 启动脚本不另行设置 gadget 的 `max_speed`；即使该值
@@ -44,9 +46,7 @@ Rec 保留连接器到 QMP PHY 的 SuperSpeed 设备树连接，通过电池服�
 `NONE`/`DEVICE` 专用开关同步停止 gadget 并撤销 VBUS 有效状态，方向和 USB
 通道就绪后再允许连接；拔线或电池服务离线也撤销连接。这个开关拒绝主机模式，
 `dr_mode` 仍为 `peripheral`，UCSI 角色切换和 DisplayPort
-显示路径不在 Rec 启动范围内。翻面测试需分别确认 UDC 已配置、`current_speed`
-为 `super-speed`、主机报告 5000M，并校验双向传输；USB 2 回退仅表示仍可连接，
-不能算两面 USB 3 验收通过。
+显示路径不在 Rec 启动范围内。
 
 方向缓存只代表最后完整成功的会话。断开、方向切换、通道切换或重新连接任一步骤失败，
 都会保留“会话未完成”状态，后续有效读数触发完整重试；即使方向回到缓存值，也不能
@@ -54,9 +54,7 @@ Rec 保留连接器到 QMP PHY 的 SuperSpeed 设备树连接，通过电池服�
 
 方向可从 `pmic_glink.power-supply.*/sm8475_raw/raw_xm_cc_orientation`
 只读属性核验：0 表示拔线，1/2 分别表示 CC1/CC2。测试时每次翻面后保持插头
-不动，分别记录该属性、UDC 的 `current_speed` 和主机 USB 设备的 `speed`；
-方向应在 1/2 间切换，两面速率都应为 `super-speed` / `5000`。还需覆盖
-插线启动、拔线冷启动后再插线，以及每个方向的数据往返哈希校验。
+不动，分别确认 UDC 已配置、方向从 1 切到 2 或从 2 切到 1，两面的 `current_speed` 均为 `super-speed`，主机 USB 设备的 `speed` 均为 `5000`。测试覆盖插线启动、拔线冷启动后再插线，以及两个方向的数据往返哈希校验。USB 2 连通性单独记录。
 
 这个上限也有原厂板级配置依据：锁定 ROM 的 Liuqin DTBO（entry 15）在 USB 节点设置
 `qcom,force-gen1`，并在 DWC3 子节点设置 `maximum-speed = "super-speed"`。
@@ -80,6 +78,8 @@ USB 状态区分输入供电与数据链路。启动时从 SDP 转入 PD 的过�
 USB 2 活跃链路可以证明数据连接仍在，拔线后的 USB 2 `Suspend` 不能覆盖供电离线。
 诊断接口不可读时保留供电与 UDC 判断，不猜测连接成功；等待枚举显示“连接中”。
 这项显示判断不重置控制器，也不改变充电协议或 ADB 授权状态。
+
+### 触控与维护界面
 
 ADB Rec 的准备画面和触控初始化与 UFS 枚举、只读检查并行。准备阶段只使用 RAM 中
 已经核验的程序和触控固件，不开放维护套接字。PID 1 完成最终存储只读校验、等待触控

@@ -171,24 +171,27 @@ static int snd_soc_resume(struct device *d) { (void)d;resume_count++;return 0; }
     code += r'''
 struct snd_pcm_substream;
 struct q6apm_dai_rtd { int state;unsigned int queue_ptr,last_pos_index;
+ bool liuqin_pcm,capture_started;struct mutex capture_lock;struct work_struct period_work;
  struct snd_pcm_substream *substream;void *graph; };
 struct snd_pcm_runtime { void *private_data;int state; };
-struct snd_pcm_substream { struct snd_pcm_runtime *runtime; };
+struct snd_pcm_substream { struct snd_pcm_runtime *runtime;int stream; };
 struct snd_soc_component { int unused; };
+enum { SNDRV_PCM_STREAM_CAPTURE=1 };
 enum { SNDRV_PCM_TRIGGER_START=1,SNDRV_PCM_TRIGGER_RESUME,SNDRV_PCM_TRIGGER_PAUSE_RELEASE,
  SNDRV_PCM_TRIGGER_STOP,SNDRV_PCM_TRIGGER_SUSPEND,SNDRV_PCM_TRIGGER_PAUSE_PUSH };
-enum { Q6APM_STREAM_IDLE,Q6APM_STREAM_STOPPED,Q6APM_STREAM_RUNNING };
+enum { Q6APM_STREAM_IDLE,Q6APM_STREAM_STOPPED,Q6APM_STREAM_RUNNING,Q6APM_STREAM_PREPARED };
 enum { APM_CLIENT_EVENT_WATERMARK_EVENT=20,APM_CLIENT_EVENT_CMD_EOS_DONE,
  APM_CLIENT_EVENT_DATA_WRITE_DONE,APM_CLIENT_EVENT_DATA_READ_DONE };
 enum { SNDRV_PCM_STATE_PREPARED=2,SNDRV_PCM_STATE_SUSPENDED=7 };
 static int read_requests,periods;
-static bool suspend_on_period;
-static void snd_pcm_period_elapsed(struct snd_pcm_substream *s) {
- periods++;if(suspend_on_period)s->runtime->state=SNDRV_PCM_STATE_SUSPENDED;
-}
+static void snd_pcm_period_elapsed(struct snd_pcm_substream *s) { periods++; }
+static void schedule_work(struct work_struct *work) { work->pending=true; }
+static int q6apm_dai_start_capture(struct snd_soc_component *c,struct snd_pcm_substream *s) { abort(); }
 static void q6apm_read(void *graph) { (void)graph;read_requests++; }
 '''
     code += function(dai, 'q6apm_dai_trigger') + '\n'
+    code += function(dai, 'q6apm_dai_period_work') + '\n'
+    code += function(dai, 'q6apm_dai_period_elapsed') + '\n'
     code += function(dai, 'event_handler') + '\n'
     code += r'''
 static int replies;
@@ -253,21 +256,30 @@ int main(void) {
  assert(!sc8280xp_system_suspend(&card_dev));assert(stops==saved);
  assert(!sc8280xp_system_resume(&card_dev));assert(resume_count==2);
  struct q6apm_dai_rtd prtd={.state=Q6APM_STREAM_RUNNING,.queue_ptr=123,.last_pos_index=7};
- struct snd_pcm_runtime runtime={.private_data=&prtd};struct snd_pcm_substream stream={&runtime};
+ struct snd_pcm_runtime runtime={.private_data=&prtd};struct snd_pcm_substream stream={.runtime=&runtime};
  assert(!q6apm_dai_trigger(NULL,&stream,SNDRV_PCM_TRIGGER_SUSPEND));
  assert(prtd.state==Q6APM_STREAM_RUNNING);
  board=true;assert(!q6apm_dai_trigger(NULL,&stream,SNDRV_PCM_TRIGGER_SUSPEND));
  assert(prtd.state==Q6APM_STREAM_STOPPED && prtd.queue_ptr==123);
  assert(!q6apm_dai_trigger(NULL,&stream,SNDRV_PCM_TRIGGER_STOP));assert(!prtd.queue_ptr);
  assert(q6apm_dai_trigger(NULL,&stream,99)==-EINVAL);
- prtd.substream=&stream;prtd.state=Q6APM_STREAM_RUNNING;runtime.state=SNDRV_PCM_STATE_PREPARED;
+ prtd.substream=&stream;prtd.liuqin_pcm=true;stream.stream=SNDRV_PCM_STREAM_CAPTURE;
+ prtd.state=Q6APM_STREAM_PREPARED;runtime.state=SNDRV_PCM_STATE_PREPARED;
  event_handler(APM_CLIENT_EVENT_DATA_READ_DONE,0,NULL,&prtd);
- assert(read_requests==1 && periods==1); /* capture prefill before ALSA START */
- suspend_on_period=true;
+ assert(!read_requests && !prtd.period_work.pending);
+ prtd.state=Q6APM_STREAM_RUNNING;
  event_handler(APM_CLIENT_EVENT_DATA_READ_DONE,0,NULL,&prtd);
- assert(read_requests==1 && periods==2); /* prepared stream has no SUSPEND trigger */
- board=false;event_handler(APM_CLIENT_EVENT_DATA_READ_DONE,0,NULL,&prtd);
- assert(read_requests==2);board=true;suspend_on_period=false;
+ assert(read_requests==1 && prtd.period_work.pending && !periods);
+ q6apm_dai_period_work(&prtd.period_work);assert(periods==1);
+ runtime.state=SNDRV_PCM_STATE_SUSPENDED;prtd.period_work.pending=false;
+ event_handler(APM_CLIENT_EVENT_DATA_READ_DONE,0,NULL,&prtd);
+ assert(read_requests==1 && !prtd.period_work.pending);
+ event_handler(APM_CLIENT_EVENT_DATA_WRITE_DONE,0,NULL,&prtd);
+ assert(prtd.period_work.pending && periods==1);prtd.period_work.pending=false;
+ event_handler(APM_CLIENT_EVENT_WATERMARK_EVENT,0,NULL,&prtd);
+ assert(prtd.period_work.pending && periods==1);
+ board=false;prtd.liuqin_pcm=false;event_handler(APM_CLIENT_EVENT_DATA_READ_DONE,0,NULL,&prtd);
+ assert(read_requests==2 && periods==2);board=true;
  g_apm=NULL;assert(!q6apm_suspend_audio());
  return 0;
 }
@@ -516,12 +528,15 @@ def check_playback_queue(args):
 #include <stdint.h>
 #include <errno.h>
 #define dev_err(d,...) ((void)(d))
+#define READ_ONCE(x) (x)
 #define WRITE_ONCE(x,v) ((x)=(v))
+#define scoped_guard(type,lock) for (int once=1; once; once=0)
+#define guard(type) (void)
 #define SNDRV_PCM_STREAM_PLAYBACK 0
 #define SNDRV_PCM_STREAM_CAPTURE 1
 #define SND_AUDIOCODEC_PCM 1
 #define NO_TIMESTAMP 0
-enum { Q6APM_STREAM_IDLE,Q6APM_STREAM_STOPPED,Q6APM_STREAM_RUNNING };
+enum { Q6APM_STREAM_IDLE,Q6APM_STREAM_STOPPED,Q6APM_STREAM_RUNNING,Q6APM_STREAM_PREPARED };
 enum { SNDRV_PCM_TRIGGER_START=1,SNDRV_PCM_TRIGGER_RESUME,SNDRV_PCM_TRIGGER_PAUSE_RELEASE,
  SNDRV_PCM_TRIGGER_STOP,SNDRV_PCM_TRIGGER_SUSPEND,SNDRV_PCM_TRIGGER_PAUSE_PUSH };
 struct device { int unused; };
@@ -529,19 +544,20 @@ struct q6apm_dai_data { int unused; };
 struct snd_soc_component { struct device *dev; };
 struct snd_pcm_control { unsigned long appl_ptr; };
 struct q6apm_dai_rtd { void *graph;int state,bits_per_sample;unsigned long queue_ptr;
+ bool liuqin_pcm,capture_started;int capture_lock;
  unsigned int last_pos_index,pcm_count,pcm_size,push_pull_size,periods,phys,pos_phys; };
 struct snd_pcm_runtime { void *private_data;struct snd_pcm_control *control;
  unsigned int rate,channels,periods;unsigned long period_size; };
 struct snd_pcm_substream { struct snd_pcm_runtime *runtime;int stream; };
 struct audioreach_module_config { int direction,sample_rate,num_channels,bit_width,fmt; };
 static bool board=true,push_pull;
-static int writes,reads,allocations,starts,prepare_error;
+static int writes,reads,allocations,starts,stops,frees,prepare_error,start_error,fail_read;
 static bool liuqin_board_quirks(void) { return board; }
 static struct q6apm_dai_data pdata;
 static void *snd_soc_component_get_drvdata(struct snd_soc_component *c) { return &pdata; }
 static void q6apm_dai_set_channel_mapping(struct audioreach_module_config *c) { }
-static int q6apm_graph_stop(void *g) { return 0; }
-static void q6apm_free_fragments(void *g,int d) { }
+static int q6apm_graph_stop(void *g) { stops++;return 0; }
+static void q6apm_free_fragments(void *g,int d) { frees++; }
 static unsigned int snd_pcm_lib_period_bytes(struct snd_pcm_substream *s) {
  return s->runtime->period_size*s->runtime->channels*2;
 }
@@ -554,19 +570,19 @@ static int q6apm_alloc_fragments(void *g,int d,unsigned int p,unsigned int size,
 static int q6apm_graph_media_format_pcm(void *g,struct audioreach_module_config *c) { return 0; }
 static int q6apm_graph_media_format_shmem(void *g,struct audioreach_module_config *c) { return 0; }
 static int q6apm_graph_prepare(void *g) { return prepare_error; }
-static int q6apm_graph_start(void *g) { starts++;return 0; }
-static int q6apm_read(void *g) { reads++;return 0; }
+static int q6apm_graph_start(void *g) { starts++;return start_error; }
+static int q6apm_read(void *g) { return ++reads==fail_read ? -ENOSPC : 0; }
 static int q6apm_write_async(void *g,unsigned int n,int a,int b,int flags) {
  assert(++writes<10000);return 0;
 }
 '''
-    code += prepare + '\n'
+    code += function(source, 'q6apm_dai_release_capture') + '\n' + prepare + '\n'
     # Keep the pre-fix variant executable: it must reproduce the missing prefill.
     old = prepare.replace('q6apm_dai_prepare(', 'old_prepare(', 1)
     old = old.replace('\tif (liuqin_board_quirks())\n\t\tprtd->queue_ptr = 0;\n', '')
     assert old != prepare.replace('q6apm_dai_prepare(', 'old_prepare(', 1)
     code += old + '\n'
-    for name in ('q6apm_dai_ack', 'q6apm_dai_trigger'):
+    for name in ('q6apm_dai_ack', 'q6apm_dai_start_capture', 'q6apm_dai_trigger', 'q6apm_dai_hw_free'):
         code += function(source, name) + '\n'
     code += r'''
 int main(void) {
@@ -591,19 +607,137 @@ int main(void) {
   assert(!q6apm_dai_ack(&c,&s) && writes==previous+3);
  }
  board=false;p.queue_ptr=8192;assert(!q6apm_dai_prepare(&c,&s));assert(p.queue_ptr==8192);
- board=true;s.stream=SNDRV_PCM_STREAM_CAPTURE;int previous=reads;
+ s.stream=SNDRV_PCM_STREAM_CAPTURE;int previous=reads;
  assert(!q6apm_dai_prepare(&c,&s) && reads==previous+4);
+ board=true;p.liuqin_pcm=true;s.stream=SNDRV_PCM_STREAM_PLAYBACK;
  prepare_error=-EIO;assert(!q6apm_dai_trigger(&c,&s,SNDRV_PCM_TRIGGER_SUSPEND));
  previous=starts;assert(q6apm_dai_prepare(&c,&s)==-EIO && starts==previous);
  assert(p.state==Q6APM_STREAM_STOPPED);
+
+ /* Board capture owns buffers at PREPARE and a graph START only after the trigger. */
+ s.stream=SNDRV_PCM_STREAM_CAPTURE;p.state=Q6APM_STREAM_IDLE;prepare_error=0;
+ starts=stops=reads=allocations=frees=0;
+ assert(!q6apm_dai_prepare(&c,&s) && p.state==Q6APM_STREAM_PREPARED);
+ assert(!q6apm_dai_trigger(&c,&s,SNDRV_PCM_TRIGGER_SUSPEND));
+ assert(!q6apm_dai_prepare(&c,&s) && !q6apm_dai_hw_free(&c,&s));
+ assert(!q6apm_dai_hw_free(&c,&s) && allocations==2 && frees==2);
+ assert(!starts && !stops && !reads);
+ assert(q6apm_dai_trigger(&c,&s,SNDRV_PCM_TRIGGER_START)==-EPIPE);
+ prepare_error=-EIO;assert(q6apm_dai_prepare(&c,&s)==-EIO);
+ assert(!q6apm_dai_hw_free(&c,&s) && frees==3 && !stops);prepare_error=0;
+ for (int fault=0;fault<=4;fault++) {
+  assert(!q6apm_dai_prepare(&c,&s));int before_reads=reads,before_stops=stops;
+  start_error=fault?0:-EIO;fail_read=fault?reads+fault:0;
+  assert(q6apm_dai_trigger(&c,&s,SNDRV_PCM_TRIGGER_START)==(fault?-ENOSPC:-EIO));
+  assert(!p.capture_started && reads==before_reads+fault && stops==before_stops+!!fault);
+  fail_read=start_error=0;before_reads=reads;
+  assert(!q6apm_dai_trigger(&c,&s,SNDRV_PCM_TRIGGER_START) && p.capture_started);
+  int active_starts=starts;
+  assert(!q6apm_dai_trigger(&c,&s,SNDRV_PCM_TRIGGER_PAUSE_RELEASE));
+  assert(starts==active_starts && reads==before_reads+4);
+  assert(!q6apm_dai_trigger(&c,&s,SNDRV_PCM_TRIGGER_SUSPEND));
+  assert(p.state==Q6APM_STREAM_STOPPED && !q6apm_dai_prepare(&c,&s));
+  assert(!p.capture_started && p.state==Q6APM_STREAM_PREPARED);
+  before_reads=reads;
+  assert(!q6apm_dai_trigger(&c,&s,SNDRV_PCM_TRIGGER_START) && reads==before_reads+4);
+  assert(!q6apm_dai_trigger(&c,&s,SNDRV_PCM_TRIGGER_STOP));
+  assert(!q6apm_dai_hw_free(&c,&s) && stops==before_stops+!!fault+2);
+ }
+ push_pull=true;previous=reads;
+ assert(!q6apm_dai_prepare(&c,&s) && !q6apm_dai_trigger(&c,&s,SNDRV_PCM_TRIGGER_START));
+ assert(p.capture_started && reads==previous && !q6apm_dai_hw_free(&c,&s));
  return 0;
 }
 '''
     run_c(code, flags=('-Wno-unused-parameter', '-Wno-sign-compare'), timeout=15)
     report = {'status': 'PASS', 'cycles': 100,
               'scope': ['old suspended queue blocks prefill', 'prepare resets playback queue',
-                        'duplicate ack does not queue twice', 'capture and failed prepare', 'board isolation']}
+                        'duplicate ack does not queue twice', 'board isolation', 'prepared-only capture',
+                        'capture START and initial READ failures', 'push-mode and suspend/reopen']}
     return report
+
+
+def check_macro_votes(args):
+    codecs = args.source / 'sound/soc/codecs'
+    common = (codecs / 'lpass-macro-common.c').read_text()
+    code = r'''
+#include <assert.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <string.h>
+#define ARRAY_SIZE(a) (sizeof(a)/sizeof(*(a)))
+#define dev_err(...) ((void)0)
+struct device { void *data; };
+struct regmap { bool cache_only,dirty; };
+struct clk { int id,refs; };
+static int fail_clock,sync_error,log_ops[32],used,generic_calls,init_error,list_result;
+static bool board=true,online=true;
+static bool liuqin_board_quirks(void) { return board; }
+static bool liuqin_audio_transport_ready(void) { return online; }
+static int liuqin_audio_clk_resume(struct device *d) { generic_calls++;return 0; }
+static int pm_clk_suspend(struct device *d) { generic_calls++;return 0; }
+static int devm_pm_clk_create(struct device *d) { generic_calls++;return init_error; }
+static int of_pm_clk_add_clks(struct device *d) { generic_calls++;return list_result; }
+static int clk_prepare_enable(struct clk *c) {
+ if (!c) return 0;
+ log_ops[used++]=c->id;
+ if (c->id==fail_clock) return -EIO;
+ c->refs++;return 0;
+}
+static void clk_disable_unprepare(struct clk *c) {
+ if (c) {assert(c->refs>0);c->refs--;log_ops[used++]=-c->id;}
+}
+static void *dev_get_drvdata(struct device *d) { return d->data; }
+static void regcache_cache_only(struct regmap *m,bool v) { m->cache_only=v; }
+static void regcache_mark_dirty(struct regmap *m) { m->dirty=true; }
+static int regcache_sync(struct regmap *m) { assert(!m->cache_only);return sync_error; }
+'''
+    for name in ('lpass_macro_pm_clks_init', 'lpass_macro_pm_clks_set'):
+        code += function(common, name) + '\n'
+    for macro in ('tx', 'rx', 'va'):
+        source = (codecs / f'lpass-{macro}-macro.c').read_text()
+        assert 'lpass_macro_pm_clks_init(dev)' in function(source, macro+'_macro_probe')
+        code += ('struct '+macro+'_macro {struct device *dev;struct regmap *regmap;'
+                 'struct clk *macro,*dcodec,*mclk,*npl,*fsgen;};\n')
+        for suffix in ('set_clocks', 'runtime_resume', 'runtime_suspend'):
+            code += function(source, f'{macro}_macro_{suffix}') + '\n'
+    code += r'''
+static void exercise(struct device *d,int n,int (*resume)(struct device *),
+                     int (*suspend)(struct device *),struct clk *clks,struct regmap *map) {
+ online=false;used=0;assert(resume(d)==-EBUSY && !used && map->cache_only);online=true;
+ for (int fail=1;fail<=n;fail++) {
+  fail_clock=fail;used=0;
+  assert(resume(d)==-EIO && map->cache_only && map->dirty);
+  assert(used==fail+fail-1);
+  for (int i=0;i<fail;i++) assert(log_ops[i]==i+1);
+  for (int i=1;i<fail;i++) assert(log_ops[fail+i-1]==-(fail-i));
+  for (int i=0;i<5;i++) assert(clks[i].refs==1); /* Another consumer retains its vote. */
+ }
+ fail_clock=0;sync_error=-ENXIO;used=0;assert(resume(d)==-ENXIO && used==2*n && map->cache_only);
+ for (int i=0;i<n;i++) assert(log_ops[n+i]==-(n-i));
+ sync_error=0;used=0;assert(!resume(d) && used==n && !map->cache_only);
+ assert(!suspend(d) && used==2*n && map->cache_only);
+ for (int i=0;i<n;i++) assert(log_ops[i]==i+1 && log_ops[n+i]==-(n-i));
+ for (int i=0;i<5;i++) assert(clks[i].refs==1);
+}
+#define TEST(kind,n) do { struct kind##_macro m={&dev,&map,c,c+1,c+2,c+3,c+4}; \
+ dev.data=&m;exercise(&dev,n,kind##_macro_runtime_resume,kind##_macro_runtime_suspend,c,&map); } while(0)
+int main(void) {
+ struct device dev={0};struct regmap map={0};struct clk c[5]={{1,1},{2,1},{3,1},{4,1},{5,1}};
+ assert(!lpass_macro_pm_clks_init(&dev) && !generic_calls);
+ TEST(tx,5);TEST(rx,5);TEST(va,4);
+ board=false;init_error=-ENOMEM;assert(lpass_macro_pm_clks_init(&dev)==-ENOMEM && generic_calls==1);
+ init_error=0;list_result=-ENOENT;assert(lpass_macro_pm_clks_init(&dev)==-ENOENT && generic_calls==3);
+ list_result=5;assert(!lpass_macro_pm_clks_init(&dev) && generic_calls==5);
+ online=false;assert(!lpass_macro_pm_clks_set(&dev,NULL,0,true));
+ assert(!lpass_macro_pm_clks_set(&dev,NULL,0,false) && generic_calls==7);
+ return 0;
+}
+'''
+    run_c(code, flags=('-Wno-unused-parameter',))
+    return {'status': 'PASS', 'scope': ['TX/RX/VA named clock order', 'reverse unwind at each clock',
+            'shared votes', 'offline and regcache failures', 'generic firmware clock lists']}
 
 
 def check_card(args):
@@ -1052,6 +1186,7 @@ def main():
         'clocks': check_clocks(args),
         'ports': check_ports(args),
         'playback_queue': check_playback_queue(args),
+        'macro_votes': check_macro_votes(args),
         'card': check_card(args),
         'device_order': check_device_order(args),
         'transport_state': check_transport_state(args),

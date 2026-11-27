@@ -7,10 +7,11 @@ SM8475 DSP（adsp/cdsp/slpi）、QCA6490 WLAN（ath11k WCN6855，含项目生成
 `board-2.bin`）、蓝牙、两种面板的 Novatek NT36532 触控、Adreno 730 GPU、
 音频拓扑、VPU 和无线监管数据库。
 
-CS35L41 的保护程序及四路通用调音另从同版原厂 ROM 的 `vendor/firmware` 提取，
-由 `build/lib/speaker_firmware.py` 校验并转换成主线驱动使用的文件名。
-默认官方系统的 `liuqin-firmware` 包因此包含上述 199 个文件和这 5 个保护固件文件。
-它们与每台平板独有的 `*-calr.bin` 校准数据不同，后者仍只在安装时读取本机 persist。
+`liuqin-firmware` 另从同版原厂 ROM 的 `vendor/firmware` 提取 13 个 CS35L41 文件。
+保护程序和四份位置调音使用主线驱动所需的文件名。四颗功放各自的音乐、语音参数
+保留原名，安装到 `/usr/share/liuqin/speaker-tuning/`，供桌面在播放时切换。
+构建逐文件校验 SHA256。每台平板独有的 `*-calr.bin` 校准数据由安装器从本机 persist 读取。
+[提取与校验](../../build/lib/speaker_firmware.py) · [免提通话调音](../../docs/AUDIO.md#扬声器音乐与免提通话调音)
 
 ## 来源
 

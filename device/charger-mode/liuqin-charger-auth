@@ -1,0 +1,169 @@
+#!/usr/bin/python3 -B
+# SPDX-License-Identifier: MIT
+"""Run the existing gauge and adapter transactions for the current attachment."""
+import errno
+import os
+from pathlib import Path
+import runpy
+import signal
+import socket
+import subprocess
+import sys
+import time
+
+HELPER = '/usr/local/libexec/liuqin-mipps-auth'
+
+
+def stop_worker(worker):
+    if worker is None:
+        return
+    try:
+        os.killpg(worker.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        worker.wait()
+        return
+    try:
+        worker.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        pass
+    # A role-write child can survive the leader. Retire the whole group.
+    try:
+        os.killpg(worker.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    worker.wait()
+
+
+class Charging:
+    def __init__(self, auth):
+        self.auth = auth
+        self.attach = None
+        self.worker = None
+        self.cells_done = False
+        self.adapter = None
+        self.attempts = 0
+        self.retry_at = 0
+
+    def disconnect(self):
+        stop_worker(self.worker)
+        self.worker = None
+        if self.attach is not None:
+            # Retire the previous worker before clearing its proof or starting another.
+            for name in ('ATTEMPT_STATE_FILE', 'READY_STATE_FILE', 'VERIFIED_STATE_FILE',
+                         'AUTHENTICATED_STATE_FILE', 'PENDING_EVENT_FILE'):
+                Path(self.auth[name]).unlink(missing_ok=True)
+            try:
+                root = self.auth['find_xiaomi_dir']()
+                try:
+                    self.auth['clear_verdict'](root)
+                finally:
+                    self.auth['set_verify_process'](root, False)
+            except OSError:
+                pass
+        self.attach = self.adapter = None
+        self.cells_done = False
+        self.attempts = self.retry_at = 0
+
+    def reap_worker(self, now):
+        if self.worker is None:
+            return
+        result = self.worker.poll()
+        if result is None and now < self.deadline:
+            return
+        stop_worker(self.worker)
+        self.worker = None
+        if result == 0:
+            self.cells_done = True
+            self.attempts = 0
+        else:
+            self.retry_at = now + 5
+            self.adapter = None
+
+    def tick(self):
+        online = self.auth['usb_is_online']()
+        if online is False:
+            self.disconnect()
+            return
+        if online is None:
+            self.reap_worker(time.monotonic())
+            return
+        token = self.auth['current_attach_token']()
+        try:
+            root = self.auth['find_xiaomi_dir']()
+            gauge = (Path(root) / 'verify_digest').stat()
+        except OSError:
+            self.disconnect()
+            return
+        attached = (gauge.st_dev, gauge.st_ino, token)
+        if attached != self.attach:
+            self.disconnect()
+            self.attach = attached
+        now = time.monotonic()
+        self.reap_worker(now)
+        if self.worker is not None or now < self.retry_at or self.attempts >= 3:
+            return
+
+        if not self.cells_done:
+            args = ['--battery-auth-only']
+        else:
+            if token is None or self.auth['partner_source_usb_data']() is not False:
+                return
+            try:
+                snapshot = self.auth['adapter_readiness_snapshot'](root)
+            except (ValueError, OSError):
+                return
+            if not self.auth['adapter_is_ready'](snapshot):
+                return
+            signature = (tuple(snapshot), self.auth['current_adapter_svid'](root))
+            pending = Path(self.auth['PENDING_EVENT_FILE']).exists()
+            if signature == self.adapter and not pending:
+                return
+            self.adapter = signature
+            args = ['--role-first', '--consume-event', '--expected-attach', token, '--timeout', '4']
+        self.worker = subprocess.Popen([sys.executable, '-I', '-B', HELPER, *args],
+                                       start_new_session=True)
+        self.deadline = now + 120
+        self.attempts += 1
+
+
+def cable_removed(data):
+    fields = data.split(b'\0')
+    if b'POWER_SUPPLY_NAME=qcom-battmgr-usb' in fields and b'POWER_SUPPLY_ONLINE=0' in fields:
+        return True
+    return (b'SUBSYSTEM=typec' in fields and b'ACTION=remove' in fields and
+            any(f.startswith(b'DEVPATH=') and f.endswith(b'-partner') for f in fields))
+
+
+def main():
+    charging = Charging(runpy.run_path(HELPER))
+    running = True
+    def stop(_signum, _frame):
+        nonlocal running
+        running = False
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    with socket.socket(socket.AF_NETLINK, socket.SOCK_DGRAM, 15) as events:
+        events.bind((0, 1))
+        try:
+            next_sample = 0
+            while running:
+                if time.monotonic() >= next_sample:
+                    charging.tick()
+                    next_sample = time.monotonic() + 1
+                events.settimeout(max(0.001, next_sample - time.monotonic()))
+                try:
+                    data, sender = events.recvfrom(65536)
+                    if sender[0] == 0 and cable_removed(data):
+                        charging.disconnect()
+                except TimeoutError:
+                    pass
+                except OSError as error:
+                    if error.errno != errno.ENOBUFS:
+                        raise
+                    charging.disconnect()
+        finally:
+            charging.disconnect()
+
+
+if __name__ == '__main__':
+    main()

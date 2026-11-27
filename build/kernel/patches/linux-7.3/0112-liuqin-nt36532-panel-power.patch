@@ -1,0 +1,497 @@
+From 8269c24875e595b15848a56d832f34f1ae39eeed Mon Sep 17 00:00:00 2001
+From: wk <58632380+wkai343@users.noreply.github.com>
+Date: Fri, 27 Nov 2026 20:29:34 +0800
+Subject: [PATCH] drm/panel: sequence all five M81 LCD supplies
+
+Use the OS2.0.6.0.VMYCNXM DTBO entry 15 supply list shared by both M81
+panels. Request all five providers, observe the post-switch delays and
+release the rails in reverse order after DSI sleep and RESX assertion.
+
+Adopt boot-enabled rails before publishing the panel to its touch follower.
+Keep the splash intact if RPMh has not cached its initial state. On failure,
+unwind newly acquired votes and retain prerequisites of a failing release.
+
+Let the panel own ENP/ENN and leave bias programming, HWEN and LED output
+with the KTZ8866 driver. Give native Recovery simplefb explicit supply votes.
+---
+ .../display/panel/xiaomi,liuqin-nt36532.yaml  |  63 +++++++++
+ .../leds/backlight/kinetic,ktz8866.yaml       |  16 ++-
+ .../boot/dts/qcom/sm8475-xiaomi-liuqin.dts    |  25 ++--
+ drivers/gpu/drm/panel/panel-novatek-nt36532.c | 131 ++++++++++--------
+ drivers/video/backlight/ktz8866.c             |  15 +-
+ 5 files changed, 172 insertions(+), 78 deletions(-)
+ create mode 100644 Documentation/devicetree/bindings/display/panel/xiaomi,liuqin-nt36532.yaml
+
+diff --git a/Documentation/devicetree/bindings/display/panel/xiaomi,liuqin-nt36532.yaml b/Documentation/devicetree/bindings/display/panel/xiaomi,liuqin-nt36532.yaml
+new file mode 100644
+index 000000000..7d303de10
+--- /dev/null
++++ b/Documentation/devicetree/bindings/display/panel/xiaomi,liuqin-nt36532.yaml
+@@ -0,0 +1,63 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/display/panel/xiaomi,liuqin-nt36532.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Xiaomi Pad 6 Pro dual-link NT36532 LCD panel
++
++maintainers:
++  - wk <58632380+wkai343@users.noreply.github.com>
++
++select:
++  properties:
++    compatible:
++      contains:
++        const: xiaomi,liuqin-nt36532
++  required: [compatible]
++
++allOf:
++  - $ref: panel-common-dual.yaml#
++
++properties:
++  compatible:
++    oneOf:
++      - const: xiaomi,liuqin-nt36532
++      - items:
++          - const: xiaomi,liuqin-nt36532
++          - const: xiaomi,pipa-nt36532
++
++  reg:
++    maxItems: 1
++
++  vddio-supply:
++    description: Panel I/O supply.
++  dvddbuck-supply:
++    description: Digital buck supply.
++  dvddldo-supply:
++    description: Digital LDO supply.
++  vsp-supply:
++    description: Positive LCD bias controlled by KTZ8866 ENP.
++  vsn-supply:
++    description: Negative LCD bias controlled by KTZ8866 ENN.
++  reset-gpios: true
++  error-gpios:
++    description: Primary and secondary DDIC error indication lines.
++    minItems: 2
++    maxItems: 2
++  backlight: true
++  ports: true
++
++required:
++  - compatible
++  - reg
++  - vddio-supply
++  - dvddbuck-supply
++  - dvddldo-supply
++  - vsp-supply
++  - vsn-supply
++  - reset-gpios
++  - backlight
++  - ports
++
++unevaluatedProperties: false
+diff --git a/Documentation/devicetree/bindings/leds/backlight/kinetic,ktz8866.yaml b/Documentation/devicetree/bindings/leds/backlight/kinetic,ktz8866.yaml
+index 43eba1fd5..1dc7e4b90 100644
+--- a/Documentation/devicetree/bindings/leds/backlight/kinetic,ktz8866.yaml
++++ b/Documentation/devicetree/bindings/leds/backlight/kinetic,ktz8866.yaml
+@@ -16,6 +16,14 @@ description: |
+ 
+ allOf:
+   - $ref: common.yaml#
++  - if:
++      required: ["kinetic,external-bias-control"]
++    then:
++      properties:
++        vddpos-supply: false
++        vddneg-supply: false
++    else:
++      required: [vddpos-supply, vddneg-supply]
+ 
+ properties:
+   compatible:
+@@ -30,6 +38,12 @@ properties:
+   vddneg-supply:
+     description: negative boost supply regulator.
+ 
++  kinetic,external-bias-control:
++    type: boolean
++    description: |
++      The panel controls ENP and ENN as part of its supply sequence.
++      The backlight programs the chip and drives HWEN.
++
+   enable-gpios:
+     description: GPIO to use to enable/disable the backlight (HWEN pin).
+     maxItems: 1
+@@ -79,8 +93,6 @@ properties:
+ required:
+   - compatible
+   - reg
+-  - vddpos-supply
+-  - vddneg-supply
+   - enable-gpios
+ 
+ unevaluatedProperties: false
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+index 1c4c85c41..e7b1c0bf2 100644
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+@@ -81,6 +81,12 @@ framebuffer: framebuffer@b8000000 {
+ 			format = "a8r8g8b8";
+ 
+ 			clocks = <&gcc GCC_DISP_HF_AXI_CLK>;
++			/* simplefb owns the inherited scanout in native Recovery. */
++			iovdd-supply = <&pm8350c_l2>;
++			dvddbuck-supply = <&display_panel_dvdd_buck>;
++			dvddldo-supply = <&display_panel_dvdd_ldo>;
++			vsp-supply = <&backlight_gpio_regulator_vsp>;
++			vsn-supply = <&backlight_gpio_regulator_vsn>;
+ 		};
+ 	};
+ 
+@@ -96,15 +102,9 @@ framebuffer: framebuffer@b8000000 {
+ 	 *   display_gpio_regulator_vsp        :33137  gpio 66  5.5 V, ramp 233 us
+ 	 *   display_gpio_regulator_vsn        :33149  gpio 53  5.5 V, ramp 233 us
+ 	 *
+-	 * vsp/vsn are not panel rails in the usual sense: gpio 66 and gpio 53 are
+-	 * the KTZ8866's own ENP and ENN pins (:12676-12677), i.e. the enables for
+-	 * its positive and negative LCD bias outputs. That is why they are
+-	 * consumed by backlight@11 as vddpos/vddneg rather than by the panel.
+-	 *
+-	 * Bias outputs remain always-on and owned by the backlight. The two
+-	 * 1.3 V rails stay boot-on until the panel driver holds their votes,
+-	 * before publishing the panel to touch followers. During blanking the
+-	 * M81 retained-power path keeps IOVDD/bias and gates only these rails.
++	 * GPIO66/53 are the KTZ8866 ENP/ENN inputs. Keep the boot splash
++	 * powered until the panel takes its votes. The M81 panel sequences
++	 * both bias switches after the digital rails and releases them first.
+ 	 */
+ 	backlight_gpio_regulator_vsn: backlight-gpio-reg-vsn {
+ 		compatible = "regulator-fixed";
+@@ -115,7 +115,6 @@ backlight_gpio_regulator_vsn: backlight-gpio-reg-vsn {
+ 		gpio = <&tlmm 53 GPIO_ACTIVE_HIGH>;
+ 		enable-active-high;
+ 		regulator-boot-on;
+-		regulator-always-on;
+ 	};
+ 
+ 	backlight_gpio_regulator_vsp: backlight-gpio-reg-vsp {
+@@ -127,7 +126,6 @@ backlight_gpio_regulator_vsp: backlight-gpio-reg-vsp {
+ 		gpio = <&tlmm 66 GPIO_ACTIVE_HIGH>;
+ 		enable-active-high;
+ 		regulator-boot-on;
+-		regulator-always-on;
+ 	};
+ 
+ 	display_panel_dvdd_buck: display-panel-dvdd-buck {
+@@ -796,8 +794,7 @@ backlight: backlight@11 {
+ 		compatible = "kinetic,ktz8866";
+ 		reg = <0x11>;
+ 
+-		vddpos-supply = <&backlight_gpio_regulator_vsp>;
+-		vddneg-supply = <&backlight_gpio_regulator_vsn>;
++		kinetic,external-bias-control;
+ 
+ 		enable-gpios = <&tlmm 6 GPIO_ACTIVE_HIGH>;
+ 
+@@ -1308,6 +1305,8 @@ panel: panel@0 {
+ 		vddio-supply = <&pm8350c_l2>;
+ 		dvddbuck-supply = <&display_panel_dvdd_buck>;
+ 		dvddldo-supply = <&display_panel_dvdd_ldo>;
++		vsp-supply = <&backlight_gpio_regulator_vsp>;
++		vsn-supply = <&backlight_gpio_regulator_vsn>;
+ 
+ 		reset-gpios = <&tlmm 0 GPIO_ACTIVE_LOW>;
+ 		error-gpios = <&tlmm 20 GPIO_ACTIVE_HIGH>,
+diff --git a/drivers/gpu/drm/panel/panel-novatek-nt36532.c b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+index ba07b74af..1a99fb3b8 100644
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -58,11 +58,6 @@ module_param(first_frame_backlight, bool, 0444);
+ MODULE_PARM_DESC(first_frame_backlight,
+ 	"Wait for DPU pixel transmission before enabling known Liuqin panel backlight");
+ 
+-static bool liuqin_retained_power = true;
+-module_param(liuqin_retained_power, bool, 0444);
+-MODULE_PARM_DESC(liuqin_retained_power,
+-	"Keep Liuqin IOVDD/bias and gate the two digital rails while blanked");
+-
+ /* Experimental removal of legacy margins, not OEM command-table waits. */
+ static bool liuqin_skip_power_on_wait;
+ module_param(liuqin_skip_power_on_wait, bool, 0444);
+@@ -84,6 +79,12 @@ module_param(liuqin_late_wake, bool, 0644);
+ MODULE_PARM_DESC(liuqin_late_wake,
+ 	"Send initial Tianma Sleep Out/Display On once, after first frame");
+ 
++/* Pipa and Yudi use the first three supplies. M81 also switches both biases. */
++#define NT36532_COMMON_SUPPLIES 3
++static const char * const nt36532_supply_names[] = {
++	"vddio", "dvddbuck", "dvddldo", "vsp", "vsn",
++};
++
+ struct nt36532 {
+ 	int refresh_status;
+ 	/* 0: original ON table; 1: pending; 2: sent; negative: transfer failed. */
+@@ -101,9 +102,8 @@ struct nt36532 {
+ 	const struct panel_desc *desc;
+ 	const struct liuqin_oem_panel *oem_panel;
+ 	struct drm_dsc_config dsc;
+-	struct regulator_bulk_data supplies[3];
++	struct regulator_bulk_data supplies[ARRAY_SIZE(nt36532_supply_names)];
+ 	unsigned int supply_votes;
+-	bool keep_iovdd;
+ 	struct delayed_work dimming_work;
+ 	unsigned int dimming_cookie;
+ 	bool dimming_pending;
+@@ -1241,24 +1241,17 @@ static const struct panel_desc yudi_desc = {
+ 	.reset_sequence = yudi_reset
+ };
+ 
+-/* Track the panel's votes, not the regulator core's boot-on state. */
+-#define LIUQIN_IOVDD_VOTE BIT(0)
+-#define LIUQIN_DIGITAL_VOTES (BIT(1) | BIT(2))
+-#define LIUQIN_ALL_VOTES (LIUQIN_IOVDD_VOTE | LIUQIN_DIGITAL_VOTES)
++/* Supply order and post-switch waits from the M81 panel supply table. */
++#define LIUQIN_ALL_VOTES GENMASK_U32(ARRAY_SIZE(nt36532_supply_names) - 1, 0)
+ 
+ static void liuqin_log_supplies(struct nt36532 *ctx, const char *stage)
+ {
+-	dev_info(ctx->panel.dev,
+-		 "Liuqin power %s: retained=%d votes=%x iovdd=%d buck=%d ldo=%d\n",
+-		 stage, ctx->keep_iovdd, ctx->supply_votes,
+-		 regulator_is_enabled(ctx->supplies[0].consumer),
+-		 regulator_is_enabled(ctx->supplies[1].consumer),
+-		 regulator_is_enabled(ctx->supplies[2].consumer));
++	dev_info(ctx->panel.dev, "Liuqin power %s: votes=%x/%x\n",
++		 stage, ctx->supply_votes, LIUQIN_ALL_VOTES);
+ }
+ 
+ static int liuqin_release_supply_votes(struct nt36532 *ctx, unsigned int mask)
+ {
+-	int first_error = 0;
+ 	int i, ret;
+ 
+ 	for (i = ARRAY_SIZE(ctx->supplies) - 1; i >= 0; i--) {
+@@ -1268,16 +1261,15 @@ static int liuqin_release_supply_votes(struct nt36532 *ctx, unsigned int mask)
+ 		if (ret) {
+ 			dev_warn(ctx->panel.dev, "Failed to release %s: %d\n",
+ 				 ctx->supplies[i].supply, ret);
+-			if (!first_error)
+-				first_error = ret;
+-		} else {
+-			ctx->supply_votes &= ~BIT(i);
++			/* Keep this rail's prerequisites until a retry succeeds. */
++			return ret;
+ 		}
+-		/* OEM post-off waits: IOVDD=2 ms, buck=2 ms, LDO=0. */
++		ctx->supply_votes &= ~BIT(i);
++		/* LDO has no post-off wait. All four other entries specify 2 ms. */
+ 		if (i != 2)
+ 			usleep_range(2000, 2010);
+ 	}
+-	return first_error;
++	return 0;
+ }
+ 
+ static int nt36532_enable_supplies(struct nt36532 *ctx)
+@@ -1287,36 +1279,35 @@ static int nt36532_enable_supplies(struct nt36532 *ctx)
+ 	int ret;
+ 
+ 	if (ctx->desc != &liuqin_desc)
+-		return regulator_bulk_enable(ARRAY_SIZE(ctx->supplies), ctx->supplies);
++		return regulator_bulk_enable(NT36532_COMMON_SUPPLIES, ctx->supplies);
+ 
+ 	for (i = 0; i < ARRAY_SIZE(ctx->supplies); i++) {
+ 		if (ctx->supply_votes & BIT(i))
+ 			continue;
+ 		ret = regulator_enable(ctx->supplies[i].consumer);
+ 		if (ret) {
+-			/* Never unwind votes retained from the preceding cycle. */
+ 			liuqin_release_supply_votes(ctx,
+ 				ctx->supply_votes & ~original_votes);
+ 			return ret;
+ 		}
+ 		ctx->supply_votes |= BIT(i);
+-		/* OEM post-on waits: IOVDD=2 ms, buck=0, LDO=2 ms. */
++		/* Buck has no post-on wait. All four other entries specify 2 ms. */
+ 		if (i != 1)
+ 			usleep_range(2000, 2010);
+ 	}
+ 	return 0;
+ }
+ 
+-static void nt36532_disable_supplies(struct nt36532 *ctx)
++static int nt36532_disable_supplies(struct nt36532 *ctx)
+ {
+-	if (ctx->desc == &liuqin_desc) {
+-		/* OEM retained mode keeps IOVDD; legacy comparison keeps 1.3 V. */
+-		liuqin_release_supply_votes(ctx, ctx->keep_iovdd ?
+-			LIUQIN_DIGITAL_VOTES : LIUQIN_IOVDD_VOTE);
+-		liuqin_log_supplies(ctx, "off");
+-	} else {
+-		regulator_bulk_disable(ARRAY_SIZE(ctx->supplies), ctx->supplies);
+-	}
++	int ret;
++
++	if (ctx->desc != &liuqin_desc)
++		return regulator_bulk_disable(NT36532_COMMON_SUPPLIES, ctx->supplies);
++
++	ret = liuqin_release_supply_votes(ctx, LIUQIN_ALL_VOTES);
++	liuqin_log_supplies(ctx, "off");
++	return ret;
+ }
+ 
+ static void liuqin_release_boot_supplies(void *data)
+@@ -1328,19 +1319,26 @@ static void liuqin_release_boot_supplies(void *data)
+ 
+ static int liuqin_hold_boot_supplies(struct nt36532 *ctx)
+ {
+-	bool cold = false;
++	bool cold = false, settle = false;
+ 	unsigned int i;
+ 	int ret;
+ 
+-	for (i = 0; i < ARRAY_SIZE(ctx->supplies); i++)
+-		cold |= regulator_is_enabled(ctx->supplies[i].consumer) <= 0;
++	for (i = 0; i < ARRAY_SIZE(ctx->supplies); i++) {
++		ret = regulator_is_enabled(ctx->supplies[i].consumer);
++		cold |= !ret;
++		/* RPMh may have no cached state yet. Allow its POR settling
++		 * time without pulsing reset on a potentially live splash.
++		 */
++		settle |= ret <= 0;
++	}
++	/* Adopt a live splash without toggling RESX or cycling its rails. */
++	if (cold)
++		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+ 	ret = nt36532_enable_supplies(ctx);
+ 	if (ret)
+ 		return ret;
+-	/* The touch probe needs the existing Novatek 10 ms POR settling time
+-	 * if late unused-regulator cleanup switched a boot-on rail off.
+-	 */
+-	if (cold)
++	/* Allow the shared TDDI to settle before publishing the panel. */
++	if (settle)
+ 		usleep_range(10000, 11000);
+ 	return 0;
+ }
+@@ -2058,9 +2056,7 @@ static int nt36532_unprepare(struct drm_panel *panel)
+ 		ctx->dsi[1]->mode_flags &= ~MIPI_DSI_MODE_LPM;
+ 
+ 	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+-	nt36532_disable_supplies(ctx);
+-
+-	return 0;
++	return nt36532_disable_supplies(ctx);
+ }
+ 
+ /* M81-specific branch in OS2.0.6.0 msm_drm.ko, not generic VFP DFPS.
+@@ -2236,7 +2232,7 @@ static int nt36532_prepare_live_refresh(struct drm_panel *panel,
+ 	right = ctx->dsi[1]->host->ops->get_refresh_rate(ctx->dsi[1]->host);
+ 	if (ctx->refresh_status != 1 || ctx->tddi_recovering ||
+ 	    ctx->dimming_stopping || ctx->off_deferred ||
+-	    (ctx->supply_votes & LIUQIN_ALL_VOTES) != LIUQIN_ALL_VOTES ||
++	    ctx->supply_votes != LIUQIN_ALL_VOTES ||
+ 	    left != rate || right != rate) {
+ 		dev_info(panel->dev, "Liuqin live reject: stage=panel-state refresh=%d tddi=%d stopping=%d off=%d votes=%#x host_rates=%d/%d expected=%d\n",
+ 			 ctx->refresh_status, ctx->tddi_recovering, ctx->dimming_stopping,
+@@ -2346,7 +2342,7 @@ static int nt36532_recover_touch(struct drm_panel *panel)
+ 	if (!ctx->dsi[1])
+ 		return -ENODEV;
+ 	if (ctx->dimming_stopping || ctx->off_deferred ||
+-	    (ctx->supply_votes & LIUQIN_ALL_VOTES) != LIUQIN_ALL_VOTES)
++	    ctx->supply_votes != LIUQIN_ALL_VOTES)
+ 		return -EHOSTDOWN;
+ 	if (!dsi->host->ops || !dsi->host->ops->transfer)
+ 		return -EOPNOTSUPP;
+@@ -2449,6 +2445,32 @@ static int nt36532_get_reset_gpio(struct nt36532 *ctx, struct device *dev)
+ 	return gpiod_direction_output(ctx->reset_gpio, level);
+ }
+ 
++static int nt36532_get_supplies(struct nt36532 *ctx, struct device *dev)
++{
++	struct regulator_bulk_data *rail;
++	unsigned int i;
++	int ret;
++
++	for (i = 0; i < ARRAY_SIZE(ctx->supplies); i++)
++		ctx->supplies[i].supply = nt36532_supply_names[i];
++
++	if (ctx->desc != &liuqin_desc) {
++		ret = devm_regulator_bulk_get(dev, NT36532_COMMON_SUPPLIES, ctx->supplies);
++		return ret ? dev_err_probe(dev, ret, "Failed to get regulators\n") : 0;
++	}
++
++	/* M81 requires five real providers. The optional-get API rejects dummies. */
++	for (i = 0; i < ARRAY_SIZE(ctx->supplies); i++) {
++		rail = &ctx->supplies[i];
++		rail->consumer = devm_regulator_get_optional(dev, rail->supply);
++		if (IS_ERR(rail->consumer))
++			return dev_err_probe(dev, PTR_ERR(rail->consumer),
++					     "Failed to get required %s supply\n", rail->supply);
++	}
++
++	return 0;
++}
++
+ static int nt36532_probe(struct mipi_dsi_device *dsi)
+ {
+ 	struct mipi_dsi_host *dsi_sec_host;
+@@ -2462,18 +2484,14 @@ static int nt36532_probe(struct mipi_dsi_device *dsi)
+ 	if (IS_ERR(ctx))
+ 		return PTR_ERR(ctx);
+ 
+-	ctx->supplies[0].supply = "vddio";
+-	ctx->supplies[1].supply = "dvddbuck";
+-	ctx->supplies[2].supply = "dvddldo";
+-	ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(ctx->supplies),
+-				      ctx->supplies);
+-	if (ret < 0)
+-		return dev_err_probe(dev, ret, "Failed to get regulators\n");
+-
+ 	ctx->desc = of_device_get_match_data(dev);
+ 	if (!ctx->desc)
+ 		return -ENODEV;
+ 
++	ret = nt36532_get_supplies(ctx, dev);
++	if (ret)
++		return ret;
++
+ 	ret = nt36532_get_reset_gpio(ctx, dev);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "Failed to configure reset GPIO\n");
+@@ -2515,7 +2533,6 @@ static int nt36532_probe(struct mipi_dsi_device *dsi)
+ 	ctx->esd_irq[1] = -1;
+ 	if (ctx->desc == &liuqin_desc) {
+ 		liuqin_select_oem_panel(ctx);
+-		ctx->keep_iovdd = liuqin_retained_power && ctx->oem_panel;
+ 		ctx->panel.backlight_after_first_frame =
+ 			first_frame_backlight && ctx->oem_panel;
+ 	}
+diff --git a/drivers/video/backlight/ktz8866.c b/drivers/video/backlight/ktz8866.c
+index a95237ae5..d10852d1b 100644
+--- a/drivers/video/backlight/ktz8866.c
++++ b/drivers/video/backlight/ktz8866.c
+@@ -311,12 +311,15 @@ static int ktz8866_probe(struct i2c_client *client)
+ 	if (IS_ERR(ktz->regmap))
+ 		return dev_err_probe(&client->dev, PTR_ERR(ktz->regmap), "failed to init regmap\n");
+ 
+-	ret = devm_regulator_get_enable(&client->dev, "vddpos");
+-	if (ret)
+-		return dev_err_probe(&client->dev, ret, "get regulator vddpos failed\n");
+-	ret = devm_regulator_get_enable(&client->dev, "vddneg");
+-	if (ret)
+-		return dev_err_probe(&client->dev, ret, "get regulator vddneg failed\n");
++	/* External ENP/ENN switches can be sequenced by the LCD panel. */
++	if (!of_property_read_bool(client->dev.of_node, "kinetic,external-bias-control")) {
++		ret = devm_regulator_get_enable(&client->dev, "vddpos");
++		if (ret)
++			return dev_err_probe(&client->dev, ret, "get regulator vddpos failed\n");
++		ret = devm_regulator_get_enable(&client->dev, "vddneg");
++		if (ret)
++			return dev_err_probe(&client->dev, ret, "get regulator vddneg failed\n");
++	}
+ 
+ 	if (id->driver_data == 2) {
+ 		ktz_b = ktz;

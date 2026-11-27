@@ -30,6 +30,12 @@ SSC 实际枚举出的默认 `ambient_light` 为 `tcs3701`，厂商 `ams AG`，�
 作为 lux；第二个原始量不参与调光。该库过滤负值，零 lux 是有效读数。
 加速度计通路与环境光分别请求、分别释放，共享 SLPI 生命周期。
 
+高通 FastRPC listener 在首次缓冲区放不下 DSP 请求时，沿用同一上下文，以已接收长度为偏移调用 `get_in_bufs2`，并检查报告的长度是否超出缓冲区。[高通 listener](https://github.com/qualcomm/fastrpc/blob/3b7f929145db1a52a8d0a334805defefd287e97e/src/listener_android.c#L211-L241) · [高通接口定义](https://github.com/qualcomm/fastrpc/blob/3b7f929145db1a52a8d0a334805defefd287e97e/inc/adsp_listener.h#L49)
+
+本项目的 `hexagonrpcd` 首次用 `next2` 接收最多 256 字节，长请求从偏移 256 续取。守护进程要求两次报告的总长度一致、参数完整，才分派请求。已编码的输入上限为 16 MiB。[Linux 移植与协议测试](../device/sensors/patches/0007-hexagonrpcd-fetch-complete-listener-inputs.patch)
+
+平板上的 ARM64 协议测试使用构造载荷，覆盖 256 字节接收边界两侧以及 4 KiB、64 KiB 长请求。复核时可在已应用补丁的 hexagonrpc 构建目录执行 `meson test -C <构建目录> listener-input-232 listener-input-233 listener-input-4096 listener-input-65536`。
+
 通用配置由构建复制；本机校准继续使用 `/var/lib/liuqin-sensors/registry`，
 通过现有导入流程获得，不进入可发布镜像。不能把另一台机器的注册表当作通用固件。
 

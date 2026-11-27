@@ -1,0 +1,120 @@
+Subject: [PATCH] Bluetooth: wait for the Liuqin controller request before suspend
+
+An audio service UUID change can be writing the Extended Inquiry Response
+as the PM notifier stops LE scanning. Canceling that request gives MGMT
+a failure and resets command credits while the controller still owes a
+Command Complete. The next scan command can then use the wrong completion.
+
+On the Liuqin WCN6855, take the request mutex before issuing suspend
+commands so the current owner can finish. An idle adapter proceeds at once.
+Arm the usual cancellation only on contention and disarm it synchronously
+before issuing any suspend command. This bounds the grace period for a
+request waiting for an unresponsive peer.
+
+The liuqin-t-oss HCI notifier orders suspend preparation on the request
+workqueue and bounds its wait with SUSPEND_NOTIFIER_TIMEOUT. This adapts
+that ordering to the synchronous request mutex in this kernel.
+
+OEM: MiCode/Xiaomi_Kernel_OpenSource, liuqin-t-oss
+     eb49e10028e27fa98856cb5e458c0f0ec5b4554e. In net/bluetooth/hci_core.c,
+     hci_change_suspend_state() queues suspend_prepare on req_workqueue
+     and calls hci_suspend_wait_event(). include/net/bluetooth/hci_core.h
+     sets SUSPEND_NOTIFIER_TIMEOUT to two seconds.
+
+diff --git a/drivers/bluetooth/hci_qca.c b/drivers/bluetooth/hci_qca.c
+index 7089e9b639b2..174d7b388d36 100644
+--- a/drivers/bluetooth/hci_qca.c
++++ b/drivers/bluetooth/hci_qca.c
+@@ -26,6 +26,7 @@
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/acpi.h>
++#include <linux/platform_data/liuqin.h>
+ #include <linux/platform_device.h>
+ #include <linux/pwrseq/consumer.h>
+ #include <linux/regulator/consumer.h>
+@@ -1956,6 +1957,8 @@ static int qca_setup(struct hci_uart *hu)
+ 		break;
+ 
+ 	case QCA_WCN6855:
++		if (liuqin_board_quirks())
++			hci_set_quirk(hdev, HCI_QUIRK_WAIT_BEFORE_SUSPEND);
+ 		soc_name = "wcn6855";
+ 		break;
+ 
+diff --git a/include/net/bluetooth/hci.h b/include/net/bluetooth/hci.h
+index 1641d879dbda..6d93b5d8b6be 100644
+--- a/include/net/bluetooth/hci.h
++++ b/include/net/bluetooth/hci.h
+@@ -375,6 +375,11 @@ enum {
+ 	 */
+ 	HCI_QUIRK_BROKEN_READ_PAGE_SCAN_TYPE,
+ 
++	/* Allow a running request to return its command credit before suspend.
++	 * Set during controller setup on boards that need this handoff.
++	 */
++	HCI_QUIRK_WAIT_BEFORE_SUSPEND,
++
+ 	__HCI_NUM_QUIRKS,
+ };
+ 
+diff --git a/net/bluetooth/hci_core.c b/net/bluetooth/hci_core.c
+index 74d9865e08c2..7891e3ee3c0b 100644
+--- a/net/bluetooth/hci_core.c
++++ b/net/bluetooth/hci_core.c
+@@ -2805,6 +2805,43 @@ static void hci_cancel_cmd_sync(struct hci_dev *hdev, int err)
+ 	hci_cmd_sync_cancel_sync(hdev, err);
+ }
+ 
++struct hci_suspend_timeout {
++	struct delayed_work work;
++	struct hci_dev *hdev;
++};
++
++static void hci_suspend_cancel_work(struct work_struct *work)
++{
++	struct hci_suspend_timeout *timeout =
++		container_of(to_delayed_work(work), struct hci_suspend_timeout, work);
++
++	hci_cancel_cmd_sync(timeout->hdev, EHOSTDOWN);
++}
++
++static void hci_suspend_req_lock(struct hci_dev *hdev)
++{
++	struct hci_suspend_timeout timeout = { .hdev = hdev };
++
++	if (!hci_test_quirk(hdev, HCI_QUIRK_WAIT_BEFORE_SUSPEND)) {
++		hci_cancel_cmd_sync(hdev, EHOSTDOWN);
++		hci_req_sync_lock(hdev);
++		return;
++	}
++
++	if (mutex_trylock(&hdev->req_lock))
++		return;
++
++	/* Let the current owner consume its controller response. For an
++	 * unresponsive peer, keep the existing cancellation as a fallback.
++	 * Join the mutex waiters before starting any suspend commands.
++	 */
++	INIT_DELAYED_WORK_ONSTACK(&timeout.work, hci_suspend_cancel_work);
++	schedule_delayed_work(&timeout.work, SUSPEND_NOTIFIER_TIMEOUT);
++	hci_req_sync_lock(hdev);
++	cancel_delayed_work_sync(&timeout.work);
++	destroy_delayed_work_on_stack(&timeout.work);
++}
++
+ /* Suspend HCI device */
+ int hci_suspend_dev(struct hci_dev *hdev)
+ {
+@@ -2821,10 +2858,7 @@ int hci_suspend_dev(struct hci_dev *hdev)
+ 	if (mgmt_powering_down(hdev))
+ 		return 0;
+ 
+-	/* Cancel potentially blocking sync operation before suspend */
+-	hci_cancel_cmd_sync(hdev, EHOSTDOWN);
+-
+-	hci_req_sync_lock(hdev);
++	hci_suspend_req_lock(hdev);
+ 	ret = hci_suspend_sync(hdev);
+ 	hci_req_sync_unlock(hdev);
+ 

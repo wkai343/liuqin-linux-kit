@@ -123,6 +123,13 @@ devbox run -- python3 tests/gpu-fault-recovery.py --kernel /path/to/patched-kern
 `a730_sqe.fw`，同时检查 initramfs 中的副本；相同固件并不保证主线驱动的
 初始化和休眠顺序与 Android 驱动完全一致。
 
+小米 Gen7 驱动在启动 GMU 前调用 `gen7_gmu_irq_enable()`，清除待处理中断并按 `HFI_IRQ_MASK` 配置掩码。[原厂 IRQ 配置](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/gpu/msm/adreno_gen7_gmu.c#L586-L605)
+
+补丁 `0104` 在固件启动前屏蔽
+GMU→host 的 HFI 中断并清掉上轮状态。主线驱动轮询启动应答和 OOB 确认，HFI 就绪后
+只开放 CM3 故障中断，此时不再清空状态，以便处理启动期间新到的故障。
+首次 `GPU_SET` 超时仍需实机取得队列和中断状态才能定位。[小米 GMU 启动顺序](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/gpu/msm/adreno_gen7_gmu.c#L1698-L1716) · [GMU 补丁](../build/kernel/patches/linux-7.3/0104-adreno-mask-hfi-before-gmu-start.patch)
+
 `GPU_SET` 用于 GPU 硬件初始化；只唤醒 GMU、没有实际提交命令时，休眠前也会补做
 这次握手。单独的 OOB 超时日志不能区分这两条路径，更不能凭随后记录的应用名称
 断定该应用提交了坏指令。`0082` 在超时消息中加入 `caller` 符号，供下一次异常定位。

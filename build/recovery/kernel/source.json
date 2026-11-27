@@ -5,7 +5,7 @@
   "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
   "tag": "v7.3.4",
   "commit": "7595a62d45ee1a2297eafa5f2ef5d0a45142d84d",
-  "expected_source_tree": "47fc6002486c95358d5422c1c6e1054d9ff8d264",
+  "expected_source_tree": "fce0bb306065bbc20c5d99f34ce88da55e5332f3",
   "config": {
     "path": "build/recovery/kernel/7.3.4.config",
     "sha256": "2ef7c5627d56a5b0e7d552f6bd50e5621746708523084b1fca1f036d0232596c"
@@ -332,6 +332,70 @@
       "sha256": "3cdc160181000ab17badcc1aac2ee0b701a142471042bc25084b5693f0ff78d5"
     },
     {
+      "path": "build/kernel/patches/linux-7.3/0097-liuqin-geni-bt-suspend-irq.patch",
+      "sha256": "4068b50ee145ef6276e05f8708b4ff5d929e7bdb3dc24fa8394e1c02a7869186"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0098-liuqin-nt36532-active-low-reset.patch",
+      "sha256": "a9068680fc6c8e18fae89f3d7685e2bea5bdaea0f0ffca9dc5e31e8d231d6c81"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0099-liuqin-dpu-check-initial-core-opp.patch",
+      "sha256": "4c74639dfaac00218e103d34691ea7c540e1651daba4191df809a0373ae7e7ce"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0100-sm8475-usb-adapter-type.patch",
+      "sha256": "5adb16a122b17a958f46c17042057cd374e37f77a3e14f1b88b1ff3daceb3e8e"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0101-liuqin-ufs-lane-clock-ownership.patch",
+      "sha256": "97a782a037aee3b331a904d40c478bad7a3ded686e1a2302fa07eee46945b1d8"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0102-msm-dsi-check-link-power.patch",
+      "sha256": "a0040f1765a10d215474b464995d72abdace934fc1c3752edf19facd43028e07"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0103-fastrpc-freeze-user-wait.patch",
+      "sha256": "9664a08c5f030701c425f199dd80eed822f7df1870a0c0d179d083fcfffdb12d"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0104-adreno-mask-hfi-before-gmu-start.patch",
+      "sha256": "fd4e16e04629990cb524ef47fda05255f637dffdcb82f8344593a08a70b54c5a"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0105-bluetooth-liuqin-finish-request-before-suspend.patch",
+      "sha256": "45f32a77f937c24883f5b4199589f77bb338c63d423d2b64662edb3e7447b9f9"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0106-bluetooth-liuqin-reset-ibs-on-power-off.patch",
+      "sha256": "56bc9bf5317272578331137282f2a565e19bc81031b085195954274b7fd754c0"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0107-liuqin-wcn6855-firmware-voltage-votes.patch",
+      "sha256": "1e65ddfc0476467f157b36a9dde70e1906b541775f9def616ef2695df18b504a"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0108-liuqin-q6apm-capture-trigger.patch",
+      "sha256": "268a8de01701a7481e99b6a2432a09146fcde981bd65575ea90a6d19a3221398"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0109-liuqin-lpass-macro-vote-order.patch",
+      "sha256": "d683d496765dc824634d7555adff06baeb8480b80bbfbbd4b9f69d4c22e4c633"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0110-liuqin-dpu-dual-rail-opps.patch",
+      "sha256": "1f33ba1159bf717d3d37b619239953c52ec79f255aab80b1e59caba5263a89dd"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0111-liuqin-speaker-i2c-dual-rail-votes.patch",
+      "sha256": "c49a80843095d918d998f5528f4d255c360fe84a430f6eed5719a13ed8e16ebc"
+    },
+    {
+      "path": "build/kernel/patches/linux-7.3/0112-liuqin-nt36532-panel-power.patch",
+      "sha256": "88ac2f72a5504000bb79da037a6fb04d858b6a73d0f1a0d4138489284b35511b"
+    },
+    {
       "path": "build/recovery/kernel/patches/linux-7.3/0001-recovery-peripheral-handoff.patch",
       "sha256": "ccb0f030fb1bed451301961d3d9c67d1b45060f67beb936a9aaf32a9db998f62"
     },
@@ -356,7 +420,7 @@
     },
     {
       "path": "device/recovery/native-display-overlay.dts",
-      "sha256": "7c7c55b7dcca0c0cac303df670e5353744608caf77d5e0b43498ee67fee33d4b"
+      "sha256": "b66fb3bf4f15df77065f8220c340e7a8847515572dd0f2573c181f0f2cfc494d"
     },
     {
       "path": "build/lib/abl-symbols.py",
@@ -371,7 +435,7 @@
   "build_timestamp": "2026-11-11T00:00:00+00:00",
   "shared_kernel": {
     "path": "build/kernel/source.json",
-    "sha256": "ac6cf97546a962f72ffb4765e6ff8a512b24742f13e6bf34d72a812316281c76"
+    "sha256": "ab22626adff2c533d1386e77fc0ddef8085132a62623c403a203ae0430b4732f"
   },
   "touch_patches": [
     {

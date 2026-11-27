@@ -8,8 +8,6 @@
 
 Rec 使用 USB ADB 提供 root 维护端点。电脑需要 ADB 驱动和支持 `adb raw` 的 Platform-Tools；无需配置 USB 网卡、IP 或共享网络。只连接可信的物理 USB 电脑。
 
-### 连接与传输
-
 电脑通过 ADB shell v2 执行绑定当前 boot ID 的命令，保留二进制输出和真实退出码。安装材料经 ADB reverse 传送，电脑服务只监听环回地址。
 
 原生内核没有 IPv6，传输前先在已绑定会话中启用 `lo`，再通过 `adb raw` 请求

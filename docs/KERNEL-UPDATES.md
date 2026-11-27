@@ -56,8 +56,7 @@ devbox run build -- --target packages
 
 1. 把同批软件包复制到平板，执行 `sudo dnf install ./*.rpm`。
    默认只安装文件，不写 boot。
-2. 按[已有系统临时启动要求](BUILD.md#当前构建产物)绑定独立测试镜像，经电脑 Fastboot
-   验证桌面和硬件后，正常重启回已安装的默认内核。更新器要求运行内核与 `boot_a` 匹配。
+2. 经电脑 Fastboot 临时验证桌面和硬件。多系统安装须先按[临时启动步骤](BUILD.md#已安装系统的临时启动)绑定并核对测试副本。正常重启回已安装的默认内核后再做更新预检，更新器要求运行内核与 `boot_a` 匹配。
 3. 执行 `sudo liuqin-boot-update check <release>` 与
    `sudo liuqin-boot-update plan <release>`，核对目标版本及写入范围。
    保留上一版 boot、模块和恢复材料；将完整旧 boot、多系统 `linux_boot` 内容、
@@ -87,11 +86,6 @@ devbox run build -- --target packages
 及实际采集数据；未接外屏时的设备识别不能替代外屏实际出声测试。
 键盘改动检查状态中断、输入及睡眠恢复，方法见
 [键盘状态中断与睡眠](HARDWARE.md#键盘状态中断与睡眠)。
-
-多系统更新会生成新的 `boot_generation`。更新后再次临时启动时，须重新读取当前
-`/etc/liuqin-boot-target` 并生成测试副本；更新前保存的绑定镜像已经过期。
-精确 release、启动目标、文件摘要和实测日志保存在忽略的 `out/` 目录，
-文档只记录更新方法、验证范围和限制。
 
 ### 系统内更新与自动写入
 

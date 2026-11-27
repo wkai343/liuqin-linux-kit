@@ -118,6 +118,69 @@ DP 未连接时，桌面仍会探测其 PCM。补丁
 允许已路由但被显示链路明确暂停的播放前端打开，保持 DP 后端关闭；真正缺失的路由
 仍报错。这样 DP 的连接状态不会阻止桌面识别板载扬声器和麦克风。
 
+### 扬声器媒体播放
+
+`OS2.0.6.0.VMYCNXM` 的 `dtbo.img` 第 15 项把上方两颗 CS35L41 接到 I²C15，
+下方两颗接到 I²C17。两条总线速率均为 400 kHz，对应 QUPv3 wrapper 2 的 SE0、SE2。
+原厂 GCC 为两个串行引擎的 75 MHz 及以下源时钟同时
+请求 CX 和 MXA 的 `VDD_LOWER`。本机的 19.2 MHz 源时钟使用 Linux RPMh 的 `LOW_SVS`。
+在 `pm_genpd_summary` 中可核对 `880000.i2c`、`888000.i2c` 各自在 CX 和 MX 的请求。
+总线活动时两项均为 64，各自自动挂起后降为零。扬声器可在控制总线空闲时继续播放。
+[小米 QUP 源时钟表](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/clk/qcom/gcc-waipio.c#L1235-L1305) · [板级补丁](../build/kernel/patches/linux-7.3/0111-liuqin-speaker-i2c-dual-rail-votes.patch)
+
+原厂 `OS2.0.6.0.VMYCNXM` 的 `/vendor/etc/audio/sku_cape/mixer_paths_overlay_static.xml`
+为 TL、TR、BL、BR 四颗 CS35L41 开启 DRE（动态范围增强），硬件噪声门初始为
+`0x0033`，启用 `speaker` 路由时设为 `0x3f75`。项目在 HiFi 静音准备阶段开启
+DRE 并写入初始值。桌面停播后 WirePlumber 仍可保持 Speaker 路由选中，因此由 UCM
+的 `liuqin_speaker` 播放 PCM 在配置硬件时设置噪声门，释放硬件时恢复初始值。
+直接打开 `hw:` 的诊断工具会绕过这段 UCM 配置。[ALSA PCM hooks](https://www.alsa-project.org/alsa-doc/alsa-lib/pcm_plugins.html#pcm_plugins_hooks)
+
+同一原厂混音配置将四颗功放的模拟增益设为档位 `18`。出货模块 `cs35l41_dlkm.ko`
+的 `cs35l41_reg` 默认表将寄存器 `0x6000` 设为 `0x00008000`，其中第 13 至 3 位
+是数字音量字段 `AMP_PCM_VOL`，值为零，对应 0 dB。UCM 在准备和停用扬声器时将
+`Digital PCM Volume` 写为 `0`（静音），启用受保护的 Speaker 路由时写为 `817`
+（0 dB）并设置模拟档位 `18`。音乐和免提通话共用这两个设置，场景增益由 DSP 单独切换。
+[原厂镜像清单](../shared/liuqin-rom-images.json) · [寄存器默认表](https://github.com/xiaomi-sm8450-kernel/android_vendor_qcom_opensource_audio-kernel/blob/721c4fb115d50aea74a2dec9ee864bf0f12682c8/asoc/codecs/cs35l41/cs35l41-tables.c#L89) · [音量档位定义](https://github.com/xiaomi-sm8450-kernel/android_vendor_qcom_opensource_audio-kernel/blob/721c4fb115d50aea74a2dec9ee864bf0f12682c8/asoc/codecs/cs35l41/cs35l41.h#L739-L741)
+
+复核时，在桌面播放、播放 PCM 关闭以及 `s2idle` 唤醒后分别读取四颗功放的
+`DRE Switch` 和 `HW Noise Gate Enable/Delay/Threshold`。DRE 应为开，后三项在播放时
+应为 `63/7/5`，关闭后应为 `0/3/3`。播放中休眠还应确认同一个音频流在唤醒后能继续出声。
+
+### 扬声器音乐与免提通话调音
+
+原厂同一份 `mixer_paths_overlay_static.xml` 为四颗 CS35L41 分别指定
+`TL/TR/BL/BR-music.txt`。四扬声器通话路由 `voice-speaker-2-protected`
+引用 `speaker-mono-2`，改选各自的 `*-voice.txt`。这八份场景文件和四份
+`*-cs35l41-dsp1-spk-prot.bin` 基础调音均取自 `OS2.0.6.0.VMYCNXM` 的
+`/vendor/firmware`，构建时逐文件验证 SHA256。
+[原厂镜像校验值](../shared/liuqin-rom-images.json) · [逐文件来源与校验值](../build/lib/speaker_firmware.py)
+
+八份场景文件在第 23 块提供两个增益参数。四颗功放加载的 V3.5 基础调音中，
+第 23 块是有五个系数的均衡器，增益位于第 27 块。直接下发场景文件会将增益值和
+校验值当成均衡器系数，造成播放无声。服务读取每颗功放对应的原厂基础调音，
+将第 23 块的五个原厂系数和第 27 块的场景增益组成一次更新，重新计算 CRC32，
+再按量产驱动的流程向 Protection 算法 `0xcd` 下发大端参数和更新命令 `8`。
+这样也能在下一次播放时恢复先前被覆盖的均衡器。
+
+WirePlumber 启动桌面用户服务 `liuqin-speaker-tuning`。当应用的 `Communication`
+播放流（PulseAudio 的 `phone`）实际连接到板载扬声器，服务确认四颗功放已加载本机校准，
+再下发四份语音参数。Plasma 的「通话」虚拟输出也按实际连线追踪。
+最后一路通话挂断或转到其他输出时恢复音乐参数，通话转回扬声器时重新选择语音。
+单独使用麦克风或播放铃声均沿用音乐参数。[桌面切换实现](../device/board-overlay/usr/libexec/liuqin-speaker-tuning)
+
+在平板桌面选中板载扬声器和麦克风，解除静音并将音量调到可听水平。以下检查在
+本机建立双向 RTP/Opus 通话，分别在接通前、通话中和挂断后播放 1090 Hz 与 1730 Hz。
+四路板载麦克风在每一阶段都应检出两个测试音。加上 `--check-dsp` 可同时核对四颗
+功放的数字音量字段（`0`）、模拟档位（`18`）和 DSP 调音。
+第 23 块均衡器的五个系数应维持原厂值，第 27 块在工作内存 `0x02801f78`
+的增益应依次为 `0x47cf26`、`0x400000`、`0x47cf26`，
+`command/state/error` 均应为零。[实机出声测试](../tests/speaker-playback-device.py) · [功放回读工具](../tests/speaker-tuning-device.py)
+
+```sh
+sudo -v
+python3 tests/speaker-playback-device.py --check-dsp
+```
+
 ## SoundWire 中断与停钟
 
 WCD9380 的 RX SoundWire 总线（`3210000.soundwire`）曾出现 `SWR bus clsh`
@@ -178,9 +241,40 @@ CPU0 的完成事件不能结束 CPU1 的广播等待。总线冲突及真实 FI
 会在系统睡眠时产生 TX 总线冲突及后续 FIFO 错误。
 唤醒时先恢复供应设备与端口，再由 ALSA 重新准备播放、采集；
 不能仅恢复 DSP graph 而让 SoundWire 仍停在关闭端口的状态。
-已 prepare、尚未 start 的采集也必须停止向 DSP 追加读取。
+本机采集在 ALSA `PREPARED` 状态只配置缓冲、格式并准备 DSP graph。
+显式 `START`（或首次读取触发的自动启动）才启动采集前端，并为共享内存模式
+投递第一轮读取，每个 period 一次。只准备就关闭的前端只释放自己持有的缓冲。
+睡眠后由应用重新 prepare 和 start，首轮读取从新环形缓冲的起点开始。
 恢复时 ALSA 会把应用指针归零，AudioReach 的 `prepare` 也必须清零播放排队位置；
 否则无需经过 STOP 的恢复路径会漏掉首批数据，表现为 RUNNING 但硬件指针不动。
+
+这项时序来自小米平板 6 Pro（M81）量产 ROM `OS2.0.6.0.VMYCNXM`。对 `vendor_a` 分区中的
+`lib64/libagm_pcm_plugin.so` 用 `llvm-objdump -d -C` 反汇编，可分别找到
+`agm_session_prepare`、`agm_session_start`、`agm_session_read` 调用；
+同版本 `libagm.so` 再分别调用 graph 的 prepare、start 和 read。本项目将同步
+启动命令放在支持睡眠的 AudioReach PCM 回调里，把本机 PCM period 通知移出 GPR
+接收工作队列，录放并行时该队列仍能处理启动应答。见[采集补丁](../build/kernel/patches/linux-7.3/0108-liuqin-q6apm-capture-trigger.patch)。
+
+同一原厂 ROM 的 `vendor_boot.img` 中，Cape 基础设备树的 `/soc/spf_core_platform/lpass-cdc`
+节点将两项资源命名为 `lpass_core_hw_vote` 和
+`lpass_audio_hw_vote`，对应提供者的 `qcom,codec-ext-clk-src` 分别为 9 和 11。
+`vendor_dlkm_a` 分区的 `lib/modules/lpass_cdc_dlkm.ko` 中，`lpass_cdc_runtime_resume()`
+先请求核心投票，再请求音频投票。用 `llvm-objdump -dr --disassemble-symbols=lpass_cdc_runtime_resume`
+可核对两次 `digital_cdc_rsc_mgr_hw_vote_enable` 调用。镜像摘要见[原厂 ROM 校验清单](../shared/liuqin-rom-images.json)。
+在本项目的 SM8450 时钟树上，两项对应 `LPASS_HW_MACRO` 和 `LPASS_HW_DCODEC`。
+本机 TX 和 RX 在取得这两票后按 MCLK、NPL、VA 帧同步时钟的顺序启用，
+VA 本身提供帧同步，只需 MCLK 和 NPL。每个 macro 在休眠时逆序释放自己的引用；
+恢复途中失败时回滚已取得的引用，并将寄存器缓存保留到下一次成功恢复。
+见[高通父设备驱动](https://github.com/xiaomi-sm8450-kernel/android_vendor_qcom_opensource_audio-kernel/blob/721c4fb115d50aea74a2dec9ee864bf0f12682c8/asoc/codecs/lpass-cdc/lpass-cdc.c#L1367-L1418)、[高通资源映射](https://github.com/xiaomi-sm8450-kernel/android_vendor_qcom_opensource_audio-kernel/blob/721c4fb115d50aea74a2dec9ee864bf0f12682c8/asoc/codecs/audio-ext-clk-up.c#L177-L210)和[本机时钟补丁](../build/kernel/patches/linux-7.3/0109-liuqin-lpass-macro-vote-order.patch)。
+
+实机检查可用临时启用 function tracer 的内核，记录 `q6apm_graph_start` 的调用者、
+`q6apm_read` 和 CCF 的 `clk_prepare` / `clk_unprepare` 事件。已有系统若使用按内核版本
+安装的拓扑，先核对测试版本的拓扑摘要，并确认 `/proc/asound/pcm` 列出 MultiMedia2 Capture。
+先只 prepare 后关闭，
+再显式 start，分别检查采集前端的启动次数、四路首个 period 和录放并行时的播放硬件指针。
+让已 prepare 的采集跨一次 `s2idle`，核对唤醒后的首次读取。记录 TX、RX、VA
+各自从 runtime suspended 到 active 再回到 suspended 的时钟事件；
+CCF 首个使用者和最后一个使用者才会产生对应的物理时钟事件。
 
 ADSP 异常恢复与系统睡眠不同：服务会销毁、重新创建，LPASS 寄存器和引脚可能丢失，
 但主机侧的时钟句柄、macro 与 SoundWire 设备仍然存在。实现参考原厂

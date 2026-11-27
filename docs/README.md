@@ -12,7 +12,6 @@
 | 构建、内核配置和发行版适配 | [构建指南](BUILD.md) |
 | 内核升级与回退 | [内核更新](KERNEL-UPDATES.md) |
 | 内核实现、验证范围与待解决项 | [内核适配总清单](HARDWARE.md) |
-| 视频应用、硬解与硬编 | [视频接口](VIDEO.md)、[OBS 插件构建与安装](../build/obs-v4l2/README.md) |
 
 ## 安装器与 Recovery 开发
 
@@ -28,6 +27,11 @@
 
 ## 硬件专题
 
-[设备树与原厂对照](DEVICE-TREE.md) · [GPU 与 OpenCL](GPU.md) · [显示与 DP 音频](DISPLAY.md) · [环境光与自动亮度](SENSORS.md) · [音频与麦克风](AUDIO.md) · [键盘与睡眠](HARDWARE.md#键盘状态中断与睡眠) · [指纹](FINGERPRINT.md) · [相机](CAMERA.md) · [视频编解码](VIDEO.md) · [温控](THERMAL.md) · [充电](FASTCHARGE.md) · [RTC](RTC.md)
+| 主题 | 文档 |
+| --- | --- |
+| 板级配置与电源 | [设备树与原厂对照](DEVICE-TREE.md) · [温控](THERMAL.md) · [充电](FASTCHARGE.md) · [充电原厂依据](FASTCHARGE-SOURCES.md) · [RTC](RTC.md) |
+| 图形、音频与视频 | [GPU 与 OpenCL](GPU.md) · [显示与 DP 音频](DISPLAY.md) · [音频与麦克风](AUDIO.md) · [视频编解码与播放](VIDEO.md) · [OBS 插件构建与安装](../build/obs-v4l2/README.md) |
+| 相机 | [支持范围与使用](CAMERA.md) · [libcamera 适配](LIBCAMERA.md) · [硬件 ISP](CAMERA-ISP.md) · [ICP 与图像后处理](CAMERA-ICP.md) |
+| 输入与传感器 | [键盘与睡眠](HARDWARE.md#键盘状态中断与睡眠) · [指纹](FINGERPRINT.md) · [环境光与自动亮度](SENSORS.md) |
 
 来源和许可证见 [CREDITS](../CREDITS.md)、[NOTICE](../NOTICE)。

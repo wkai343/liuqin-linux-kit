@@ -1,0 +1,104 @@
+Subject: [PATCH] drm/msm/dsi: balance link power and stop transfers on clock failure
+
+Keep the first clock-parent error. Both power-on and command preparation
+resume the device, set rates, and enable the link before using the DSI
+controller. Drop each acquired reference on failure. The existing bonded
+transfer path restores only the hosts that it prepared successfully.
+
+OEM: Xiaomi M81 OS2.0.6.0.VMYCNXM, vendor_dlkm_a/lib/modules/msm_drm.ko.
+     dsi_display_prepare() requests its clocks at 0x13d4b4 and checks the
+     return value at 0x13d4b8. This driver propagates failures from each
+     Linux link-clock and runtime PM operation and balances both hosts.
+
+diff --git a/drivers/gpu/drm/msm/dsi/dsi_host.c b/drivers/gpu/drm/msm/dsi/dsi_host.c
+index bbeca7b0f..cbcc3b1d0 100644
+--- a/drivers/gpu/drm/msm/dsi/dsi_host.c
++++ b/drivers/gpu/drm/msm/dsi/dsi_host.c
+@@ -444,12 +444,16 @@ int dsi_link_clk_set_rate_6g_v2_9(struct msm_dsi_host *msm_host)
+ 	 * cannot use assigned-clock-parents.
+ 	 */
+ 	ret = clk_set_parent(msm_host->byte_src_clk, msm_host->dsi_pll_byte_clk);
+-	if (ret)
++	if (ret) {
+ 		dev_err(dev, "Failed to parent byte_src -> dsi_pll_byte: %d\n", ret);
++		return ret;
++	}
+ 
+ 	ret = clk_set_parent(msm_host->pixel_src_clk, msm_host->dsi_pll_pixel_clk);
+-	if (ret)
++	if (ret) {
+ 		dev_err(dev, "Failed to parent pixel_src -> dsi_pll_pixel: %d\n", ret);
++		return ret;
++	}
+ 
+ 	return dsi_link_clk_set_rate_6g(msm_host);
+ }
+@@ -2398,11 +2402,29 @@ void msm_dsi_host_unregister(struct mipi_dsi_host *host)
+ 	}
+ }
+ 
++static int dsi_link_power_get(struct msm_dsi_host *msm_host)
++{
++	const struct msm_dsi_host_cfg_ops *ops = msm_host->cfg_hnd->ops;
++	struct device *dev = &msm_host->pdev->dev;
++	int ret;
++
++	ret = pm_runtime_resume_and_get(dev);
++	if (ret < 0)
++		return ret;
++
++	ret = ops->link_clk_set_rate(msm_host);
++	if (!ret)
++		ret = ops->link_clk_enable(msm_host);
++	if (ret)
++		pm_runtime_put(dev);
++	return ret;
++}
++
+ int msm_dsi_host_xfer_prepare(struct mipi_dsi_host *host,
+ 				const struct mipi_dsi_msg *msg)
+ {
+ 	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+-	const struct msm_dsi_cfg_handler *cfg_hnd = msm_host->cfg_hnd;
++	int ret;
+ 
+ 	/* TODO: make sure dsi_cmd_mdp is idle.
+ 	 * Since DSI6G v1.2.0, we can set DSI_TRIG_CTRL.BLOCK_DMA_WITHIN_FRAME
+@@ -2414,9 +2436,9 @@ int msm_dsi_host_xfer_prepare(struct mipi_dsi_host *host,
+ 	 * mdss interrupt is generated in mdp core clock domain
+ 	 * mdp clock need to be enabled to receive dsi interrupt
+ 	 */
+-	pm_runtime_get_sync(&msm_host->pdev->dev);
+-	cfg_hnd->ops->link_clk_set_rate(msm_host);
+-	cfg_hnd->ops->link_clk_enable(msm_host);
++	ret = dsi_link_power_get(msm_host);
++	if (ret)
++		return ret;
+ 
+ 	/* TODO: vote for bus bandwidth */
+ 
+@@ -2863,13 +2885,10 @@ int msm_dsi_host_power_on(struct mipi_dsi_host *host,
+ 	if (ret) {
+ 		pr_err("%s:Failed to enable vregs.ret=%d\n",
+ 			__func__, ret);
+-		goto unlock_ret;
++		goto fail_disable_sfpb;
+ 	}
+ 
+-	pm_runtime_get_sync(&msm_host->pdev->dev);
+-	ret = cfg_hnd->ops->link_clk_set_rate(msm_host);
+-	if (!ret)
+-		ret = cfg_hnd->ops->link_clk_enable(msm_host);
++	ret = dsi_link_power_get(msm_host);
+ 	if (ret) {
+ 		pr_err("%s: failed to enable link clocks. ret=%d\n",
+ 		       __func__, ret);
+@@ -2898,6 +2917,8 @@ int msm_dsi_host_power_on(struct mipi_dsi_host *host,
+ fail_disable_reg:
+ 	regulator_bulk_disable(msm_host->cfg_hnd->cfg->num_regulators,
+ 			       msm_host->supplies);
++fail_disable_sfpb:
++	msm_dsi_sfpb_config(msm_host, false);
+ unlock_ret:
+ 	mutex_unlock(&msm_host->dev_mutex);
+ 	return ret;

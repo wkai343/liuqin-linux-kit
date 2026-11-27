@@ -1,0 +1,11 @@
+[Unit]
+Description=Select Xiaomi Pad 6 Pro speaker tuning for calls
+After=wireplumber.service
+PartOf=wireplumber.service
+ConditionPathExists=/usr/share/liuqin/speaker-tuning/sha256.json
+
+[Service]
+ExecStart=/usr/libexec/liuqin-speaker-tuning
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes

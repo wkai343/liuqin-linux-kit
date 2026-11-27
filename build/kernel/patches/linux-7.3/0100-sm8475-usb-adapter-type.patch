@@ -1,0 +1,54 @@
+Subject: [PATCH] power: supply: qcom_battmgr: translate the M81 charger type for the class
+
+Map the firmware enum only while returning POWER_SUPPLY_PROP_USB_TYPE.
+Keep the raw property available to input-current policy. The M81 module
+groups 0x80 through 0x82 as DCP and sends FLOAT and CLASSB through its
+default branch. Wire value 9 is Apple Brick ID in the shipping ABI.
+
+OEM: Xiaomi M81 OS2.0.6.0.VMYCNXM, vendor_dlkm_a/lib/modules/
+     qti_battery_charger_main_m81.ko. The range check at 0x14b8 in
+     battery_chg_update_usb_type_work() selects the three QC values.
+     MiCode/Xiaomi_Kernel_OpenSource eb49e10028e27fa98856cb5e458c0f0ec5b4554e,
+     include/linux/power_supply.h and drivers/power/supply/qti_battery_charger.c,
+     define the Android USB enum and charger classification.
+
+diff --git a/drivers/power/supply/qcom_battmgr.c b/drivers/power/supply/qcom_battmgr.c
+index 1336bb8d2f01..94be84bf08ce 100644
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -2091,6 +2091,23 @@ static int qcom_battmgr_usb_sm8350_update(struct qcom_battmgr *battmgr,
+ 	return ret;
+ }
+ 
++/* M81 USB_ADAP_TYPE uses the Android USB enum followed by QTI extensions. */
++static int qcom_battmgr_sm8475_usb_type(u32 raw)
++{
++	switch (raw) {
++	case 0 ... 8:	/* UNKNOWN through PD_PPS match the Linux class. */
++		return raw;
++	case 9:
++		return POWER_SUPPLY_USB_TYPE_APPLE_BRICK_ID;
++	case 0x80:	/* HVDCP */
++	case 0x81:	/* HVDCP_3 */
++	case 0x82:	/* HVDCP_3P5 */
++		return POWER_SUPPLY_USB_TYPE_DCP;
++	default:	/* Includes USB_FLOAT and HVDCP_3_CLASSB on M81. */
++		return POWER_SUPPLY_USB_TYPE_UNKNOWN;
++	}
++}
++
+ static int qcom_battmgr_usb_get_property(struct power_supply *psy,
+ 					 enum power_supply_property psp,
+ 					 union power_supply_propval *val)
+@@ -2129,7 +2146,10 @@ static int qcom_battmgr_usb_get_property(struct power_supply *psy,
+ 		val->intval = battmgr->usb.current_limit;
+ 		break;
+ 	case POWER_SUPPLY_PROP_USB_TYPE:
+-		val->intval = battmgr->usb.usb_type;
++		if (battmgr->variant == QCOM_BATTMGR_SM8475)
++			val->intval = qcom_battmgr_sm8475_usb_type(battmgr->usb.usb_type);
++		else
++			val->intval = battmgr->usb.usb_type;
+ 		break;
+ 	default:
+ 		return -EINVAL;

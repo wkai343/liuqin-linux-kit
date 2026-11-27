@@ -1,0 +1,128 @@
+Subject: [PATCH] drm/panel: nt36532: hold Liuqin RESX low when powering down
+
+Use logical assertion throughout the M81 reset sequence and handle old
+active-high DTBs at probe. Sample the inherited level before requesting
+output so deferred probe preserves bootloader scanout. Assert before
+restoring missing rails, before normal rail release, and on command
+unwind once the host stops. Retain the per-board supply vote policy.
+
+OEM: Xiaomi M81 OS2.0.6.0.VMYCNXM. Entry 15 of dtbo.img specifies the
+     Tianma and CSOT reset waveforms. In vendor_dlkm_a/lib/modules/msm_drm.ko,
+     dsi_panel_post_unprepare() drives RESX physically low at 0x14e7c0
+     before releasing the panel supplies at 0x14e8d4.
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+index 3b6905e7dec4..949e858e5676 100644
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+@@ -1247,10 +1247,6 @@ &mdss_dsi0 {
+ 
+ 	status = "okay";
+ 
+-	/*
+-	 * The Liuqin reset helper drives physical low/high/low/high and must end
+-	 * high (out of reset). Keep GPIO_ACTIVE_HIGH for that existing waveform.
+-	 */
+ 	panel: panel@0 {
+ 		compatible = "xiaomi,liuqin-nt36532", "xiaomi,pipa-nt36532";
+ 		reg = <0>;
+@@ -1259,7 +1255,7 @@ panel: panel@0 {
+ 		dvddbuck-supply = <&display_panel_dvdd_buck>;
+ 		dvddldo-supply = <&display_panel_dvdd_ldo>;
+ 
+-		reset-gpios = <&tlmm 0 GPIO_ACTIVE_HIGH>;
++		reset-gpios = <&tlmm 0 GPIO_ACTIVE_LOW>;
+ 		error-gpios = <&tlmm 20 GPIO_ACTIVE_HIGH>,
+ 			      <&tlmm 116 GPIO_ACTIVE_HIGH>;
+ 		backlight = <&backlight>;
+diff --git a/drivers/gpu/drm/panel/panel-novatek-nt36532.c b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+index 7c09bf63cb2a..ba07b74af7ed 100644
+--- a/drivers/gpu/drm/panel/panel-novatek-nt36532.c
++++ b/drivers/gpu/drm/panel/panel-novatek-nt36532.c
+@@ -147,18 +147,16 @@ static struct mipi_dsi_device *nt36532_cmd_dsi(struct nt36532 *ctx)
+ 	return ctx->dsi[1] ?: ctx->dsi[0];
+ }
+ 
+-/* Physical levels and delays from both OS2.0.6.0 M81 panel descriptions.
+- * Liuqin keeps its legacy GPIO_ACTIVE_HIGH binding, so 0/1 are low/high.
+- */
++/* Both M81 panels use the same active-low RESX waveform. */
+ static void liuqin_reset(struct nt36532 *ctx)
+ {
+-	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
+-	usleep_range(10000, 10100);
+ 	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+-	usleep_range(3000, 3100);
++	usleep_range(10000, 10100);
+ 	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
+ 	usleep_range(3000, 3100);
+ 	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++	usleep_range(3000, 3100);
++	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
+ 	usleep_range(15000, 15100);
+ }
+ 
+@@ -1905,10 +1903,9 @@ static int nt36532_prepare(struct drm_panel *panel)
+ 
+ 	liuqin_cancel_dimming(ctx, false);
+ 
+-	/* Match the retained-power resume path: reset low before digital rails. */
+-	if (ctx->desc == &liuqin_desc && ctx->keep_iovdd &&
+-	    (ctx->supply_votes & LIUQIN_DIGITAL_VOTES) != LIUQIN_DIGITAL_VOTES)
+-		gpiod_set_value_cansleep(ctx->reset_gpio, 0);
++	/* Hold RESX low while restoring rails, including a partial-enable unwind. */
++	if (ctx->desc == &liuqin_desc && ctx->supply_votes != LIUQIN_ALL_VOTES)
++		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+ 
+ 	ret = nt36532_enable_supplies(ctx);
+ 	if (ret < 0) {
+@@ -2429,6 +2426,29 @@ static const struct drm_panel_funcs nt36532_panel_funcs = {
+ 	.finish_touch_recovery = nt36532_finish_touch_recovery,
+ };
+ 
++static int nt36532_get_reset_gpio(struct nt36532 *ctx, struct device *dev)
++{
++	bool liuqin = ctx->desc == &liuqin_desc;
++	int level;
++
++	ctx->reset_gpio = devm_gpiod_get(dev, "reset", liuqin ? GPIOD_ASIS : GPIOD_OUT_HIGH);
++	if (IS_ERR(ctx->reset_gpio))
++		return PTR_ERR(ctx->reset_gpio);
++	if (!liuqin)
++		return 0;
++
++	/* Older Liuqin DTBs described the waveform in physical levels. */
++	if (!gpiod_is_active_low(ctx->reset_gpio))
++		gpiod_toggle_active_low(ctx->reset_gpio);
++
++	/* Preserve bootloader scanout even if a later supplier defers probe. */
++	level = gpiod_get_value_cansleep(ctx->reset_gpio);
++	if (level < 0)
++		return level;
++
++	return gpiod_direction_output(ctx->reset_gpio, level);
++}
++
+ static int nt36532_probe(struct mipi_dsi_device *dsi)
+ {
+ 	struct mipi_dsi_host *dsi_sec_host;
+@@ -2450,15 +2470,14 @@ static int nt36532_probe(struct mipi_dsi_device *dsi)
+ 	if (ret < 0)
+ 		return dev_err_probe(dev, ret, "Failed to get regulators\n");
+ 
+-	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
+-	if (IS_ERR(ctx->reset_gpio))
+-		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio),
+-				     "Failed to get reset-gpios\n");
+-
+ 	ctx->desc = of_device_get_match_data(dev);
+ 	if (!ctx->desc)
+ 		return -ENODEV;
+ 
++	ret = nt36532_get_reset_gpio(ctx, dev);
++	if (ret)
++		return dev_err_probe(dev, ret, "Failed to configure reset GPIO\n");
++
+ 	dsi_sec = of_graph_get_remote_node(dsi->dev.of_node, 1, -1);
+ 
+ 	if (dsi_sec) {

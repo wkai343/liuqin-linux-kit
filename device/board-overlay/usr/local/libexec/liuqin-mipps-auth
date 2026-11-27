@@ -831,7 +831,10 @@ def role_first_prelude(root, args):
         if read_state_file(READY_STATE_FILE) != state:
             raise RuntimeError("cannot persist readiness retry budget")
         if count < READINESS_ATTEMPTS:
-            queue_auth_event()
+            if getattr(args, "expected_attach", None):
+                mark_auth_event()  # The initramfs supervisor watches this marker.
+            else:
+                queue_auth_event()
         raise
     require_current_attach()
     usb_data = wait_partner_source_usb_data(args.timeout)
@@ -1232,6 +1235,7 @@ def main():
     parser.add_argument("--xm-property-trigger", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--typec-trigger", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--consume-event", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--expected-attach", help=argparse.SUPPRESS)
     parser.add_argument("--watch", action="store_true",
                         help="wait for pending charger events in one persistent process")
     parser.add_argument("--ready-timeout", type=float, default=12.0,
@@ -1281,6 +1285,9 @@ def main():
 
 
 def process_auth_event(args):
+    expected = args.expected_attach
+    if expected is not None and (current_attach_token() != expected or usb_is_online() is not True):
+        raise UnsupportedChargerError("charger attachment changed before authentication")
     if args.consume_event and not args.battery_auth_only:
         consume_auth_event()
     try:
@@ -1295,6 +1302,8 @@ def process_auth_event(args):
         return
     global ACTIVE_ATTACH
     ACTIVE_ATTACH = current_attach_token()
+    if expected is not None and ACTIVE_ATTACH != expected:
+        raise UnsupportedChargerError("charger attachment changed before authentication")
     try:
         completed = False if args.force else auth_already_completed(root)
         if completed is None:

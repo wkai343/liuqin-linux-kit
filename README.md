@@ -16,12 +16,8 @@
 | 安装环境 | 自带内核的原生 Rec，通过 USB ADB 与电脑 GUI 配合 |
 | 安装器 | 先读真实分区，再选系统材料；统一备份、方案确认、限定写入和回读 |
 | 引导管理 | 电脑或具备相应能力的 Rec 切换默认系统；支持中断检查与重复引导快照回收 |
-| 固定 Rec | A 槽固定、冷启动及恢复已验证；按设备与固件匹配镜像 |
-| 内核升级 | 版本化 RPM/DEB；系统内自动写引导仍默认停用 |
-
-固定 Rec 的跨 ROM 保护按安装后的启动链检查；已知硬件限制见对应专题。
-
-内核实现、硬件验证范围、待解决项及用户态依赖见[内核适配总清单](docs/HARDWARE.md)。
+| 固定 Rec | A 槽固定、冷启动及恢复已验证。镜像按设备与固件匹配，跨 ROM 保护核对安装后的启动链 |
+| 内核升级 | Fedora 提供配套的版本化 RPM，系统内自动写引导默认停用 |
 
 ## 使用安装器
 
@@ -33,7 +29,7 @@ uv run --project installer installer/install-gui.py
 
 源码模式自动查找 `out/releases/native-recovery-flash/recovery.img` 等配套镜像；也可用 `--recovery-image /path/to/recovery.img` 明确选择。Windows 10/11 x64 可运行 `installer/start-windows.cmd`，只需相应 Fastboot/ADB 驱动，无需配置 USB 网卡。
 
-五步流程为：设备与分区 → 安装材料 → 确认方案 → 执行 → 完成。勾选 userdata 安装 Android，勾选 rootfs 安装 Linux；新建、删除、格式化先加入待执行列表，确认后才写盘。Android 选择完整 ROM ZIP，Linux 选择配套 boot.img 与 rootfs.tar.gz。
+安装 Android 时选择 userdata 和完整 ROM ZIP，安装 Linux 时选择 rootfs 分区及配套的 `boot.img`、`rootfs.tar.gz`。向导先预览分区和系统安装方案，确认后才写盘。
 
 **重装、删除和格式化会清除相应数据，工具的设备/引导备份不包含个人文件。** 完成后留在 Rec；首次启动由用户在平板确认。操作与恢复见[安装助手](docs/INSTALLER-GUI.md)和[安装要求与恢复](docs/FLASHING.md)。
 
@@ -49,24 +45,16 @@ cd liuqin-linux-kit
 devbox install
 devbox run doctor
 devbox run init
+# 核对 build.json 中的内核、ROM 路径和 rootfs_config 后继续
 devbox run fetch-rom
 devbox run plan
-devbox run build
-devbox run outputs
+devbox run build -- --export-dir out/releases/my-fedora-build
 ```
 
-检查本机 `build.json` 的内核、ROM 路径及 `rootfs_config`。`build` 生成配套 boot/rootfs；`outputs` 按内核/模块标识列出路径，boot 产物可复制为 `boot.img`。原生 ADB Rec 由 `build/recovery/` 独立构建。
+导出目录须尚不存在。构建完成后可用 `uv run --project installer installer/install-gui.py --bundle out/releases/my-fedora-build` 打开这组配套文件。安装所需的 [Rec 镜像](docs/NATIVE-RECOVERY.md#构建与交付)单独构建。
 
 rootfs 装配默认使用 Podman 用户命名空间，具备完整 subuid/subgid 等依赖后无需 sudo 密码。已有系统升级见[内核更新](docs/KERNEL-UPDATES.md)，更换源码或配置后需使用同批 Image、模块和 boot。
 
 ## 项目目录
 
-| 目录 | 用途 |
-| --- | --- |
-| `build/` | 构建脚本、内核补丁、rootfs 配方、Rec 构建与验证工具 |
-| `installer/` | 当前 QML 向导、worker、备份与源码打包 |
-| `device/`、`shared/` | 板级适配、Rec/安装代理和共用接口 |
-| `docs/`、`tests/` | 使用、开发与离线回归 |
-| `inputs/`、`sources/`、`out/` | 素材、外部源码和构建产物，不提交 |
-
-安装器源码包由 `python3 installer/package.py` 生成；内置 Rec 的交付包需另传入镜像及相应源码/许可。目录边界见[项目结构](docs/STRUCTURE.md)，工作流见[CI](docs/CI.md)，贡献要求见 [CONTRIBUTING](CONTRIBUTING.md)。[问题反馈](https://github.com/wkai343/liuqin-linux-kit/issues)。
+目录职责和各类输出见[项目结构](docs/STRUCTURE.md)。安装器源码包由 `python3 installer/package.py` 生成，内置 Rec 时还需提供镜像和对应的源码、许可材料。开发与反馈见 [CI 工作流](docs/CI.md)、[贡献说明](CONTRIBUTING.md)和[问题反馈](https://github.com/wkai343/liuqin-linux-kit/issues)。

@@ -1,29 +1,10 @@
 # 原生 Rec 内核
 
-Rec 独立使用 kernel.org 源码和本仓库补丁，不再获取原作者的内核仓库，也不需要从旧 Recovery 镜像提取内核、配置或 DTB。桌面内核配方仍在 `build/kernel/source.json`。
-
-默认配方为 [source.json](source.json)，版本为 **7.3.4**，与 Fedora 使用同一 kernel.org 提交和 `build/kernel/source.json` 中的公共补丁。独立的 [7.3.4.config](7.3.4.config) 从原 Rec 配置迁移；Rec 不使用桌面配置或启动参数。公共源码中的音频恢复改动不代表 Rec 开启了音频，也不替代当前源码配方的 Rec 实机验证。
-
-CPU 功耗系数与两级 BWMON 共享桌面的设备树配置；Rec 将 `CONFIG_QCOM_ICC_BWMON` 内置，
-不依赖未打包的带宽监测模块。新增配置在 Rec 侧仅完成源码、配置和 DTB 离线校验；
-Fedora 的实机结果不代表新的 Rec 镜像已通过验收，详见[设备树对照](../../../docs/DEVICE-TREE.md)。
+[Rec 来源清单](source.json)与[桌面内核清单](../../kernel/source.json)共用 kernel.org 7.3.4 的提交和公共补丁。[Rec 内核配置](7.3.4.config)、启动参数和专用补丁独立维护。CPU 功耗系数和两级 BWMON 来自公共设备树，Rec 内核将 BWMON 内置。桌面与 Rec 各自的验证范围见[设备树对照](../../../docs/DEVICE-TREE.md)。
 
 Rec 专用差异集中在 `patches/linux-7.3/`：内核补丁隔离 ABL 占位节点的供应依赖、固定 USB peripheral，并保留 PMIC 电池/充电服务；外部模块补丁仅应用到触控接管模块的构建副本，通知新版 NVT 驱动已有画面就绪。
 
-USB 速率由公共补丁 `0071` 的板级 `maximum-speed = "super-speed"` 统一约束，
-Rec 不再通过 ADB gadget 脚本另行限速。控制器限制与实际枚举的核验见
-[USB 配置](../../../docs/NATIVE-RECOVERY.md)。
-
-Rec 通过电池服务的 `XM_CC_ORIENTATION` 驱动 QMP 的 Type-C 方向与 USB
-通道切换，保留连接器到高速 PHY 的双向设备树连接。属性定义与只读诊断接口由
-公共补丁 `0072` 提供；正式系统的 UCSI 查询路径在 Rec 中不启用。专用补丁 `0005` 使用
-已有电池请求锁，处理服务重启、USB 通知和迟到的方向状态；读取失败不切换。
-此路径同时要求板级 helper 与 Rec 标记，不接管正式系统的 Type-C 策略。
-切换通道前同步停止 gadget、撤销 VBUS 有效状态，完成后通过仅接受
-NONE/DEVICE 的控制器开关重新连接；连接器到控制器的设备树连接也予以保留。
-Rec 不启用 UCSI/PAN 客户端，控制器仍固定为 peripheral，不进入 DP/USB4
-模式。翻面验收必须分别检查两面的
-`current_speed` 为 `super-speed` 并完成数据校验，不能仅以 ADB 已连接判定通过。
+USB 的 Gen1 上限由公共补丁 `0071` 定义，`0072` 提供 `XM_CC_ORIENTATION` 属性。Rec 专用补丁 `0005` 仅在板级识别和 Rec 标记同时匹配时，用电池服务驱动 QMP 翻面，控制器固定为 peripheral。调试节点、切换时序和双向传输验收见[USB 方向与速率](../../../docs/NATIVE-RECOVERY.md#usb-方向与速率)。
 
 Rec 标记还会跳过桌面 ADSP 的音频 PRM 时钟子设备创建。Rec 已禁用 GPR 音频子树，
 不能因无法创建其时钟设备而使整个 ADSP 探测失败；电池和充电服务仍依赖 ADSP。
@@ -31,7 +12,7 @@ Rec 标记还会跳过桌面 ADSP 的音频 PRM 时钟子设备创建。Rec 已�
 
 Rec 专用触控补丁在天马屏 NVT 固件加载后、输入开放前检查看门狗状态，持续异常时
 最多重载一次固件；不重新注册输入设备、不执行工程复位或面板复位。该机制用于
-有限恢复，不能替代首次固件启动异常的根因分析，详见[触控准备流程](../../../docs/NATIVE-RECOVERY.md)。
+有限恢复，不能替代首次固件启动异常的根因分析，详见[触控准备流程](../../../docs/NATIVE-RECOVERY.md#触控与维护界面)。
 
 维护环境继续使用启动器保留的 simplefb 画面、手指触控、ADB 和只读存储封存。DTB 禁用完整 DRM/GPU 接管、音频与笔输入，保留显示时钟/电源依赖和 ADSP 电池通信。触控服务在发布衔接面板之前设置 `nt36523_ts.liuqin_tddi_recovery=0`，沿用 Rec 的 ReK 就绪判断；simplefb 没有桌面 A3 校准恢复所需的面板回调。初始画面就绪检查和禁止工程复位仍保留。共享显示补丁不表示 Rec 启用了桌面的刷新率切换。
 
@@ -43,9 +24,9 @@ Rec 专用触控补丁在天马屏 NVT 固件加载后、输入开放前检查�
 
 ## 验证范围
 
-7.3.4 配合 Buildroot 用户态已在一台天马屏设备上通过 Fastboot 临时启动、背光自动开启、界面显示、菜单点按/滑动、ADB、触控固件初始化、电池读取，以及六个 UFS LUN、141 个块设备节点的只读检查。运行时文件校验和 GPT 只读读取通过；触控工程复位和看门狗计数为零，固件只加载一次；`boot_a` 和 `recovery_a` 摘要与此前基线一致。当前镜像与 `hardware-boot-validation.json` 位于 `out/releases/liuqin-native-rec-7.3.4-buildroot/`；记录绑定镜像摘要、构建 ID 和启动 ID，不能用于其他产物。
+7.3.4 的 Buildroot 基线镜像曾在天马屏设备完成临时启动、背光与触控操作、ADB、电池读取、UFS 全节点只读和 GPT 读取核验。该次启动仍有音频 pinctrl、早期 QRTR 及键盘 I2C 告警。复核时以对应镜像的 `hardware-boot-validation.json` 匹配摘要、构建 ID 和启动 ID。
 
-离线检查覆盖公共补丁绑定、组件身份、内置维护驱动、两种 USB 设备树结构、ARM64 对齐入口、触控策略及现有安装流程。尚未验证真实安装、格式化、固定刷入或长期运行，也未验收华星屏及磁吸键盘。启动日志中的音频 pinctrl、早期 QRTR 服务告警和一次键盘 I2C 取消超时保留在验证记录中，尚未专项处理。
+离线检查覆盖公共补丁与组件身份、内置维护驱动、USB 设备树、ARM64 对齐入口和触控策略。真实安装及固定刷入按具体镜像的[角色与资格记录](../../../docs/NATIVE-RECOVERY.md#镜像角色)核验。华星屏、磁吸键盘及长期运行仍需单独验证。
 
 ## 构建
 

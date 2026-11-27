@@ -588,11 +588,19 @@ class SourceTests(unittest.TestCase):
             speaker.extract(vendor,source)
             (source/'usr/lib/firmware/cirrus/private-calr.bin').write_bytes(b'private')
             speaker.install(source,target)
-        files=list((target/'usr/lib/firmware/cirrus').iterdir())
-        self.assertEqual({p.name for p in files},{record[1] for record in records})
+        tuning=target/'usr/share/liuqin/speaker-tuning'
+        manifest=json.loads((tuning/'sha256.json').read_text())
+        delta_names={f'{amp}-{mode}.txt' for amp in ('TL','TR','BL','BR') for mode in ('music','voice')}
+        self.assertEqual(set(manifest),delta_names)
+        self.assertEqual(manifest,{name:digest for _,name,digest in records if name in delta_names})
+        firmware_dir=target/'usr/lib/firmware/cirrus'
+        self.assertEqual({p.name for p in firmware_dir.iterdir()},{name for _,name,_ in records}-delta_names)
+        self.assertEqual({p.name for p in tuning.iterdir()},delta_names|{'sha256.json'})
+        files=[*firmware_dir.iterdir(),*tuning.iterdir()]
         self.assertTrue(all(p.stat().st_mode & 0o777==0o644 for p in files))
         for name,renamed,_digest in records:
-            self.assertEqual((target/'usr/lib/firmware/cirrus'/renamed).read_bytes(),(vendor/'firmware'/name).read_bytes())
+            parent=tuning if renamed in delta_names else firmware_dir
+            self.assertEqual((parent/renamed).read_bytes(),(vendor/'firmware'/name).read_bytes())
         # Validate the entire input set before creating a partial package tree.
         (source/'usr/lib/firmware/cirrus'/records[-1][1]).write_bytes(b'corrupted')
         rejected=self.root/'rejected'
@@ -683,6 +691,8 @@ class DevicePackageTests(unittest.TestCase):
             (gnome/'policy').write_text('gnome-v1')
             composer=project/'build/lib/device_overlay.py';composer.parent.mkdir(parents=True)
             composer.write_text('composer-v1')
+            speaker_builder=composer.with_name('speaker_firmware.py')
+            speaker_builder.write_text('speaker-payload-v1')
             for module,cls in ((fedora_flow,fedora_flow.FedoraFlow),):
                 with self.subTest(pipeline=cls.__name__):
                     pipeline=object.__new__(cls);pipeline.version='0.1'
@@ -692,7 +702,7 @@ class DevicePackageTests(unittest.TestCase):
                     def tree(path):
                         return helpers.tree_identity(path) if path in (board,gnome) else str(path)
                     def digest(path):
-                        return helpers.sha(path) if path==composer else str(path)
+                        return helpers.sha(path) if path in (composer,speaker_builder) else str(path)
                     with patch.object(module,'PROJECT',project), \
                          patch.object(module,'tree_identity',side_effect=tree), \
                          patch.object(module,'sha',side_effect=digest), \
@@ -707,9 +717,17 @@ class DevicePackageTests(unittest.TestCase):
                         pipeline.device_debs()
                         composer.write_text(composer.read_text()+' changed')
                         pipeline.device_debs()
+                        speaker_builder.write_text('changed install layout')
+                        pipeline.device_debs()
                     self.assertEqual(records[0],records[1])
                     self.assertNotEqual(records[1],records[2])
                     self.assertNotEqual(records[2],records[3])
+                    self.assertNotEqual(records[3],records[4])
+
+    def test_firmware_deb_default_pin_matches_the_shipped_manifest(self):
+        script=(PROJECT/'build/scripts/build-liuqin-debs.sh').read_text()
+        digest=helpers.sha(PROJECT/'device/firmware/firmware.manifest')
+        self.assertIn('FIRMWARE_MANIFEST_SHA256:-'+digest+'}',script)
 
     def test_sensor_deb_leaves_distribution_libraries_to_packages(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -758,6 +776,9 @@ class DevicePackageTests(unittest.TestCase):
             self.assertFalse((extracted/'usr/local/libexec/liuqin-power-key-action').exists())
             self.assertFalse((extracted/'usr/local/bin/liuqin-camera').exists())
             self.assertTrue((extracted/'usr/lib/systemd/sleep.conf.d/30-liuqin-suspend.conf').is_file())
+            self.assertTrue(os.access(extracted/'usr/libexec/liuqin-speaker-tuning', os.X_OK))
+            self.assertIn('Wants=liuqin-speaker-tuning.service', (extracted/
+                'usr/lib/systemd/user/wireplumber.service.d/50-liuqin-speaker-tuning.conf').read_text())
             self.assertFalse((extracted/'usr/bin/gnome-control-center').exists())
             meta=next(out.glob('liuqin-device-base_*.deb'))
             self.assertNotIn('liuqin-kernel',subprocess.check_output(['dpkg-deb','-f',str(meta),'Depends'],text=True))

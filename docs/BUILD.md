@@ -43,36 +43,27 @@ devbox run fetch-rom -- --archive /path/to/liuqin-fastboot-rom.tgz
 ```sh
 devbox run plan
 devbox run build -- --export-dir out/releases/my-fedora-build
-devbox run outputs
 ```
 
-`build` 默认生成配套 boot/rootfs；不带 `--export-dir` 时只保存在 `out/build/from-source/`。导出目录必须尚不存在，包含 `boot.img`、`rootfs.tar.gz`、`native-root.contract` 和 `SHA256SUMS`。核验配套标识与完成记录摘要后才发布目录，不附带 Rec、构建配置或独立登录信息；CI 使用同一入口。
-
-`outputs` 只列出已完成缓存，不联网、不构建，也不保证对应当前配置。交付本次构建应使用 `--export-dir`。
+`build` 默认将配套 boot/rootfs 保存在 `out/build/from-source/`。本地和 CI 均用 `--export-dir` 交付本次构建，目录须尚不存在。导出时先核对 boot/rootfs 的配套标识及完成记录中的文件摘要。要查看以往完成的缓存，可运行 `devbox run outputs`，其中可能包含其他配置的产物。
 
 ### 当前构建产物
 
-| 产物 | 内容 |
+| 系统导出文件 | 内容 |
 | --- | --- |
-| `boot-liuqin-native.img`（导出为 `boot.img`） | 目标内核、DTB、固件、启动脚本与模块身份 |
+| `boot.img` | 目标内核、DTB、固件、启动脚本与模块身份。缓存文件名为 `boot-liuqin-native.img` |
 | `rootfs.tar.gz` | 官方基础系统、桌面、设备包及同版内核模块 |
-| 原生 `recovery.img` | 独立内核、运行载荷、UI、触控与 ADB；使用[原生 Rec 构建入口](NATIVE-RECOVERY.md#构建与交付) |
+| `native-root.contract` | boot 与 rootfs 共用的内核及模块标识 |
+| `SHA256SUMS` | 上述三个文件的摘要。在导出目录执行 `sha256sum -c SHA256SUMS` 可复核 |
 
-目标 boot 与 rootfs 模块必须配套。更换内核时可复用已完成的桌面装配，再打包根归档。
-
-对已有系统使用 Fastboot 临时启动前，还需沿用安装时的启动目标绑定：分区与文件系统 UUID、
-`native-root` 路径及 `boot_generation`。构建输出是未绑定的发布镜像；先用
-[`liuqin_boot_target.bind`](../shared/liuqin_boot_target.py) 和已核实的现有绑定生成测试副本，
-并核对新版本模块及启动契约。仅复制新模块不会自动给发布镜像补上目标绑定。
-默认内核更新会生成新的 `boot_generation`；更新后再次临时启动须重新读取当前目标并绑定，
-不能复用更新前的测试镜像。完整流程见[已安装系统更新](KERNEL-UPDATES.md#已安装系统更新)。
+安装所需的 `recovery.img` 由[原生 Rec 构建入口](NATIVE-RECOVERY.md#构建与交付)独立生成。更换目标内核时可复用已完成的桌面装配，再打包同版模块和根归档。要在已有多系统 Linux 上试用发布镜像，请从未绑定的 `boot.img` 生成[临时启动副本](#已安装系统的临时启动)。
 
 | 命令 | 用途 |
 | --- | --- |
 | `devbox run build -- --target kernel` | 编译 Image 与 DTB |
 | `devbox run build -- --target modules` | 构建同版内核模块 |
 | `devbox run build -- --target boot` | 构建引导镜像，不装配桌面 |
-| `devbox run build -- --target packages` | 构建配套 RPM/DEB 内核升级包 |
+| `devbox run build -- --target packages` | 构建 Fedora 内核升级 RPM，见[软件包清单](KERNEL-UPDATES.md#构建升级包) |
 | `devbox run build -- --target libcamera` | 单独构建前后摄硬件 ISP 控制与后摄对焦的配套 RPM，无需内核或原厂 ROM |
 | `devbox run build -- --target obs-v4l2` | 单独构建 OBS V4L2 插件 RPM，自动补齐 FFmpeg，无需内核或原厂 ROM |
 | `devbox run build -- --target kernel --configure-only` | 生成最终 `.config`，不编译 |
@@ -87,24 +78,37 @@ uv run --project installer installer/install-gui.py --bundle out/releases/my-fed
 
 Rec 准备、备份与写入范围见[安装助手](INSTALLER-GUI.md)和[安装指南](FLASHING.md)。日常软件更新用 DNF，内核更新用[配套升级包](KERNEL-UPDATES.md)；系统内自动写 boot 默认停用。
 
+### 已安装系统的临时启动
+
+在要测试的已安装多系统 Linux 仍在运行时，确认同批内核模块、设备包和启动契约已就位，将设备上当前的 `/etc/liuqin-boot-target` 原样保存到电脑本次测试的 `out/` 子目录，然后再重启到 Bootloader。每次测试重新读取，默认内核更新后 `boot_generation` 会变化。
+
+在电脑的仓库根目录执行。三个参数依次是本次保存的目标、未绑定的发布镜像和新的测试副本路径。示例使用 Devbox 的 Python 环境，电脑需能运行 Fastboot。[绑定工具](../shared/liuqin_boot_target.py)会保留发布镜像供更新器使用。[镜像解析器](../shared/liuqin_artifacts.py)在启动前读取同一份副本，解析失败、绑定缺失或任一字段不符都会中止。
+
+```sh
+devbox run -- env PYTHONPATH=shared python3 - out/boot-test/current-target \
+  out/releases/my-fedora-build/boot.img out/boot-test/trial.img <<'PY'
+from pathlib import Path
+import subprocess
+import sys
+from liuqin_artifacts import boot_interface
+from liuqin_boot_target import bind, parse
+
+saved, release, trial = map(Path, sys.argv[1:])
+target = parse(saved.read_bytes())
+bind(release, trial, target)
+if boot_interface(trial).get("boot_target") != target:
+    sys.exit("测试镜像与本次保存的启动目标不一致")
+subprocess.run(["fastboot", "boot", str(trial)], check=True)
+PY
+```
+
+临时验证完成后普通重启，回到已安装的默认内核，再按[内核更新流程](KERNEL-UPDATES.md#已安装系统更新)核对运行内核和 `boot_a`、预览持久更新。
+
 ## 配置说明
 
 ### 本机构建配置
 
-`build.json` 选择内核与板级输入，`rootfs_config` 指向的软件配方选择发行版、应用、overlay 和账号初始化方式。所有构建目标均要求 `rootfs_config`，过时字段会报错。
-
-```json
-{
-  "kernel_source": "sources/linux-liuqin-7.3.4",
-  "kernel_fragments": ["build/kernel/configs/custom-zram.config"],
-  "kernel_localversion": "-liuqin-fedora-v734",
-  "rootfs_config": "build/rootfs/fedora-plasma.json",
-  "usb_manufacturer": "Xiaomi",
-  "usb_product": "Pad 6 Pro",
-  "rom_images": "inputs/roms/liuqin/OS2.0.6.0.VMYCNXM/images",
-  "package_version": "0.3.20"
-}
-```
+`build.json` 选择内核与板级输入，完整默认值见 [Devbox 初始化模板](../build/devbox/build.example.json)。所有构建目标都需要 `rootfs_config`，它指定发行版、软件、overlay 和账号初始化方式。
 
 | 配置项 | 说明 |
 | --- | --- |
@@ -131,24 +135,7 @@ Rec 准备、备份与写入范围见[安装助手](INSTALLER-GUI.md)和[安装�
 
 [source.json](../build/kernel/source.json) 固定内核版本、基础提交、配置和 `target_patches`，构建核对 `expected_source_tree`。补丁顺序以清单为准，不按编号补齐空缺。固定基础提交的补丁应用在构建缓存中，不改写用户源码；使用其他提交须自行合入适用补丁。`tested_source_commit` / `tested_source_tree` 仅是历史验收基线，不能证明当前产物已通过实机测试。
 
-Recovery 按共享内核清单的 `target_patches` 顺序应用全部补丁，再应用 Recovery 专用内核补丁。运行 `python3 tests/recovery-source.py` 可检查两份清单的顺序和文件摘要。
-
-TDDI 首帧唤醒与校准恢复集中在 `0011`，DSI 命令调度、四档模式与在线切换集中在 `0024`，笔精度、报文诊断与唤醒故障隔离集中在 `0031`，`0035` 使用原厂 Cape 的 CPU 能力描述区分大小核，`0036` 补齐 CPU 功耗系数和两级带宽监测，验证范围见[设备树对照](DEVICE-TREE.md)。`0037` 补入原厂 M81 电量计刷新请求，见[充电](FASTCHARGE.md#电量刷新)；`0038` 对齐 M81 功率属性和厂商状态事件；`0039` 导出当前 Type-C 对端的供电能力，供自动认证区分纯充电来源与 USB 数据设备；`0040` 修正 UCSI 的 PPS 协商电压、电流和合同变化通知；`0041` 同步认证后变化的 Type-C 供电能力目录；`0042` 修正 UCSI 注册失败标志与注销后的连接器指针；`0043` 补齐固件恢复后的通知订阅与 UCSI 初始化重试、代次隔离及清理。`0044` 校验 UCSI GLINK 读写应答的完整长度。`0045` 按 Type-C 分配限制 DP 通道数。`0046` 单独处理 AUX 空闲时已确认的 DP PHY PLL 失锁中断。`0047` 连接 DP0 音频后端与显示控制器。`0048` 在停流前同步关闭 DPCM 音频后端，并在 DPU 首次显示提交完成后重配、启动仍然打开的播放流；CPU DAI 关闭 DSP 后，component close 再关闭 DP 音频引擎，独立于物理插拔状态。`0049` 补齐四路模拟麦克风接线与 TX 生命周期，`0050` 允许未接外屏时探测其播放前端，`0051` 保留四路原始录音的连续 DSP 通道标识，`0052` 对齐 WCD938x 的 TX 中断归属并限制异常处理循环，`0053` 在 SoundWire 关时钟前停用并等待 IRQ，`0054` 为 SoundWire 1.7 配对 CPU1 命令 FIFO 与中断；`0055` 在 ADSP 传输暂时中断时保留 M81 最近有效电量，`0056` 补齐整卡睡眠、播放队列重置和 ADSP 音频服务恢复，`0057` 修正多路 ADC 共用时钟、高通滤波时序及异常离线收尾，`0058` 在已确认离线时回收音频图，见[音频](AUDIO.md)。`0059` 在 DPU 关闭显示管线前清除旧帧的待提交状态，见[显示](DISPLAY.md)；`0060` 持续处理磁吸键盘清醒期间的状态中断，并保留睡眠唤醒开关，见[硬件](HARDWARE.md#键盘状态中断与睡眠)。
-
-`0061` 对齐 SM8475 原厂 GPU 电源档位，`0062` 恢复 A730 图像地址相关的 SP/TPL1
-非上下文寄存器，`0063` 将 Liuqin A730 的挂起检查周期设为 5000 ms，给长计算保留
-更长预算。该策略同时影响图形与计算的超时恢复，作用范围和代价见
-[GPU 与 OpenCL](GPU.md#大规模计算的超时预算)。
-
-`0064` 让共享 CTL 的双路视频每帧只提交一次，同时保留两路接口更新位，修复正常
-绘图中的 DSC 刷新位超时；它与 `0059` 的关闭阶段清理分别覆盖不同路径，见[显示](DISPLAY.md)。
-
-合并补丁时须保持最终源码树一致，并同步 Rec 锁中的补丁摘要及公共源码锁摘要。
-补丁文件或顺序改变会更新构建身份。
-
-`0071` 为正式内核和 Rec 共用的 USB 控制器补齐原厂 Gen1 速率上限；使用主线
-`maximum-speed` 绑定，由 DWC3 核心统一约束设备模式及链路配置，见
-[USB 配置与核验](NATIVE-RECOVERY.md)。
+[Rec 内核清单](../build/recovery/kernel/source.json)按同一顺序应用公共补丁，再应用 Rec 专用补丁。仅整理补丁时须保持最终源码树一致。修改源码内容时重新核对目标树。补丁文件或顺序变化都会改变构建身份，须同步 Rec 清单内的补丁摘要和公共清单摘要。用 `python3 tests/recovery-source.py` 检查两份清单。各项改动的原厂依据和实测范围见[硬件适配清单](HARDWARE.md)。
 
 修改源码后先提交，再更换 `kernel_localversion`。用 `--target kernel --configure-only` 检查自定义片段；zram 选项只提供内核能力，容量和算法由 rootfs 服务配置。Fedora 额外应用 `fedora.config` 启用 SELinux，并将 `ath11k` / `ath11k_pci` 编为模块；Rec 保留原有内置配置。
 
@@ -165,6 +152,12 @@ TDDI 首帧唤醒与校准恢复集中在 `0011`，DSI 命令调度、四档模�
 
 登录设备等待、PowerDevil 探测范围和启动耗时对照见[显示与登录](DISPLAY.md#登录与会话启动)；
 引导写入、回退与系统内更新器的验收限制见[内核更新](KERNEL-UPDATES.md)。
+
+Fedora 原生 boot 的充电环境使用目标系统的 ARM64 Python、服务所需扩展及其动态库。
+标准构建会自动准备该环境。启用 Plymouth 时两者来自同一次 Fedora 软件包事务。
+单独调用 `build-liuqin-native-boot.sh` 时，`CHARGER_RUNTIME` 指向同版构建收集的充电目录，
+`KERNEL_MODULES_DIR` 指向对应内核的模块产物。默认 Fedora 将温控依赖的 SPMI ADC5 内置。
+自定义配置编为模块时，构建会从已校验的模块包中取出 ADC 及其依赖。[运行环境收集器](../build/lib/charger_runtime.py) · [关机充电](FASTCHARGE.md#关机充电)
 
 ### 根文件系统格式
 
@@ -212,7 +205,7 @@ VP9 会暂时使用软件解码。已有 overlay 的本地启动器保留，维�
 
 Fedora 桌面安装推荐依赖，`remove` 清单阻止相应弱依赖引入并在装配结束时移除。裁剪时保留登录、网络、电源管理、存储和所需语言组件。SSH 服务端预装但停用，需要时在平板执行 `sudo systemctl enable --now sshd`，主机密钥在设备上生成。
 
-传感器组件使用固定上游源码与补丁，在目标发行版中编译；Adreno 监测使用官方 `ksystemstats` 加独立 [GPU 插件](../device/ksystemstats/README.md)，Qt/libksysguard ABI 更新后仍须验证；[指纹组件](FINGERPRINT.md)按独立来源锁构建，私有库不替换系统 libfprint。Fedora 使用官方 KWin 和欢迎中心，`device/kwin/` 不参与构建；固件来源与许可见 [CREDITS](../CREDITS.md)。
+传感器组件使用固定源码与补丁，在目标发行版中编译。Adreno 监测使用官方 `ksystemstats` 加独立 [GPU 插件](../device/ksystemstats/README.md)，Qt/libksysguard ABI 更新后须复测。[指纹组件](FINGERPRINT.md)使用独立来源锁和私有库。Fedora 使用官方 KWin 和欢迎中心，[KWin 排查补丁](../device/kwin/README.md)仅供单独复核。固件来源与许可见 [CREDITS](../CREDITS.md)。
 
 ### 首次设置与输入法
 

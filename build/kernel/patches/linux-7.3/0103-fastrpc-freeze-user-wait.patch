@@ -1,0 +1,26 @@
+Subject: [PATCH] misc: fastrpc: keep userspace invocation waiters across system sleep
+
+Keep the original context in the completion wait across freezing. Ordinary
+signals remain interruptible and kernel invocations keep the bounded wait.
+
+OEM: MiCode/Xiaomi_Kernel_OpenSource, liuqin-t-oss
+     eb49e10028e27fa98856cb5e458c0f0ec5b4554e, drivers/char/adsprpc.c.
+     On restart, context_restore_interrupted() recovers the user's
+     invocation and the driver rejoins its wait without resubmitting it.
+     The Linux freezer-aware wait preserves that context across suspend.
+
+diff --git a/drivers/misc/fastrpc.c b/drivers/misc/fastrpc.c
+index adc6f850e..0a0dd9f94 100644
+--- a/drivers/misc/fastrpc.c
++++ b/drivers/misc/fastrpc.c
+@@ -1328,7 +1328,9 @@ static inline int fastrpc_wait_for_response(struct fastrpc_invoke_ctx *ctx,
+ 		if (!wait_for_completion_timeout(&ctx->work, 10 * HZ))
+ 			err = -ETIMEDOUT;
+ 	} else {
+-		err = wait_for_completion_interruptible(&ctx->work);
++		/* Freeze in place without restarting an already submitted RPC. */
++		err = wait_for_completion_state(&ctx->work,
++						TASK_INTERRUPTIBLE | TASK_FREEZABLE);
+ 	}
+ 
+ 	return err;

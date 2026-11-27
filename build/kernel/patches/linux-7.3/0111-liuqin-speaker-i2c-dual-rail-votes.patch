@@ -1,0 +1,111 @@
+Subject: [PATCH] i2c: qcom-geni: vote both SE supplies for Liuqin speaker I2C
+
+M81 uses QUPv3 wrapper 2 SE0 and SE2 for the four CS35L41 amplifiers.
+Both source clocks require VDD_LOWER on CX and MXA up to 75 MHz. The
+19.2 MHz source used for 400 kHz I2C is inside that corner. Describe a
+fixed active performance request on each supply and let genpd runtime
+links apply and drop it around SE clock use. Keep the SCMI power/perf
+device setup in its own resource path.
+
+OEM: Xiaomi OS2.0.6.0.VMYCNXM vendor_boot, Cape GCC and speaker I2C.
+     MiCode/Xiaomi_Kernel_OpenSource eb49e10028e27fa98856cb5e458c0f0ec5b4554e,
+     drivers/clk/qcom/gcc-waipio.c, gcc_qupv3_wrap2_s{0,2}_clk_src.
+
+diff --git a/Documentation/devicetree/bindings/i2c/qcom,i2c-geni-qcom.yaml b/Documentation/devicetree/bindings/i2c/qcom,i2c-geni-qcom.yaml
+index 51534953a..4274601ce 100644
+--- a/Documentation/devicetree/bindings/i2c/qcom,i2c-geni-qcom.yaml
++++ b/Documentation/devicetree/bindings/i2c/qcom,i2c-geni-qcom.yaml
+@@ -58,13 +58,17 @@ properties:
+       - const: sleep
+ 
+   power-domains:
+-    maxItems: 1
++    minItems: 1
++    items:
++      - description: Core domain of the serial engine
++      - description: Memory domain required while the serial engine is clocked
+ 
+   reg:
+     maxItems: 1
+ 
+   required-opps:
+-    maxItems: 1
++    minItems: 1
++    maxItems: 2
+ 
+ required:
+   - compatible
+@@ -76,6 +80,24 @@ required:
+ allOf:
+   - $ref: /schemas/i2c/i2c-controller.yaml#
+   - $ref: /schemas/soc/qcom/qcom,se-common-props.yaml#
++  - if:
++      required:
++        - power-domains
++      properties:
++        power-domains:
++          minItems: 2
++    then:
++      properties:
++        compatible:
++          const: qcom,geni-i2c
++        required-opps:
++          minItems: 2
++      required:
++        - required-opps
++    else:
++      properties:
++        required-opps:
++          maxItems: 1
+   - if:
+       properties:
+         compatible:
+diff --git a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+index 8f5d6ccb3..1c4c85c41 100644
+--- a/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
++++ b/arch/arm64/boot/dts/qcom/sm8475-xiaomi-liuqin.dts
+@@ -932,6 +932,8 @@ keyboard@4c {
+  * protection firmware block exceeds mainline's one-second timeout at 100 kHz.
+  */
+ &i2c15 {
++	power-domains = <&rpmhpd RPMHPD_CX>, <&rpmhpd RPMHPD_MX>;
++	required-opps = <&rpmhpd_opp_low_svs>, <&rpmhpd_opp_low_svs>;
+ 	clock-frequency = <400000>;
+ 	status = "okay";
+ 
+@@ -983,6 +985,8 @@ cs35l41_tr: speaker-amp@40 {
+ };
+ 
+ &i2c17 {
++	power-domains = <&rpmhpd RPMHPD_CX>, <&rpmhpd RPMHPD_MX>;
++	required-opps = <&rpmhpd_opp_low_svs>, <&rpmhpd_opp_low_svs>;
+ 	clock-frequency = <400000>;
+ 	status = "okay";
+ 
+diff --git a/drivers/i2c/busses/i2c-qcom-geni.c b/drivers/i2c/busses/i2c-qcom-geni.c
+index c4c6202ff..5d32a69a9 100644
+--- a/drivers/i2c/busses/i2c-qcom-geni.c
++++ b/drivers/i2c/busses/i2c-qcom-geni.c
+@@ -16,6 +16,7 @@
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
++#include <linux/pm_domain.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/soc/qcom/geni-se.h>
+ #include <linux/spinlock.h>
+@@ -1138,6 +1139,14 @@ static int geni_i2c_resources_init(struct geni_se *se)
+ 	struct geni_i2c_dev *gi2c = dev_get_drvdata(se->dev);
+ 	int ret;
+ 
++	/* Fixed required-opps on each virtual domain follow the SE runtime links. */
++	if (of_count_phandle_with_args(se->dev->of_node, "power-domains",
++				       "#power-domain-cells") > 1) {
++		ret = devm_pm_domain_attach_list(se->dev, NULL, &se->pd_list);
++		if (ret < 0)
++			return dev_err_probe(se->dev, ret, "failed to attach SE supplies\n");
++	}
++
+ 	ret = geni_se_resources_init(&gi2c->se);
+ 	if (ret)
+ 		return ret;

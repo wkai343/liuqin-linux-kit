@@ -1,13 +1,7 @@
 # 构建端
 
-统一入口为根目录的 `devbox.json`，从 [构建指南](../docs/BUILD.md) 开始。
-默认构建官方 Fedora 45 ARM64 + Plasma，目标内核为 Linux 7.3.4。`build` 构建配套 boot/rootfs；原生 ADB Rec 在 `recovery/` 独立构建。
+从仓库根目录通过 Devbox 构建 Fedora。配套的 boot 和 rootfs 默认保存在 `out/build/from-source/`。交付时用 `devbox run build -- --export-dir <新目录>` 导出本次构建。`devbox run outputs` 可查看已有缓存。配置及全部目标见[构建指南](../docs/BUILD.md)。
 
-`scripts/` 放构建入口，`lib/` 放装配工具，`devbox/` 放环境与编排，
-`kernel/`、`rootfs/` 放当前内核与 Fedora 配方，`runtime/` 放独立 ARM64 工具环境来源，`recovery/` 放原生 Rec、ADB/LVGL、固定封装和启动链验证，`data/` 放 ROM 版本数据。
-公共接口来自 `shared/`，不依赖 Qt 安装器，也不访问平板。
+Devbox 会向底层脚本传入选定的源码快照和构建目录。直接调用时，须按脚本接口指定源码（`--source`、`KERNEL_DIR` 或 `KERNEL_SOURCE`）和对应构建目录。
 
-直接调用底层脚本时，应显式传入源码路径（`--source`、`KERNEL_DIR` 或 `KERNEL_SOURCE`）及对应构建目录。
-Devbox 会传入选定的源码快照和构建目录。
-
-缓存位于 `out/build/`，成品位于 `out/releases/`；见 [项目结构](../docs/STRUCTURE.md)。
+原生 ADB Rec 使用独立的内核配置和构建入口。见 [Rec 构建与交付](../docs/NATIVE-RECOVERY.md#构建与交付)和[项目结构](../docs/STRUCTURE.md)。

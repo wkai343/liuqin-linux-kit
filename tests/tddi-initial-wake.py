@@ -364,7 +364,7 @@ ps = r"""
 typedef uint8_t u8;
 #define ARRAY_SIZE(x) (sizeof(x)/sizeof((x)[0]))
 #define READ_ONCE(x) (x)
-#define LIUQIN_ALL_VOTES 7
+#define LIUQIN_ALL_VOTES 31
 #define MIPI_DSI_MSG_USE_LPM 2
 #define MIPI_DSI_DCS_LONG_WRITE 0x39
 #define MIPI_DSI_DCS_SHORT_WRITE_PARAM 0x15
@@ -403,14 +403,14 @@ static int transfer(struct mipi_dsi_host *host,const struct mipi_dsi_msg *m){
  if(i==fail_at)return short_write?1:-ETIMEDOUT;return 2;
 }
 static const struct mipi_dsi_host_ops ops={transfer},no_ops={NULL};
-static void setup(void){ctx=(struct nt36532){.panel={.backlight_lock={1},.enabled=true,.backlight_cookie=42},.desc=&liuqin_desc,.oem_panel=&liuqin_oem_panels[0],.supply_votes=7,.dimming_pending=true,.cabc_ready=true,.esd_enabled=true,.esd_armed=3,.requested=1};host0.ops=host1.ops=&ops;dsi0=(struct mipi_dsi_device){7,&host0};dsi1=(struct mipi_dsi_device){3,&host1};ctx.dsi[0]=&dsi0;ctx.dsi[1]=&dsi1;transfers=waits_seen=mask_calls=cancel_calls=start_calls=dim_calls=cabc_calls=fault_calls=0;applied=-1;fail_at=-1;short_write=pending_race=false;memset(waited,0,sizeof(waited));}
+static void setup(void){ctx=(struct nt36532){.panel={.backlight_lock={1},.enabled=true,.backlight_cookie=42},.desc=&liuqin_desc,.oem_panel=&liuqin_oem_panels[0],.supply_votes=LIUQIN_ALL_VOTES,.dimming_pending=true,.cabc_ready=true,.esd_enabled=true,.esd_armed=3,.requested=1};host0.ops=host1.ops=&ops;dsi0=(struct mipi_dsi_device){7,&host0};dsi1=(struct mipi_dsi_device){3,&host1};ctx.dsi[0]=&dsi0;ctx.dsi[1]=&dsi1;transfers=waits_seen=mask_calls=cancel_calls=start_calls=dim_calls=cabc_calls=fault_calls=0;applied=-1;fail_at=-1;short_write=pending_race=false;memset(waited,0,sizeof(waited));}
 static void clean(void){assert(ctx.panel.backlight_lock.held==1&&!ctx.esd_lock.held);}
 """
 ps+='\n'.join(fn(panel_source,n) for n in ['nt36532_recover_touch','nt36532_finish_touch_recovery'])
 ps += r"""
 int main(void){unsigned int count=0;
  setup();assert(!nt36532_recover_touch(&ctx.panel));assert(transfers==5&&waits_seen==4&&!memcmp(waited,(unsigned int[]){20,120,120,20},sizeof(waited)));assert(mask_calls==1&&cancel_calls==1&&ctx.tddi_recovering&&ctx.tddi_recovery_cookie==42&&!start_calls&&!fault_calls);ctx.requested=3;nt36532_finish_touch_recovery(&ctx.panel,true);assert(!ctx.tddi_recovering&&start_calls==1&&cabc_calls==1&&dim_calls==1&&applied==3&&!fault_calls);clean();count++;
- for(int type=0;type<7;type++){setup();if(type==0)ctx.desc=&other_desc;if(type==1)ctx.oem_panel=&liuqin_oem_panels[1];if(type==2)ctx.dsi[1]=NULL;if(type==3)ctx.dimming_stopping=true;if(type==4)ctx.off_deferred=true;if(type==5)ctx.supply_votes=3;if(type==6)host1.ops=&no_ops;assert(nt36532_recover_touch(&ctx.panel)<0&&!transfers&&!mask_calls&&ctx.esd_enabled&&!ctx.tddi_recovering);clean();count++;}
+ for(int type=0;type<7;type++){setup();if(type==0)ctx.desc=&other_desc;if(type==1)ctx.oem_panel=&liuqin_oem_panels[1];if(type==2)ctx.dsi[1]=NULL;if(type==3)ctx.dimming_stopping=true;if(type==4)ctx.off_deferred=true;if(type==5)ctx.supply_votes=7;if(type==6)host1.ops=&no_ops;assert(nt36532_recover_touch(&ctx.panel)<0&&!transfers&&!mask_calls&&ctx.esd_enabled&&!ctx.tddi_recovering);clean();count++;}
  setup();ctx.esd_pending=true;assert(nt36532_recover_touch(&ctx.panel)==-EBUSY&&ctx.esd_pending&&ctx.esd_enabled&&!mask_calls&&!transfers);nt36532_finish_touch_recovery(&ctx.panel,false);assert(ctx.esd_pending&&ctx.esd_enabled&&!start_calls&&!fault_calls);clean();count++;
  setup();pending_race=true;assert(nt36532_recover_touch(&ctx.panel)==-EBUSY&&ctx.esd_pending&&ctx.esd_enabled&&!mask_calls&&!transfers);clean();count++;
  setup();ctx.tddi_recovering=true;assert(nt36532_recover_touch(&ctx.panel)==-EBUSY&&!transfers&&ctx.esd_enabled);clean();count++;

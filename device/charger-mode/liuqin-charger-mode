@@ -16,6 +16,8 @@ blockdev=${LIUQIN_CHARGER_BLOCKDEV:-"/bin/busybox blockdev"}
 key_tool=${LIUQIN_CHARGER_KEY_TOOL:-/bin/liuqin-charger-mode-power-key}
 exit_tool=${LIUQIN_CHARGER_EXIT_TOOL:-/bin/liuqin-charger-mode-exit}
 ui_tool=${LIUQIN_CHARGER_UI_TOOL:-/bin/liuqin-charger-mode-ui}
+auth_tool=${LIUQIN_CHARGER_AUTH_TOOL:-/usr/local/libexec/liuqin-charger-auth}
+thermal_tool=${LIUQIN_CHARGER_THERMAL_TOOL:-/usr/local/libexec/liuqin-charge-thermal}
 display_prepare=${LIUQIN_CHARGER_DISPLAY_PREPARE:-/usr/libexec/liuqin-boot-splash}
 uptime_file=${LIUQIN_CHARGER_UPTIME_FILE:-/proc/uptime}
 run_dir=${LIUQIN_CHARGER_RUN_DIR:-/run/liuqin-charger-mode}
@@ -159,13 +161,28 @@ charger_apply_lowpower() {
 	[ "$(charger_value "$charger_policy/scaling_max_freq")" = "$charger_min" ]
 }
 
+charger_usb_type() {
+	IFS= read -r charger_types 2>/dev/null <"$usb/usb_type" || charger_types=
+	# The power-supply class puts brackets around the active USB type.
+	case " $charger_types " in
+		*[[:space:]]'['*']'[[:space:]]*)
+			charger_types=${charger_types#*'['}
+			charger_types=${charger_types%']'*}
+			;;
+	esac
+	case $charger_types in
+		''|*[![:alnum:]_-]*) charger_types=NA ;;
+	esac
+	printf '%s\n' "$charger_types"
+}
+
 charger_status() {
 	printf 'capacity=%s status=%s voltage_now=%s usb_online=%s usb_type=%s' \
 		"$(charger_value "$bat/capacity")" \
 		"$(charger_value "$bat/status")" \
 		"$(charger_value "$bat/voltage_now")" \
 		"$(charger_value "$usb/online")" \
-		"$(charger_value "$usb/usb_type")"
+		"$(charger_usb_type)"
 }
 
 charger_wait_key() {
@@ -272,8 +289,37 @@ charger_show_display() {
 	return "$charger_ui_rc"
 }
 
+charger_start_services() {
+	if [ -z "$charger_thermal_pid" ] || ! kill -0 "$charger_thermal_pid" 2>/dev/null; then
+		[ -z "$charger_thermal_pid" ] || wait "$charger_thermal_pid" 2>/dev/null || :
+		if [ -x "$thermal_tool" ]; then
+			if [ -f /usr/lib/liuqin-charger/modules.order ]; then
+				while read -r module; do
+					name=$(printf '%s' "${module%.ko}" | /bin/busybox tr - _)
+					[ -d "/sys/module/$name" ] || /bin/busybox insmod "/usr/lib/liuqin-charger/$module" || :
+				done </usr/lib/liuqin-charger/modules.order
+			fi
+			"$thermal_tool" >/dev/null &
+			charger_thermal_pid=$!
+		fi
+	fi
+	if [ -z "$charger_auth_pid" ] || ! kill -0 "$charger_auth_pid" 2>/dev/null; then
+		[ -z "$charger_auth_pid" ] || wait "$charger_auth_pid" 2>/dev/null || :
+		if [ -x "$auth_tool" ]; then
+			"$auth_tool" >/dev/null &
+			charger_auth_pid=$!
+		fi
+	fi
+}
+
 charger_cleanup() {
+	for pid in "$charger_auth_pid" "$charger_thermal_pid"; do
+		[ -z "$pid" ] || kill "$pid" 2>/dev/null || :
+	done
 	[ -z "$charger_monitor_pid" ] || kill "$charger_monitor_pid" 2>/dev/null || :
+	for pid in "$charger_auth_pid" "$charger_thermal_pid"; do
+		[ -z "$pid" ] || wait "$pid" 2>/dev/null || :
+	done
 	[ -z "$charger_display_pid" ] || wait "$charger_display_pid" 2>/dev/null || :
 	[ -z "$charger_monitor_pid" ] || wait "$charger_monitor_pid" 2>/dev/null || :
 }
@@ -311,6 +357,8 @@ mkdir -p "$run_dir" || exit 1
 chmod 0700 "$run_dir" || exit 1
 charger_monitor_pid=
 charger_display_pid=
+charger_auth_pid=
+charger_thermal_pid=
 charger_display_started=false
 rm -f "$run_dir/display-finished"
 trap charger_cleanup EXIT
@@ -326,6 +374,7 @@ while :; do
 	charger_lowpower=failed
 	charger_lock_ufs && charger_ufs=ro
 	if [ "$charger_ufs" = ro ]; then
+		charger_start_services
 		if [ -z "$charger_display_pid" ]; then
 			charger_panel_off && charger_panel=off
 		else

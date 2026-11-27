@@ -93,7 +93,10 @@ def main() -> int:
             self.assertEventually(lambda: self.get_dbus_property("AccelerometerOrientation") == "left-up")
             self.proxy.ReleaseLight()
             self.assertEqual(self.get_dbus_property("HasAccelerometer"), True)
-            self.assertEqual(self.get_dbus_property("AccelerometerOrientation"), "left-up")
+            # The mock cycles through orientations while the accelerometer is claimed.
+            samples = self.count_text_in_log("Accel sent by driver")
+            self.assertEventually(lambda: self.count_text_in_log("Accel sent by driver") > samples)
+            self.assertEventually(lambda: self.get_dbus_property("AccelerometerOrientation") == "right-up")
             self.proxy.ClaimLight()
             self.assert_light_reading()
             self.proxy.ReleaseAccelerometer()

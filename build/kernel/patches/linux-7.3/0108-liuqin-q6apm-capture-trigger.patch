@@ -1,0 +1,328 @@
+Subject: [PATCH] ASoC: q6apm: start Liuqin capture from the PCM trigger
+
+The M81 production AGM PCM plugin and graph manager distinguish prepare,
+start and read. Keep a configured capture FE quiescent until START,
+including prepared-only probes and system sleep. Preserve playback
+prefill and DSP push-mode watermark handling.
+
+Use the nonatomic AudioReach link for synchronous graph commands. Defer
+PCM period notifications so the single GPR receive worker can deliver
+the reply even when ALSA holds a linked stream lock. Keep capture read
+priming, refill, ownership of START and failure cleanup per FE.
+
+OEM: Xiaomi Pad 6 Pro (M81), OS2.0.6.0.VMYCNXM, vendor_a partition
+     lib64/libagm_pcm_plugin.so calls agm_session_prepare(),
+     agm_session_start() and agm_session_read(). lib64/libagm.so calls
+     graph_prepare(), graph_start() and graph_read().
+
+diff --git a/sound/soc/qcom/qdsp6/q6apm-dai.c b/sound/soc/qcom/qdsp6/q6apm-dai.c
+index cefda8c..fac07c2 100644
+--- a/sound/soc/qcom/qdsp6/q6apm-dai.c
++++ b/sound/soc/qcom/qdsp6/q6apm-dai.c
+@@ -7,6 +7,7 @@
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
+ #include <linux/platform_data/liuqin.h>
++#include <linux/workqueue.h>
+ #include <linux/slab.h>
+ #include <sound/soc.h>
+ #include <sound/soc-dapm.h>
+@@ -56,6 +57,7 @@ enum stream_state {
+ 	Q6APM_STREAM_IDLE = 0,
+ 	Q6APM_STREAM_STOPPED,
+ 	Q6APM_STREAM_RUNNING,
++	Q6APM_STREAM_PREPARED,
+ };
+ 
+ struct q6apm_dai_rtd {
+@@ -80,6 +82,10 @@ struct q6apm_dai_rtd {
+ 	bool next_track;
+ 	enum stream_state state;
+ 	struct q6apm_graph *graph;
++	bool liuqin_pcm;
++	bool capture_started;
++	struct mutex capture_lock;
++	struct work_struct period_work;
+ 	spinlock_t lock;
+ 	bool notify_on_drain;
+ };
+@@ -128,6 +134,25 @@ static const struct snd_pcm_hardware q6apm_dai_hardware_playback = {
+ 	.fifo_size =            0,
+ };
+ 
++/* The single GPR RX thread also delivers the reply that a PCM trigger
++ * waits for. It must never wait for that trigger's ALSA stream lock.
++ */
++static void q6apm_dai_period_work(struct work_struct *work)
++{
++	struct q6apm_dai_rtd *prtd = container_of(work, struct q6apm_dai_rtd,
++						period_work);
++
++	snd_pcm_period_elapsed(prtd->substream);
++}
++
++static void q6apm_dai_period_elapsed(struct q6apm_dai_rtd *prtd)
++{
++	if (prtd->liuqin_pcm)
++		schedule_work(&prtd->period_work);
++	else
++		snd_pcm_period_elapsed(prtd->substream);
++}
++
+ static void event_handler(uint32_t opcode, uint32_t token, void *payload, void *priv)
+ {
+ 	struct q6apm_dai_rtd *prtd = priv;
+@@ -135,21 +160,27 @@ static void event_handler(uint32_t opcode, uint32_t token, void *payload, void *
+ 
+ 	switch (opcode) {
+ 	case APM_CLIENT_EVENT_WATERMARK_EVENT:
+-		snd_pcm_period_elapsed(substream);
++		q6apm_dai_period_elapsed(prtd);
+ 		break;
+ 	case APM_CLIENT_EVENT_CMD_EOS_DONE:
+ 		prtd->state = Q6APM_STREAM_STOPPED;
+ 		break;
+ 	case APM_CLIENT_EVENT_DATA_WRITE_DONE:
+-		snd_pcm_period_elapsed(substream);
++		q6apm_dai_period_elapsed(prtd);
+ 
+ 		break;
+ 	case APM_CLIENT_EVENT_DATA_READ_DONE:
+-		snd_pcm_period_elapsed(substream);
+-		/* ALSA also suspends prepared streams without calling trigger(). */
+-		if (READ_ONCE(prtd->state) == Q6APM_STREAM_RUNNING &&
+-		    (!liuqin_board_quirks() ||
+-		     READ_ONCE(substream->runtime->state) != SNDRV_PCM_STATE_SUSPENDED))
++		if (prtd->liuqin_pcm) {
++			guard(mutex)(&prtd->capture_lock);
++			if (READ_ONCE(prtd->state) != Q6APM_STREAM_RUNNING ||
++			    READ_ONCE(substream->runtime->state) == SNDRV_PCM_STATE_SUSPENDED)
++				break;
++			q6apm_read(prtd->graph);
++			q6apm_dai_period_elapsed(prtd);
++			break;
++		}
++		q6apm_dai_period_elapsed(prtd);
++		if (READ_ONCE(prtd->state) == Q6APM_STREAM_RUNNING)
+ 			q6apm_read(prtd->graph);
+ 
+ 		break;
+@@ -232,6 +263,27 @@ static void q6apm_dai_set_channel_mapping(struct audioreach_module_config *cfg)
+ 		cfg->channel_map[i] = i + 1;
+ }
+ 
++/* Stop only the START reference held by this capture FE. A prepared-only
++ * FE still owns its fragments, but another user may own a shared graph.
++ */
++static int q6apm_dai_release_capture(struct q6apm_dai_rtd *prtd)
++{
++	int ret = 0;
++
++	scoped_guard(mutex, &prtd->capture_lock) {
++		if (prtd->state == Q6APM_STREAM_IDLE)
++			return 0;
++		WRITE_ONCE(prtd->state, Q6APM_STREAM_IDLE);
++	}
++
++	if (prtd->capture_started) {
++		ret = q6apm_graph_stop(prtd->graph);
++		prtd->capture_started = false;
++	}
++	q6apm_free_fragments(prtd->graph, SNDRV_PCM_STREAM_CAPTURE);
++	return ret;
++}
++
+ static int q6apm_dai_prepare(struct snd_soc_component *component,
+ 			     struct snd_pcm_substream *substream)
+ {
+@@ -240,6 +292,7 @@ static int q6apm_dai_prepare(struct snd_soc_component *component,
+ 	struct audioreach_module_config cfg = {};
+ 	struct device *dev = component->dev;
+ 	struct q6apm_dai_data *pdata;
++	bool defer_capture;
+ 	int ret;
+ 
+ 	pdata = snd_soc_component_get_drvdata(component);
+@@ -257,7 +310,12 @@ static int q6apm_dai_prepare(struct snd_soc_component *component,
+ 	cfg.bit_width = prtd->bits_per_sample;
+ 	cfg.fmt = SND_AUDIOCODEC_PCM;
+ 	q6apm_dai_set_channel_mapping(&cfg);
+-	if (prtd->state) {
++	defer_capture = prtd->liuqin_pcm && substream->stream == SNDRV_PCM_STREAM_CAPTURE;
++	if (defer_capture) {
++		ret = q6apm_dai_release_capture(prtd);
++		if (ret)
++			return ret;
++	} else if (prtd->state) {
+ 		/* clear the previous setup if any  */
+ 		q6apm_graph_stop(prtd->graph);
+ 		q6apm_free_fragments(prtd->graph, substream->stream);
+@@ -296,6 +354,10 @@ static int q6apm_dai_prepare(struct snd_soc_component *component,
+ 
+ 	}
+ 
++	/* Remember fragment ownership even if a later format or PREPARE fails. */
++	if (defer_capture)
++		WRITE_ONCE(prtd->state, Q6APM_STREAM_STOPPED);
++
+ 	ret = q6apm_graph_media_format_pcm(prtd->graph, &cfg);
+ 	if (ret < 0) {
+ 		dev_err(dev, "%s: CMD Format block failed\n", __func__);
+@@ -315,6 +377,11 @@ static int q6apm_dai_prepare(struct snd_soc_component *component,
+ 		return ret;
+ 	}
+ 
++	if (defer_capture) {
++		WRITE_ONCE(prtd->state, Q6APM_STREAM_PREPARED);
++		return 0;
++	}
++
+ 	ret = q6apm_graph_start(prtd->graph);
+ 	if (ret) {
+ 		dev_err(dev, "Failed to Start Graph %d\n", ret);
+@@ -362,28 +429,86 @@ static int q6apm_dai_ack(struct snd_soc_component *component, struct snd_pcm_sub
+ 	return ret;
+ }
+ 
++static int q6apm_dai_start_capture(struct snd_soc_component *component,
++				    struct snd_pcm_substream *substream)
++{
++	struct snd_pcm_runtime *runtime = substream->runtime;
++	struct q6apm_dai_rtd *prtd = runtime->private_data;
++	int i, ret;
++
++	if (prtd->state == Q6APM_STREAM_RUNNING)
++		return 0;
++	/* After a partial prime or a stopped stream, reset the DSP and ring
++	 * before retrying. Each session submits each initial buffer once.
++	 */
++	if (prtd->state == Q6APM_STREAM_STOPPED) {
++		ret = q6apm_dai_prepare(component, substream);
++		if (ret)
++			return ret;
++	}
++	if (prtd->state != Q6APM_STREAM_PREPARED)
++		return -EPIPE;
++
++	ret = q6apm_graph_start(prtd->graph);
++	if (ret)
++		return ret;
++	prtd->capture_started = true;
++
++	/* READ is asynchronous. Serialize priming with the first completion,
++	 * but never wait for a synchronous GPR reply under capture_lock.
++	 */
++	scoped_guard(mutex, &prtd->capture_lock) {
++		if (!q6apm_is_graph_in_push_pull_mode(prtd->graph)) {
++			for (i = 0; i < runtime->periods; i++) {
++				ret = q6apm_read(prtd->graph);
++				if (ret < 0)
++					break;
++			}
++		}
++		WRITE_ONCE(prtd->state, ret < 0 ? Q6APM_STREAM_STOPPED : Q6APM_STREAM_RUNNING);
++	}
++	if (ret < 0) {
++		if (q6apm_graph_stop(prtd->graph))
++			dev_err(component->dev, "cannot stop partially primed capture graph\n");
++		prtd->capture_started = false;
++		return ret;
++	}
++	return 0;
++}
++
+ static int q6apm_dai_trigger(struct snd_soc_component *component,
+ 			     struct snd_pcm_substream *substream, int cmd)
+ {
+ 	struct snd_pcm_runtime *runtime = substream->runtime;
+ 	struct q6apm_dai_rtd *prtd = runtime->private_data;
++	bool capture = prtd->liuqin_pcm && substream->stream == SNDRV_PCM_STREAM_CAPTURE;
+ 	int ret = 0;
+ 
++	if (capture && (cmd == SNDRV_PCM_TRIGGER_STOP || cmd == SNDRV_PCM_TRIGGER_SUSPEND)) {
++		guard(mutex)(&prtd->capture_lock);
++		if (prtd->capture_started)
++			WRITE_ONCE(prtd->state, Q6APM_STREAM_STOPPED);
++	}
++
+ 	switch (cmd) {
+ 	case SNDRV_PCM_TRIGGER_START:
+ 	case SNDRV_PCM_TRIGGER_RESUME:
+ 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
++		if (capture)
++			return q6apm_dai_start_capture(component, substream);
+ 		prtd->state = Q6APM_STREAM_RUNNING;
+ 		break;
+ 	case SNDRV_PCM_TRIGGER_STOP:
+ 		/* TODO support be handled via SoftPause Module */
+-		prtd->state = Q6APM_STREAM_STOPPED;
++		if (!capture)
++			prtd->state = Q6APM_STREAM_STOPPED;
+ 		prtd->queue_ptr = 0;
+ 		prtd->last_pos_index = 0;
+ 		break;
+ 	case SNDRV_PCM_TRIGGER_SUSPEND:
+-		if (liuqin_board_quirks())
++		if (!capture && liuqin_board_quirks()) {
+ 			WRITE_ONCE(prtd->state, Q6APM_STREAM_STOPPED);
++		}
+ 		break;
+ 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
+ 		break;
+@@ -420,6 +545,9 @@ static int q6apm_dai_open(struct snd_soc_component *component,
+ 
+ 	spin_lock_init(&prtd->lock);
+ 	prtd->substream = substream;
++	prtd->liuqin_pcm = liuqin_board_quirks();
++	mutex_init(&prtd->capture_lock);
++	INIT_WORK(&prtd->period_work, q6apm_dai_period_work);
+ 	prtd->graph = q6apm_graph_open(dev, event_handler, prtd, graph_id, substream->stream);
+ 	if (IS_ERR(prtd->graph)) {
+ 		dev_err(dev, "%s: Could not allocate memory\n", __func__);
+@@ -482,18 +610,37 @@ static int q6apm_dai_open(struct snd_soc_component *component,
+ 
+ 	return 0;
+ err:
++	if (!IS_ERR_OR_NULL(prtd->graph)) {
++		disable_work_sync(&prtd->period_work);
++		q6apm_graph_close(prtd->graph);
++	}
+ 	kfree(prtd);
+ 
+ 	return ret;
+ }
+ 
++static int q6apm_dai_hw_free(struct snd_soc_component *component,
++			     struct snd_pcm_substream *substream)
++{
++	struct q6apm_dai_rtd *prtd = substream->runtime->private_data;
++
++	if (prtd && prtd->liuqin_pcm && substream->stream == SNDRV_PCM_STREAM_CAPTURE)
++		return q6apm_dai_release_capture(prtd);
++	return 0;
++}
++
+ static int q6apm_dai_close(struct snd_soc_component *component,
+ 			   struct snd_pcm_substream *substream)
+ {
+ 	struct snd_pcm_runtime *runtime = substream->runtime;
+ 	struct q6apm_dai_rtd *prtd = runtime->private_data;
+ 
+-	if (prtd->state) {
++	if (prtd->liuqin_pcm)
++		disable_work_sync(&prtd->period_work);
++
++	if (prtd->liuqin_pcm && substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
++		q6apm_dai_release_capture(prtd);
++	} else if (prtd->state) {
+ 		/* only stop graph that is started */
+ 		q6apm_graph_stop(prtd->graph);
+ 		q6apm_free_fragments(prtd->graph, substream->stream);
+@@ -1045,6 +1192,7 @@ static const struct snd_soc_component_driver q6apm_fe_dai_component = {
+ 	.open		= q6apm_dai_open,
+ 	.close		= q6apm_dai_close,
+ 	.prepare	= q6apm_dai_prepare,
++	.hw_free	= q6apm_dai_hw_free,
+ 	.pcm_new	= q6apm_dai_pcm_new,
+ 	.pcm_free	= q6apm_dai_pcm_free,
+ 	.hw_params	= q6apm_dai_hw_params,

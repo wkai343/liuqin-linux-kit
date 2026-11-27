@@ -160,6 +160,32 @@ class Tests(unittest.TestCase):
         self.role.assert_not_called()
         self.assertEqual(self.commands, [])
 
+    def test_offmode_worker_only_touches_expected_partner(self):
+        auth.mark_auth_event()
+        self.put('pd_verifed', '1')
+        with self.assertRaisesRegex(auth.UnsupportedChargerError, 'attachment changed'):
+            self.run_main('--expected-attach', 'previous partner')
+        self.assertTrue(Path(auth.PENDING_EVENT_FILE).is_file())
+        self.assertEqual(self.get('pd_verifed'), '1')
+        self.cells.assert_not_called()
+        self.role.assert_not_called()
+
+    def test_offmode_readiness_retry_uses_existing_supervisor(self):
+        self.put('pdo2', '00000000')
+        with self.assertRaises(auth.AdapterReadinessTimeout):
+            self.run_main('--expected-attach', 'partner-1')
+        self.assertTrue(Path(auth.PENDING_EVENT_FILE).is_file())
+        self.start.assert_not_called()
+
+    def test_offmode_partner_replaced_after_claiming_event(self):
+        self.partner.side_effect = ['partner-1', 'partner-2']
+        self.put('pd_verifed', '1')
+        with self.assertRaisesRegex(auth.UnsupportedChargerError, 'attachment changed'):
+            self.run_main('--expected-attach', 'partner-1')
+        self.assertEqual(self.get('pd_verifed'), '1')
+        self.cells.assert_not_called()
+        self.role.assert_not_called()
+
     def test_cell_transport_error_can_retry_an_independent_challenge(self):
         self.mock('node_is_one', return_value=False)
         verify = self.mock('verify_fuel_gauge_once', side_effect=[OSError(errno.EAGAIN, 'busy'), True])

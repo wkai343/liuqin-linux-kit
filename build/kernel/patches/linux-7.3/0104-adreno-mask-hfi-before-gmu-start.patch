@@ -1,0 +1,35 @@
+Subject: [PATCH] drm/msm/adreno: mask HFI and clear stale status before GMU boot
+
+HFI boot replies and OOB acknowledgements are polled. Mask the IRQ line
+and clear stale status while the firmware is still stopped. Only unmask
+CM3 faults after HFI starts; a fresh fault remains latched for the ISR.
+
+OEM: MiCode/Xiaomi_Kernel_OpenSource, liuqin-t-oss
+     eb49e10028e27fa98856cb5e458c0f0ec5b4554e, drivers/gpu/msm/adreno_gen7_gmu.c.
+     gen7_gmu_irq_enable() clears pending status and programs the IRQ
+     masks before gen7_gmu_device_start(). The mask used here reflects
+     the Linux driver's polled HFI replies and OOB acknowledgements.
+
+diff --git a/drivers/gpu/drm/msm/adreno/a6xx_gmu.c b/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
+index 3f0340d8e..42ec70ecd 100644
+--- a/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
++++ b/drivers/gpu/drm/msm/adreno/a6xx_gmu.c
+@@ -1363,6 +1363,10 @@ int a6xx_gmu_resume(struct a6xx_gpu *a6xx_gpu)
+ 	/* Set the bus quota to a reasonable value for boot */
+ 	a6xx_gmu_set_initial_bw(gpu, gmu);
+ 
++	/* HFI boot replies are polled. Keep them off the IRQ line at startup. */
++	gmu_write(gmu, REG_A6XX_GMU_GMU2HOST_INTR_MASK, ~0);
++	gmu_write(gmu, REG_A6XX_GMU_GMU2HOST_INTR_CLR, ~0);
++
+ 	/* Enable the GMU interrupt */
+ 	gmu_write(gmu, REG_A6XX_GMU_AO_HOST_INTERRUPT_CLR, ~0);
+ 	gmu_write(gmu, REG_A6XX_GMU_AO_HOST_INTERRUPT_MASK, ~A6XX_GMU_IRQ_MASK);
+@@ -1407,7 +1411,6 @@ int a6xx_gmu_resume(struct a6xx_gpu *a6xx_gpu)
+ 	 * Turn on the GMU firmware fault interrupt after we know the boot
+ 	 * sequence is successful
+ 	 */
+-	gmu_write(gmu, REG_A6XX_GMU_GMU2HOST_INTR_CLR, ~0);
+ 	gmu_write(gmu, REG_A6XX_GMU_GMU2HOST_INTR_MASK, ~A6XX_HFI_IRQ_MASK);
+ 	enable_irq(gmu->hfi_irq);
+ 

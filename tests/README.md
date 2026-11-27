@@ -14,15 +14,44 @@ devbox run -- python3 tests/docs-links.py
 测试使用临时目录、合成镜像或模拟设备，不刷写平板；QML、源码阶段验证和真机验收另行执行。
 CI 的实际测试列表以 `.github/workflows/` 为准，不能把本地入口通过等同于全部 CI 作业通过。
 
-使用 `LIUQIN_KERNEL_SOURCE=/path/to/assembled/source devbox run test` 可从完整适配源码
-编译执行 Q6 时钟注册、DSP 就绪与重试、M81 电量刷新等回归。同一入口还会执行四组 USB
-源码测试和 GLINK 充电日志生命周期测试。未提供源码时，输出会标明源码检查已跳过。
-Rec 会话故障注入使用内置夹具，默认在 Devbox 和 CI 中运行。
+## 板级驱动与充电
 
-`charger-mode.py` 使用模拟电源属性和单调时钟检查拔线关机、防抖、重插、初始化及
-读取失败处理，替换系统调用验证关机与重启分派；使用 ASan/UBSan 和模拟 DRM 设备
-执行真实充电绘制代码，检查内屏/模式选择、缓冲区边界及释放。测试不关机、不访问
-真实显示或分区，已接入 Devbox 和 CI；实机检查见 [关机充电](../docs/FASTCHARGE.md#关机充电)。
+`LIUQIN_KERNEL_SOURCE=/path/to/assembled/source devbox run test` 会从已应用补丁的源码编译并检查 Q6 时钟注册、DSP 就绪与重试、M81 电量刷新、四组 USB 行为及 GLINK 充电日志生命周期，也覆盖蓝牙 UART 的中断屏蔽计数及 HCI 空闲、请求完成和响应超时时的挂起顺序、DPU 投票失败时的开钟顺序、面板复位电平及 20 个充电类型的 sysfs/uevent 输出。缺少源码时会明确列出跳过项。Rec 会话故障注入使用内置夹具，默认在 Devbox 和 CI 中运行。
+WCN6855 掉电回归覆盖六种收发睡眠状态组合，模拟清理期间到达的 UART 指示、仍会启动定时器的工作项，以及重新上电后首条普通 HCI 命令的唤醒握手。
+WCN6855 供电回归覆盖独立的蓝牙和 WLAN 启动请求、固件就绪后释放下限、保持使能、热启动重新申请及逐路故障回滚。提供量产 M81 的基础 DTB 可同时核对 PMIC 初值、供电连接、消费者范围及保持标志。
+
+```sh
+devbox run -- python3 tests/wcn6855-power.py --source /path/to/assembled/source \
+  --stock-dtb /path/to/stock/dtbs/dtb-02.dtb
+```
+
+`mdp-speaker-power.py` 从设备树解析 RPMh 域和 OPP 引用，核对 MDP 五档的双域请求、
+两条扬声器 I²C 总线的活动档位和四颗功放的连接。设置 `LIUQIN_KERNEL_SOURCE` 后，
+`devbox run test` 会编译板级设备树并执行这项检查，也可用 `--dtb` 直接检查发布产物。
+
+要与量产 ROM 比对，可将解编译的 `dtbo.img` 第 15 项传给面板测试。
+`--baseline-source` 可同时核对 Pipa、Yudi 的复位和初始化函数。
+
+```sh
+devbox run -- python3 tests/display-panel-resx.py --source /path/to/assembled/source \
+  --oem-panel /path/to/entry-15.dts --baseline-source /path/to/previous/source
+```
+
+`display-panel-power.py` 执行实际供电函数，核对五路启停顺序、逐路等待、引导器画面接管、缺失电源时的探测失败及启停错误回退。加上量产 DTBO 第 15 项可核对两款 M81 面板共用的电源表，传入发布 DTB 可核对面板、背光和 Recovery simplefb 的供电归属。
+
+```sh
+devbox run -- python3 tests/display-panel-power.py --source /path/to/assembled/source \
+  --stock-overlay /path/to/dtbo/entry.15 --dtb /path/to/desktop.dtb --dtb /path/to/recovery.dtb
+```
+
+`charger-mode.py` 用模拟电源、时钟和系统调用验证断电防抖、重插、读取失败、关机与重启，以及日志中选中的 USB 协议。它还检查 UFS 封存后启动认证与温控、拔线取消、凭据清理及有限重试。模拟 DRM 配合 ASan/UBSan 覆盖内屏与模式选择、绘图缓冲区边界及释放。该项在 Devbox 和 CI 离线执行，实机复测见[关机充电](../docs/FASTCHARGE.md#关机充电)。
+
+`kernel73-ufs-dsi-rpc-gmu.py --source /path/to/assembled/source` 编译并执行实际驱动函数，
+检查 UFS 的 lane 时钟引用、双 DSI 的电源回退、FastRPC 用户冻结与内核等待、HFI 屏蔽和状态清除顺序。
+`mipps-startup.py` 覆盖启动子进程时 Type-C 连接被替换，以及桌面与 initramfs 各自的就绪重试。
+传感器构建执行 hexagonrpc 的 Meson 测试，长请求覆盖 256 字节边界、64 KiB 载荷、续取失败和总长度变化。
+
+## GPU 与多媒体
 
 `fedora-stats.py` 用真实 ARM64 共享库生成 GPU 独立 RPM，检查文件清单只包含私有插件、
 服务 drop-in 和许可/源码记录，不占用官方守护进程或标准插件路径；同时检查共享库与 Qt/KDE
@@ -93,6 +122,8 @@ OpenCL CTS 须在平板执行，不加入无 GPU 的离线入口。按问题选�
 运行时调整超时的对照、修复内核的复现验证与完整 CTS 要分别记录，不能相互替代。
 实际镜像、软件包、环境、错误及结果记录保存在忽略的 `out/` 目录。
 
+## 温控、设备包与输入
+
 `thermal-cooling.py --dtb <编译后的 DTB>` 检查 CPU 温区到频率域的完整绑定和保护阈值。
 `thermal-device.py` 在真机上临时降低一个被动阈值，以有界负载验证实际限频和自然降温恢复，
 结束后恢复阈值；GPU 使用配套 `thermal-gpu-load.py`。它们不加入离线默认入口，
@@ -150,7 +181,9 @@ OpenCL CTS 须在平板执行，不加入无 GPU 的离线入口。按问题选�
 | `storage-seal.py`、`storage-ready.py`、`storage-paths.py` | 批量只读设置、UFS/GPT 就绪证明、原厂 LUN 3/5 备份头兼容边界、路径替换及回退 |
 | `wlan-mac.py` | 目标网卡 udev 初始化、命名竞态与设备身份 |
 | `rtc.py` | 真实 helper 的离线时间推算、计数器重置/停走、过期和损坏校准、chrony 只读协议的响应身份/长度/时间和同步判定、原子保存与 RPM 板级载荷；不改变主机时间，不代替关机/重启验收 |
-| `fedora-startup.py` | 登录界面 Powerdevil 仅在合成器和 Wayland 套接字就绪时启动、退出后拒绝再激活；普通桌面不受该条件限制。检查音频 PCM 探测前以静音状态准备保护 DSP |
+| `fedora-startup.py` | 登录界面 Powerdevil 仅在合成器和 Wayland 套接字就绪时启动、退出后拒绝再激活；普通桌面不受该条件限制。检查播放 PCM 探测前的静音、保护 DSP 和 DRE 准备，以及四颗功放启用时的数字与模拟增益、噪声门和停用时的恢复值 |
+| `speaker-tuning.py` | 检查通话路由、重叠通话、四颗 DSP 的更新顺序、部分失败恢复，以及原厂均衡器系数和增益块的组合与校验 |
+| `speaker-playback-device.py` | 实机用四路板载麦克风检查双向通话接通前、通话中和挂断后的实际出声。`--check-dsp` 调用 `speaker-tuning-device.py` 核对四颗功放的增益、均衡器和运行状态，见[音频说明](../docs/AUDIO.md#扬声器音乐与免提通话调音) |
 | `mipps-startup.py` | 原厂命令轮询预算、慢应答与传输失败区分、7 → 6 失败收尾、有限角色/电芯/就绪重试、处理标志清理、每次连接一次握手与新连接恢复、断线凭据清理、PDO 数据能力保护及功率提示；完成后的读取失败不撤销认证，缺失摘要不置位 PD 门控，就绪读取恢复不被旧缓存阻挡，执行期间事件保留待处理标记 |
 | `mipps-events.py` | 使用真实 systemd 用户级 path / 常驻单元、inotify 与模拟充电接口，验证认证中重插及事务返回后的事件不会丢失、重复通知复用同一进程且不重放握手、空闲时释放认证锁；无需平板，没有可用用户级 systemd 时跳过 |
 | `charge-status.py` | 使用隔离 sysfs 文件验证双电荷泵及混合通路汇总、单位换算、普通 USB、拔线/source 清零、通路读取失败、无效值及连接变化拒绝；不修改设备或充电策略 |
@@ -308,7 +341,7 @@ Type-C 申请与生效状态、接收端通道数限制，以及分配变化后�
 | `dp-audio.py` | DP 音频与 ALSA 并发、关链路前停止后端、首帧后恢复、拔线取消恢复、CPU DAI 与 DP 引擎关闭顺序；断开显示器时的前端探测与失败清理 |
 | `microphones.py` | 四路 ADC 接线与通道映射、TX mixer/mute、声卡重建后的路由初始化；360 种 ADC 子集和关闭顺序、共享时钟、静音占位、离线收尾及高通滤波延时与任务竞态 |
 | `soundwire.py` | WCD TX 中断归属、延迟 IRQ 与停钟顺序；1.3/1.7/2.0 FIFO 和完成中断、真实错误保留；ADSP 恢复后的引脚配置、重新枚举、codec 复位和失败重试 |
-| `audio-recovery.py` | APR/APM/PRM 服务及设备恢复顺序、时钟投票与端口回滚、播放队列重新准备、声卡回调清理、内置与模块共用代次、macro 复位，以及离线 graph 关闭和引用释放 |
+| `audio-recovery.py` | APR/APM/PRM 服务恢复、端口和播放队列、声卡清理、恢复代次、macro 复位及离线 graph；覆盖采集只准备就关闭、START 和首批 READ 失败重试、睡眠后重开，以及 TX/RX/VA 的时钟顺序、逐级失败和共享引用回滚 |
 
 `microphones.py` 可追加 `--baseline /path/to/old-source` 复现 ADC 主端口冲突；
 `--stock-overlay /path/to/entry.15` 从固定摘要的原厂 DTBO 读取实际传输参数。
@@ -461,7 +494,7 @@ devbox run -- python3 tests/partition-editor-device.py
 
 `boot-retention.py` 用普通文件验证三个现用系统保护、连续 12 次替换后版本数量有界、删除系统的孤立引导回收、仅保留一个可核验的旧 Linux 内核、未完成事务阻止清理，以及移动/删除/完成记录阶段断电后的续接。清理失败不把已提交系统标为失败；中断清理阻止新安装。`workflow.py` 还检查仅删除当前默认系统时先要求切换默认。
 
-带 `--source`、`--baseline` 或 ROM 证明参数的显示测试是手工运行的内核回归入口，不因未列入默认 CI 就视为废弃。供电顺序、部分使能失败、投票释放及其他面板隔离使用 `display-retained-power.py` 的状态机夹具。
+当前面板五路供电的源码与量产 ROM 检查见[板级驱动与充电](#板级驱动与充电)。`display-retained-power.py` 用于复核早期三路保电方案引入前后的源码快照。
 
 构建路由回归检查 `build --target` 的统一流程、旧命令/隐藏参数/旧配置拒绝，以及 `outputs` 配套选择。配置检查不自动迁移旧路径或加载素材清单。`project-structure.py` 检查 Rec RAM 装配独立性和安装器源码包边界。
 

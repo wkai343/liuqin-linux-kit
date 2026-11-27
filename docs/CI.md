@@ -11,7 +11,7 @@ GUI 使用的原生 Rec 由 `build/recovery/` 独立构建。
 | `checks.yml`：集成检查 | GitHub Ubuntu runner | 语法、文档、构建缓存、安装器与设备保护等离线回归 |
 | `windows.yml`：Windows 安装器检查 | GitHub Windows runner | 主机兼容、worker、当前六组 QML 回归及安装器源码包 |
 | `build.yml`：内核构建 | GitHub Ubuntu runner + Devbox | 默认目标 Image、DTB、模块、配置及来源记录 |
-| `image.yml`：系统镜像构建 | 专用 Linux 自托管 runner，仅可信 `main` | 本次配套 boot/rootfs、内核标识和 SHA256SUMS |
+| `image.yml`：系统镜像构建 | 专用 Linux 自托管 runner，仅可信 `main` | 本次配套 boot/rootfs、启动契约和 SHA256SUMS |
 
 离线和 QML 演示不连接平板；Windows CI 也不验证 USB 驱动或真机安装。
 依赖阶段内核源码和 ROM 证明材料的显示测试单独运行，尚未纳入此工作流，见 [测试说明](../tests/README.md)。

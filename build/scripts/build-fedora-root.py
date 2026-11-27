@@ -445,7 +445,7 @@ def configure(root, data, output):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=('runtime','apps','extract','sensors','kernel-files','stats','fingerprint','splash','ffmpeg','obs-v4l2','libcamera','kamoso'))
+    parser.add_argument('action',choices=('runtime','apps','extract','sensors','kernel-files','stats','fingerprint','splash','charger','ffmpeg','obs-v4l2','libcamera','kamoso'))
     parser.add_argument('--archive',type=Path,required=True);parser.add_argument('--archive-sha256',required=True)
     parser.add_argument('--out',type=Path,required=True);parser.add_argument('--recipe',type=Path)
     parser.add_argument('--rpms',type=Path);parser.add_argument('--rom-sensors',type=Path)
@@ -474,6 +474,12 @@ def main():
     if args.action=='runtime':extract_oci(args.archive,args.archive_sha256,root)
     else:common.extract(args.archive,args.archive_sha256,root)
     if args.action=='extract':return
+    if args.action=='charger':
+        from charger_runtime import collect
+        with mounted_root(root):
+            collect(root, output/'runtime', chroot)
+        shutil.rmtree(root)
+        return
     with mounted_root(root):check_systemd_runtime(root)
     if args.action=='splash':
         with mounted_root(root):
@@ -485,6 +491,8 @@ def main():
             chroot(root,['python3','/tmp/liuqin-plymouth-runtime.py','--out','/tmp/liuqin-splash-runtime'])
             for name in ('runtime.tar.gz','runtime.json'):
                 shutil.copyfile(root/'tmp/liuqin-splash-runtime'/name,output/name)
+            from charger_runtime import collect
+            collect(root, output/'charger-runtime', chroot)
         shutil.rmtree(root)
         return
     if args.action=='sensors':

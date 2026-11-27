@@ -57,7 +57,7 @@ static __attribute__((format(printf,1,2))) void log_message(const char *format,.
 #define DSI_1 1
 #define LIUQIN_PANEL_TIANMA 0
 #define LIUQIN_PANEL_CSOT 1
-#define LIUQIN_ALL_VOTES 7
+#define LIUQIN_ALL_VOTES 31
 #define DSI_VIDEO_TIMING_DB_MODE 0x1e4
 #define DSI_VIDEO_TIMING_FLUSH 0x1e0
 #define LIUQIN_DSI_LINE_CLOCKS 448
@@ -230,7 +230,7 @@ static void setup(int index) {
  memset(hosts,0,sizeof(hosts));memset(intfs,0,sizeof(intfs));
  memset(&dsi_cmd_lock,0,sizeof(dsi_cmd_lock));
  ctx.panel=(struct drm_panel){.funcs=&panel_ops,.prepared=true,.enabled=true};
- ctx.desc=&liuqin_desc;ctx.oem_panel=&liuqin_oem_panels[0];ctx.refresh_status=1;ctx.supply_votes=7;
+ ctx.desc=&liuqin_desc;ctx.oem_panel=&liuqin_oem_panels[0];ctx.refresh_status=1;ctx.supply_votes=LIUQIN_ALL_VOTES;
  bridge=(struct panel_bridge){{true},&ctx.panel};
  initial_rate=drm_mode_vrefresh(&modes[index]);
  rounded_byte_rate=125878949;
@@ -294,7 +294,7 @@ int main(void) {
  #define VETO(statement) do {setup(0);statement;assert(!change(0,1));unchanged();assert(strstr(diagnostics,"Liuqin live reject: stage="));faults++;} while(0)
  VETO(ctx.panel.prepared=false);VETO(ctx.panel.enabled=false);VETO(ctx.panel.backlight_pending=true);
  VETO(ctx.refresh_status=-EIO);VETO(ctx.esd_pending=true);VETO(ctx.tddi_recovering=true);
- VETO(ctx.dimming_stopping=true);VETO(ctx.off_deferred=true);VETO(ctx.supply_votes=0);
+ VETO(ctx.dimming_stopping=true);VETO(ctx.off_deferred=true);VETO(ctx.supply_votes=0);VETO(ctx.supply_votes=7);
  VETO(ctx.oem_panel=NULL);VETO(liuqin_live_60=false);VETO(ctx.panel.funcs=NULL);
  VETO(hosts[1].mode_flags=0);VETO(hosts[1].byte_clk_rate++);VETO(hosts[0].refresh_rate=60);
  VETO(actual_byte_rate=0);VETO(actual_pixel_rate=0);VETO(hosts[1].byte_clk_rate=125878969UL);

@@ -168,9 +168,15 @@ int main(void) {
  val.intval=-2;int n=requests;
  assert(qcom_battmgr_usb_set_property(&psy,POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,&val)==-EINVAL);
  assert(requests==n);
- usb_type=8;val.intval=500000;
- assert(qcom_battmgr_usb_set_property(&psy,POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,&val)==-EINVAL);
- assert(requests==n+1 && last_opcode==0x32);
+ const u32 blocked_types[] = {8, 9, 0x80, 0x81, 0x82, 0x83, 0x84, UINT32_MAX};
+ val.intval=500000;
+ for (unsigned int i = 0; i < sizeof(blocked_types) / sizeof(blocked_types[0]); i++) {
+     usb_type = blocked_types[i];
+     n = requests;
+     assert(qcom_battmgr_usb_set_property(&psy,POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,&val)==-EINVAL);
+     assert(requests == n + 1 && last_opcode == 0x32 && last_property == USB_ADAP_TYPE);
+     assert(b.icl_ua == 500000 && psy.changed == 1);
+ }
  return 0;
 }
 ''')

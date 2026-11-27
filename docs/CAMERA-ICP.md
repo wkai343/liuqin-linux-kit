@@ -1,6 +1,6 @@
 # ICP / IPE 帧处理验证
 
-[硬件 ISP](CAMERA-ISP.md) ｜ [构建和临时启动](BUILD.md)
+[硬件 ISP](CAMERA-ISP.md) ｜ [已安装系统的临时启动](BUILD.md#已安装系统的临时启动)
 
 `tests/camera-icp/` 是独立的 SM8475 测试组件，未加入发行内核。默认构建没有
 视频节点；可选视频桥接、经过本机校验的启动服务及配套 libcamera
@@ -89,8 +89,7 @@ python3 tests/camera-ipe-programs.py --vendor /path/to/vendor
 在上电前返回 `EOPNOTSUPP`（实拍回放第 8 级也一样）。
 
 构建器只生成模块和清单，不装模块、不改启动镜像。必须使用匹配配置及 Module.symvers，
-并先在独立测试内核中加入时钟前置补丁。临时启动严格遵守 BUILD.md 的实时目标绑定和
-启动前镜像校验。不要把在线卸载/重载 camcc 当作正式验证：genpd 仍可能保留旧的父子链接。
+并先在独立测试内核中加入时钟前置补丁。按[临时启动步骤](BUILD.md#已安装系统的临时启动)绑定并核对测试镜像。在线卸载或重载 camcc 后，genpd 仍可能保留旧的父子链接。
 
 关闭相机客户端，核验清单、固件、内核、实时 DT 与快照一致后，手动加载 overlay 和
 测试驱动。视频桥接先用 `modprobe videobuf2-vmalloc`、`modprobe v4l2-mem2mem`

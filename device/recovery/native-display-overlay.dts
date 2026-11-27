@@ -4,8 +4,8 @@
 
 // Keep the bootloader's already initialized display for the RAM console.
 // Do not attempt a DPU/DSI or 3D handoff during this maintenance boot. The
-// simple-framebuffer node in /chosen owns scanout memory; its clocks and the
-// board's always-on panel rails remain in the original device tree.
+// simple-framebuffer node in /chosen describes scanout memory and holds
+// the scanout clock and panel supplies while the RAM console is active.
 / {
     fragment@0 {
         target-path = "/soc@0/display-subsystem@ae00000";

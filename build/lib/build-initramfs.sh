@@ -543,6 +543,16 @@ if [ -n "${BOOT_SPLASH_RUNTIME:-}" ]; then
         --modules "${SPLASH_KERNEL_MODULES_DIR:?set SPLASH_KERNEL_MODULES_DIR}" \
         --contract "$native_root_contract" --staging "$staging" --kernel-config "$KERNEL_CONFIG" --cc "$slot_success_gcc"
 fi
+if [ "$charger_mode" = 1 ]; then
+    python3 "$project_root/build/lib/charger_runtime.py" "${CHARGER_RUNTIME:?set CHARGER_RUNTIME to the built Fedora charger runtime}" \
+        "$staging" --config "$KERNEL_CONFIG" --contract "$native_root_contract" --modules "${SPLASH_KERNEL_MODULES_DIR:?set target modules}"
+    mkdir -p "$staging/usr/local/libexec" "$staging/usr/share/liuqin"
+    for helper in liuqin-mipps-auth liuqin-charge-thermal; do
+        install -m 0755 "$project_root/device/board-overlay/usr/local/libexec/$helper" "$staging/usr/local/libexec/$helper"
+    done
+    install -m 0644 "$project_root/device/board-overlay/usr/share/liuqin/charge-thermal.json" "$staging/usr/share/liuqin/"
+    install -m 0755 "$project_root/device/charger-mode/liuqin-charger-auth" "$staging/usr/local/libexec/"
+fi
 if grep -qx btrfs "$staging/etc/liuqin-filesystems" && [ "$root_profile" = installer ]; then
     [ -x "$staging/usr/sbin/mkfs.btrfs" ] && [ -x "$staging/usr/bin/btrfs" ] || {
         echo 'error: Btrfs-capable installer requires mkfs.btrfs and btrfs tools' >&2; exit 1;

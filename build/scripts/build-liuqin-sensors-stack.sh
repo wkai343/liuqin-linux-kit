@@ -18,6 +18,7 @@ static_overlay=${SENSORS_OVERLAY:-$project_root/device/sensors-overlay}
 ssc_accel_test_runner=$project_root/tests/ssc-accel-integration.py
 hexagonrpc_patch=${HEXAGONRPC_PATCH:-$project_root/device/sensors/patches/0001-hexagonrpcd-expose-the-SSC-registry-version-sibling.patch}
 hexagonrpc_sns_patch=${HEXAGONRPC_SNS_PATCH:-$project_root/device/sensors/patches/0002-hexagonrpcd-add-a-narrow-sns_registry-property-shim.patch}
+listener_patch=$project_root/device/sensors/patches/0007-hexagonrpcd-fetch-complete-listener-inputs.patch
 iio_claim_patch=${IIO_CLAIM_PATCH:-$project_root/device/sensors/patches/0003-iio-sensor-proxy-start-preclaimed-coldplug-sensor.patch}
 iio_polling_patch=${IIO_POLLING_PATCH:-$project_root/device/sensors/patches/0004-iio-sensor-proxy-serialize-ssc-accel-polling.patch}
 iio_release_patch=${IIO_RELEASE_PATCH:-$project_root/device/sensors/patches/0005-iio-sensor-proxy-cancel-released-pending-claims.patch}
@@ -37,6 +38,7 @@ expected_config_manifest_sha256=1cbf79b3ba5bfdd3efa152bcb5900ff6addd703f61b19def
 expected_sns_reg_sha256=d89a5dfd69b9681f6864bca8d24c17fb922cb19a9ed3a0f7f5c00e4b5dc1089b
 expected_hexagonrpc_patch_sha256=856b046e572209b5f13c54ef100e685463aba23eefb850d0f3389c4c7ac6fa90
 expected_hexagonrpc_sns_patch_sha256=7826943d36a93bbddf1746e96b831bbc2efd5e7c7ff1f0d8460fe2f2acf7a1a5
+listener_patch_sha256=52993fb9e122f924786643da8713e0b43554f55f7d72f239ad335810f71639d5
 expected_iio_claim_patch_sha256=84bd7c4986d5e1ad68a6edfe241147e41262db3c95f69b054e464a95846ac808
 expected_iio_polling_patch_sha256=978b9d168584890e576ac6cee4b27fb75260d0117da4b0d68813a25fe15fa738
 expected_iio_release_patch_sha256=c46633a0ff858cd4d28fcdc14226f473a874c7fc6073970a215bc77b1be11aaf
@@ -91,6 +93,8 @@ grep -Fqx 'property=persist.vendor.sensors.enable.property1=/mnt/vendor/persist/
 	die 'hexagonrpc registry-version patch mismatch'
 [ "$(sha256sum "$hexagonrpc_sns_patch" | cut -d' ' -f1)" = "$expected_hexagonrpc_sns_patch_sha256" ] ||
 	die 'hexagonrpc sns_registry patch mismatch'
+[ "$(sha256sum "$listener_patch" | cut -d' ' -f1)" = "$listener_patch_sha256" ] ||
+	die 'hexagonrpc listener patch mismatch'
 [ "$(sha256sum "$iio_claim_patch" | cut -d' ' -f1)" = "$expected_iio_claim_patch_sha256" ] ||
 	die 'iio-sensor-proxy preclaimed coldplug patch mismatch'
 [ "$(sha256sum "$iio_polling_patch" | cut -d' ' -f1)" = "$expected_iio_polling_patch_sha256" ] ||
@@ -152,6 +156,7 @@ git -C "$work/source/hexagonrpc" apply "$hexagonrpc_patch"
 git -C "$work/source/hexagonrpc" apply --check "$hexagonrpc_sns_patch" ||
 	die 'hexagonrpc sns_registry patch no longer applies after the registry-version patch'
 git -C "$work/source/hexagonrpc" apply "$hexagonrpc_sns_patch"
+git -C "$work/source/hexagonrpc" apply "$listener_patch"
 git -C "$work/source/hexagonrpc" diff --check || die 'patched hexagonrpc tree has whitespace errors'
 git -C "$work/source/iio-sensor-proxy" apply --check "$iio_claim_patch" ||
 	die 'iio-sensor-proxy preclaimed coldplug patch no longer applies to the pinned source'
@@ -272,6 +277,7 @@ cat >"$merged/build/build.sh" <<'EOF'
 #!/bin/sh
 set -eu
 jobs=${JOBS:-12}
+listener_patch_sha256=$1
 # Keep deterministic messages by default, but do not set LC_ALL: two upstream
 # tests intentionally override LC_NUMERIC=fr_FR.UTF-8 and LC_ALL would win.
 unset LC_ALL
@@ -308,12 +314,9 @@ testlog_passed() {
 }
 
 build_one hexagonrpc -Dhexagonrpcd_verbose=false
-if tests_passed hexagonrpc 5; then
-	printf '%s\n' 'hexagonrpc: retaining current 5/5 PASS testlog'
-else
-	meson test -C /build/work/hexagonrpc --print-errorlogs --timeout-multiplier=4
-fi
+meson test -C /build/work/hexagonrpc --print-errorlogs --timeout-multiplier=4
 DESTDIR=/build/dest meson install -C /build/work/hexagonrpc
+sha256sum /build/dest/usr/bin/hexagonrpcd >"/build/work/hexagonrpc/listener-$listener_patch_sha256.sha256"
 
 build_one libssc
 if tests_passed libssc 7; then
@@ -420,11 +423,13 @@ DESTDIR=/build/dest meson install -C /build/work/iio-sensor-proxy
 rpm -qa --qf '%{NAME}\t%{VERSION}-%{RELEASE}\t%{ARCH}\n' | LC_ALL=C sort >/build/dest/fedora-build-deps.tsv
 EOF
 chmod 0755 "$merged/build/build.sh"
-JOBS=$jobs run_sensor_chroot "$merged" /build/build.sh
+JOBS=$jobs run_sensor_chroot "$merged" /build/build.sh "$listener_patch_sha256"
 ;;
 1)
 	[ -x "$merged/build/dest/usr/bin/ssccli" ] || die 'ASSEMBLE_ONLY has no completed ssccli'
 	[ -x "$merged/build/dest/usr/bin/hexagonrpcd" ] || die 'ASSEMBLE_ONLY has no completed hexagonrpcd'
+	run_sensor_chroot "$merged" sha256sum -c "/build/work/hexagonrpc/listener-$listener_patch_sha256.sha256" ||
+		die 'ASSEMBLE_ONLY needs the tested long-request listener'
 	[ -x "$merged/build/dest/usr/libexec/iio-sensor-proxy" ] || die 'ASSEMBLE_ONLY has no completed SensorProxy'
 	say 'reusing the completed and tested arm64 build (ASSEMBLE_ONLY=1)'
 	;;
@@ -493,6 +498,7 @@ cp "$source_manifest" "$dest/usr/share/doc/liuqin/sensor-stack-sources.manifest"
 {
 	printf '%s  %s\n' "$expected_hexagonrpc_patch_sha256" "${hexagonrpc_patch##*/}"
 	printf '%s  %s\n' "$expected_hexagonrpc_sns_patch_sha256" "${hexagonrpc_sns_patch##*/}"
+	printf '%s  %s\n' "$listener_patch_sha256" "${listener_patch##*/}"
 	printf '%s  %s\n' "$expected_iio_claim_patch_sha256" "${iio_claim_patch##*/}"
 	printf '%s  %s\n' "$expected_iio_polling_patch_sha256" "${iio_polling_patch##*/}"
 	printf '%s  %s\n' "$expected_iio_release_patch_sha256" "${iio_release_patch##*/}"
@@ -587,7 +593,7 @@ find "$dest" -type f -print | LC_ALL=C sort | while IFS= read -r elf; do
 		[ -n "$provider" ] || die "unclosed runtime dependency ${elf#$dest/}: $needed"
 		case $provider in
 		"$dest"/*) source=extension ;;
-		*) source=$distribution-root ;;
+		*) source=${dependency_record}-root ;;
 		esac
 		printf '%s\t%s\t%s\n' "${elf#$dest/}" "$needed" "$source" >>"$needed_audit"
 	done

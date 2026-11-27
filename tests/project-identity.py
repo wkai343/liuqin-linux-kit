@@ -25,20 +25,14 @@ class IdentityTests(unittest.TestCase):
         self.assertIn('CREDITS.md', readme)
 
     def test_license_and_current_component_notices_are_preserved(self):
-        expected = {'LICENSE': 'b9d8b4bd86feb7e54d8c272e786f859209bd6053e880d1fbd6733e16418db881',
-                    'NOTICE': '8f405e222a5de0eda58e63ff17c828e4e94029971d342a5e7ac568e97ead005b'}
+        expected = {
+            'LICENSE': 'b9d8b4bd86feb7e54d8c272e786f859209bd6053e880d1fbd6733e16418db881',
+            'NOTICE': 'e649a0dfa0f74d9b444035da14400a4c32f15c9749d4cf60e4b68584655f06b5',
+        }
         for name, digest in expected.items():
-            content=(PROJECT/name).read_bytes()
-            if name=='NOTICE':
-                # Reviewed current components: kernel.org + local patches,
-                # corrected board path and direct upstream fingerprint sources.
-                # Removed GNOME/Ubuntu components no longer appear as inputs;
-                # retained components keep their authors and license notices.
-                # Includes the added role-first MiPPS upstream attribution.
-                # Also retains authorship for the UCSI service-recovery fixes.
-                content=content.split(b'\nBoot and shutdown artwork\n')[0]
-                content=content.replace(b'build/kernel/source.json',b'kernel/source.json')
-            self.assertEqual(hashlib.sha256(content).hexdigest(),digest)
+            with self.subTest(document=name):
+                content = (PROJECT / name).read_bytes()
+                self.assertEqual(hashlib.sha256(content).hexdigest(), digest)
 
     def test_exported_installer_keeps_credit_license_and_notices(self):
         with tempfile.TemporaryDirectory() as directory:

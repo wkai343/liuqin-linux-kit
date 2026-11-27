@@ -11,12 +11,49 @@
 | --- | --- |
 | 面板识别 | 显示与触控共用 ABL 主屏参数 `msm_drm.dsi_display0`，选择天马/华星初始化表及触控固件；未知或冲突时保留通用显示命令和设备树固件 |
 | 初始化与 PHY | 按原厂包类型、分组、等待和广播方式发送寄存器配置及 PPS；已识别的面板和双 DSI 链路使用原厂 D-PHY 时序 |
-| 供电与复位 | 保留原厂电压、稳定时间和复位波形；关屏保留 IOVDD/偏压，关闭两路 1.3 V，尚未实现完整五路断电 |
+| 供电与复位 | 面板按量产顺序申请五路电源。关屏时先让面板进入睡眠，拉低 RESX，再反序释放五路电源 |
 | DSI 启停 | 初始化及 PPS 完成后启动视频；关屏依次停显示控制器、停视频、发送 OFF；时钟门控保持关闭 |
 | 背光 | 驱动探测时按默认亮度点亮；DRM 接管后仍按首帧流程开启背光，完成正常显示和 CABC，再执行延迟调光；关屏取消过期任务 |
 | 命令调度 | 视频运行时为双路命令选择相同扫描行并核对行计数；等待有上限，传输后恢复寄存器，部分失败不原地重发 |
 
 时序、命令及校验来源见[四档切换补丁](../build/kernel/patches/linux-7.3/0024-liuqin-refresh-modes-and-live-switching.patch)和[来源说明](../CREDITS.md)。
+
+量产 `OS2.0.6.0.VMYCNXM` 的 `dtbo.img` 第 15 项给出的天马与华星 RESX 波形相同，依次为低 10 ms、高 3 ms、低 3 ms、高 15 ms。
+同版 `msm_drm.ko`（SHA-256 `3079f8d315440d34d58a57de82d31e42b8bc4ff01b5cd64bf141a4c5dfb1d7ba`）的常规关屏路径
+`dsi_panel_post_unprepare` 在 `0x14e7c0` 写入物理低电平，随后在 `0x14e8d4` 调用电源释放函数。
+当前设备树将 GPIO0 标为低有效。桌面驱动取得 GPIO0 时保留其电平，关屏或初始化失败并完成 DSI 清理后将其拉低，再释放电源。[RESX 补丁](../build/kernel/patches/linux-7.3/0098-liuqin-nt36532-active-low-reset.patch)
+
+同一 DTBO 中，天马和华星面板都引用 `dsi_panel_pwr_supply_M81`。下表按上电顺序列出量产电压及每步完成后的等待时间。断电从 VSN 开始，按相反顺序执行。
+
+| 电源 | 板上控制 | 量产电压 | 上电后等待 | 断电后等待 |
+| --- | --- | ---: | ---: | ---: |
+| IOVDD | PM8350C L2 | 1.8 V | 2 ms | 2 ms |
+| DVDD buck | GPIO2 | 1.3 V | 0 ms | 2 ms |
+| DVDD LDO | GPIO93 | 1.3 V | 2 ms | 0 ms |
+| VSP | KTZ8866 ENP，GPIO66 | +5.5 V | 2 ms | 2 ms |
+| VSN | KTZ8866 ENN，GPIO53 | −5.5 V | 2 ms | 2 ms |
+
+驱动要求设备树提供全部五路电源。桌面探测到引导器已点亮的面板时，先持有五路电源，首次 prepare 复用这些引用。再次亮屏时在 RESX 为低的状态下恢复供电，再执行原厂复位波形。KTZ8866 驱动继续负责 HWEN、偏压寄存器和 LED 亮度，ENP/ENN 随面板启停。原生 Recovery 由 simplefb 持有扫描输出所需的五路电源。[供电补丁](../build/kernel/patches/linux-7.3/0112-liuqin-nt36532-panel-power.patch)
+
+实机可对比 DPMS 开关前后的 `/sys/kernel/debug/regulator/regulator_summary` 和 `/sys/kernel/debug/gpio`。前者显示电源引用数，后者可核对 RESX 与四个使能引脚。检查偏压的实际电压需要在板上测量。[可复现检查](../tests/README.md#板级驱动与充电)
+
+原厂显示时钟表给出了 MDP 频率对应的电压档位，`clk_prepare_regmap()` 在 prepare 阶段读取当前频率并申请相应档位。
+Liuqin 的主线驱动在首次启钟前申请设备树中的最高 OPP，后续 runtime resume 使用 CRTC 上次成功申请的频率。投票失败即返回，时钟和寄存器访问均在其后。
+7.3.4 在最后一个 CRTC 关闭、目标频率为零时直接返回，已有的非零频率仍可供恢复使用。[原厂 MDP 表](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/clk/qcom/dispcc-waipio.c#L767-L793) · [原厂电压投票](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/clk/qcom/clk-regmap.c#L195-L215)
+
+M81 量产 `vendor_boot.img` 给显示时钟控制器提供 `vdd_mm` 和 `vdd_mxa`。
+MDP 的 172、200、325、375、500 MHz 五档分别在 MMCX 和 MX 两域同时请求
+`LOW_SVS_D1`、`LOW_SVS`、`SVS`、`SVS_L1`、`NOM`。两域随 DPU 的 runtime PM
+启停。核对时切换 60、90、120、144 Hz，读取实际 MDP 时钟及
+`/sys/kernel/debug/pm_genpd/pm_genpd_summary` 中 `ae01000.display-controller` 的两个设备请求。
+不同刷新率可以使用同一 MDP 时钟，此时两域都维持相同档位。
+关闭最后一路显示并等到 DPU 挂起，两项都应降为零。恢复后按实际时钟核对档位，
+同一电源域还可能有其他设备维持请求。[双域 OPP 补丁](../build/kernel/patches/linux-7.3/0110-liuqin-dpu-dual-rail-opps.patch)
+
+同版 `msm_drm.ko` 的 `dsi_display_prepare` 在 `0x13d4b4` 调用
+`dsi_display_clk_ctrl`，在 `0x13d4b8` 检查返回值。主线双 DSI 在选父时钟、取得
+runtime PM 引用、设定链路频率或启钟失败时返回错误。链路未就绪的 host 不写传输寄存器，
+另一侧已取得的引用按原顺序释放。[DSI 补丁](../build/kernel/patches/linux-7.3/0102-msm-dsi-check-link-power.patch)
 
 ### 四档在线切换
 
@@ -152,7 +189,6 @@ HFP 为完整双路图像宽度；DSC 只压缩有效像素，表中的 DRM 时�
 | `liuqin_live_all` | `1` | 开启四档在线切换；设为 `0` 后只保留 120 ↔ 60 Hz 在线路径 |
 | `liuqin_low_refresh` | `0` | 设为 `1` 暴露完整低频诊断组，不代表这些档位通过验收 |
 | `liuqin_late_wake`、`first_frame_backlight` | 均为 `1` | 天马首帧后唤醒与首帧背光 |
-| `liuqin_retained_power` | `1` | 关屏保留部分供电 |
 | `liuqin_skip_power_on_wait`、`liuqin_skip_post_reset_wait`、`liuqin_skip_post_pps_wait` | 均为 `1` | 对已识别面板省去三处额外的 120 ms 等待，保留原厂命令等待；设为 `0` 可恢复对照 |
 
 三个 `liuqin_live_*` 开关在驱动未收到参数时默认为关闭。旧镜像不会随仓库配置更新而改变。
@@ -218,9 +254,7 @@ sudo liuqin-display-policy set ui --save
 | 手写笔 | 戴尔 PN7522W 在 120 Hz 和在线切入的 60 Hz 有坐标、落笔和压感；90/144 Hz 未收到笔事件 |
 | 离线回归 | 双面板 24 个切换方向、57 项故障/范围检查及 84 项显示与触控初始化检查通过；源码树合并前后一致 |
 
-实机结论为短时、单块天马屏验证。Fedora 7.3.4 已复测全部 12 个方向，画面与连续手指输入正常；
-对应日志、内核与产物身份保存在本地 `out/releases/liuqin-fedora-7.3.4/`。
-手写笔等既有专项记录保留在 `out/releases/liuqin-live-refresh-r6/`；回归范围和执行方法见[测试说明](../tests/README.md#刷新率模式)。
+上表的实机结果限于单块天马屏的短时测试。面板与手写笔的复测方法见[刷新率模式测试](../tests/README.md#刷新率模式)。
 
 ## 待解决与待验证
 
@@ -229,7 +263,7 @@ sudo liuqin-display-policy set ui --save
 | 华星屏 | 初始化、时序、PHY 和扫描命令已离线核对；点亮、切换、熄屏恢复及触控笔全部待真机验证 |
 | 60 Hz 与低频 | 60 Hz 首次点亮/熄屏恢复待验收；普通换档至 60 Hz 及更低诊断档位存在闪烁、告警或黑屏记录 |
 | 长期运行 | 四档长期往返、反复唤醒、异常恢复、其他面板批次及功耗待验证 |
-| 显示接管与供电 | 尚无连续无黑屏接管、完整五路断电和原生显示状态无缝继承；DSI 时钟门控保持关闭 |
+| 显示接管与供电 | 原生 DRM 接管时仍有短暂黑屏。华星五路启停和长期唤醒待实机验证，DSI 时钟门控保持关闭 |
 | 画质与笔 | CABC 观感及节电收益待测；笔适配重点为 60/120 Hz，90/144 Hz 无笔输入暂不排查 |
 
 ## 排查方法

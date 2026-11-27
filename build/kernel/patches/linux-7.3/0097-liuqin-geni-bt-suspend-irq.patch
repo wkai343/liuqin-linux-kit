@@ -1,0 +1,120 @@
+Subject: [PATCH] serial: qcom-geni: guard the Liuqin Bluetooth IRQ during serial-core suspend
+
+The M81 serial engine has a level interrupt. Mask it before serial core
+marks the port suspended and issues stop_rx. Hand ownership back to the
+existing shutdown/startup pair as soon as serial core returns. An open
+TTY configured for wake keeps its main IRQ and resources, and an aborted
+power transition reopens the port. The dedicated wake line is independent.
+
+OEM: MiCode/Xiaomi_Kernel_OpenSource, liuqin-t-oss
+     eb49e10028e27fa98856cb5e458c0f0ec5b4554e, drivers/tty/serial/msm_geni_serial.c.
+     msm_geni_serial_runtime_suspend() stops RX and masks the main IRQ
+     before releasing resources. msm_geni_serial_runtime_resume() starts
+     RX before unmasking. The earlier mask around uart_suspend_port() is
+     needed by the Linux serial-core system suspend path.
+
+diff --git a/drivers/tty/serial/qcom_geni_serial.c b/drivers/tty/serial/qcom_geni_serial.c
+index a851b8f0ef04..302cff0f0651 100644
+--- a/drivers/tty/serial/qcom_geni_serial.c
++++ b/drivers/tty/serial/qcom_geni_serial.c
+@@ -22,6 +22,7 @@
+ #include <linux/panic_notifier.h>
+ #include <linux/pm_domain.h>
+ #include <linux/pm_opp.h>
++#include <linux/platform_data/liuqin.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/pm_wakeirq.h>
+@@ -150,6 +151,7 @@ struct qcom_geni_serial_port {
+ 	unsigned int tx_queued;
+ 	bool tx_dma_stale;
+ 	int wakeup_irq;
++	bool guard_suspend_irq;
+ 	bool rx_tx_swap;
+ 	bool cts_rts_swap;
+ 	bool manual_flow;
+@@ -1877,6 +1879,19 @@ static int qcom_geni_serial_panic_notifier(struct notifier_block *nb,
+ 	return NOTIFY_OK;
+ }
+ 
++/* Only the Liuqin Bluetooth UART needs its level IRQ masked before stop_rx. */
++static bool qcom_geni_serial_is_liuqin_bt(struct device *dev)
++{
++	if (!liuqin_board_quirks())
++		return false;
++
++	for_each_available_child_of_node_scoped(dev->of_node, child)
++		if (of_device_is_compatible(child, "qcom,wcn6855-bt"))
++			return true;
++
++	return false;
++}
++
+ static int qcom_geni_serial_probe(struct platform_device *pdev)
+ {
+ 	int ret = 0;
+@@ -1968,6 +1983,7 @@ static int qcom_geni_serial_probe(struct platform_device *pdev)
+ 	}
+ 
+ 	uport->irq = irq;
++	port->guard_suspend_irq = !data->console && qcom_geni_serial_is_liuqin_bt(&pdev->dev);
+ 	uport->has_sysrq = IS_ENABLED(CONFIG_SERIAL_QCOM_GENI_CONSOLE);
+ 
+ 	if (!data->console)
+@@ -2085,6 +2101,13 @@ static int __maybe_unused qcom_geni_serial_runtime_resume(struct device *dev)
+ 	return 0;
+ }
+ 
++static bool qcom_geni_serial_keep_active(struct qcom_geni_serial_port *port)
++{
++	/* serial core leaves the port running when the TTY owns the wake IRQ. */
++	return (!console_suspend_enabled && uart_console(&port->uport)) ||
++	       (port->guard_suspend_irq && !port->uport.suspended);
++}
++
+ static int qcom_geni_serial_suspend(struct device *dev)
+ {
+ 	struct qcom_geni_serial_port *port = dev_get_drvdata(dev);
+@@ -2101,18 +2124,27 @@ static int qcom_geni_serial_suspend(struct device *dev)
+ 		geni_icc_set_bw(&port->se);
+ 	}
+ 
++	/*
++	 * stop_rx can raise the level IRQ after serial core marks the port
++	 * suspended, when the ISR can no longer acknowledge it. shutdown()
++	 * takes its own disable reference until startup() has restarted RX.
++	 */
++	if (port->guard_suspend_irq)
++		disable_irq(uport->irq);
+ 	ret = uart_suspend_port(private_data->drv, uport);
++	if (port->guard_suspend_irq)
++		enable_irq(uport->irq);
+ 	if (ret)
+ 		return ret;
+ 
+-	/*
+-	 * When no_console_suspend is set the console must remain active
+-	 * across system sleep, so skip the force suspend path.
+-	 */
+-	if (!console_suspend_enabled && uart_console(uport))
++	if (qcom_geni_serial_keep_active(port))
+ 		return 0;
+ 
+-	return pm_runtime_force_suspend(dev);
++	ret = pm_runtime_force_suspend(dev);
++	if (ret && port->guard_suspend_irq)
++		uart_resume_port(private_data->drv, uport);
++
++	return ret;
+ }
+ 
+ static int qcom_geni_serial_resume(struct device *dev)
+@@ -2122,7 +2154,7 @@ static int qcom_geni_serial_resume(struct device *dev)
+ 	struct uart_port *uport = &port->uport;
+ 	struct qcom_geni_private_data *private_data = uport->private_data;
+ 
+-	if (console_suspend_enabled || !uart_console(uport)) {
++	if (!qcom_geni_serial_keep_active(port)) {
+ 		ret = pm_runtime_force_resume(dev);
+ 		if (ret)
+ 			return ret;

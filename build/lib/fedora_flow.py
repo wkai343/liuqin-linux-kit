@@ -8,11 +8,18 @@ import sys
 from source_flow import Flow, load_module
 from source_build import PROJECT, download, sha, tree_identity
 from storage_scope import inputs as storage_scope_inputs
+from charger_runtime import SERVICES as CHARGER_SERVICES
 import mesa_libclc
 import fedora_ffmpeg
 import fedora_obs
 import fedora_libcamera
 import fedora_kamoso
+
+
+def charger_runtime_inputs():
+    return dict(collector=sha(PROJECT/'build/lib/charger_runtime.py'),
+                resolver=sha(PROJECT/'build/lib/plymouth_runtime.py'),
+                services={path.name:sha(path) for path in CHARGER_SERVICES})
 
 
 class FedoraFlow(Flow):
@@ -59,8 +66,22 @@ class FedoraFlow(Flow):
             builder=sha(PROJECT/'build/scripts/build-fedora-root.py'),
             collector=sha(PROJECT/'build/lib/plymouth_runtime.py'),
             splash_assets=sha(PROJECT/'build/lib/splash_assets.py'),
-            theme=tree_identity(PROJECT/'device/boot/splash'),refresh=self.refresh),
-            build,['assembled/runtime.tar.gz','assembled/runtime.json'])/'assembled'
+            theme=tree_identity(PROJECT/'device/boot/splash'),charger=charger_runtime_inputs(),refresh=self.refresh),
+            build,['assembled/runtime.tar.gz','assembled/runtime.json','assembled/charger-runtime'])/'assembled'
+
+    def board_inputs(self):
+        inputs = super().board_inputs()
+        splash = self.boot_splash_runtime()
+        if splash:
+            # One Fedora transaction supplies the shared loader and libraries.
+            return dict(inputs, CHARGER_RUNTIME=str(splash/'charger-runtime'))
+        archive = self.target_runtime_root()
+        def build(out):
+            self.target_action('charger', archive, out/'assembled')
+        stage = self.stage('fedora-charger-runtime', dict(base=sha(archive),
+            charger=charger_runtime_inputs(),
+            builder=sha(PROJECT/'build/scripts/build-fedora-root.py')), build, ['assembled/runtime'])
+        return dict(inputs, CHARGER_RUNTIME=str(stage/'assembled/runtime'))
 
     def sensors(self):
         archive=self.target_runtime_root();board=self.board()
@@ -79,6 +100,7 @@ class FedoraFlow(Flow):
             env=dict(STORAGE_SCOPE_CC=storage['compiler']))
         return self.stage('fedora-device-rpms',dict(sensors=sha(sensors),
             firmware=tree_identity(PROJECT/'device/firmware'),speakers=tree_identity(board/'speaker-firmware'),
+            speaker_builder=sha(PROJECT/'build/lib/speaker_firmware.py'),
             board_overlay=tree_identity(PROJECT/'device/board-overlay'),
             overlay_builder=sha(PROJECT/'build/lib/device_overlay.py'),busybox=sha(tools['BUSYBOX']),version=self.version,
             storage_scope=storage,storage_builder=sha(PROJECT/'build/lib/storage_scope.py'),

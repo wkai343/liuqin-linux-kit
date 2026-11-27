@@ -112,7 +112,8 @@ def build(firmware, speakers, sensors, busybox, output, version):
         helper=build_storage_helper(work/'liuqin-storage-seal')
         root=work/'board';board_overlay(root,busybox,helper);docs(root,'liuqin-device-support')
         rpm(root,'liuqin-device-support',version,packages,requires=['systemd','systemd-udev','python3',
-            'NetworkManager','bluez','glib2','iproute','chrony'],summary='Liuqin board services independent of the desktop',
+            'NetworkManager','bluez','glib2','iproute','chrony','alsa-utils','wireplumber-libs >= 0.5',
+            'python3-gobject-base'],summary='Liuqin board services independent of the desktop',
             posttrans=legacy_cleanup(),provides=['liuqin-storage-policy-ufs = 1'])
         root=work/'sensors';root.mkdir();sensor_payload(sensors,root);docs(root,'liuqin-sensors')
         rpm(root,'liuqin-sensors',version,packages,requires=['glib2','libgudev','polkit-libs','libqmi',

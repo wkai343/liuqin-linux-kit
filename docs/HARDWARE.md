@@ -27,12 +27,21 @@ CPU、空闲、供电与带宽的原厂对照及补齐项见[设备树对照](DE
 | 时钟、供电、复位、引脚与中断 | 已接入 GCC/DISPCC/CAMCC、RPMh、PMIC、pinctrl 等板级资源 | 随已验证外设覆盖部分链路 | 待验证：资源释放、延迟探测及错误回退；保留未使用时钟/电源域的启动策略 |
 | SMMU 与互连带宽：ARM SMMU、SM8450 interconnect | 已接入显示、GPU、相机等依赖；补齐 CPU/LLCC 两级 BWMON | 两级 BWMON 自动绑定；内存负载使中断与带宽请求上升，结束后回落；显示和相机覆盖部分既有链路 | 待验证：并发 DMA、长期负载、睡眠恢复、IOMMU 故障恢复；原厂 memlat/L3 策略尚未移植 |
 | 内存与预留区 | 已接入；保留必要的固件内存区域 | 8 GB 设备约 6.8 GiB 可用，基础读写与启动 | 待验证：其他容量；SMEM DDR 未知字段仍待核实，MPSS 预留回收未通过 |
-| UFS / GPT：`ufs-qcom`、分区解析 | 已接入；原厂 LUN 3/5 备份头兼容限定设备和校验条件，独立只读复查使用批处理 | ext4/Btrfs 安装与启动实机；7.3.4 快速就绪、批量复查及根分区以外只读验证，见[存储保护](BUILD.md#启动与设备适配) | 待验证持续 I/O、休眠恢复与错误恢复 |
+| UFS / GPT：`ufs-qcom`、分区解析 | 限定条件下兼容原厂 LUN 3/5 备份头，批量复查节点只读状态 | ext4/Btrfs 安装与启动、快速就绪及非根分区只读保护。短时连续只读 I/O 期间三个符号时钟均启用，结束后回到空闲。见[存储保护](BUILD.md#启动与设备适配) | 长时读写负载、I/O 跨休眠及错误恢复待验证 |
 | DSP 通信：Q6 remoteproc、GLINK、SMEM、SMP2P、FastRPC | ADSP/CDSP/SLPI 节点及固件已接入；音频服务恢复时保留时钟提供设备、恢复资源投票并按依赖顺序重建硬件状态 | 音频、充电、加速度计链路实机；临时内核下受控整 ADSP 停启后，播放及四路采集自动恢复，随后再次 s2idle 通过 | 待验证：CDSP 独立任务、任意固件崩溃与长时并发负载；固件拒绝的音频 PD 单独重启未验证 |
 | 安全调用：SCM、`tee/qseecom` | 已接入指纹所需 TA/RPMB 通路 | 配套指纹栈的录入与认证实机 | 待验证：系统重启、休眠及 Android 往返共存 |
 | NVMEM：QFPROM、SPMI SDAM | 驱动配置已启用；RTC 无持久偏移单元 | 未做独立验收 | 待核实：本机单元、消费者及读取结果 |
 | 加密与随机数 | ARM64 CE、高通 RNG 已配置；QCE/ICE 适配状态待核实 | 未做独立验收 | 待验证：实际硬件后端、磁盘加密通路及吞吐 |
 | 故障记录：watchdog、pstore/ramoops | 驱动配置及 ramoops 区域已接入 | 有运行日志。Rec 经 Fastboot 热重启后未读回 pstore 测试标记 | 待验证看门狗恢复及崩溃日志跨重启保存 |
+
+M81 的原厂 UFS 节点列出 TX0、RX0 和 RX1 三个符号时钟。小米驱动按 lane 管理这些时钟，
+允许双 lane 配置缺少 TX1，并记录时钟是否已经使能。Linux 7.3.4 的通用层还会读取
+`freq-table-hz` 对应的时钟。补丁 `0101` 让已识别的 M81 由高通驱动单独管理这些 lane 时钟，
+使控制器反复启用、门控和恢复时的引用数配对。[小米 UFS 驱动](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/scsi/ufs/ufs-qcom.c#L307-L409) · [UFS 补丁](../build/kernel/patches/linux-7.3/0101-liuqin-ufs-lane-clock-ownership.patch)
+
+小米 FastRPC 驱动会找回中断前保存的用户调用上下文，继续等待同一笔 DSP 请求。
+补丁 `0103` 在主线驱动中让用户等待点接受系统冻结，解冻后接续等待。普通信号仍可中断用户调用，
+内核调用沿用 10 秒超时。[小米 FastRPC 驱动](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/char/adsprpc.c#L3385-L3399) · [FastRPC 补丁](../build/kernel/patches/linux-7.3/0103-fastrpc-freeze-user-wait.patch)
 
 ## 显示与输入
 
@@ -41,6 +50,7 @@ CPU、空闲、供电与带宽的原厂对照及补齐项见[设备树对照](DE
 | GPU：DRM MSM / Adreno 730、GMU、devfreq | 按原厂补齐 220–900 MHz 共 13 档 GX/CX 等级与 ACD；恢复 A730 图像地址寄存器；Liuqin A730 采用 5000 ms 挂起检查周期，见 [GPU](GPU.md) | 临时启动及默认内核普通重启；13 档切换、900 MHz 负载、自动调频与空闲休眠、GLES 回读、Vulkan、s2idle 后计算恢复；长计算与受控卡死恢复；原厂表、GMU CX/HFI 和寄存器列表有离线检查 | 软件超时恢复可能更慢；实际高温限频、长期压力、其他 GPU 故障及其他批次待验证 |
 | OpenCL：Fedora Mesa Rusticl / libclc | 保留官方 Mesa RPM，关闭 early preamble 规避跨步复制错误；配套 Mesa libclc SPIR-V 包消除兼容性警告 | 图像、矩形复制和双向跨步复制定向 CTS 通过；5000 ms 运行时策略下完整 `full_3d_explicit_local` 单项通过；修复内核的定向验证范围见 [专题](GPU.md#当前方案与验证范围) | 完整 CTS 尚未完成；跨步复制错误的底层根因、长期应用兼容性及发行版升级后的 libclc 配套仍需验证 |
 | 内屏：NT36532、双 DSI、DSC | 已实现 2880 × 1800；天马/华星默认四档在线切换，首选 120 Hz；关闭前清理旧帧请求，共享 CTL 的正常帧只提交一次 | 天马四档全部 12 个方向、画面与手指正常；旧/新/旧内核对照验证重复提交修复，临时与默认启动绘图、s2idle 和 DPMS 短测未复现提交超时，帧计数与刷新寄存器正常 | 待验证：华星全部路径、长期切换、60 Hz 首次点亮/熄屏恢复；30/48/50 Hz 仅诊断，见[显示](DISPLAY.md) |
+| 面板供电与复位 | NT36532 按 M81 量产顺序启停五路电源，KTZ8866 负责背光和偏压编程 | 天马屏灭亮与 s2idle 恢复，电源引用、使能引脚、触控就绪状态及五路切换顺序 | 华星屏、长期唤醒和板上电压波形待验证，见[显示供电](DISPLAY.md#当前实现) |
 | 背光与 CABC：`ktz8866`、面板命令 | 已实现亮度曲线、首帧背光与调光 | 手动亮度、普通亮灭屏实机 | 待解决：启动接管短暂黑屏；待验证：CABC 观感与功耗 |
 | 触控：`nt36523/nt36xxx` | 已实现面板固件选择、共享 TDDI 顺序、校准保护与看门狗诊断 | 天马点击、滑动、普通熄屏恢复及四档切换实机 | 待验证：华星、长期唤醒与异常恢复，见[触控时序](DISPLAY.md#显示与触摸恢复时序) |
 | 手写笔：`NVTCapacitivePen` | 已实现坐标精度、压感、报文计数及笔唤醒故障隔离 | 戴尔 PN7522W 在 120 Hz、在线切入的 60 Hz 有基本输入 | 已知限制：90/144 Hz 无笔事件，暂不排查；待验证：其他笔、侧键、防误触与睡眠恢复 |
@@ -77,18 +87,51 @@ WN8030 使用 GPIO50 通知 HID 数据，GPIO46 通知状态与唤醒；GPIO42 �
 | 项目 / 内核入口 | 实现状态 | 已验证范围 | 待解决 / 待验证 |
 | --- | --- | --- | --- |
 | Wi-Fi：`ath11k` / WCN6855 | 已接入 QCA6490、固件及板级数据 | 扫描、5 GHz 联网及一次 s2idle 后重连 | 待验证：其他频段、吞吐、反复休眠与蓝牙共存 |
-| 蓝牙：`hci_qca` | 已接入驱动及固件 | 当前配方的专项记录不完整 | 待验证：配对、音频、唤醒与长期连接 |
+| 蓝牙：`hci_qca` | WCN6855 在准备休眠时等待在途 HCI 请求完成。GENI UART 在串口核心挂起前屏蔽主中断，启动 RX 后开放中断 | 实机覆盖首次 s2idle、服务 UUID 增删、LE 扫描恢复，以及反复关开后的 IBS 握手和 GATT 读取。主机回归覆盖端口开关、TTY 唤醒和挂起失败回退。[HCI 休眠验证](#蓝牙-hci-与休眠) · [蓝牙关开验证](#蓝牙关开与-wcn6855-供电) · [原厂 UART 中断顺序](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/tty/serial/msm_geni_serial.c#L3718-L3810) | 待实机验证配对、音频、蓝牙外设唤醒与长期连接 |
 | USB 主机/角色：DWC3、QMP PHY、eUSB2 repeater | 已接入 OTG、角色切换与 SuperSpeed | 预接 U 盘启动、挂载读取及 5 Gbit/s 协商 | 待验证：集线器、带载拔插与睡眠恢复 |
 | USB gadget：configfs、FunctionFS | 内核已配置，桌面未默认创建 gadget | 当前目标内核未专项验收；Rec 使用独立内核 | 待验证：目标系统所需设备功能及主从往返 |
 | 外屏：DRM DP、Type-C Alt Mode、FSA4480 | HBR2 上限，按 Type-C 分配选择两条或四条通道；独立 DP 音频前端与 UCM，按显示链路停启 DSP 后端，见[显示](DISPLAY.md#usb-c-displayport) | 四通道下单台外屏以 2560 × 1600、120/144 Hz 扫描输出，内屏同时启用；临时内核的 ALSA 48 kHz、S16_LE 双声道出声与停止后重开、ALSA/桌面播放中换档、桌面热插拔恢复通过，未见音频关闭超时；配套 UCM 下未接外屏的临时启动和默认内核普通重启均可识别板载音频 | 未接外屏启动后再接入外屏待复测；换档有短暂停顿；其他外屏、双通道扩展坞、长时间高刷及音频睡眠恢复待验证 |
-| 四扬声器：CS35L41、AudioReach、SoundWire | 已接入声卡、保护固件和校准接口；整卡睡眠与重新准备时重置播放队列 | 立体声播放、音量及 USB 连接下普通重启；临时内核中同时录放的 s2idle、受控整 ADSP 重启及重启后再次睡眠，均确认自动恢复出声与播放指针推进 | 待验证：四路单独通道、长时播放及异常固件崩溃；音质仍需调校 |
+| 四扬声器：CS35L41、AudioReach、SoundWire | 已接入声卡、保护固件和本机校准。按实际输出切换[原厂音乐与免提通话参数](AUDIO.md#扬声器音乐与免提通话调音)。整卡睡眠与重新准备时重置播放队列 | 立体声播放、音量及 USB 连接下普通重启；临时内核中同时录放的 s2idle、受控整 ADSP 重启及重启后再次睡眠，均确认自动恢复出声与播放指针推进 | 待验证：四路单独通道、长时播放及异常固件崩溃；音质仍需调校 |
 | 麦克风：ASoC / DSP 拓扑 | AMIC1/3/4/5 的原厂偏置与 SoundWire 接线、四路采集及连续 DSP 通道映射；公共 ADC 时钟按最后一路退出释放，四通道载体保留未用时隙的时钟与静音；采用原厂 HPF 等待时序，离线关闭清理引用、缓存及延迟任务；重建声卡时重置路由；桌面使用软件音量，见[音频](AUDIO.md) | 四路 48 kHz / S16_LE、应用录音回放、静音与软件音量及普通重启通过；临时内核验证单路起录、逐路关闭/恢复、快速启停及停止后释放时钟与偏置；运行态和 PREPARED 态采集跨 s2idle、同时录放、受控整 ADSP 重启后恢复及再次睡眠通过，恢复后四路均有数据 | 长期并行录放和真实固件崩溃待验收；原始四通道不包含原厂通话降噪、回声消除或波束成形 |
 | WCD9380 / SoundWire 中断与停钟 | TX 独占 codec 寄存器中断；1.7 使用 CPU1 FIFO 与中断；关时钟前排空 IRQ，系统睡眠在 DAPM 关路径前停用数据端口；ADSP 恢复时重设引脚、复位并重新枚举，见[音频](AUDIO.md#系统睡眠与音频服务恢复) | 临时内核启动、自动休眠/恢复、反复录音、同时录放及 s2idle 恢复通过，未复现总线冲突、奇偶校验、FIFO 错误、停钟超时或 IRQ 异常；受控 ADSP 重启后四路采集恢复，离线 graph 关闭未再出现 `-102`，停止后时钟与偏置释放 | 长期压力、任意 DSP 崩溃和 Recovery 音频待验收 |
 | 视频编解码：Iris2 / V4L2 | H.264、H.265、VP9 解码；H.264、H.265 编码，见[视频](VIDEO.md) | 完整内核临时与默认启动通过三种 8-bit 720p 解码逐帧校验及两种硬编；另覆盖 1080p/854×480 编码、并发、停止重开、模块重载、自动休眠和空闲 s2idle 后重开；应用范围见下方软件接口 | 待验证：4K、10-bit、HDR、其他 profile、睡眠中保持的视频会话、吞吐及长时间运行 |
-| 后摄：S5KJN1、CAMSS、GT9764 | IFE680 4080×3060 NV12、独立原厂色彩参数、基础 AE/AWB、单机 WB/LSC/AF 校准、原厂镜头初始化与 libcamera 对比度对焦 | 普通用户采集、预览、拍照与扫码；近处文字及约 2 米远景实际合焦，单次/连续模式、取消、暗场失败；最后一个客户端关闭后释放电源 | 硬件 NV12 连续采集与近景合焦已验证；录像封装和采集中睡眠待验证；可选 IPE 恒等/原厂 TF21 单层时域降噪已接通；待解决：完整运动补偿、HDR、低照度/运动场景对焦及枚举服务长期持有镜头句柄时的功耗，见[相机](CAMERA.md) |
-| 前摄：AAC IMX596 | 原厂三种 RAW10 模式、供电/时钟与 CSIPHY2；录像帧长控制；IFE680 NV12、基础 AE/AWB、EEPROM 单机校准及 CC131 原厂多光源基础矩阵 | 原厂表核对；30/60/10 fps RAW 时序、各尺寸彩色出图、曝光限幅、切换与重开；1080p30 H.264/H.265、720p60/1080p60 H.264 无声录像；关闭后睡眠再重开、运行时电源释放 | 软件 ISP 60 fps 偶有间隙和丢帧；硬件路径支持两种合并模式和可选原厂 TF21 单层时域降噪，完整运动补偿、HDR 及完整场景调校未接入；音画同步、采集中睡眠与长期稳定性待验证，见[相机](CAMERA.md) |
+| 后摄：S5KJN1、CAMSS、GT9764 | 三档合并像素模式经 IFE680 输出 NV12，使用原厂色彩参数、单机校准及 libcamera 对比度对焦。可选 IPE TF21 单层降噪 | 普通用户预览、拍照、扫码、近远景合焦及关闭后释放电源。Kamoso 带声短片与回放。独立工具可三曝光 HDR 拍照、宽屏 HLG 录像 | 长录音画漂移、采集中睡眠、低照度与运动对焦、长期持有镜头时的功耗及完整 TF 运动补偿待验证或适配。见[相机支持与待办](CAMERA.md) |
+| 前摄：AAC IMX596 | 三种原厂 RAW10 模式，两个合并像素模式可经 IFE680 输出 NV12，含基础 AE/AWB、EEPROM 校准、CC131 原厂矩阵及可选 TF21 | 30/60/10 fps RAW、彩色出图、曝光限幅、切换重开、停止后睡眠与电源释放。1080p30 H.264/H.265、720p60/1080p60 H.264 无声录像。独立工具支持三曝光 HDR 拍照和 640×480 HLG 录像 | 软件 ISP 的 60 fps 仍有启动间隙和偶发丢帧。完整 TF 运动补偿、场景调校、长录同步及采集中睡眠待覆盖。见[硬件 ISP](CAMERA-ISP.md)及[相机待办](CAMERA.md#前后摄待办) |
 | 运动传感器：SLPI / FastRPC | 加速度计通路已接入，依赖 SSC 用户态 | 实际采样与自动旋转 | 待核实：陀螺仪等其他传感器；待验证：精度、轴向与睡眠恢复 |
 | 环境光：TCS3701 / SSC | lux 经 SensorProxy 接入 Plasma 原生自动亮度，桌面默认曲线参考固定原厂 vendor 资源 | SSC 型号、真实 lux、KWin 接收和原生背光联动 | 待验证：校准精度、其他面板观感、长期休眠；其他光感/接近传感器配置不代表硬件已验收，见[传感器](SENSORS.md) |
+
+### 蓝牙 HCI 与休眠
+
+小米 GENI UART 驱动在 runtime suspend 中先停 RX，再屏蔽主中断，随后关闭串口资源。恢复时先开资源、启动 RX，再开放中断。补丁 `0097` 针对 Linux 串口核心的系统挂起流程，在调用 `uart_suspend_port()` 之前就屏蔽主中断，避免核心标记端口挂起后还有电平中断待应答。[小米 UART 驱动](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/tty/serial/msm_geni_serial.c#L3718-L3810) · [UART 补丁](../build/kernel/patches/linux-7.3/0097-liuqin-geni-bt-suspend-irq.patch)
+
+BlueZ 增删本地服务 UUID 时，内核用 `Write Extended Inquiry Response`（`0x0c52`）更新经典蓝牙查询响应中的服务列表。若休眠准备在控制器回包前取消这个请求，BlueZ 会收到管理命令失败，内核也会提前补回一份命令额度。此时关闭 LE 扫描的 `LE Set Extended Scan Enable`（`0x2042`）可以先行发出，后续的成功回包就可能与内核正在等待的命令错配。
+
+小米公开的 `liuqin-t-oss` 内核将休眠准备放入请求工作队列，等待扫描等任务完成，等待上限为两秒。量产 ROM `OS2.0.6.0.VMYCNXM` 的 `vendor_a` 在 `etc/vintf/manifest_cape.xml` 声明蓝牙 HIDL 服务，启动配置指定 QTI 服务程序，HAL 实现包含 UART 传输。Fedora 的 WCN6855 驱动在准备休眠时先获取 HCI 请求锁。控制器空闲时可立即进入休眠，发生竞争时先让当前持有者完成请求。超过两秒仍阻塞时，沿用内核的取消路径。[原厂休眠队列](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/net/bluetooth/hci_core.c#L3469-L3513) · [原厂超时定义](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/include/net/bluetooth/hci_core.h#L93) · [量产镜像校验值](../shared/liuqin-rom-images.json)
+
+实机验证时，从开机后第一次 `s2idle` 开始，在休眠前启动 `btmon -i hci0`。分别覆盖空闲、LE 扫描中，以及用独立的临时服务 UUID 在休眠入口交错注册和注销三种情况。对照 MGMT 的 Add/Remove UUID 结果、HCI 命令和 Command Complete 的次序。在控制器只给一份命令额度时，上一条的回包应先于下一条的发送。RTC 唤醒后检查 `/sys/power/suspend_stats` 的成功计数，并再次读取控制器版本。临时 UUID 用后注销。
+
+### 蓝牙关开与 WCN6855 供电
+
+量产 ROM `OS2.0.6.0.VMYCNXM` 的 `vendor_a/lib64/hw/android.hardware.bluetooth@1.0-impl-qti.so` 为每次 UART 上电重建带内休眠（IBS）会话。`UartController::Cleanup()` 调用 `IbsHandler::StopAllTimers()` 后析构处理器，`UartController::Init()` 重新构造处理器并调用 `InitInt()`。[量产镜像来源](../shared/liuqin-rom-images.json)
+
+Linux 的 `hci_qca` 会复用收发状态，最后的 HCI 关机命令仍可重启发送空闲定时器。Liuqin 在拉低 BT_EN 前阻止旧会话收发，依次收尾唤醒工作、定时器和时钟投票，将收发两侧恢复为 ASLEEP。下一次上电下载固件后，首条普通 HCI 命令重新走 WAKE/ACK。[板级补丁](../build/kernel/patches/linux-7.3/0106-bluetooth-liuqin-reset-ibs-on-power-off.patch)
+
+复测时先读取 HCI 本地版本，随即用 BlueZ 关闭适配器，在 `/sys/kernel/debug/bluetooth/hci0/ibs/` 读取 `tx_ibs_state`、`rx_ibs_state`、`tx_vote` 和 `rx_vote`。BT_EN（TLMM GPIO81）拉低后应分别为 0、0、N、N。分别立即开蓝牙，或等待超过 `tx_idle_delay` 再开。掉电期间 `ibs_sent_sleeps` 应保持稳定。重开后验证本地版本、LE 扫描及已知外设的 GATT 读取。
+
+#### 射频启动与固件保持模式
+
+量产 M81 的 RPMh 驱动用毫伏表示电压。它读取设备树中的初始请求并缓存。下列四路在原厂设备树中均未设置 `qcom,send-defaults`。蓝牙和 Wi-Fi 在上电前分别向稳压器申请固件启动电压，固件就绪后各自撤销下限。共用电源轨采用所有消费者请求的交集。[原厂 RPMh 请求单位](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/regulator/rpmh-regulator.c#L980-L1007) · [原厂初始电压](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/regulator/rpmh-regulator.c#L1564-L1580) · [原厂默认请求发送条件](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/regulator/rpmh-regulator.c#L1958-L1968)
+
+| 电源轨 | PMIC 初始请求 | 物理轨范围 | 蓝牙固件启动请求 | Wi-Fi 固件启动请求 |
+| --- | ---: | ---: | ---: | ---: |
+| S11B，蓝牙 AON/DIG/RFACMN/RFA_0p8 和 WLAN DIG | 952 mV | 382–1170 mV | 966–1170 mV | 966–1170 mV |
+| S12B，RFA2 | 1256 mV | 1224–2040 mV | 1350–2024 mV | 1350–2040 mV |
+| S1C，RFA1 | 1880 mV | 1800–2024 mV | 1900–2040 mV | 1900–2024 mV |
+| S2E，WLAN AON | 500 mV | 500–1040 mV | — | 1012–1040 mV |
+
+两路还共用固定 1800 mV 的 S10B（I/O）和固定 2800 mV 的 L7E（天线开关）。S1C 上蓝牙的有效上限受物理轨的 2024 mV 限制。Wi-Fi 在 CNSS 固件初始化成功后撤销启动下限。量产 `OS2.0.6.0.VMYCNXM` 的 `android.hardware.bluetooth@1.0-impl-qti.so` 在 `UartController::Init()` 中先调用 `SetPower(true, false)`，初始化末尾调用 `SetPower(true, true)`。`PowerUpChip()` 将第二次调用转为模式 2，原厂内核在该模式保留使能并撤销启动下限。Linux 在蓝牙补丁和 NVM 下载成功、Wi-Fi 固件就绪时分别执行这个交接，重新启动固件时重新申请。[小米蓝牙供电定义](https://github.com/MiCode/kernel_devicetree/blob/1c507816ba8aa6117dcec41f577ef7a66d2091f7/qcom/cape.dtsi#L553-L569) · [小米 WLAN 供电定义](https://github.com/MiCode/kernel_devicetree/blob/1c507816ba8aa6117dcec41f577ef7a66d2091f7/qcom/cape.dtsi#L3049-L3064) · [原厂蓝牙保持模式](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/bluetooth/btpower.c#L705-L715) · [原厂 WLAN 固件交接](https://github.com/MiCode/Xiaomi_Kernel_OpenSource/blob/eb49e10028e27fa98856cb5e458c0f0ec5b4554e/drivers/net/wireless/cnss2/main.c#L668-L710) · [板级实现](../build/kernel/patches/linux-7.3/0107-liuqin-wcn6855-firmware-voltage-votes.patch)
+
+发布内核可直接采样 `/sys/kernel/debug/regulator/regulator_summary` 的 `bt-*`、`wlan-*` 消费者。要追踪实际发送的命令，用同一源码临时构建启用 `CONFIG_FTRACE=y`、`CONFIG_ENABLE_DEFAULT_TRACERS=y` 的诊断内核，在独立 tracefs 实例记录 `regulator_set_voltage` 和 `regulator_set_voltage_complete`。从 `/sys/kernel/debug/cmd-db` 查出 `smpb11`、`smpb12`、`smpc1`、`smpe2` 的资源地址，用 `rpmh_send_msg` 核对发往 VRM 的毫伏数。先单独关开蓝牙，再在 WLAN 固件重新启动期间开蓝牙。可从启动请求、其中一路先就绪、两路均就绪三个阶段核对下限与使能计数。在共享轨上，另一方仍有启动请求时应保留其电压。用 HCI 本地版本、LE 扫描及 Wi-Fi 重新关联确认无线功能。trace 与 sysfs 的数值表示内核请求，板上实际电压需用仪器测量。
 
 ### USB-C 方向与速率
 
@@ -146,7 +189,7 @@ MiCode 提交 `eb49e10028e27fa98856cb5e458c0f0ec5b4554e` 中
 
 | 项目 / 内核入口 | 实现状态 | 已验证范围 | 待解决 / 待验证 |
 | --- | --- | --- | --- |
-| 电池/充电：PMIC GLINK | 已实现周期电量刷新、双电芯状态、认证、MiPPS/PPS 及 M81 热限制档位；传输暂时中断时保留最近有效电量、充电状态标为未知；协商和电流表由固件完成 | 基础充电、电量及电芯认证；电脑固定 PD 下热档位限流与解除、普通重启及自动温控服务；受控 ADSP 停启期间 UPower 保持有效电量 | 独立 USB 输入限额 SET 被当前固件以 `0x204` 拒绝，接口如实报错；各适配器功率、低电量/高负载、热限制跨真实固件重启及长期断联待验证，见[充电](FASTCHARGE.md) |
+| 电池/充电：PMIC GLINK | 周期电量刷新、双电芯认证、MiPPS/PPS 和 M81 热限制。传输中断时保留最近有效电量并将充电状态标为未知 | 基础充电、电量、双电芯认证。电脑固定 PD 限流、解除限流、普通重启和自动温控。受控 ADSP 停启期间 UPower 保有有效电量。临时进入关机充电模式，电脑口为 PD，已测快充头为 PD_PPS | 固件以 `0x204` 拒绝独立 USB 输入限额。实际输入功率、低电量/高负载、热限制跨固件重启、长期断联和关机插线冷启待验证。见[充电](FASTCHARGE.md) |
 | 温控：TSENS、PMIC ADC、thermal cooling | 补齐 13 个 CPU 温区到三个频率域的 cooling maps；GPU 已有绑定；接入 PMK8350 内温及八路原厂 ADC7 外部热敏电阻，按原厂 normal 表实现充电温控服务；其他 PMIC 内部告警温区的 37°C 是估算值 | 单台设备：CPU/GPU 在降低的被动阈值下实际限频和自然降温恢复；充电在降低的实温阈值下自动进入 15 档、停载自然降温后解除，USB 实流约 0.5 A，电池电流约 0.15→0.60 A；默认启动核对读数及服务恢复，保留既有 CPU/GPU 绑定 | 默认高温阈值、固件独立热保护、critical 保护、长时间负载、挂起及 Recovery 充电温控仍待验证；方法与边界见[温控](THERMAL.md) |
 | s2idle | 内核已支持；默认系统选择此路径；补齐音频整卡的端口与 DSP 暂停/恢复顺序 | 600 秒待机，RTC、键盘、电源键唤醒；音频临时内核的空闲、录音及同时录放短周期 RTC 唤醒与数据恢复 | 旧版偶发键盘提前唤醒的原因尚未确认；状态中断改动后的短周期检查通过，见[键盘状态中断与睡眠](#键盘状态中断与睡眠)；待验证多轮长时待机、其他外设恢复及功耗，音频诊断配置范围见[AUDIO.md](AUDIO.md#系统睡眠与音频服务恢复) |
 | deep | 有试验路径，非默认策略 | 已观察到异常 | 待解决：提前唤醒、串口/蓝牙恢复；再入睡原型未加入默认构建 |

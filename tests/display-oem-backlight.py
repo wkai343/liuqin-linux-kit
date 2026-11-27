@@ -51,7 +51,7 @@ static void mock_dev_info(const char *fmt, ...) {(void)fmt;}
 #define dev_info(dev, ...) mock_dev_info(__VA_ARGS__)
 #define dev_err_probe(dev,error,...) (error)
 static unsigned int ilog2(unsigned int n){assert(n);return 31-__builtin_clz(n);}
-struct device_node {int sinks,mask,delay,ramp,led_ramp;bool bias,oem;};
+struct device_node {int sinks,mask,delay,ramp,led_ramp;bool bias,oem,external_bias;};
 struct device {struct device_node *of_node;};
 struct regmap {int id;unsigned int values[0x16];};
 struct i2c_device_id {unsigned long driver_data;};
@@ -83,6 +83,7 @@ static int of_property_read_u32(struct device_node *n,const char *name,unsigned 
 }
 static bool of_property_read_bool(struct device_node *n,const char *name){
  if(!strcmp(name,"kinetic,enable-lcd-bias"))return n->bias;
+ if(!strcmp(name,"kinetic,external-bias-control"))return n->external_bias;
  assert(!strcmp(name,"xiaomi,liuqin-brightness-curve"));return n->oem;
 }
 static struct ktz8866 *bl_get_data(struct backlight_device *b){return b->data;}
@@ -90,7 +91,11 @@ static unsigned int backlight_get_brightness(struct backlight_device *b){return 
 static const struct i2c_device_id *i2c_client_get_device_id(struct i2c_client *c){return &c->id;}
 static void *devm_kzalloc(struct device *d,size_t size,int flag){(void)d;(void)flag;assert(nalloc<64);void *v=calloc(1,size);assert(v);allocations[nalloc++]=v;return v;}
 static struct regmap *devm_regmap_init_i2c(struct i2c_client *c,const struct regmap_config *cfg){assert(cfg->precious_reg(&c->dev,15));assert(!cfg->precious_reg(&c->dev,8));return c->map;}
-static int devm_regulator_get_enable(struct device *d,const char *s){(void)d;(void)s;return 0;}
+static unsigned int bias_requests;
+static int devm_regulator_get_enable(struct device *d,const char *s){
+ assert(!d->of_node->external_bias && bias_requests<2);
+ assert(!strcmp(s,bias_requests ? "vddneg" : "vddpos"));bias_requests++;return 0;
+}
 static struct gpio_desc *devm_gpiod_get_optional(struct device *d,const char *s,int flag){(void)d;(void)s;(void)flag;return &gpio;}
 static struct backlight_device *devm_backlight_device_register(struct device *d,const char *name,struct device *parent,struct ktz8866 *ktz,const struct backlight_ops *ops,const struct backlight_properties *props){
  (void)d;(void)name;(void)parent;published_mask=maps[0].values[8];published_brightness=maps[0].values[4]|(maps[0].values[5]<<3);
@@ -105,6 +110,7 @@ static void backlight_disable(struct backlight_device *b){b->props.power=4;b->op
  cases=r'''
 static struct ktz8866 ktz,slave;
 static void reset(bool oem,bool dual){
+ bias_requests=0;
  ktz_b=NULL;for(int i=0;i<nalloc;i++)free(allocations[i]);nalloc=0;
  memset(maps,0,sizeof(maps));maps[0].id=0;maps[1].id=1;
  node=(struct device_node){.sinks=oem?6:5,.mask=oem?31:-1,.delay=oem?10:-1,.ramp=128,.led_ramp=1,.bias=true,.oem=oem};
@@ -142,9 +148,9 @@ int main(void){
  reset(true,false);node.led_ramp=16385;assert(ktz8866_init(&ktz)==-EINVAL && writes==2);
  ready(false);assert(ktz8866_set_brightness(&ktz,2048)==-EINVAL && !writes);assert(!ktz8866_set_brightness(&ktz,2047));check_lit(1,2047);assert(!(maps[0].values[8]&128));
  reset(true,false);assert(ktz8866_precious_reg(&client.dev,15));for(int i=0;i<=21;i++)if(i!=15)assert(!ktz8866_precious_reg(&client.dev,i));
- reset(true,false);assert(!ktz8866_probe(&client));assert(published==1 && published_mask==127 && published_brightness==1500);assert(bl.props.max_brightness==4095 && bl.props.brightness==510 && bl.props.power==0 && client.data==&bl);
+ reset(true,false);node.external_bias=true;assert(!ktz8866_probe(&client) && !bias_requests);assert(published==1 && published_mask==127 && published_brightness==1500);assert(bl.props.max_brightness==4095 && bl.props.brightness==510 && bl.props.power==0 && client.data==&bl);
  clear_trace();backlight_disable(&bl);check_dark(1);bl.props.power=0;assert(!bl.ops->update_status(&bl));check_lit(1,1500);
- reset(false,false);assert(!ktz8866_probe(&client));assert(published==1 && published_mask==95 && published_brightness==1500 && bl.props.max_brightness==2047 && bl.props.brightness==1500 && !bl.props.power);
+ reset(false,false);assert(!ktz8866_probe(&client) && bias_requests==2);assert(published==1 && published_mask==95 && published_brightness==1500 && bl.props.max_brightness==2047 && bl.props.brightness==1500 && !bl.props.power);
  for(int i=0;i<7;i++){reset(true,false);fail_at=i;fail_after=1;assert(ktz8866_probe(&client)==-EIO && !published);}
  reset(false,false);reg_fail=1;assert(ktz8866_probe(&client)==-ENOMEM && !published);check_dark(1);
  reset(false,false);fail_at=6;fail_after=1;assert(ktz8866_probe(&client)==-EIO && !published);check_dark(1);

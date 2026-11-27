@@ -21,7 +21,7 @@ version=${LIUQIN_DEB_VERSION:-0.1}
 maintainer='Liuqin Linux Kit contributors'
 
 firmware_tree=${FIRMWARE_TREE:-"$project_root/device/firmware"}
-firmware_manifest_sha256=${FIRMWARE_MANIFEST_SHA256:-012c413e0a5d5c3c14631fbdfe50da5c51e95ffc1ae431b8d93f776538b65ba2}
+firmware_manifest_sha256=${FIRMWARE_MANIFEST_SHA256:-6162565154d5cd250b35c6f5639ec537c974553478e39cb65e15811170a8c25c}
 speaker_firmware=${SPEAKER_FIRMWARE_DIR:-}
 board_overlay=${BOARD_OVERLAY:-"$project_root/device/board-overlay"}
 busybox=${BUSYBOX:-}
@@ -125,7 +125,8 @@ build_firmware() {
 		(cd "$root" && sha256sum -c --quiet - >/dev/null) ||
 		die 'firmware content does not match the pinned firmware-prep manifest'
 	count=$(find "$root/usr/lib/firmware" -type f | wc -l | tr -d ' ')
-	[ "$count" = 197 ] || die "firmware closure is not the pinned 197 files: $count"
+	expected_count=$(wc -l <"$firmware_tree/firmware.manifest" | tr -d ' ')
+	[ "$count" = "$expected_count" ] || die "firmware closure has $count files, expected $expected_count"
 	if [ -n "$speaker_firmware" ]; then
 		python3 "$project_root/build/lib/speaker_firmware.py" "$speaker_firmware" "$root"
 	else
@@ -183,7 +184,7 @@ build_device_support() {
 		PYTHONPATH="$project_root/build/lib" python3 -c 'from storage_scope import legacy_cleanup; print(legacy_cleanup())'
 		printf 'fi\n'
 	} >"$root/DEBIAN/postinst"
-	pack "$pkg" arm64 'systemd, udev, python3, chrony, network-manager, bluez, libglib2.0-bin' \
+	pack "$pkg" arm64 'systemd, udev, python3, chrony, network-manager, bluez, libglib2.0-bin, alsa-utils, python3-gi, gir1.2-wp-0.5' \
 		'Xiaomi Pad 6 Pro (liuqin) desktop-neutral board services and storage protection'
 }
 

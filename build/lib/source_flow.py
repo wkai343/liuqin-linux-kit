@@ -187,6 +187,12 @@ class Flow:
                         dtb_tools=sha(PROJECT/'build/lib/build-bootimg.sh'),
                         abl_symbols=sha(PROJECT/'build/lib/abl-symbols.py'))
         env=dict(inputs,**usb_environment(self.usb),KERNEL_SOURCE=str(source),KERNEL_OUT=str(kernel))
+        if 'CHARGER_RUNTIME' in inputs:
+            dependency.update(charger_runtime=tree_identity(Path(inputs['CHARGER_RUNTIME'])),
+                              charger_stager=sha(PROJECT/'build/lib/charger_runtime.py'),
+                              charger_helpers={name:sha(PROJECT/'device/board-overlay'/name) for name in
+                                  ('usr/local/libexec/liuqin-mipps-auth', 'usr/local/libexec/liuqin-charge-thermal',
+                                   'usr/share/liuqin/charge-thermal.json')})
         modules=self.modules();dependency['modules']=sha(modules/'kernel.build.json')
         splash=self.boot_splash_runtime()
         if splash:
