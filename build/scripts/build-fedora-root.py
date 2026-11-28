@@ -308,6 +308,16 @@ def check_desktop_runtime(root, *, first_boot_setup=False):
     for binary in ('/usr/bin/upower','/usr/libexec/upowerd'):
         chroot(root,[binary,'--help'],timeout=30,stdout=subprocess.DEVNULL)
 
+    if any((root/'usr/bin'/app).is_file() for app in ('kamoso', 'snapshot')):
+        # Inspect the target plugin without a camera, session bus or registry cache.
+        info = chroot(root, ['/usr/bin/env', 'GST_PLUGIN_SYSTEM_PATH_1_0=', 'GST_REGISTRY=/dev/null',
+                            '/usr/bin/gst-inspect-1.0', '/usr/lib64/gstreamer-1.0/libgstpipewire.so'],
+                      timeout=30, capture_output=True, text=True)
+        features = {line.partition(':')[0].strip() for line in info.stdout.splitlines()}
+        missing = {'pipewiresrc', 'pipewiredeviceprovider'} - features
+        if missing:
+            raise ValueError('桌面相机缺少 GStreamer PipeWire 组件 ' + ', '.join(sorted(missing)))
+
 
 def boot_splash_files():
     files={

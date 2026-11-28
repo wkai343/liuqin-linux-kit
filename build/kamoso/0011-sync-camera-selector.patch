@@ -1,0 +1,12 @@
+diff --git a/src/qml/ImagesView.qml b/src/qml/ImagesView.qml
+--- a/src/qml/ImagesView.qml
++++ b/src/qml/ImagesView.qml
+@@ -270,6 +270,8 @@
+                     Layout.fillWidth: parent
+                     model: DeviceManager
+                     textRole: "display"
++                    valueRole: "objectId"
++                    currentValue: WebcamControl.currentDevice
+                     visible: count>1
+                     onActivated: (row) => {
+                         DeviceManager.playingDevice = DeviceManager.deviceAt(row);

@@ -43,7 +43,9 @@ def prepare(archive, top):
     revision = int(lock['release'].split('.liuqin')[1])
     spec = spec.replace('%cmake_build\n',
                         f'export SOURCE_DATE_EPOCH=$((${{SOURCE_DATE_EPOCH:-1795564800}} + {revision}))\n%cmake_build\n', 1)
-    downstream = (f"* Wed Nov 25 2026 Liuqin Linux Kit <noreply@localhost> - {lock['version']}-{lock['release']}\n"
+    downstream = (f"* Sat Nov 28 2026 Liuqin Linux Kit <noreply@localhost> - {lock['version']}-{lock['release']}\n"
+                  "- Show the active preview camera when the settings page opens.\n\n"
+                  "* Wed Nov 25 2026 Liuqin Linux Kit <noreply@localhost> - 26.08.3-1.liuqin15\n"
                   "- Allow 120 ms of lateness for the onboard rear viewfinder.\n\n"
                   "* Wed Nov 25 2026 Liuqin Linux Kit <noreply@localhost> - 26.08.3-1.liuqin14\n"
                   "- Share the rear recording clock and retain the negotiated native mode.\n\n"

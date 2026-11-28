@@ -17,7 +17,7 @@
     "man-db", "man-pages", "mandoc",
     "udisks2", "dosfstools", "exfatprogs", "ntfs-3g", "usbutils",
     "libcamera-tools", "libcamera-ipa", "v4l-utils",
-    "kamoso", "snapshot", "libcamera-gstreamer", "pipewire-plugin-libcamera",
+    "kamoso", "snapshot", "libcamera-gstreamer", "pipewire-plugin-libcamera", "pipewire-gstreamer",
     "gstreamer1-plugins-good", "gstreamer1-plugins-good-qt6", "gstreamer1-plugins-bad-free", "gstreamer1-plugin-openh264",
     "kde-partitionmanager", "parted", "ntfsprogs",
 

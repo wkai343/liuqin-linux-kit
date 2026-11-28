@@ -287,7 +287,7 @@ class FedoraTests(unittest.TestCase):
     def test_default_camera_apps_and_snapshot_menu_entry(self):
         recipe = root_builder.common.recipe(PROJECT/'build/rootfs/fedora-plasma.json')
         packages = set(recipe['packages'])
-        self.assertTrue({'kamoso', 'snapshot', 'libcamera-gstreamer', 'pipewire-plugin-libcamera',
+        self.assertTrue({'kamoso', 'snapshot', 'libcamera-gstreamer', 'pipewire-plugin-libcamera', 'pipewire-gstreamer',
                          'gstreamer1-plugin-openh264'} <= packages)
         self.assertTrue(packages.isdisjoint({'plasma-camera', 'plasma-camera-liuqin-test', 'qrca'}))
 
@@ -401,6 +401,25 @@ class FedoraTests(unittest.TestCase):
                 raise subprocess.CalledProcessError(127,command,stderr='missing shared library')
         with patch.object(root_builder,'chroot',side_effect=chroot),self.assertRaises(subprocess.CalledProcessError):
             root_builder.check_desktop_runtime(root)
+
+    def test_each_camera_app_requires_the_pipewire_device_provider_and_source(self):
+        root = self.desktop_fixture()
+        for app in ('kamoso', 'snapshot'):
+            binary = root/'usr/bin'/app
+            binary.touch()
+            for absent in ('pipewiredeviceprovider', 'pipewiresrc', None):
+                with self.subTest(app=app, absent=absent), patch.object(root_builder, 'chroot') as chroot:
+                    chroot.return_value.stdout = '\n'.join(
+                        '  ' + name + ': PipeWire' for name in ('pipewiredeviceprovider', 'pipewiresrc')
+                        if name != absent)
+                    if absent:
+                        with self.assertRaisesRegex(ValueError, absent):
+                            root_builder.check_desktop_runtime(root)
+                    else:
+                        root_builder.check_desktop_runtime(root)
+                    probes = [call.args[1] for call in chroot.call_args_list if '/usr/bin/gst-inspect-1.0' in call.args[1]]
+                    self.assertEqual([probe[-1] for probe in probes], ['/usr/lib64/gstreamer-1.0/libgstpipewire.so'])
+            binary.unlink()
 
     def test_gpu_plugin_loader_failure_stops_image_publication(self):
         root=self.desktop_fixture()

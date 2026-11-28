@@ -148,6 +148,10 @@ python3 tests/camera/camera-oem.py --kernel /path/to/patched-linux --vendor /pat
 `gstreamer1-plugins-good-qt6` 和 `gstreamer1-plugins-bad-free`。
 缺少 Qt6 GStreamer 插件时，预览界面可能无法加载。
 
+「配置 Kamoso…」中的摄像头选择框按当前预览的设备标识选中对应镜头。选择后摄，关闭并重新打开应用，
+在配置页运行 `python3 tests/camera/kamoso-camera-selection.py` 可比对界面名称和实际 PipeWire 视频流。
+切到前摄后可用同一命令复核。
+
 前摄软件 ISP 已加入原厂黑电平、基础色彩矩阵、白平衡平滑，并修正重开时短快门与
 高增益组合导致的噪声。硬件路径另使用单机校准和 CC131 色彩修正；可选 IPE TF21 单层时域降噪已接入，完整原厂场景调校仍未实现；
 支持范围与录像复现命令见 [libcamera 适配](LIBCAMERA.md)。
@@ -179,8 +183,10 @@ GStreamer 上应分别读到 120、5、120 ms。单窗口和双窗口都应分�
 
 ## Snapshot
 
-默认 Fedora 桌面同时提供官方 Snapshot，菜单名称为「相机」。它通过 PipeWire 和
-libcamera 切换前后摄、拍照和录像。使用后摄快门闪光和闪光连拍时可打开定制 Kamoso。
+默认 Fedora 桌面同时提供官方 Snapshot，菜单名称为「相机」。WirePlumber 通过
+`pipewire-plugin-libcamera` 枚举镜头，桌面应用通过 `pipewire-gstreamer` 读取视频流。
+`gst-inspect-1.0 --plugin pipewire` 应列出 `pipewiredeviceprovider` 和 `pipewiresrc`。
+在定制 Kamoso 切到板载后摄，可点按画面对焦，在拍照模式还可选择闪光灯的关闭、打开和自动三档。前摄为固定焦点。
 前后摄的首选照片尺寸和对焦控制见 [Snapshot 适配说明](LIBCAMERA.md#fedora-snapshot)。
 
 ## 诊断

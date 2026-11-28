@@ -2,7 +2,7 @@
   "url": "https://dl.fedoraproject.org/pub/fedora/linux/updates/45/Everything/source/tree/Packages/k/kamoso-26.08.3-1.fc45.src.rpm",
   "srpm": "kamoso-26.08.3-1.fc45.src.rpm",
   "sha256": "3b45a2a46b815532d81e9e83c06bf9568ae80d95ae8a919f15287cc77fdaeb43",
-  "release": "1.liuqin15",
+  "release": "1.liuqin16",
   "version": "26.08.3",
   "dist": "fc45",
   "patches": [
@@ -15,6 +15,7 @@
     "0007-rear-tap-focus.patch",
     "0008-iris-h264-recording.patch",
     "0009-rear-recording-clock-and-mode.patch",
-    "0010-rear-preview-lateness.patch"
+    "0010-rear-preview-lateness.patch",
+    "0011-sync-camera-selector.patch"
   ]
 }
