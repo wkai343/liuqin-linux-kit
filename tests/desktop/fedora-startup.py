@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 """Regress greeter activation and protected audio preparation before PCM probing."""
+import configparser
 import os
 from pathlib import Path
 import re
+import shlex
 import socket
 import subprocess
 import tempfile
@@ -15,6 +17,22 @@ HIFI = PROJECT / 'device/board-overlay/usr/share/alsa/ucm2/Qualcomm/sm8450/Xiaom
 
 
 class StartupTests(unittest.TestCase):
+    def test_lid_blanks_in_setup_and_locks_in_the_new_account(self):
+        default = PLASMA / 'etc/xdg/powerdevilrc'
+        unit = configparser.ConfigParser()
+        unit.read(PLASMA / 'usr/lib/systemd/system/plasma-setup.service.d/20-liuqin-lid.conf')
+        source, destination = shlex.split(unit['Service']['ExecStartPre'])[-2:]
+        self.assertEqual(destination, '/run/plasma-setup/.config/powerdevilrc')
+        setup = PLASMA / source.lstrip('/')
+        for account, files in [('plasma-setup', [default, setup]), ('desktop', [default])]:
+            policy = configparser.ConfigParser()
+            self.assertEqual(policy.read(files), [str(path) for path in files])
+            for profile in ('AC', 'Battery', 'LowBattery'):
+                with self.subTest(account=account, profile=profile):
+                    self.assertEqual(policy.getint(profile+'][SuspendAndShutdown', 'LidAction'), 64)
+                    self.assertEqual(policy.getboolean(profile+'][Display', 'LockBeforeTurnOffDisplay'),
+                                     account == 'desktop')
+
     def test_greeter_requires_a_live_compositor_socket_but_regular_desktops_do_not(self):
         helper = PLASMA / 'usr/libexec/liuqin-plasma-power-ready'
         with tempfile.TemporaryDirectory() as directory:

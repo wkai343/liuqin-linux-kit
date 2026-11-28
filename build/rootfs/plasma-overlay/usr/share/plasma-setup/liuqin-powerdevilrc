@@ -1,0 +1,9 @@
+# Inherit the tablet's lid action. The setup account has no unlock password.
+[AC][Display]
+LockBeforeTurnOffDisplay=false
+
+[Battery][Display]
+LockBeforeTurnOffDisplay=false
+
+[LowBattery][Display]
+LockBeforeTurnOffDisplay=false

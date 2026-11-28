@@ -211,6 +211,7 @@ Fedora 桌面安装推荐依赖，`remove` 清单阻止相应弱依赖引入并�
 
 - `first_boot_setup: true`：不预置普通用户或密码，也不生成 `out/login/` 凭据。开机由 Plasma Setup 设置语言、网络、时区、设备名和账号，完成标记为 `/etc/plasma-setup-done`，不要在已有系统上删除此标记重做初始化。
 - `first_boot_setup: false`：填写 `user`，可选 `hostname`、`password_file`。密码文件须为权限 0600 的单行文件；省略时生成随机密码，存入权限 0600 的 `out/login/<发行版>-plasma-<内容标识>.txt`。
+- 首次设置期间合盖只熄屏，开盖可继续向导。进入新账号后，合盖默认锁屏并熄屏，用户可在电源设置中调整。
 - 默认使用 Plasma 屏幕键盘，保留 Fcitx5、移除重复的 IBus/Maliit 主程序；不要用 `langpacks-zh_CN` 元包重新引入 IBus 拼音。
 - Wayland 可在“系统设置 → 键盘 → 虚拟键盘”切换 Plasma 键盘与 Fcitx 5；后者是输入框架启动器，不提供屏幕按键。两者不能同时占用 KWin 输入法接口。
 - 共用 `XMODIFIERS=@im=fcitx`，清除全局 `QT_IM_MODULES`；Wayland 不全局设置 `GTK_IM_MODULE`、`QT_IM_MODULE`、`SDL_IM_MODULE`，X11 将三项设为 `fcitx` 并自动启动 Fcitx5。旧 Qt/XWayland 应用可单独用 `QT_IM_MODULE=fcitx 程序名`。

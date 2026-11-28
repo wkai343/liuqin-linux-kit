@@ -4,7 +4,7 @@
 构建选项和拆包方式。它不是 Fedora 官方签名的二进制包，也不修改 Mesa 或内核。
 镜像预装修复后的 FFmpeg 与七个配套运行库，并用 DNF5 锁定整组版本。
 
-当前固定输入为 `ffmpeg-9.0.2-3.fc45.src.rpm`，SHA-256 和 spec 摘要见
+当前固定输入为 `ffmpeg-9.0.2-4.fc45.src.rpm`，SHA-256 和 spec 摘要见
 [source.json](source.json)。配方仅增加：
 
 - H.264、H.265 的 V4L2 stateful 硬解 wrapper；原生软件解码器继续按 Fedora 配置禁用。
@@ -62,11 +62,11 @@ AVFrame，可能越界；仅把读取高度改成 720 会让 UV 偏移仍然错�
 
 ```sh
 mkdir -p out/ffmpeg-source
-dnf download --source --destdir out/ffmpeg-source ffmpeg-free-9.0.2-3.fc45
+dnf download --source --destdir out/ffmpeg-source ffmpeg-free-9.0.2-4.fc45
 sudo dnf install rpm-build redhat-rpm-config gpgverify cpio dnf5-plugins
-sudo dnf builddep out/ffmpeg-source/ffmpeg-9.0.2-3.fc45.src.rpm
+sudo dnf builddep out/ffmpeg-source/ffmpeg-9.0.2-4.fc45.src.rpm
 python3 build/scripts/build-fedora-ffmpeg.py \
-  --srpm out/ffmpeg-source/ffmpeg-9.0.2-3.fc45.src.rpm \
+  --srpm out/ffmpeg-source/ffmpeg-9.0.2-4.fc45.src.rpm \
   --out out/ffmpeg-rpm --jobs 4
 ```
 
@@ -78,7 +78,7 @@ python3 build/scripts/build-fedora-ffmpeg.py \
 
 ## 更新与撤销
 
-发行号为 `3.liuqin3.fc45`，高于当前官方 `3.fc45`，低于下一官方 `4.fc45`。
+发行号为 `4.liuqin1.fc45`。Fedora 的 `4.fc45` 源码包包含 OpenAPV 1.1 兼容补丁。
 默认镜像自动设置 versionlock，保留 overlay 中无关软件的锁；同名冲突锁会停止构建。
 单独使用 `build-fedora-ffmpeg.py` 不设置锁。未锁定时，后续 Fedora 更新可以覆盖
 这组包；如果官方仍缺少修复或硬解白名单，相关问题会重新出现。

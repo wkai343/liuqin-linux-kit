@@ -128,6 +128,12 @@ def build(root, archive, output, jobs, chroot, dnf):
         '--prepare-only', '--srpm', guest+'/'+info['srpm'], '--out', guest+'/rpmbuild'])
     spec = guest+'/rpmbuild/SPECS/libcamera.spec'
     dnf(root, 'builddep', spec)
+    # Fedora byte-compiles the Python bindings in parallel at RPM install time.
+    # POSIX semaphores live in the build chroot's private /dev tmpfs.
+    shm = root/'dev/shm'
+    if not shm.exists():
+        shm.mkdir()
+        shm.chmod(0o1777)
     chroot(root, ['rpmbuild', '-ba', '--define', '_topdir '+guest+'/rpmbuild',
         '--define', '_smp_mflags -j'+str(jobs), spec])
     if inputs() != identity:

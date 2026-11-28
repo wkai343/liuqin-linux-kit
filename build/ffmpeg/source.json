@@ -1,11 +1,11 @@
 {
-  "url": "https://dl.fedoraproject.org/pub/fedora/linux/updates/45/Everything/source/tree/Packages/f/ffmpeg-9.0.2-3.fc45.src.rpm",
-  "srpm": "ffmpeg-9.0.2-3.fc45.src.rpm",
-  "sha256": "2c4fb4143e733b53a1423dde0c055a9b001eba47a7c1fcc8bd5f01f372fe4f5f",
-  "spec_sha256": "ad2066c09c916e2942182770bdeb2c4f9dd7a235969ab827c10b45499691f687",
+  "url": "https://dl.fedoraproject.org/pub/fedora/linux/updates/45/Everything/source/tree/Packages/f/ffmpeg-9.0.2-4.fc45.src.rpm",
+  "srpm": "ffmpeg-9.0.2-4.fc45.src.rpm",
+  "sha256": "748dcacc3e11f626345082d670735247013ce044b612b32fc066d3fdd739e278",
+  "spec_sha256": "5084f940338c1b874e06ea5c4400f06710c1f38866c13af86bf03fb5a43eb7a7",
   "version": "9.0.2",
   "dist": "fc45",
-  "release": "3.liuqin3",
+  "release": "4.liuqin1",
   "decoders": [
     "h264_v4l2m2m",
     "hevc_v4l2m2m"

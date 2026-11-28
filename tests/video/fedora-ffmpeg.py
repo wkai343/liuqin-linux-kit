@@ -129,7 +129,7 @@ class FFmpegTests(unittest.TestCase):
     def test_real_rpm_architecture_version_and_source_type_are_enforced(self):
         runtime = self.bundle/'rpms'/ffmpeg.filenames(self.info)['ffmpeg-free']
         wrong = self.base/'rpmbuild/RPMS/noarch'/('wrong-arch-'+ffmpeg.release(self.info)+'.noarch.rpm')
-        newer = dict(self.info, release='4.liuqin1')
+        newer = dict(self.info, release=self.info['release']+'.1')
         for path, name, info, source in ((wrong,'wrong-arch',self.info,False),
                 (runtime,'ffmpeg-free',newer,False), (runtime,'ffmpeg-free',self.info,True)):
             with self.subTest(path=path,source=source),self.assertRaisesRegex(ValueError,'不匹配'):

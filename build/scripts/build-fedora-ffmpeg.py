@@ -32,7 +32,7 @@ def prepare(srpm, out, recipe):
     if hashlib.sha256(spec_path.read_bytes()).hexdigest() != lock['spec_sha256']:
         raise ValueError('Fedora spec SHA-256 mismatch')
     spec = spec_path.read_text()
-    old_release = 'Release:        3%{?dist}'
+    old_release = 'Release:        ' + lock['release'].split('.', 1)[0] + '%{?dist}'
     if spec.count(old_release) != 1 or spec.count('\nPatch1:') != 1:
         raise ValueError('Unexpected Fedora spec layout')
     spec = spec.replace(old_release, 'Release:        ' + lock['release'] + '%{?dist}')
